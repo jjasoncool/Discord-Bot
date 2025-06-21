@@ -18,9 +18,12 @@ class ManagementCommands(commands.Cog):
         if not interaction.guild:
             await interaction.response.send_message("此命令只能在伺服器中使用！", ephemeral=True)
             return False
-        if owner_only and interaction.user.id != interaction.guild.owner_id:
-            await interaction.response.send_message("此命令僅限伺服器擁有者使用！", ephemeral=True)
-            return False
+        if owner_only:
+            import os
+            owner_id = int(os.getenv('OWNER_ID', '0'))
+            if interaction.user.id != owner_id:
+                await interaction.response.send_message("此命令僅限指定擁有者使用！", ephemeral=True)
+                return False
         return True
 
     async def _send_error_message(self, interaction: discord.Interaction, message: str):
@@ -77,6 +80,31 @@ class ManagementCommands(commands.Cog):
             embed.add_field(name="⚪ 其他頻道", value="\n".join(other_channels), inline=False)
 
         embed.set_footer(text="提示：您可以使用這些頻道 ID 來設定頻道監控")
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="list_roles", description="列出所有身份組及其ID")
+    async def list_roles_cmd(self, interaction: discord.Interaction):
+        """斜線命令：列出伺服器中所有身份組及其ID"""
+        logger.info(f'收到來自 {interaction.user} 的 /list_roles 斜線命令')
+
+        if not await self._check_guild_and_owner(interaction, owner_only=True):
+            return
+
+        # 建立身份組列表
+        roles = [f"🎭 {role.name} (ID: {role.id})" for role in interaction.guild.roles if not role.is_default()]
+
+        # 創建嵌入訊息
+        embed = discord.Embed(
+            title=f"{interaction.guild.name} 的身份組列表",
+            description="以下是此伺服器中所有身份組列表，包含各身份組的 ID：",
+            color=discord.Color.purple()
+        )
+
+        if roles:
+            embed.add_field(name="🎭 身份組", value="\n".join(roles), inline=False)
+        else:
+            embed.add_field(name="🎭 身份組", value="此伺服器中沒有自定義身份組。", inline=False)
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
