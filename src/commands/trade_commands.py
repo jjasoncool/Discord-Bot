@@ -2,6 +2,7 @@ import logging
 import discord
 from discord import app_commands
 from discord.ext import commands
+import asyncio
 
 # 獲取 logger
 logger = logging.getLogger('discord_bot')
@@ -36,6 +37,182 @@ class TradeCommands(commands.Cog):
         )
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        """監控私人 thread 中的訊息，處理交易確認"""
+        if message.channel.type != discord.ChannelType.private_thread:
+            return
+
+        if message.author == self.bot.user:
+            return
+
+        content = message.content.strip()
+        if content == "請領收" or "🤝" in content:
+            logger.info(f"收到交易確認請求，訊息內容: {content}，來自使用者: {message.author.name}")
+            # 從機器人發送的前三則非空訊息中提取賣家和買家資訊
+            message_count = 0
+            async for msg in message.channel.history(limit=10, oldest_first=True):
+                if msg.content:  # 檢查訊息內容是否為空
+                    message_count += 1
+                    logger.info(f"檢查訊息 {message_count}/3，作者: {msg.author.name}, 內容: {msg.content[:150]}...")
+                    if msg.author == self.bot.user:
+                        logger.info(f"找到機器人發送的訊息，完整內容: {msg.content}")
+                        content_lines = msg.content.split('\n')
+                        seller_mention = None
+                        buyer_mention = None
+                        source_post_id = None
+                        for line in content_lines:
+                            if "貼文者為" in line:
+                                buyer_mention = line.split("貼文者為 ")[1].strip()
+                                logger.info(f"提取買家提及: {buyer_mention}")
+                            elif "對交易貼文" in line and "有興趣" in line:
+                                seller_mention = line.split("對交易貼文")[0].replace("使用者", "").strip()
+                                logger.info(f"提取賣家提及: {seller_mention}")
+                            elif "來源貼文 ID:" in line:
+                                try:
+                                    source_post_id = line.split("來源貼文 ID:")[1].strip()
+                                    logger.info(f"提取來源貼文 ID: {source_post_id}")
+                                except IndexError:
+                                    logger.error(f"無法從行中提取來源貼文 ID: {line}")
+                        if seller_mention and buyer_mention and source_post_id:
+                            if message.author.mention == seller_mention:
+                                logger.info(f"確認使用者 {message.author.name} 為賣方，處理交易確認請求")
+                                await self.handle_trade_confirmation(message, source_post_id)
+                                return
+                            else:
+                                logger.info(f"使用者 {message.author.name} 不是賣方，忽略交易確認請求")
+                                return
+                        elif seller_mention and buyer_mention:
+                            if message.author.mention == seller_mention:
+                                logger.info(f"確認使用者 {message.author.name} 為賣方，但缺少來源貼文 ID")
+                                logger.error("無法從訊息中提取來源貼文 ID")
+                                await message.channel.send("無法識別此交易 thread 的來源貼文 ID，請手動確認交易狀態。")
+                                return
+                            else:
+                                logger.info(f"使用者 {message.author.name} 不是賣方，忽略交易確認請求")
+                                return
+                        else:
+                            logger.error(f"無法從機器人訊息中提取賣方和買方資訊: {msg.content}")
+                            await message.channel.send("無法識別此交易 thread 的賣方和買方，請手動確認交易狀態。")
+                            return
+                    if message_count >= 3:
+                        break
+            if message_count == 0 or (message_count < 3 and not any(msg.author == self.bot.user for msg in message.channel.history(limit=10, oldest_first=True))):
+                logger.error(f"無法找到足夠的非空訊息或機器人發送的訊息")
+                await message.channel.send("無法識別此交易 thread 的賣方和買方，請手動確認交易狀態。")
+                return
+
+    async def handle_trade_confirmation(self, message, source_post_id):
+        """處理交易確認請求"""
+        from utils import get_trade_forum_channel_id
+        thread = message.channel
+        thread_name = thread.name
+
+        logger.info(f"開始處理交易確認，thread 名稱: {thread_name}，來自使用者: {message.author.name}")
+        # 使用提供的來源貼文 ID
+        source_thread_id = int(source_post_id)
+        logger.info(f"使用提供的來源貼文 ID: {source_thread_id}")
+
+        # 獲取交易論壇頻道 ID
+        logger.debug("準備調用 get_trade_forum_channel_id 函數 (調用者: TradeCommands)")
+        try:
+            forum_channel_id = await get_trade_forum_channel_id(config_file="config.json", caller="TradeCommands")
+            logger.info(f"獲取到交易論壇頻道 ID: {forum_channel_id}")
+        except Exception as e:
+            logger.error(f"調用 get_trade_forum_channel_id 時發生錯誤: {str(e)}")
+            await thread.send("無法獲取交易論壇頻道 ID，請手動確認交易狀態。")
+            return
+
+        # 獲取來源貼文
+        forum_channel = self.bot.get_channel(forum_channel_id)
+        if not forum_channel:
+            logger.error(f"無法找到交易論壇頻道 {forum_channel_id}")
+            await thread.send("無法找到交易論壇頻道，請手動確認交易狀態。")
+            return
+
+        source_message = None
+        try:
+            if forum_channel.type == discord.ChannelType.forum:
+                # 直接通過 ID 獲取 thread
+                source_thread = forum_channel.get_thread(source_thread_id)
+                if not source_thread:
+                    # 如果 get_thread 無法找到，嘗試 fetch_channel
+                    source_thread = await forum_channel.fetch_channel(source_thread_id)
+                if source_thread:
+                    # 獲取 thread 的第一條訊息作為來源貼文
+                    async for msg in source_thread.history(limit=1, oldest_first=True):
+                        source_message = msg
+                        break
+                else:
+                    logger.error(f"無法找到來源 thread {source_thread_id}")
+                    await thread.send("無法找到來源 thread，請手動確認交易狀態。")
+                    return
+            else:
+                source_message = await forum_channel.fetch_message(source_thread_id)
+        except discord.NotFound:
+            logger.error(f"無法找到來源貼文 {source_thread_id}")
+            await thread.send("無法找到來源貼文，請手動確認交易狀態。")
+            return
+        except Exception as e:
+            logger.error(f"獲取來源貼文 {source_thread_id} 時發生錯誤: {str(e)}")
+            await thread.send("獲取來源貼文時發生錯誤，請手動確認交易狀態。")
+            return
+
+        # 獲取貼文者 (必須是本機器人，並從第一句內容中抓取被提及的人)
+        post_author = None
+        if source_message.author == self.bot.user:
+            content_lines = source_message.content.split('\n')
+            if content_lines:
+                first_line = content_lines[0]
+                for mention in source_message.mentions:
+                    if mention.id != message.author.id:
+                        post_author = mention
+                        break
+                if not post_author and source_message.mentions:
+                    post_author = source_message.mentions[0]
+        else:
+            logger.info(f"來源貼文作者不是本機器人，忽略此交易確認請求。訊息作者: {source_message.author.name}")
+            await thread.send("來源貼文作者不是本機器人，無法處理交易確認。")
+            return
+
+        if not post_author:
+            logger.error("無法確定貼文者，忽略此交易確認請求")
+            await thread.send("無法確定貼文者，無法處理交易確認。")
+            return
+
+        # 發送確認對話給買家
+        confirmation_message = await thread.send(
+            f"{post_author.mention}，賣家已確認交易完成，"
+            f"請點選下面的 ✅ 反應來確認您已收到商品或服務。"
+            f"確認後，此 thread 及來源貼文將被鎖定。"
+        )
+
+        logger.info(f"已發送交易確認對話給買家 {post_author.name}，thread ID: {thread.id}")
+
+        # 監控買家的確認反應
+        def check(reaction, user):
+            return user == post_author and str(reaction.emoji) == "✅" and reaction.message.id == confirmation_message.id
+
+        try:
+            reaction, user = await self.bot.wait_for('reaction_add', timeout=86400.0, check=check)  # 等待24小時
+            logger.info(f"收到買家 {user.name} 的交易確認反應")
+
+            # 鎖定 thread
+            await thread.edit(locked=True)
+            logger.info(f"已鎖定 thread {thread.name}，ID: {thread.id}")
+
+            # 鎖定來源貼文
+            await source_message.channel.edit(locked=True)
+            logger.info(f"已鎖定來源貼文 {source_message.id} 的頻道")
+
+            await thread.send(f"交易已由雙方確認完成。此 thread 及來源貼文已被鎖定。")
+        except asyncio.TimeoutError:
+            logger.warning(f"交易確認超時，買家 {post_author.name} 未在24小時內確認")
+            await thread.send(f"{post_author.mention}，您未在24小時內確認交易，交易確認已超時。請與賣家聯繫以完成確認。")
+        except Exception as e:
+            logger.error(f"處理交易確認反應時發生錯誤: {str(e)}")
+            await thread.send("處理交易確認時發生錯誤，請手動確認交易狀態。")
 
     @app_commands.command(name="select_item", description="選擇一件物品進行購買")
     async def select_item_cmd(self, interaction: discord.Interaction):
@@ -83,7 +260,7 @@ class TradeCommands(commands.Cog):
             cancel_button = discord.ui.Button(label="取消", style=discord.ButtonStyle.red)
 
             async def confirm_callback(interaction: discord.Interaction, selected_label=selected_option.label, qty=quantity):
-                logger.info(f"用戶 {interaction.user.id} ({interaction.user.name}) 確認購買 {qty} 個 {selected_label}")
+                logger.info(f"使用者 {interaction.user.id} ({interaction.user.name}) 確認購買 {qty} 個 {selected_label}")
                 await interaction.response.edit_message(view=None)
                 await interaction.followup.send(f"您已確認購買 {qty} 個 {selected_label}", ephemeral=True)
                 # 完全移除所有互動元素
@@ -139,7 +316,7 @@ class TradeCommands(commands.Cog):
                     )
 
             async def cancel_callback(interaction: discord.Interaction, selected_label=selected_option.label, qty=quantity):
-                logger.info(f"用戶 {interaction.user.id} ({interaction.user.name}) 取消購買 {qty} 個 {selected_label}")
+                logger.info(f"使用者 {interaction.user.id} ({interaction.user.name}) 取消購買 {qty} 個 {selected_label}")
                 await interaction.response.edit_message(view=None)
                 await interaction.followup.send(f"您已取消購買 {qty} 個 {selected_label}", ephemeral=True)
                 # 完全移除所有互動元素
@@ -160,7 +337,7 @@ class TradeCommands(commands.Cog):
             if selected_option:
                 from datetime import datetime
                 current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                logger.info(f"用戶 {interaction.user.id} ({interaction.user.name}) 在 {current_time} 選擇了物品 {selected_option.label}")
+                logger.info(f"使用者 {interaction.user.id} ({interaction.user.name}) 在 {current_time} 選擇了物品 {selected_option.label}")
 
                 # 檢查是否為限制只能購買一個的物品
                 restricted_items = ["universe_radio", "universe_special", "dragon_first_charge"]
@@ -190,7 +367,7 @@ class TradeCommands(commands.Cog):
 
                     async def quantity_callback(interaction: discord.Interaction):
                         quantity = quantity_select.values[0]
-                        logger.info(f"用戶 {interaction.user.id} ({interaction.user.name}) 選擇了數量 {quantity} 個 {selected_option.label}")
+                        logger.info(f"使用者 {interaction.user.id} ({interaction.user.name}) 選擇了數量 {quantity} 個 {selected_option.label}")
                         await interaction.response.edit_message(view=None)
                         embed, confirm_view = create_confirm_view(interaction, selected_option, quantity)
                         await interaction.followup.send(embed=embed, view=confirm_view, ephemeral=True)

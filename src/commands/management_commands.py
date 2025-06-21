@@ -298,6 +298,69 @@ class ManagementCommands(commands.Cog):
         )
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
+    @app_commands.command(name="set_cart_delivery_channel", description="設定購物車交付頻道")
+    async def set_cart_delivery_channel_cmd(self, interaction: discord.Interaction):
+        """斜線命令：設定用於購物車交付通知的頻道"""
+        logger.info(f'收到來自 {interaction.user} 的 /set_cart_delivery_channel 斜線命令')
+
+        if not await self._check_guild_and_owner(interaction, owner_only=True):
+            return
+
+        # 獲取所有文字頻道
+        text_channels = [channel for channel in interaction.guild.channels if channel.type == discord.ChannelType.text]
+        if not text_channels:
+            await self._send_error_message(interaction, "此伺服器中沒有找到文字頻道！")
+            return
+
+        # 創建選單
+        select = discord.ui.Select(
+            placeholder="選擇一個文字頻道...",
+            options=[
+                discord.SelectOption(label=channel.name, value=str(channel.id), description=f"ID: {channel.id}")
+                for channel in text_channels
+            ]
+        )
+
+        async def select_callback(interaction: discord.Interaction):
+            selected_channel_id = int(select.values[0])
+            channel = interaction.guild.get_channel(selected_channel_id)
+            if channel and channel.type == discord.ChannelType.text:
+                # 儲存設定到 JSON 檔案
+                import json
+                import os
+                config_file = "config.json"
+                config = {}
+                if os.path.exists(config_file):
+                    try:
+                        with open(config_file, 'r') as f:
+                            config = json.load(f)
+                    except json.JSONDecodeError:
+                        logger.error(f"無法讀取 {config_file}，將創建新檔案")
+
+                config['cart_delivery_channel_id'] = selected_channel_id
+                with open(config_file, 'w') as f:
+                    json.dump(config, f, indent=2)
+
+                await interaction.response.edit_message(view=None)
+                await interaction.followup.send(
+                    f"✅ 已將購物車交付頻道設定為 **{channel.name}** (ID: {selected_channel_id})！",
+                    ephemeral=True
+                )
+                logger.info(f"購物車交付頻道已設定為 {channel.name} (ID: {selected_channel_id})")
+            else:
+                await interaction.response.send_message("選擇的頻道無效或不是文字頻道，請重試。", ephemeral=True)
+
+        select.callback = select_callback
+        view = discord.ui.View()
+        view.add_item(select)
+
+        embed = discord.Embed(
+            title="選擇購物車交付頻道",
+            description="請從以下選項中選擇一個文字頻道作為購物車交付通知頻道。",
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
     # 處理所有訊息以實現監控功能
     @commands.Cog.listener()
     async def on_message(self, message):

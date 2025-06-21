@@ -33,7 +33,7 @@ class TestCommands(commands.Cog):
         private="是否只有您能看到回應 (默認: 是)"
     )
     async def echo_cmd(self, interaction: discord.Interaction, message: str, private: bool = False):
-        """斜線命令：回傳用戶輸入的訊息"""
+        """斜線命令：回傳使用者輸入的訊息"""
         logger.info(f'收到來自 {interaction.user} 的 /echo 斜線命令，參數: message="{message}", private={private}')
         await interaction.response.send_message(
             f'📣 {interaction.user.mention} 說: {message}',
@@ -96,14 +96,14 @@ class TestCommands(commands.Cog):
                 )
 
                 for i, thread in enumerate(threads[:20], 1):
-                    owner_mention = "未知用戶"
+                    owner_mention = "未知使用者"
                     if thread.owner_id:
                         try:
                             owner = await interaction.guild.fetch_member(thread.owner_id)
                             if owner:
                                 owner_mention = owner.mention
                         except discord.NotFound:
-                            owner_mention = "未知用戶 (已離開群組)"
+                            owner_mention = "未知使用者 (已離開群組)"
                         except Exception as e:
                             logger.error(f"獲取貼文擁有者信息時發生錯誤: {str(e)}")
                     tags = ", ".join(tag.name for tag in thread.applied_tags) if thread.applied_tags else "無標籤"
