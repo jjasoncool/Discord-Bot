@@ -233,6 +233,7 @@ class TradeCommands(commands.Cog):
             {"label": "寰宇電台", "value": "universe_radio", "description": "提供額外資源"},
             {"label": "寰宇特約", "value": "universe_special", "description": "提供額外資源與橫幅"},
             {"label": "一條龍", "value": "dragon_first_charge", "description": "全部雙倍首儲一次購買"},
+            {"label": "商城禮包", "value": "store_gift_pack", "description": "商城禮包自選"},
             {"label": "60月相", "value": "moon_60", "description": "60月相"},
             {"label": "300月相", "value": "moon_300", "description": "額外+30"},
             {"label": "980月相", "value": "moon_980", "description": "額外+110"},
@@ -339,7 +340,7 @@ class TradeCommands(commands.Cog):
                 logger.info(f"使用者 {interaction.user.id} ({interaction.user.name}) 在 {current_time} 選擇了物品 {selected_option.label}")
 
                 # 檢查是否為限制只能購買一個的物品
-                restricted_items = ["universe_radio", "universe_special", "dragon_first_charge"]
+                restricted_items = ["universe_radio", "universe_special", "dragon_first_charge", "store_gift_pack"]
                 if selected_option.value in restricted_items:
                     # 直接進入確認購買步驟，數量固定為1
                     embed, confirm_view = create_confirm_view(interaction, selected_option, 1)
