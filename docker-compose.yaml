@@ -6,8 +6,12 @@ services:
     container_name: discord-bot
     restart: always
     volumes:
-      - ./src:/app
-      - ./logs:/logs
+      - type: bind
+        source: ./src
+        target: /app
+      - type: bind
+        source: ./logs
+        target: /logs
     env_file:
       - .env
     environment:

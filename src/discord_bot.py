@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import logging
+import asyncio
 from logging.handlers import RotatingFileHandler
 import discord
 from discord import app_commands
@@ -57,43 +58,30 @@ logger.info(f"日誌目錄內容: {os.listdir('/logs') if os.path.exists('/logs'
 intents = discord.Intents.default()
 intents.message_content = True
 
+# 指令模組清單
+COMMAND_MODULES = [
+    'commands.test_commands',
+    'commands.trade_commands',
+    'commands.management_commands'
+]
+
 # 建立機器人實例
 class MyBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix='!', intents=intents)
 
     async def setup_hook(self):
-        logger.info("設置斜線命令...")
-        # 創建斜線命令示例
-        @self.tree.command(name="ping", description="測試機器人是否在線")
-        async def ping_cmd(interaction: discord.Interaction):
-            """斜線命令：測試機器人是否在線"""
-            logger.info(f'收到來自 {interaction.user} 的 /ping 斜線命令')
-            await interaction.response.send_message('Pong!', ephemeral=True)
+        logger.info("正在載入指令模組...")
 
-        @self.tree.command(name="hello", description="獲取一個 Hello World 訊息")
-        async def hello_cmd(interaction: discord.Interaction):
-            """斜線命令：Hello World"""
-            logger.info(f'收到來自 {interaction.user} 的 /hello 斜線命令')
-            await interaction.response.send_message(
-                f'👋 Hello World! 您好，{interaction.user.mention}！我是一個由 Discord.py 驅動的機器人。',
-                ephemeral=True
-            )
+        # 載入所有指令模組
+        for module in COMMAND_MODULES:
+            try:
+                await self.load_extension(module)
+                logger.info(f"已載入指令模組: {module}")
+            except Exception as e:
+                logger.error(f"載入指令模組 {module} 時發生錯誤: {str(e)}")
 
-        @self.tree.command(name="echo", description="讓機器人回傳一段訊息")
-        @app_commands.describe(
-            message="要回傳的訊息",
-            private="是否只有您能看到回應 (默認: 是)"
-        )
-        async def echo_cmd(interaction: discord.Interaction, message: str, private: bool = True):
-            """斜線命令：回傳用戶輸入的訊息"""
-            logger.info(f'收到來自 {interaction.user} 的 /echo 斜線命令，參數: message="{message}", private={private}')
-            await interaction.response.send_message(
-                f'📣 {interaction.user.mention} 說: {message}',
-                ephemeral=private
-            )
-
-        # 注冊斜線命令 - 強制全局同步
+        # 同步斜線命令
         try:
             logger.info("開始同步斜線命令...")
             # 同步全局命令
@@ -117,7 +105,6 @@ async def on_ready():
         add_reactions=True,
         embed_links=True,
         attach_files=True,
-        # use_slash_commands 已被棄用，不需要特別指定
         read_message_history=True
     )
 
@@ -139,33 +126,6 @@ async def on_ready():
     except Exception as e:
         logger.error(f"獲取命令列表失敗: {str(e)}")
 
-# 傳統前綴命令 (保留向後兼容性)
-@bot.command(name='ping')
-async def ping(ctx):
-    """回應一個 Pong 訊息，用於測試機器人是否在線"""
-    logger.info(f'收到來自 {ctx.author} 的 ping 前綴命令')
-    await ctx.send('Pong!')
-
-@bot.command(name='helloworld')
-async def hello_world(ctx):
-    """回應一個 Hello World 訊息"""
-    logger.info(f'收到來自 {ctx.author} 的 helloworld 前綴命令')
-    await ctx.send(f'👋 Hello World! 您好，{ctx.author.mention}！我是一個由 Discord.py 驅動的機器人。')
-
-# 注意：斜線命令已移至 MyBot 類的 setup_hook 方法中定義
-# 這樣可以確保命令在機器人啟動時正確註冊
-
-@bot.event
-async def on_message(message):
-    # 避免機器人回應自己的訊息
-    if message.author == bot.user:
-        return
-
-    # 記錄接收到的訊息
-    logger.debug(f'收到訊息: {message.content} (來自: {message.author})')
-
-    # 繼續處理命令
-    await bot.process_commands(message)
 
 # 添加斜線命令交互回應處理
 @bot.tree.error
@@ -183,6 +143,18 @@ async def on_app_command_error(interaction: discord.Interaction, error):
             f"執行命令時發生錯誤: {str(error)}",
             ephemeral=True
         )
+
+@bot.event
+async def on_message(message):
+    # 避免機器人回應自己的訊息
+    if message.author == bot.user:
+        return
+
+    # 記錄接收到的訊息
+    logger.debug(f'收到訊息: {message.content} (來自: {message.author})')
+
+    # 繼續處理命令
+    await bot.process_commands(message)
 
 # 主函數
 def main():
