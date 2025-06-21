@@ -183,10 +183,9 @@ class TradeCommands(commands.Cog):
 
         # 發送確認對話給買家
         confirmation_message = await thread.send(
-            f"{post_author.mention}，賣家已確認交易完成，"
-            f"請點選下面的 ✅ 反應來確認您已收到商品或服務。"
-            f"確認後，此 thread 及來源貼文將被鎖定。"
+            f"{post_author.mention}，賣家已確認交易完成，請點選下面的 ✅ 反應來確認您已收到商品或服務。確認後，此 thread 及來源貼文將被鎖定。"
         )
+        await confirmation_message.add_reaction("✅")
 
         logger.info(f"已發送交易確認對話給買家 {post_author.name}，thread ID: {thread.id}")
 
