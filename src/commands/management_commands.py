@@ -235,6 +235,69 @@ class ManagementCommands(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    @app_commands.command(name="set_trade_forum_channel", description="設定交易論壇頻道")
+    async def set_trade_forum_channel_cmd(self, interaction: discord.Interaction):
+        """斜線命令：設定用於交易記錄的論壇頻道"""
+        logger.info(f'收到來自 {interaction.user} 的 /set_trade_forum_channel 斜線命令')
+
+        if not await self._check_guild_and_owner(interaction, owner_only=True):
+            return
+
+        # 獲取所有論壇頻道
+        forum_channels = [channel for channel in interaction.guild.channels if channel.type == discord.ChannelType.forum]
+        if not forum_channels:
+            await self._send_error_message(interaction, "此伺服器中沒有找到論壇頻道！")
+            return
+
+        # 創建選單
+        select = discord.ui.Select(
+            placeholder="選擇一個論壇頻道...",
+            options=[
+                discord.SelectOption(label=channel.name, value=str(channel.id), description=f"ID: {channel.id}")
+                for channel in forum_channels
+            ]
+        )
+
+        async def select_callback(interaction: discord.Interaction):
+            selected_channel_id = int(select.values[0])
+            channel = interaction.guild.get_channel(selected_channel_id)
+            if channel and channel.type == discord.ChannelType.forum:
+                # 儲存設定到 JSON 檔案
+                import json
+                import os
+                config_file = "config.json"
+                config = {}
+                if os.path.exists(config_file):
+                    try:
+                        with open(config_file, 'r') as f:
+                            config = json.load(f)
+                    except json.JSONDecodeError:
+                        logger.error(f"無法讀取 {config_file}，將創建新檔案")
+
+                config['trade_forum_channel_id'] = selected_channel_id
+                with open(config_file, 'w') as f:
+                    json.dump(config, f, indent=2)
+
+                await interaction.response.edit_message(view=None)
+                await interaction.followup.send(
+                    f"✅ 已將交易論壇頻道設定為 **{channel.name}** (ID: {selected_channel_id})！",
+                    ephemeral=True
+                )
+                logger.info(f"交易論壇頻道已設定為 {channel.name} (ID: {selected_channel_id})")
+            else:
+                await interaction.response.send_message("選擇的頻道無效或不是論壇頻道，請重試。", ephemeral=True)
+
+        select.callback = select_callback
+        view = discord.ui.View()
+        view.add_item(select)
+
+        embed = discord.Embed(
+            title="選擇交易論壇頻道",
+            description="請從以下選項中選擇一個論壇頻道作為交易記錄頻道。",
+            color=discord.Color.blue()
+        )
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
     # 處理所有訊息以實現監控功能
     @commands.Cog.listener()
     async def on_message(self, message):
