@@ -51,22 +51,25 @@ class TradeCommands(commands.Cog):
         file = discord.File("/app/static/items.png", filename="items.png")
         embed.set_image(url="attachment://items.png")
 
+        # 物品選項配置，未來可以從配置文件或數據庫中讀取
+        ITEMS = [
+            {"label": "月相觀測卡", "value": "moon_card", "description": "每日提供90星聲"},
+            {"label": "寰宇電台", "value": "universe_radio", "description": "提供額外資源"},
+            {"label": "寰宇特約", "value": "universe_special", "description": "提供額外資源與橫幅"},
+            {"label": "一條龍", "value": "dragon_first_charge", "description": "全部雙倍首儲一次購買"},
+            {"label": "60月相", "value": "moon_60", "description": "60月相"},
+            {"label": "300月相", "value": "moon_300", "description": "額外+30"},
+            {"label": "980月相", "value": "moon_980", "description": "額外+110"},
+            {"label": "1980月相", "value": "moon_1980", "description": "額外+260"},
+            {"label": "3280月相", "value": "moon_3280", "description": "額外+600"},
+            {"label": "6480月相", "value": "moon_6480", "description": "額外+1600"},
+            {"label": "32400月相", "value": "moon_32400", "description": "額外+8000"},
+            {"label": "64800月相", "value": "moon_64800", "description": "額外+16000"}
+        ]
+
         select = discord.ui.Select(
             placeholder="選擇一件物品...",
-            options=[
-                discord.SelectOption(label="月相觀測卡", value="moon_card", description="每日提供90星聲"),
-                discord.SelectOption(label="寰宇電台", value="universe_radio", description="提供額外資源"),
-                discord.SelectOption(label="寰宇特約", value="universe_special", description="提供額外資源與橫幅"),
-                discord.SelectOption(label="一條龍", value="dragon_first_charge", description="全部雙倍首儲一次購買"),
-                discord.SelectOption(label="60月相", value="moon_60", description="60月相"),
-                discord.SelectOption(label="300月相", value="moon_300", description="額外+30"),
-                discord.SelectOption(label="980月相", value="moon_980", description="額外+110"),
-                discord.SelectOption(label="1980月相", value="moon_1980", description="額外+260"),
-                discord.SelectOption(label="3280月相", value="moon_3280", description="額外+600"),
-                discord.SelectOption(label="6480月相", value="moon_6480", description="額外+1600"),
-                discord.SelectOption(label="32400月相", value="moon_32400", description="額外+8000"),
-                discord.SelectOption(label="64800月相", value="moon_64800", description="額外+16000")
-            ]
+            options=[discord.SelectOption(**item) for item in ITEMS]
         )
 
         def create_confirm_view(interaction: discord.Interaction, selected_option, quantity):
@@ -87,22 +90,7 @@ class TradeCommands(commands.Cog):
                 await interaction.followup.edit_message(interaction.message.id, view=None)
 
                 # 檢查是否已設定交易論壇頻道
-                import json
-                import os
-                config_file = "config.json"
-                forum_channel_id = 1234567890  # 預設佔位符 ID
-                if os.path.exists(config_file):
-                    try:
-                        with open(config_file, 'r') as f:
-                            config = json.load(f)
-                            forum_channel_id = config.get('trade_forum_channel_id', 1234567890)
-                            if forum_channel_id != 1234567890:
-                                logger.info(f"從 {config_file} 讀取到交易論壇頻道 ID: {forum_channel_id}")
-                            else:
-                                logger.warning(f"從 {config_file} 讀取到交易論壇頻道 ID，但未設定，使用預設佔位符 ID")
-                    except json.JSONDecodeError:
-                        logger.error(f"無法讀取 {config_file}，使用預設佔位符 ID")
-
+                forum_channel_id = await self.get_trade_forum_channel_id(config_file="config.json")
                 if forum_channel_id == 1234567890:
                     await interaction.followup.send(
                         "交易論壇頻道尚未設定，請通知管理員。",
@@ -217,6 +205,24 @@ class TradeCommands(commands.Cog):
         view.add_item(select)
 
         await interaction.response.send_message(embed=embed, view=view, file=file, ephemeral=True)
+
+    async def get_trade_forum_channel_id(self, config_file="config.json"):
+        """從配置文件中讀取交易論壇頻道 ID"""
+        import json
+        import os
+        forum_channel_id = 1234567890  # 預設佔位符 ID
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, 'r') as f:
+                    config = json.load(f)
+                    forum_channel_id = config.get('trade_forum_channel_id', 1234567890)
+                    if forum_channel_id != 1234567890:
+                        logger.info(f"從 {config_file} 讀取到交易論壇頻道 ID: {forum_channel_id}")
+                    else:
+                        logger.warning(f"從 {config_file} 讀取到交易論壇頻道 ID，但未設定，使用預設佔位符 ID")
+            except json.JSONDecodeError:
+                logger.error(f"無法讀取 {config_file}，使用預設佔位符 ID")
+        return forum_channel_id
 
 async def setup(bot):
     await bot.add_cog(TradeCommands(bot))
