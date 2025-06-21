@@ -1,0 +1,20 @@
+services:
+  discord-bot:
+    build:
+      context: .
+      dockerfile: discord_bot/dockerfile
+    container_name: discord-bot
+    restart: always
+    volumes:
+      - ./src:/app
+      - ./logs:/logs
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Taipei
+    networks:
+      - discord-net
+
+networks:
+  discord-net:
+    driver: bridge

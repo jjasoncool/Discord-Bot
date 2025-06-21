@@ -1,0 +1,7 @@
+FROM python:3.12-slim
+WORKDIR /app
+# 複製 requirements.txt 的正確路徑
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+# 不需要複製源代碼，因為 docker-compose 會將 src 目錄掛載到 /app
+CMD ["python", "discord_bot.py"]
