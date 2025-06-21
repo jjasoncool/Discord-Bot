@@ -10,11 +10,15 @@ logger = logging.getLogger('discord_bot')
 class ForumMonitor(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.target_emoji = "✅"  # :white_check_mark: 的 Unicode 表示
+        self.target_emojis = ["✅", "🤝", "💰"]  # 監控的表情符號列表
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload):
         """監控交易論壇頻道上的表情符號反應"""
+        if str(payload.emoji) not in self.target_emojis:
+            logger.debug(f"忽略非目標表情符號: {str(payload.emoji)}，目標表情符號列表: {self.target_emojis}")
+            return  # 只處理指定的表情符號
+
         from utils import get_trade_forum_channel_id
         logger.debug("準備調用 get_trade_forum_channel_id 函數 (調用者: ForumMonitor)")
         forum_channel_id = await get_trade_forum_channel_id(config_file="config.json", caller="ForumMonitor")
@@ -40,14 +44,10 @@ class ForumMonitor(commands.Cog):
             logger.debug(f"頻道 ID {payload.channel_id} 不是線程，且不匹配目標交易論壇頻道 ID: {forum_channel_id}")
 
         if not is_target_channel:
-            logger.info(f"頻道 ID 不匹配，忽略此事件。收到的事件頻道 ID: {payload.channel_id}，目標交易論壇頻道 ID: {forum_channel_id}")
+            logger.debug(f"頻道 ID 不匹配，忽略此事件。收到的事件頻道 ID: {payload.channel_id}，目標交易論壇頻道 ID: {forum_channel_id}")
             return  # 只處理交易論壇頻道或其線程中的反應，無需記錄日誌
 
         logger.info(f"收到反應事件: 表情符號={str(payload.emoji)}, 頻道ID={payload.channel_id}, 訊息ID={payload.message_id}, 使用者ID={payload.user_id}")
-
-        if str(payload.emoji) != self.target_emoji:
-            logger.debug(f"忽略非目標表情符號: {str(payload.emoji)}")
-            return  # 只處理指定的表情符號
 
         channel = self.bot.get_channel(payload.channel_id)
         if channel is None:
@@ -65,7 +65,7 @@ class ForumMonitor(commands.Cog):
                 logger.error(f"獲取使用者 {payload.user_id} 時發生錯誤: {str(e)}")
                 return
 
-            logger.info(f"使用者 {user.name} 在交易論壇頻道對訊息 {message.id} 新增了 {self.target_emoji} 反應")
+            logger.info(f"使用者 {user.name} 在交易論壇頻道對訊息 {message.id} 新增了 {str(payload.emoji)} 反應")
             await self.send_cart_delivery_notification(message, user)
         except Exception as e:
             logger.error(f"處理反應事件時發生錯誤: {str(e)}")
