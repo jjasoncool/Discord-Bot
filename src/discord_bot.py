@@ -33,7 +33,7 @@ console_handler.setFormatter(console_format)
 file_handler = RotatingFileHandler(
     '/logs/discord_bot.log',
     maxBytes=10*1024*1024,  # 10MB
-    backupCount=5,          # 保留5個備份
+    backupCount=50,          # 保留50個備份
     encoding='utf-8'
 )
 file_handler.setLevel(log_level)
@@ -57,12 +57,14 @@ logger.info(f"日誌目錄內容: {os.listdir('/logs') if os.path.exists('/logs'
 # 設定意圖
 intents = discord.Intents.default()
 intents.message_content = True
+intents.reactions = True
 
 # 指令模組清單
 COMMAND_MODULES = [
     'commands.test_commands',
     'commands.trade_commands',
-    'commands.management_commands'
+    'commands.management_commands',
+    'commands.forum_monitor'
 ]
 
 # 建立機器人實例
@@ -151,7 +153,18 @@ async def on_message(message):
         return
 
     # 記錄接收到的訊息
-    logger.debug(f'收到訊息: {message.content} (來自: {message.author})')
+    if message.content:
+        logger.debug(f'收到訊息: {message.content} (來自: {message.author})')
+
+    # 記錄圖片附件
+    if message.attachments:
+        for attachment in message.attachments:
+            logger.debug(f'包含附件: {attachment.url} (類型: {attachment.content_type})')
+
+    # 記錄訊息中的嵌入內容
+    if message.embeds:
+        for embed in message.embeds:
+            logger.debug(f'包含嵌入內容: {embed.url if embed.url else "無URL"}')
 
     # 繼續處理命令
     await bot.process_commands(message)

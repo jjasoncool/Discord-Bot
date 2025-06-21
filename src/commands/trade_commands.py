@@ -90,7 +90,10 @@ class TradeCommands(commands.Cog):
                 await interaction.followup.edit_message(interaction.message.id, view=None)
 
                 # 檢查是否已設定交易論壇頻道
-                forum_channel_id = await self.get_trade_forum_channel_id(config_file="config.json")
+                from utils import get_trade_forum_channel_id
+                logger.debug("準備調用 get_trade_forum_channel_id 函數 (調用者: TradeCommands)")
+                forum_channel_id = await get_trade_forum_channel_id(config_file="config.json", caller="TradeCommands")
+                logger.debug(f"從 get_trade_forum_channel_id 函數返回的 forum_channel_id: {forum_channel_id} (調用者: TradeCommands)")
                 if forum_channel_id == 1234567890:
                     await interaction.followup.send(
                         "交易論壇頻道尚未設定，請通知管理員。",
@@ -206,23 +209,6 @@ class TradeCommands(commands.Cog):
 
         await interaction.response.send_message(embed=embed, view=view, file=file, ephemeral=True)
 
-    async def get_trade_forum_channel_id(self, config_file="config.json"):
-        """從配置文件中讀取交易論壇頻道 ID"""
-        import json
-        import os
-        forum_channel_id = 1234567890  # 預設佔位符 ID
-        if os.path.exists(config_file):
-            try:
-                with open(config_file, 'r') as f:
-                    config = json.load(f)
-                    forum_channel_id = config.get('trade_forum_channel_id', 1234567890)
-                    if forum_channel_id != 1234567890:
-                        logger.info(f"從 {config_file} 讀取到交易論壇頻道 ID: {forum_channel_id}")
-                    else:
-                        logger.warning(f"從 {config_file} 讀取到交易論壇頻道 ID，但未設定，使用預設佔位符 ID")
-            except json.JSONDecodeError:
-                logger.error(f"無法讀取 {config_file}，使用預設佔位符 ID")
-        return forum_channel_id
 
 async def setup(bot):
     await bot.add_cog(TradeCommands(bot))
