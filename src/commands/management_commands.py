@@ -235,131 +235,99 @@ class ManagementCommands(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="set_trade_forum_channel", description="設定交易論壇頻道")
-    async def set_trade_forum_channel_cmd(self, interaction: discord.Interaction):
-        """斜線命令：設定用於交易記錄的論壇頻道"""
-        logger.info(f'收到來自 {interaction.user} 的 /set_trade_forum_channel 斜線命令')
+    @app_commands.command(name="set_channel", description="設定特定功能的頻道")
+    async def set_channel_cmd(self, interaction: discord.Interaction):
+        """斜線命令：設定特定功能的頻道"""
+        logger.info(f'收到來自 {interaction.user} 的 /set_channel 斜線命令')
 
         if not await self._check_guild_and_owner(interaction, owner_only=True):
             return
 
-        # 獲取所有論壇頻道
-        forum_channels = [channel for channel in interaction.guild.channels if channel.type == discord.ChannelType.forum]
-        if not forum_channels:
-            await self._send_error_message(interaction, "此伺服器中沒有找到論壇頻道！")
-            return
+        channel_types = {
+            "交易論壇": {"type": discord.ChannelType.forum, "key": "trade_forum_channel_id", "color": discord.Color.blue(), "desc": "交易記錄頻道"},
+            "購物車交付": {"type": discord.ChannelType.text, "key": "cart_delivery_channel_id", "color": discord.Color.green(), "desc": "購物車交付通知頻道"}
+        }
 
-        # 創建選單
-        select = discord.ui.Select(
-            placeholder="選擇一個論壇頻道...",
+        # 創建頻道類型選單
+        type_select = discord.ui.Select(
+            placeholder="選擇要設定的頻道類型...",
             options=[
-                discord.SelectOption(label=channel.name, value=str(channel.id), description=f"ID: {channel.id}")
-                for channel in forum_channels
+                discord.SelectOption(label=channel_type, value=channel_type, description=info["desc"])
+                for channel_type, info in channel_types.items()
             ]
         )
 
-        async def select_callback(interaction: discord.Interaction):
-            selected_channel_id = int(select.values[0])
-            channel = interaction.guild.get_channel(selected_channel_id)
-            if channel and channel.type == discord.ChannelType.forum:
-                # 儲存設定到 JSON 檔案
-                import json
-                import os
-                config_file = "config.json"
-                config = {}
-                if os.path.exists(config_file):
-                    try:
-                        with open(config_file, 'r') as f:
-                            config = json.load(f)
-                    except json.JSONDecodeError:
-                        logger.error(f"無法讀取 {config_file}，將創建新檔案")
+        async def type_select_callback(interaction: discord.Interaction):
+            selected_type = type_select.values[0]
+            if selected_type not in channel_types:
+                await interaction.response.send_message(f"無效的頻道類型：{selected_type}。請重試。", ephemeral=True)
+                return
 
-                config['trade_forum_channel_id'] = selected_channel_id
-                with open(config_file, 'w') as f:
-                    json.dump(config, f, indent=2)
+            channel_info = channel_types[selected_type]
+            channels = [channel for channel in interaction.guild.channels if channel.type == channel_info["type"]]
+            if not channels:
+                await interaction.response.send_message(f"此伺服器中沒有找到{selected_type}頻道！", ephemeral=True)
+                return
 
-                await interaction.response.edit_message(view=None)
-                await interaction.followup.send(
-                    f"✅ 已將交易論壇頻道設定為 **{channel.name}** (ID: {selected_channel_id})！",
-                    ephemeral=True
-                )
-                logger.info(f"交易論壇頻道已設定為 {channel.name} (ID: {selected_channel_id})")
-            else:
-                await interaction.response.send_message("選擇的頻道無效或不是論壇頻道，請重試。", ephemeral=True)
+            # 創建頻道選單
+            channel_select = discord.ui.Select(
+                placeholder=f"選擇一個{selected_type}頻道...",
+                options=[
+                    discord.SelectOption(label=channel.name, value=str(channel.id), description=f"ID: {channel.id}")
+                    for channel in channels
+                ]
+            )
 
-        select.callback = select_callback
-        view = discord.ui.View()
-        view.add_item(select)
+            async def channel_select_callback(interaction: discord.Interaction):
+                selected_channel_id = int(channel_select.values[0])
+                channel = interaction.guild.get_channel(selected_channel_id)
+                if channel and channel.type == channel_info["type"]:
+                    # 儲存設定到 JSON 檔案
+                    import json
+                    import os
+                    config_file = "config.json"
+                    config = {}
+                    if os.path.exists(config_file):
+                        try:
+                            with open(config_file, 'r') as f:
+                                config = json.load(f)
+                        except json.JSONDecodeError:
+                            logger.error(f"無法讀取 {config_file}，將創建新檔案")
 
-        embed = discord.Embed(
-            title="選擇交易論壇頻道",
-            description="請從以下選項中選擇一個論壇頻道作為交易記錄頻道。",
-            color=discord.Color.blue()
-        )
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+                    config[channel_info["key"]] = selected_channel_id
+                    with open(config_file, 'w') as f:
+                        json.dump(config, f, indent=2)
 
-    @app_commands.command(name="set_cart_delivery_channel", description="設定購物車交付頻道")
-    async def set_cart_delivery_channel_cmd(self, interaction: discord.Interaction):
-        """斜線命令：設定用於購物車交付通知的頻道"""
-        logger.info(f'收到來自 {interaction.user} 的 /set_cart_delivery_channel 斜線命令')
+                    await interaction.response.edit_message(view=None)
+                    await interaction.followup.send(
+                        f"✅ 已將{selected_type}頻道設定為 **{channel.name}** (ID: {selected_channel_id})！",
+                        ephemeral=True
+                    )
+                    logger.info(f"{selected_type}頻道已設定為 {channel.name} (ID: {selected_channel_id})")
+                else:
+                    await interaction.response.send_message(f"選擇的頻道無效或不是{selected_type}頻道，請重試。", ephemeral=True)
 
-        if not await self._check_guild_and_owner(interaction, owner_only=True):
-            return
+            channel_select.callback = channel_select_callback
+            channel_view = discord.ui.View()
+            channel_view.add_item(channel_select)
 
-        # 獲取所有文字頻道
-        text_channels = [channel for channel in interaction.guild.channels if channel.type == discord.ChannelType.text]
-        if not text_channels:
-            await self._send_error_message(interaction, "此伺服器中沒有找到文字頻道！")
-            return
+            embed = discord.Embed(
+                title=f"選擇{selected_type}頻道",
+                description=f"請從以下選項中選擇一個{selected_type}頻道作為{channel_info['desc']}。",
+                color=channel_info["color"]
+            )
+            await interaction.response.edit_message(embed=embed, view=channel_view)
 
-        # 創建選單
-        select = discord.ui.Select(
-            placeholder="選擇一個文字頻道...",
-            options=[
-                discord.SelectOption(label=channel.name, value=str(channel.id), description=f"ID: {channel.id}")
-                for channel in text_channels
-            ]
-        )
-
-        async def select_callback(interaction: discord.Interaction):
-            selected_channel_id = int(select.values[0])
-            channel = interaction.guild.get_channel(selected_channel_id)
-            if channel and channel.type == discord.ChannelType.text:
-                # 儲存設定到 JSON 檔案
-                import json
-                import os
-                config_file = "config.json"
-                config = {}
-                if os.path.exists(config_file):
-                    try:
-                        with open(config_file, 'r') as f:
-                            config = json.load(f)
-                    except json.JSONDecodeError:
-                        logger.error(f"無法讀取 {config_file}，將創建新檔案")
-
-                config['cart_delivery_channel_id'] = selected_channel_id
-                with open(config_file, 'w') as f:
-                    json.dump(config, f, indent=2)
-
-                await interaction.response.edit_message(view=None)
-                await interaction.followup.send(
-                    f"✅ 已將購物車交付頻道設定為 **{channel.name}** (ID: {selected_channel_id})！",
-                    ephemeral=True
-                )
-                logger.info(f"購物車交付頻道已設定為 {channel.name} (ID: {selected_channel_id})")
-            else:
-                await interaction.response.send_message("選擇的頻道無效或不是文字頻道，請重試。", ephemeral=True)
-
-        select.callback = select_callback
-        view = discord.ui.View()
-        view.add_item(select)
+        type_select.callback = type_select_callback
+        type_view = discord.ui.View()
+        type_view.add_item(type_select)
 
         embed = discord.Embed(
-            title="選擇購物車交付頻道",
-            description="請從以下選項中選擇一個文字頻道作為購物車交付通知頻道。",
-            color=discord.Color.green()
+            title="選擇頻道類型",
+            description="請選擇您要設定的頻道類型。",
+            color=discord.Color.greyple()
         )
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await interaction.response.send_message(embed=embed, view=type_view, ephemeral=True)
 
     # 處理所有訊息以實現監控功能
     @commands.Cog.listener()
