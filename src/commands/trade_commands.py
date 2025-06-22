@@ -103,6 +103,117 @@ class TradeCommands(commands.Cog):
     #             await message.channel.send("無法識別此交易 thread 的賣方和買方，請手動確認交易狀態。")
     #             return
 
+    @app_commands.command(name="cancel_trade", description="取消當前交易")
+    async def cancel_trade_cmd(self, interaction: discord.Interaction):
+        """斜線命令：取消當前交易並鎖定 thread"""
+        logger.info(f'收到來自 {interaction.user} 的 /cancel_trade 斜線命令')
+
+        if interaction.channel.type != discord.ChannelType.private_thread:
+            if not interaction.response.is_done():
+                await interaction.response.send_message("此命令只能在私人 thread 中使用。", ephemeral=True)
+            else:
+                await interaction.followup.send("此命令只能在私人 thread 中使用。", ephemeral=True)
+            return
+
+        thread = interaction.channel
+        logger.info(f"開始處理交易取消，thread 名稱: {thread.name}，來自使用者: {interaction.user.name}")
+
+        # 從機器人發送的訊息中提取來源貼文 ID 和相關使用者
+        source_post_id = None
+        reacting_user = None
+        async for msg in thread.history(limit=10, oldest_first=True):
+            if msg.author == self.bot.user and msg.content:
+                content_lines = msg.content.split('\n')
+                for line in content_lines:
+                    if "來源貼文 ID:" in line:
+                        try:
+                            source_post_id = line.split("來源貼文 ID:")[1].strip()
+                            logger.info(f"提取來源貼文 ID: {source_post_id}")
+                        except IndexError:
+                            logger.error(f"無法從行中提取來源貼文 ID: {line}")
+                    elif "對交易貼文" in line and "有興趣" in line:
+                        reacting_user_mention = line.split("對交易貼文")[0].replace("使用者", "").strip()
+                        try:
+                            user_id = int(reacting_user_mention.split("<@")[1].split(">")[0])
+                            reacting_user = await self.bot.fetch_user(user_id)
+                            logger.info(f"提取反應使用者: {reacting_user_mention}")
+                        except (IndexError, ValueError, discord.NotFound):
+                            logger.error(f"無法從提及中提取使用者 ID 或找到使用者: {reacting_user_mention}")
+                if source_post_id and reacting_user:
+                    break
+
+        logger.info(f"提取結果 - 來源貼文 ID: {source_post_id}, 反應使用者: {reacting_user.name if reacting_user else '未找到'}")
+
+        if not source_post_id or not reacting_user:
+            logger.error("無法從訊息中提取來源貼文 ID 或反應使用者")
+            if not interaction.response.is_done():
+                await interaction.response.send_message("無法識別此交易 thread 的來源貼文或相關使用者，請手動處理。", ephemeral=True)
+            else:
+                await interaction.followup.send("無法識別此交易 thread 的來源貼文或相關使用者，請手動處理。", ephemeral=True)
+            return
+
+        # 鎖定當前 thread
+        await thread.edit(locked=True, archived=True)
+        logger.info(f"已鎖定並封存 thread {thread.name}，ID: {thread.id}")
+
+        # 清除來源貼文中的反應
+        from utils import get_trade_forum_channel_id
+        try:
+            forum_channel_id = await get_trade_forum_channel_id(config_file="config.json", caller="TradeCommands")
+            logger.info(f"獲取到交易論壇頻道 ID: {forum_channel_id}")
+        except Exception as e:
+            logger.error(f"調用 get_trade_forum_channel_id 時發生錯誤: {str(e)}")
+            await thread.send("無法獲取交易論壇頻道 ID，請手動確認交易狀態。")
+            return
+
+        forum_channel = self.bot.get_channel(forum_channel_id)
+        if not forum_channel:
+            logger.error(f"無法找到交易論壇頻道 {forum_channel_id}")
+            await thread.send("無法找到交易論壇頻道，請手動確認交易狀態。")
+            return
+
+        source_message = None
+        try:
+            if forum_channel.type == discord.ChannelType.forum:
+                source_thread = forum_channel.get_thread(int(source_post_id))
+                if not source_thread:
+                    source_thread = await forum_channel.fetch_channel(int(source_post_id))
+                if source_thread:
+                    async for msg in source_thread.history(limit=1, oldest_first=True):
+                        source_message = msg
+                        break
+                else:
+                    logger.error(f"無法找到來源 thread {source_post_id}")
+                    await thread.send("無法找到來源 thread，請手動確認交易狀態。")
+                    return
+            else:
+                source_message = await forum_channel.fetch_message(int(source_post_id))
+        except discord.NotFound:
+            logger.error(f"無法找到來源貼文 {source_post_id}")
+            await thread.send("無法找到來源貼文，請手動確認交易狀態。")
+            return
+        except Exception as e:
+            logger.error(f"獲取來源貼文 {source_post_id} 時發生錯誤: {str(e)}")
+            await thread.send("獲取來源貼文時發生錯誤，請手動確認交易狀態。")
+            return
+
+        # 清除反應
+        target_emojis = ["✅", "🤝", "💰"]  # 與交易相關的表情符號列表
+        for reaction in source_message.reactions:
+            if str(reaction.emoji) in target_emojis:
+                async for user in reaction.users():
+                    if user == reacting_user:
+                        await source_message.remove_reaction(reaction.emoji, user)
+                        logger.info(f"已清除使用者 {reacting_user.name} 在來源貼文 {source_post_id} 上的反應 {reaction.emoji}")
+                        break
+
+        if not interaction.response.is_done():
+            await interaction.response.send_message("交易已取消，此 thread 已鎖定，來源貼文的反應已清除。", ephemeral=True)
+        else:
+            await interaction.followup.send("交易已取消，此 thread 已鎖定，來源貼文的反應已清除。", ephemeral=True)
+        await thread.send(f"交易已被 {interaction.user.mention} 取消。此 thread 已鎖定，來源貼文的反應已清除。")
+
+
     async def handle_trade_confirmation(self, message, source_post_id):
         """處理交易確認請求"""
         from utils import get_trade_forum_channel_id
