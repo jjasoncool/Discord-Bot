@@ -315,10 +315,21 @@ class UserCommands(commands.Cog):
     # 處理所有訊息以實現監控功能
     @commands.Cog.listener()
     async def on_message(self, message):
-        # 避免處理機器人訊息（包括自己的訊息）
+        # 避免處理機器人訊息（包括自己的訊息），除非是在交易論壇頻道中
         if message.author.bot:
-            logger.debug(f"跳過處理機器人訊息 - 作者: {message.author.name} (ID: {message.author.id})")
-            return
+            from utils import get_trade_forum_channel_id
+            # 獲取交易論壇頻道 ID
+            try:
+                trade_forum_channel_id = await get_trade_forum_channel_id(config_file="config.json", caller="UserCommands")
+            except Exception as e:
+                logger.error(f"無法獲取交易論壇頻道 ID: {str(e)}")
+                trade_forum_channel_id = None
+            # 如果訊息是在交易論壇頻道中，則允許處理
+            if trade_forum_channel_id and isinstance(message.channel, discord.Thread) and message.channel.parent_id == trade_forum_channel_id:
+                logger.debug(f"處理機器人訊息，因為是在交易論壇頻道 (ID: {trade_forum_channel_id})")
+            else:
+                logger.debug(f"跳過處理機器人訊息 - 作者: {message.author.name} (ID: {message.author.id})")
+                return
 
         # 檢查訊息是否在監控的頻道中
         if not message.guild:
@@ -344,7 +355,8 @@ class UserCommands(commands.Cog):
 
             if monitored_channel_id:
                 settings_list = monitored_channels[guild_id][monitored_channel_id]
-                content_lower = message.content.lower()
+                content_lower = message.content.lower() if not message.author.bot else ""
+                thread_title_lower = message.channel.name.lower() if message.author.bot and isinstance(message.channel, discord.Thread) else ""
 
                 # 記錄所有被監控頻道的對話，以便除錯
                 channel_name = message.channel.parent.name if parent_channel_id else message.channel.name
@@ -358,7 +370,10 @@ class UserCommands(commands.Cog):
                     for kw in settings['keywords']:
                         # 使用正則表達式進行匹配，忽略大小寫，不要求整詞匹配
                         pattern = re.escape(kw.lower())
-                        if re.search(pattern, content_lower):
+                        if message.author.bot and thread_title_lower:
+                            if re.search(pattern, thread_title_lower):
+                                found_keywords.append(kw)
+                        elif re.search(pattern, content_lower):
                             found_keywords.append(kw)
 
                     if found_keywords and settings.get('notify', True):
