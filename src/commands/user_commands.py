@@ -59,16 +59,8 @@ class UserCommands(commands.Cog):
 
     async def _check_guild_and_owner(self, interaction: discord.Interaction, owner_only: bool = False) -> bool:
         """檢查命令是否在伺服器中使用且使用者是否為伺服器擁有者（如果啟用了限制）"""
-        if not interaction.guild:
-            await interaction.response.send_message("此命令只能在伺服器中使用！", ephemeral=True)
-            return False
-        if owner_only:
-            import os
-            owner_id = int(os.getenv('OWNER_ID', '0'))
-            if interaction.user.id != owner_id:
-                await interaction.response.send_message("此命令僅限指定擁有者使用！", ephemeral=True)
-                return False
-        return True
+        from utils import check_guild
+        return await check_guild(interaction, owner_only)
 
     async def _send_error_message(self, interaction: discord.Interaction, message: str):
         """發送錯誤訊息"""
@@ -264,7 +256,7 @@ class UserCommands(commands.Cog):
             await self._send_error_message(interaction, "您未設定任何監控！")
 
     @app_commands.command(name="list_monitored", description="列出目前監控的所有頻道")
-    async def monitored_channels(self, interaction: discord.Interaction):
+    async def list_monitored_cmd(self, interaction: discord.Interaction):
         """斜線命令：列出目前監控的所有頻道"""
         logger.info(f'收到來自 {interaction.user} 的 /list_monitored 斜線命令')
 

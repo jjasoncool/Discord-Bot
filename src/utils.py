@@ -1,6 +1,7 @@
 import logging
 import json
 import os
+import discord
 
 # 獲取 logger
 logger = logging.getLogger('discord_bot')
@@ -48,3 +49,17 @@ async def get_cart_delivery_channel_id(config_file="config.json", caller="unknow
         logger.warning(f"配置文件 {config_file} 不存在，使用預設佔位符 ID (調用者: {caller})")
     logger.debug(f"返回購物車交付頻道 ID: {delivery_channel_id} (調用者: {caller})")
     return delivery_channel_id
+
+async def check_guild(interaction: discord.Interaction, owner_only: bool = False) -> bool:
+    """檢查命令是否在伺服器中使用且使用者是否為伺服器擁有者（如果啟用了限制）"""
+    if not interaction.guild:
+        await interaction.response.send_message("此命令只能在伺服器中使用，無法在私人訊息中使用。", ephemeral=True)
+        logger.info(f'使用者 {interaction.user} 嘗試在私人訊息中使用命令，已被拒絕')
+        return False
+    if owner_only:
+        owner_id = int(os.getenv('OWNER_ID', '0'))
+        if interaction.user.id != owner_id:
+            await interaction.response.send_message("此命令僅限指定擁有者使用！", ephemeral=True)
+            logger.info(f'使用者 {interaction.user} 嘗試使用僅限擁有者的命令，已被拒絕')
+            return False
+    return True

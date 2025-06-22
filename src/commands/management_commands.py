@@ -14,16 +14,8 @@ class ManagementCommands(commands.Cog):
 
     async def _check_guild_and_owner(self, interaction: discord.Interaction, owner_only: bool = True) -> bool:
         """檢查命令是否在伺服器中使用且使用者是否為伺服器擁有者（如果啟用了限制）"""
-        if not interaction.guild:
-            await interaction.response.send_message("此命令只能在伺服器中使用！", ephemeral=True)
-            return False
-        if owner_only:
-            import os
-            owner_id = int(os.getenv('OWNER_ID', '0'))
-            if interaction.user.id != owner_id:
-                await interaction.response.send_message("此命令僅限指定擁有者使用！", ephemeral=True)
-                return False
-        return True
+        from utils import check_guild
+        return await check_guild(interaction, owner_only)
 
     async def _send_error_message(self, interaction: discord.Interaction, message: str):
         """發送錯誤訊息"""

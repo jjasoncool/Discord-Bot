@@ -224,6 +224,11 @@ class TradeCommands(commands.Cog):
         """斜線命令：顯示圖片和選擇器以選擇物品"""
         logger.info(f'收到來自 {interaction.user} 的 /select_item 斜線命令')
 
+        # 檢查是否在伺服器中使用
+        from utils import check_guild
+        if not await check_guild(interaction):
+            return
+
         embed = discord.Embed(
             title="選擇物品",
             description="請從以下選項中選擇一件物品進行購買。",
