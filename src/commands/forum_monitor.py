@@ -110,12 +110,69 @@ class ForumMonitor(commands.Cog):
                     existing_thread = thread
                     break
 
+            class TransactionView(discord.ui.View):
+                def __init__(self, bot):
+                    super().__init__(timeout=None)  # 設置為 None 以永久有效
+                    self.bot = bot
+
+                @discord.ui.button(label="買家領收", style=discord.ButtonStyle.green)
+                async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+                    # 從訊息內容中提取 reacting_user 的 ID
+                    source_post_id = None
+                    message_content = interaction.message.content
+                    reacting_user_mention = message_content.split("使用者 ")[1].split(" 對交易貼文")[0]
+                    reacting_user_id = int(reacting_user_mention.split("<@")[1].split(">")[0])
+                    # 從訊息內容中提取 source_post_id
+                    try:
+                        source_post_id = message_content.split("來源貼文 ID:")[1].strip().split('\n')[0]
+                        logger.info(f"提取來源貼文 ID: {source_post_id}")
+                    except IndexError:
+                        logger.error(f"無法從訊息中提取來源貼文 ID: {message_content}")
+                    if interaction.user.id == reacting_user_id:
+                        await interaction.response.send_message(f"{interaction.user.mention} 通知買家領收。", ephemeral=False)
+                        # 調用 handle_trade_confirmation 流程
+                        try:
+                            from commands.trade_commands import TradeCommands
+                            trade_cog = self.bot.get_cog('TradeCommands')
+                            if trade_cog:
+                                # 由於 handle_trade_confirmation 期望接收 message 對象而非 interaction
+                                # 我們需要將 interaction.message 作為參數傳遞
+                                if source_post_id:
+                                    await trade_cog.handle_trade_confirmation(interaction.message, source_post_id)
+                                else:
+                                    await interaction.followup.send("無法從訊息中提取來源貼文 ID，請手動確認交易狀態。", ephemeral=True)
+                                    logger.error("無法從訊息中提取來源貼文 ID")
+                            else:
+                                await interaction.followup.send("無法找到交易命令模組，請稍後再試。", ephemeral=True)
+                                logger.error("無法找到交易命令模組 'TradeCommands'")
+                        except Exception as e:
+                            error_message = f"調用交易確認流程時發生錯誤: {str(e)}，請截圖通知管理員。"
+                            await interaction.followup.send(error_message, ephemeral=True)
+                            logger.error(error_message, exc_info=True)
+                    else:
+                        await interaction.response.send_message("只有賣家可以進行此操作。", ephemeral=True)
+
+                @discord.ui.button(label="取消交易", style=discord.ButtonStyle.red)
+                async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+                    # 從訊息內容中提取 reacting_user 的 ID
+                    message_content = interaction.message.content
+                    reacting_user_mention = message_content.split("使用者 ")[1].split(" 對交易貼文")[0]
+                    reacting_user_id = int(reacting_user_mention.split("<@")[1].split(">")[0])
+                    if interaction.user.id == reacting_user_id:
+                        await interaction.response.send_message(f"{interaction.user.mention} 已取消交易。", ephemeral=False)
+                        for item in self.children:
+                            item.disabled = True
+                        await interaction.message.edit(view=self)
+                    else:
+                        await interaction.response.send_message("只有賣家可以進行此操作。", ephemeral=True)
+
             if existing_thread:
                 await existing_thread.send(
                     f"提醒：使用者 {reacting_user.mention} 對交易貼文 {message.jump_url} 有興趣\n"
                     f"貼文者為 {post_author.mention}\n"
                     f"來源貼文 ID: {source_thread_id}\n"
-                    f"請在這裡確認交易細節。"
+                    f"請在這裡確認交易細節。",
+                    view=TransactionView(self.bot)
                 )
                 logger.info(f"已在現有 thread {existing_thread.name} 中重新發送通知，來源貼文 ID: {source_thread_id}")
             else:
@@ -133,7 +190,8 @@ class ForumMonitor(commands.Cog):
                         f"使用者 {reacting_user.mention} 對交易貼文 {message.jump_url} 有興趣\n"
                         f"貼文者為 {post_author.mention}\n"
                         f"來源貼文 ID: {source_thread_id}\n"
-                        f"請在這裡確認交易細節。"
+                        f"請在這裡確認交易細節。",
+                        view=TransactionView(self.bot)
                     )
                     logger.info(f"已在頻道 {delivery_channel.name} 中為交易創建私有 thread: {thread_name}，來源貼文 ID: {source_thread_id}")
                 except Exception as e:
