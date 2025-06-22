@@ -235,10 +235,10 @@ class TradeCommands(commands.Cog):
 
         # 物品選項配置，未來可以從配置文件或數據庫中讀取
         ITEMS = [
-            {"label": "月相觀測卡", "value": "moon_card", "description": "每日提供90星聲"},
-            {"label": "寰宇電台", "value": "universe_radio", "description": "提供額外資源"},
-            {"label": "寰宇特約", "value": "universe_special", "description": "提供額外資源與橫幅"},
-            {"label": "一條龍", "value": "dragon_first_charge", "description": "全部雙倍首儲一次購買"},
+            {"label": "月相觀測卡", "value": "moon_card", "description": "小月卡"},
+            {"label": "寰宇電台", "value": "universe_radio", "description": "大月卡"},
+            {"label": "寰宇特約", "value": "universe_special", "description": "特約月卡 - 含名片"},
+            {"label": "一條龍", "value": "dragon_first_charge", "description": "各檔位月相一次購買"},
             {"label": "商城禮包", "value": "store_gift_pack", "description": "商城禮包自選"},
             {"label": "60月相", "value": "moon_60", "description": "60月相"},
             {"label": "300月相", "value": "moon_300", "description": "額外+30"},
@@ -359,16 +359,20 @@ class TradeCommands(commands.Cog):
                         color=discord.Color.blue()
                     )
 
+                    # 根據所選物品動態設置數量選項
+                    quantity_options = [
+                        discord.SelectOption(label="1", value="1"),
+                        discord.SelectOption(label="2", value="2"),
+                        discord.SelectOption(label="3", value="3"),
+                        discord.SelectOption(label="4", value="4"),
+                        discord.SelectOption(label="5", value="5")
+                    ]
+                    if selected_option.value != "moon_card":
+                        quantity_options.append(discord.SelectOption(label="10", value="10"))
+
                     quantity_select = discord.ui.Select(
                         placeholder="選擇數量...",
-                        options=[
-                            discord.SelectOption(label="1", value="1"),
-                            discord.SelectOption(label="2", value="2"),
-                            discord.SelectOption(label="3", value="3"),
-                            discord.SelectOption(label="4", value="4"),
-                            discord.SelectOption(label="5", value="5"),
-                            discord.SelectOption(label="10", value="10")
-                        ]
+                        options=quantity_options
                     )
 
                     async def quantity_callback(interaction: discord.Interaction):
