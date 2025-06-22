@@ -317,6 +317,7 @@ class UserCommands(commands.Cog):
     async def on_message(self, message):
         # 避免處理機器人訊息（包括自己的訊息）
         if message.author.bot:
+            logger.debug(f"跳過處理機器人訊息 - 作者: {message.author.name} (ID: {message.author.id})")
             return
 
         # 檢查訊息是否在監控的頻道中

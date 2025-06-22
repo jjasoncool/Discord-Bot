@@ -153,17 +153,22 @@ async def on_message(message):
 
     # 記錄接收到的訊息
     if message.content:
-        logger.debug(f'收到訊息: {message.content} (來自: {message.author})')
+        logger.debug(f'收到訊息: {message.content} (來自: {message.author}, 頻道: {message.channel.name} [ID: {message.channel.id}])')
 
     # 記錄圖片附件
     if message.attachments:
         for attachment in message.attachments:
-            logger.debug(f'包含附件: {attachment.url} (類型: {attachment.content_type})')
+            logger.debug(f'包含附件: {attachment.url} (類型: {attachment.content_type}, 頻道: {message.channel.name} [ID: {message.channel.id}])')
 
     # 記錄訊息中的嵌入內容
     if message.embeds:
         for embed in message.embeds:
-            logger.debug(f'包含嵌入內容: {embed.url if embed.url else "無URL"}')
+            logger.debug(f'包含嵌入內容: {embed.url if embed.url else "無URL"} (頻道: {message.channel.name} [ID: {message.channel.id}])')
+
+    # 記錄貼圖訊息
+    if message.stickers:
+        for sticker in message.stickers:
+            logger.debug(f'包含貼圖: {sticker.name} (ID: {sticker.id}, 頻道: {message.channel.name} [ID: {message.channel.id}])')
 
     # 繼續處理命令
     await bot.process_commands(message)
