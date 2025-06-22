@@ -1,7 +1,27 @@
 FROM python:3.12-slim
 WORKDIR /app
+# Update and install security packages
+RUN apt-get update && \
+    apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends ca-certificates && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create logs directory with correct permissions for nobody user
+RUN groupadd -r appuser && useradd -r -g appuser -m -d /home/appuser -u 1000 appuser
+RUN chown -R appuser:appuser /app
+RUN chown -R appuser:appuser /home/appuser
+
+# Create logs directory with correct permissions
+RUN mkdir -p /logs && chown -R appuser:appuser /logs
+
+# Set non-root user
+USER appuser
+
 # 複製 requirements.txt 的正確路徑
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# 以非 root 用戶身份安裝套件到用戶家目錄
+RUN pip install --no-cache-dir --user -r requirements.txt
+
 # 不需要複製源代碼，因為 docker-compose 會將 src 目錄掛載到 /app
 CMD ["python", "discord_bot.py"]

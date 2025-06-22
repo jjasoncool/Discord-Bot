@@ -14,9 +14,6 @@ load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
 
-# 創建日誌目錄（確保與 docker-compose.yaml 中的掛載配置一致）
-os.makedirs('/logs', exist_ok=True)
-
 # 設置日誌系統
 logger = logging.getLogger('discord_bot')
 # 設置日誌級別
@@ -36,6 +33,7 @@ file_handler = RotatingFileHandler(
     backupCount=50,          # 保留50個備份
     encoding='utf-8'
 )
+
 file_handler.setLevel(log_level)
 file_format = logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s', '%Y-%m-%d %H:%M:%S')
 file_handler.setFormatter(file_format)
