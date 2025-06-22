@@ -108,11 +108,12 @@ class TradeCommands(commands.Cog):
         """斜線命令：取消當前交易並鎖定 thread"""
         logger.info(f'收到來自 {interaction.user} 的 /cancel_trade 斜線命令')
 
+        # 延遲回應以避免交互被提前回應
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+
         if interaction.channel.type != discord.ChannelType.private_thread:
-            if not interaction.response.is_done():
-                await interaction.response.send_message("此命令只能在私人 thread 中使用。", ephemeral=True)
-            else:
-                await interaction.followup.send("此命令只能在私人 thread 中使用。", ephemeral=True)
+            await interaction.followup.send("此命令只能在私人 thread 中使用。", ephemeral=True)
             return
 
         thread = interaction.channel
@@ -146,10 +147,7 @@ class TradeCommands(commands.Cog):
 
         if not source_post_id or not reacting_user:
             logger.error("無法從訊息中提取來源貼文 ID 或反應使用者")
-            if not interaction.response.is_done():
-                await interaction.response.send_message("無法識別此交易 thread 的來源貼文或相關使用者，請手動處理。", ephemeral=True)
-            else:
-                await interaction.followup.send("無法識別此交易 thread 的來源貼文或相關使用者，請手動處理。", ephemeral=True)
+            await interaction.followup.send("無法識別此交易 thread 的來源貼文或相關使用者，請手動處理。", ephemeral=True)
             return
 
         # 鎖定當前 thread
@@ -207,10 +205,7 @@ class TradeCommands(commands.Cog):
                         logger.info(f"已清除使用者 {reacting_user.name} 在來源貼文 {source_post_id} 上的反應 {reaction.emoji}")
                         break
 
-        if not interaction.response.is_done():
-            await interaction.response.send_message("交易已取消，此 thread 已鎖定，來源貼文的反應已清除。", ephemeral=True)
-        else:
-            await interaction.followup.send("交易已取消，此 thread 已鎖定，來源貼文的反應已清除。", ephemeral=True)
+        await interaction.followup.send("交易已取消，此 thread 已鎖定，來源貼文的反應已清除。", ephemeral=True)
         await thread.send(f"交易已被 {interaction.user.mention} 取消。此 thread 已鎖定，來源貼文的反應已清除。")
 
 
