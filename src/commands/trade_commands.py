@@ -197,18 +197,24 @@ class TradeCommands(commands.Cog):
             reaction, user = await self.bot.wait_for('reaction_add', timeout=86400.0, check=check)  # 等待24小時
             logger.info(f"收到買家 {user.name} 的交易確認反應")
 
-            # 鎖定 thread
-            await thread.edit(locked=True)
-            logger.info(f"已鎖定 thread {thread.name}，ID: {thread.id}")
+            # 鎖定並封存 thread
+            await thread.edit(locked=True, archived=True)
+            logger.info(f"已鎖定並封存 thread {thread.name}，ID: {thread.id}")
 
-            # 鎖定來源貼文
-            await source_message.channel.edit(locked=True)
-            logger.info(f"已鎖定來源貼文 {source_message.id} 的頻道")
+            # 鎖定並封存來源貼文
+            await source_message.channel.edit(locked=True, archived=True)
+            logger.info(f"已鎖定並封存來源貼文 {source_message.id} 的頻道")
 
             await thread.send(f"交易已由雙方確認完成。此 thread 及來源貼文已被鎖定。")
         except asyncio.TimeoutError:
             logger.warning(f"交易確認超時，買家 {post_author.name} 未在24小時內確認")
-            await thread.send(f"{post_author.mention}，您未在24小時內確認交易，交易確認已超時。請與賣家聯繫以完成確認。")
+            await thread.send(f"{post_author.mention}，您未在24小時內確認交易，交易已自動確認領收。")
+            # 自動確認領收，鎖定並封存 thread 和來源貼文
+            await thread.edit(locked=True, archived=True)
+            logger.info(f"已因超時自動鎖定並封存 thread {thread.name}，ID: {thread.id}")
+            await source_message.channel.edit(locked=True, archived=True)
+            logger.info(f"已因超時自動鎖定並封存來源貼文 {source_message.id} 的頻道")
+            await thread.send(f"交易已自動確認完成。此 thread 及來源貼文已被鎖定。")
         except Exception as e:
             logger.error(f"處理交易確認反應時發生錯誤: {str(e)}")
             await thread.send("處理交易確認時發生錯誤，請手動確認交易狀態。")
