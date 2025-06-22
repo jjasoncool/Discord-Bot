@@ -115,6 +115,7 @@ class ManagementCommands(commands.Cog):
 
         channel_types = {
             "交易論壇": {"type": discord.ChannelType.forum, "key": "trade_forum_channel_id", "color": discord.Color.blue(), "desc": "交易記錄頻道"},
+            "交易紀錄封存": {"type": discord.ChannelType.forum, "key": "archive_channel_id", "color": discord.Color.dark_grey(), "desc": "交易紀錄封存頻道"},
             "購物車交付": {"type": discord.ChannelType.text, "key": "cart_delivery_channel_id", "color": discord.Color.green(), "desc": "購物車交付通知頻道"}
         }
 

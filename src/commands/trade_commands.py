@@ -201,23 +201,80 @@ class TradeCommands(commands.Cog):
             await thread.edit(locked=True, archived=True)
             logger.info(f"已鎖定並封存 thread {thread.name}，ID: {thread.id}")
 
-            # 鎖定並封存來源貼文
-            await source_message.channel.edit(locked=True, archived=True)
-            logger.info(f"已鎖定並封存來源貼文 {source_message.id} 的頻道")
+            # 將來源貼文內容複製到 archive 頻道並刪除來源貼文
+            await self.archive_source_message(thread, source_message)
 
             await thread.send(f"交易已由雙方確認完成。此 thread 及來源貼文已被鎖定。")
         except asyncio.TimeoutError:
             logger.warning(f"交易確認超時，買家 {post_author.name} 未在24小時內確認")
             await thread.send(f"{post_author.mention}，您未在24小時內確認交易，交易已自動確認領收。")
-            # 自動確認領收，鎖定並封存 thread 和來源貼文
+            # 自動確認領收，鎖定並封存 thread
             await thread.edit(locked=True, archived=True)
             logger.info(f"已因超時自動鎖定並封存 thread {thread.name}，ID: {thread.id}")
-            await source_message.channel.edit(locked=True, archived=True)
-            logger.info(f"已因超時自動鎖定並封存來源貼文 {source_message.id} 的頻道")
+            # 將來源貼文內容複製到 archive 頻道並刪除來源貼文
+            await self.archive_source_message(thread, source_message)
             await thread.send(f"交易已自動確認完成。此 thread 及來源貼文已被鎖定。")
         except Exception as e:
             logger.error(f"處理交易確認反應時發生錯誤: {str(e)}")
             await thread.send("處理交易確認時發生錯誤，請手動確認交易狀態。")
+
+    async def archive_source_message(self, thread, source_message):
+        """將來源貼文內容複製到 archive 頻道並刪除來源貼文"""
+        from utils import get_archive_channel_id
+        try:
+            archive_channel_id = await get_archive_channel_id(config_file="config.json", caller="TradeCommands")
+            archive_channel = self.bot.get_channel(archive_channel_id)
+            if archive_channel:
+                if isinstance(archive_channel, discord.ForumChannel):
+                    # 如果是論壇頻道，創建一個新的 thread
+                    thread_title = f"已封存 - {source_message.channel.name if isinstance(source_message.channel, discord.Thread) else '貼文'} {source_message.id}"
+                    # 獲取 thread 中的所有訊息，按時間順序排列
+                    conversation_history = []
+                    async for msg in source_message.channel.history(limit=100, oldest_first=True):
+                        conversation_history.append(f"{msg.author.name}: {msg.content}")
+
+                    thread_content = f"已封存的來源貼文 {source_message.id} 對話內容：\n" + "\n".join(conversation_history)
+                    applied_tags = []
+                    for tag in archive_channel.available_tags:
+                        if tag.name == "封存":
+                            applied_tags.append(tag)
+                            break
+                    if not applied_tags:
+                        try:
+                            new_tag = await archive_channel.create_tag(name="封存")
+                            applied_tags.append(new_tag)
+                            logger.info(f"已創建新標籤「封存」並應用到貼文")
+                        except Exception as tag_error:
+                            logger.error(f"創建新標籤「封存」時發生錯誤: {str(tag_error)}")
+                    archived_thread = await archive_channel.create_thread(name=thread_title, content=thread_content, applied_tags=applied_tags)
+                    logger.info(f"已將來源貼文 {source_message.id} 複製到 archive 頻道 {archive_channel_id} 的新 thread 中，使用標籤: {applied_tags if applied_tags else '無'}")
+                else:
+                    # 如果是文字頻道，直接發送訊息
+                    # 獲取 thread 中的所有訊息，按時間順序排列
+                    conversation_history = []
+                    async for msg in source_message.channel.history(limit=100, oldest_first=True):
+                        conversation_history.append(f"{msg.author.name}: {msg.content}")
+
+                    archived_message = await archive_channel.send(f"已封存的來源貼文 {source_message.id} 對話內容：\n" + "\n".join(conversation_history))
+                    logger.info(f"已將來源貼文 {source_message.id} 複製到 archive 頻道 {archive_channel_id}")
+                # 刪除來源貼文
+                if isinstance(source_message.channel, discord.Thread) and isinstance(source_message.channel.parent, discord.ForumChannel):
+                    # 如果來源訊息在論壇 thread 中，刪除整個 thread
+                    await source_message.channel.delete()
+                    logger.info(f"已刪除來源貼文 {source_message.id} 的整個 thread")
+                else:
+                    # 否則只刪除訊息
+                    await source_message.delete()
+                    logger.info(f"已刪除來源貼文 {source_message.id}")
+            else:
+                logger.error(f"無法找到 archive 頻道 {archive_channel_id}")
+                await thread.send("無法找到 archive 頻道，來源貼文將被鎖定並關閉。")
+                await source_message.channel.edit(locked=True, archived=True)
+                logger.info(f"已因無法找到 archive 頻道而鎖定並關閉來源貼文 {source_message.id} 的頻道")
+        except Exception as e:
+            logger.error(f"處理來源貼文封存時發生錯誤: {str(e)}", exc_info=True)
+            await thread.send("處理來源貼文封存時發生錯誤，來源貼文未被處理。詳細錯誤已記錄，請通知管理員處理。")
+            logger.info(f"已因錯誤而無法處理來源貼文 {source_message.id}，詳細錯誤訊息已記錄")
 
     @app_commands.command(name="select_item", description="選擇一件物品進行購買")
     async def select_item_cmd(self, interaction: discord.Interaction):
