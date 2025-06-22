@@ -1,3 +1,4 @@
 .env
 logs/*
 __pycache__/
+monitored_channels.json

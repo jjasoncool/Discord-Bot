@@ -367,7 +367,9 @@ class TradeCommands(commands.Cog):
                         discord.SelectOption(label="4", value="4"),
                         discord.SelectOption(label="5", value="5")
                     ]
-                    if selected_option.value != "moon_card":
+                    if selected_option.value == "moon_card":
+                        quantity_options.append(discord.SelectOption(label="6", value="6"))
+                    else:
                         quantity_options.append(discord.SelectOption(label="10", value="10"))
 
                     quantity_select = discord.ui.Select(
