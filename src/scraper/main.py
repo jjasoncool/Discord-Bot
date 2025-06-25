@@ -51,7 +51,7 @@ def main():
     load_dotenv()
 
     # 設定定時任務
-    schedule.every().hour.at(":00").do(main_scrape_task)
+    schedule.every(15).minutes.do(main_scrape_task)
 
     # 立即執行一次
     logger.info("執行初始爬蟲任務")

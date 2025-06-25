@@ -3,3 +3,4 @@ python-dotenv
 schedule
 sqlalchemy
 alembic
+fake-useragent
