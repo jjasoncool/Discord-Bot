@@ -76,16 +76,16 @@ class ArticleMonitor:
     async def fetch_recent_articles(self, days: int = 3) -> List[Dict]:
         """從 scraper API 取得最近的文章"""
         try:
-            # 使用專為 Discord 設計的 API 端點
+            # 使用專為 Discord 設計的 API 端點，指定按時間升序排序（舊到新）
             url = f"{self.scraper_api_url}/api/articles/discord"
-            params = {"days": days, "limit": 50}
+            params = {"days": days, "limit": 50, "order": "asc"}
 
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, params=params, timeout=30) as response:
                     if response.status == 200:
                         data = await response.json()
                         if data.get('success'):
-                            logger.info(f"成功取得 {len(data['articles'])} 篇文章（包含完整內容）")
+                            logger.info(f"成功取得 {len(data['articles'])} 篇文章（已按時間排序：舊→新）")
                             return data['articles']
                         else:
                             logger.error(f"API 回應失敗: {data.get('message')}")
@@ -523,7 +523,12 @@ class ArticleMonitor:
                 logger.info("沒有新的未發送文章")
                 return
 
-            logger.info(f"找到 {len(new_articles)} 篇新文章")
+            logger.info(f"找到 {len(new_articles)} 篇新文章（已在資料庫層面按時間排序：舊→新）")
+            
+            # 記錄文章時間順序（用於除錯）
+            for i, article in enumerate(new_articles):
+                time_str = article.get('start_time') or article.get('create_time') or '無時間'
+                logger.debug(f"  第 {i+1} 篇: {article.get('article_id')} - {time_str}")
 
             # 發送新文章到所有指定頻道
             for article in new_articles:

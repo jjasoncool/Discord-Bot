@@ -135,6 +135,7 @@ async def get_recent_articles(
 async def get_articles_for_discord(
     days: int = 3,
     limit: int = 50,
+    order: str = "asc",  # 新增排序參數：asc=舊到新，desc=新到舊
     db: Session = Depends(get_db)
 ):
     """
@@ -144,6 +145,7 @@ async def get_articles_for_discord(
     Args:
         days: 查詢天數，預設3天
         limit: 回傳數量限制，預設50筆
+        order: 排序方式，預設 asc（舊到新），可選 desc（新到舊）
         db: 資料庫 session
 
     Returns:
@@ -153,16 +155,22 @@ async def get_articles_for_discord(
         # 計算查詢的開始時間
         start_date = datetime.now() - timedelta(days=days)
 
-        logger.info(f"Discord Bot 查詢 {days} 天內的文章，從 {start_date} 開始")
+        logger.info(f"Discord Bot 查詢 {days} 天內的文章，從 {start_date} 開始，排序: {order}")
 
         # 查詢有完整內容的文章，JOIN 副表
         query = db.query(ArticleMenu).join(
             ArticleDetail, ArticleMenu.article_id == ArticleDetail.article_id
         ).filter(
             ArticleMenu.start_time >= start_date
-        ).order_by(
-            ArticleMenu.start_time.desc()
-        ).limit(limit)
+        )
+        
+        # 根據排序參數決定排序方式
+        if order.lower() == "desc":
+            query = query.order_by(ArticleMenu.start_time.desc())
+        else:  # 預設為 asc，舊到新
+            query = query.order_by(ArticleMenu.start_time.asc())
+        
+        query = query.limit(limit)
 
         results = query.all()
 
