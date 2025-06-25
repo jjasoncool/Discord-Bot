@@ -19,6 +19,26 @@ services:
     networks:
       - discord-net
 
+  scraper:
+    build:
+      context: .
+      dockerfile: scraper/dockerfile
+    container_name: scraper
+    restart: always
+    volumes:
+      - type: bind
+        source: ./src/scraper
+        target: /app
+      - type: bind
+        source: ./logs
+        target: /logs
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Taipei
+    networks:
+      - discord-net
+
 networks:
   discord-net:
     driver: bridge

@@ -1,0 +1,28 @@
+# 使用 Python 作為基礎映像
+FROM python:3.12-slim
+
+# 設定工作目錄
+WORKDIR /app
+
+# 安裝必要的套件
+RUN apt-get update && apt-get install -y \
+    && rm -rf /var/lib/apt/lists/*
+
+# 建立應用程式使用者
+RUN groupadd -r appuser && useradd -r -g appuser -m -d /home/appuser -u 1000 appuser
+RUN chown -R appuser:appuser /app
+RUN chown -R appuser:appuser /home/appuser
+
+# 建立資料和日誌目錄並設定權限
+RUN mkdir -p /app/data /logs && chown -R appuser:appuser /app/data /logs
+
+# 切換到非 root 使用者
+USER appuser
+
+# 複製依賴檔案並安裝
+COPY scraper/requirements.txt .
+RUN pip install --no-cache-dir --user -r requirements.txt
+
+# 程式碼透過 volume 掛載，環境變數透過 docker-compose 設定
+# 使用新的主程式啟動
+CMD ["python", "main.py"]
