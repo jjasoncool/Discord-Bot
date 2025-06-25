@@ -56,10 +56,16 @@ class ArticleCommands(commands.Cog):
                     emoji="📊"
                 ),
                 discord.SelectOption(
-                    label="🧪 測試功能",
+                    label="🧪 測試 API",
                     value="test",
                     description="測試從爬蟲 API 取得文章",
                     emoji="🧪"
+                ),
+                discord.SelectOption(
+                    label="🔧 測試解析",
+                    value="test_parse",
+                    description="測試 HTML 內容解析功能",
+                    emoji="🔧"
                 )
             ]
         )
@@ -75,6 +81,8 @@ class ArticleCommands(commands.Cog):
                 await self._handle_monitor_status(select_interaction)
             elif action == "test":
                 await self._handle_test_fetch(select_interaction)
+            elif action == "test_parse":
+                await self._handle_test_parse(select_interaction)
 
         select_menu.callback = select_callback
 
@@ -102,8 +110,13 @@ class ArticleCommands(commands.Cog):
             inline=True
         )
         embed.add_field(
-            name="🧪 測試功能",
+            name="🧪 測試 API",
             value="測試 API 連接和文章取得",
+            inline=True
+        )
+        embed.add_field(
+            name="🔧 測試解析",
+            value="測試 HTML 到 Markdown 轉換",
             inline=True
         )
 
@@ -234,6 +247,11 @@ class ArticleCommands(commands.Cog):
                 value=str(len(self.article_monitor.sent_articles) if self.article_monitor else 0),
                 inline=True
             )
+            embed.add_field(
+                name="🔧 HTML 解析器",
+                value="pypandoc" if self.article_monitor.pypandoc_available else "BeautifulSoup",
+                inline=True
+            )
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -251,13 +269,13 @@ class ArticleCommands(commands.Cog):
 
             if not articles:
                 embed = discord.Embed(
-                    title="🧪 測試結果",
+                    title="🧪 API 測試結果",
                     description="❌ 沒有取得任何文章",
                     color=discord.Color.red()
                 )
             else:
                 embed = discord.Embed(
-                    title="🧪 測試結果",
+                    title="🧪 API 測試結果",
                     description=f"✅ 成功取得 {len(articles)} 篇文章",
                     color=discord.Color.green()
                 )
@@ -281,7 +299,99 @@ class ArticleCommands(commands.Cog):
         except Exception as e:
             logger.error(f"測試文章取得失敗: {e}")
             embed = discord.Embed(
-                title="🧪 測試結果",
+                title="🧪 API 測試結果",
+                description=f"❌ 測試失敗：{str(e)}",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+    async def _handle_test_parse(self, interaction: discord.Interaction):
+        """處理測試 HTML 解析功能"""
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            if not self.article_monitor:
+                await interaction.followup.send("❌ 官方文章更新器未初始化", ephemeral=True)
+                return
+
+            # 測試 HTML 內容 - 包含多張圖片來測試圖片顯示邏輯
+            test_html = """
+            <h1>測試標題</h1>
+            <p>這是一個<strong>粗體文字</strong>和<em>斜體文字</em>的測試段落。</p>
+            <ul>
+                <li>列表項目 1</li>
+                <li>列表項目 2</li>
+            </ul>
+            <a href="https://example.com">這是一個連結</a>
+            <img src="https://example.com/image1.jpg" alt="測試圖片1">
+            <img src="https://example.com/image2.jpg" alt="測試圖片2">
+            <img src="https://example.com/image3.jpg" alt="測試圖片3">
+            <img src="https://example.com/image4.jpg" alt="測試圖片4">
+            <img src="https://example.com/image5.jpg" alt="測試圖片5">
+            <img src="https://example.com/image6.jpg" alt="測試圖片6">
+            <img src="https://example.com/image7.jpg" alt="測試圖片7">
+            <blockquote>這是引用文字</blockquote>
+            <code>inline code</code>
+            """
+
+            # 測試解析
+            result = await self.article_monitor.test_html_parsing(test_html)
+
+            if result['success']:
+                embed = discord.Embed(
+                    title="🔧 HTML 解析測試結果",
+                    description="✅ 解析成功",
+                    color=discord.Color.green()
+                )
+
+                embed.add_field(
+                    name="🔧 解析器",
+                    value="pypandoc" if result['pypandoc_used'] else "BeautifulSoup",
+                    inline=True
+                )
+
+                embed.add_field(
+                    name="📏 文字長度",
+                    value=str(result['text_length']),
+                    inline=True
+                )
+
+                embed.add_field(
+                    name="🖼️ 圖片數量",
+                    value=str(result['images_found']),
+                    inline=True
+                )
+
+                if result.get('markdown_features'):
+                    features = result['markdown_features']
+                    feature_text = f"標題: {features['headers']}, 粗體: {features['bold_text']}, 斜體: {features['italic_text']}, 連結: {features['links']}, 列表: {features['bullet_lists'] + features['numbered_lists']}"
+                    embed.add_field(
+                        name="📝 Markdown 特徵",
+                        value=feature_text,
+                        inline=False
+                    )
+
+                # 顯示解析後的內容（縮短版本）
+                parsed_preview = result['parsed_text'][:800] + "..." if len(result['parsed_text']) > 800 else result['parsed_text']
+                embed.add_field(
+                    name="📄 解析結果預覽",
+                    value=f"```\n{parsed_preview}\n```",
+                    inline=False
+                )
+
+            else:
+                embed = discord.Embed(
+                    title="🔧 HTML 解析測試結果",
+                    description=f"❌ 解析失敗：{result['error']}",
+                    color=discord.Color.red()
+                )
+
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            logger.error(f"測試 HTML 解析失敗: {e}")
+            embed = discord.Embed(
+                title="🔧 HTML 解析測試結果",
                 description=f"❌ 測試失敗：{str(e)}",
                 color=discord.Color.red()
             )
