@@ -3,6 +3,7 @@ import sys
 import time
 import logging
 import asyncio
+import json
 from logging.handlers import RotatingFileHandler
 import discord
 from discord import app_commands
@@ -63,7 +64,8 @@ COMMAND_MODULES = [
     'commands.trade_commands',
     'commands.management_commands',
     'commands.forum_monitor',
-    'commands.user_commands'
+    'commands.user_commands',
+    'commands.article_commands'
 ]
 
 # 建立機器人實例
@@ -117,6 +119,9 @@ async def on_ready():
 
     logger.info(f"邀請連結: {invite_url}")
     logger.info("如果斜線命令未顯示，請使用上面的連結重新邀請機器人，確保包含應用程序命令權限")
+
+    # 自動啟動官方文章更新
+    await auto_start_article_monitor(bot)
 
     try:
         # 列出已註冊的命令
@@ -172,6 +177,61 @@ async def on_message(message):
 
     # 繼續處理命令
     await bot.process_commands(message)
+
+async def auto_start_article_monitor(bot):
+    """自動啟動官方文章更新功能"""
+    try:
+        # 等待一下讓所有 Cog 完全載入
+        await asyncio.sleep(2)
+
+        # 讀取配置文件
+        config_file = "config.json"
+        if not os.path.exists(config_file):
+            logger.info("配置文件不存在，跳過自動啟動官方文章更新")
+            return
+
+        with open(config_file, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+
+        article_monitor_channel_id = config.get('article_monitor_channel_id')
+
+        if not article_monitor_channel_id:
+            logger.info("配置文件中沒有設定官方文章更新頻道 ID，跳過自動啟動")
+            return
+
+        # 檢查頻道是否存在
+        channel = bot.get_channel(article_monitor_channel_id)
+        if not channel:
+            logger.error(f"找不到官方文章更新頻道 ID: {article_monitor_channel_id}")
+            return
+
+        # 獲取 ArticleCommands Cog
+        article_commands = bot.get_cog('ArticleCommands')
+        if not article_commands:
+            logger.error("找不到 ArticleCommands Cog，無法啟動官方文章更新")
+            return
+
+        # 檢查是否已經在監控
+        if article_commands.monitoring_task and not article_commands.monitoring_task.done():
+            logger.info("官方文章更新已經在運行中")
+            return
+
+        # 設定監控頻道
+        if article_monitor_channel_id not in article_commands.monitored_channels:
+            article_commands.monitored_channels.append(article_monitor_channel_id)
+
+        # 啟動監控任務
+        article_commands.monitoring_task = asyncio.create_task(
+            article_commands.article_monitor.start_monitoring(
+                channel_ids=article_commands.monitored_channels,
+                check_interval=180  # 3分鐘檢查一次
+            )
+        )
+
+        logger.info(f"✅ 已自動啟動官方文章更新！更新頻道: {channel.name} (ID: {article_monitor_channel_id})")
+
+    except Exception as e:
+        logger.error(f"自動啟動官方文章更新時發生錯誤: {e}", exc_info=True)
 
 # 主函數
 def main():

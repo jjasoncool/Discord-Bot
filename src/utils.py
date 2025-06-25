@@ -45,16 +45,37 @@ async def get_archive_channel_id(config_file="config.json", caller="unknown"):
     """從配置文件中讀取封存頻道 ID"""
     return await ChannelConfig.get_channel_id('archive_channel_id', config_file, caller)
 
-async def check_guild(interaction: discord.Interaction, owner_only: bool = False) -> bool:
-    """檢查命令是否在伺服器中使用且使用者是否為伺服器擁有者（如果啟用了限制）"""
+async def check_guild(interaction: discord.Interaction, owner_only: bool = False, admin_only: bool = False) -> bool:
+    """
+    檢查命令使用權限
+
+    Args:
+        interaction: Discord 互動物件
+        owner_only: 是否僅限擁有者使用
+        admin_only: 是否僅限管理員使用
+
+    Returns:
+        bool: 是否通過權限檢查
+    """
+    # 檢查是否在伺服器中使用
     if not interaction.guild:
         await interaction.response.send_message("此命令只能在伺服器中使用，無法在私人訊息中使用。", ephemeral=True)
         logger.info(f'使用者 {interaction.user} 嘗試在私人訊息中使用命令，已被拒絕')
         return False
+
+    # 檢查擁有者權限（最高優先級）
     if owner_only:
         owner_id = int(os.getenv('OWNER_ID', '0'))
         if interaction.user.id != owner_id:
-            await interaction.response.send_message("此命令僅限指定擁有者使用！", ephemeral=True)
+            await interaction.response.send_message("❌ 此命令僅限指定擁有者使用！", ephemeral=True)
             logger.info(f'使用者 {interaction.user} 嘗試使用僅限擁有者的命令，已被拒絕')
             return False
+
+    # 檢查管理員權限
+    elif admin_only:
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ 此命令僅限管理員使用！", ephemeral=True)
+            logger.info(f'使用者 {interaction.user} 嘗試使用僅限管理員的命令，已被拒絕')
+            return False
+
     return True

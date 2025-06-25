@@ -25,6 +25,8 @@ services:
       dockerfile: scraper/dockerfile
     container_name: scraper
     restart: always
+    expose:
+      - "8000"  # 只在內網暴露 API 端口
     volumes:
       - type: bind
         source: ./src/scraper

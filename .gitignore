@@ -4,3 +4,4 @@ __pycache__/
 monitored_channels.json
 src/scraper/data/*.json
 src/scraper/articles.db
+src/services/sent_articles.json

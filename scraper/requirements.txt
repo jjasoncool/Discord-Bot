@@ -4,3 +4,6 @@ schedule
 sqlalchemy
 alembic
 fake-useragent
+fastapi
+uvicorn
+pydantic

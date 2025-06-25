@@ -1,11 +1,14 @@
 """
 主爬蟲程式
 負責定時任務調度和程式入口
+同時啟動 API 服務供 Discord Bot 使用
 """
 import schedule
 import time
+import threading
 from datetime import datetime
 from dotenv import load_dotenv
+import uvicorn
 
 from container import ServiceContainer
 from utils.logger import get_logger, log_startup_info
@@ -42,6 +45,18 @@ def main_scrape_task():
             scraper_service.db_manager.close()
 
 
+def start_api_server():
+    """啟動 API 服務器"""
+    from api_server import app
+    logger.info("啟動 API 服務器於 port 8000")
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        log_level="info"
+    )
+
+
 def main():
     """主程式入口"""
     # 記錄啟動資訊
@@ -49,6 +64,11 @@ def main():
 
     # 載入環境變數
     load_dotenv()
+
+    # 在背景執行緒中啟動 API 服務器
+    api_thread = threading.Thread(target=start_api_server, daemon=True)
+    api_thread.start()
+    logger.info("API 服務器已在背景啟動")
 
     # 設定定時任務
     schedule.every(15).minutes.do(main_scrape_task)
@@ -58,7 +78,7 @@ def main():
     main_scrape_task()
 
     # 啟動定時任務循環
-    logger.info("定時任務已啟動，每小時執行一次")
+    logger.info("定時任務已啟動，每15分鐘執行一次")
     while True:
         try:
             schedule.run_pending()
