@@ -7,7 +7,7 @@ from discord.ext import commands
 import asyncio
 import logging
 
-logger = logging.getLogger('article_commands')
+logger = logging.getLogger('discord_bot')
 
 class ArticleCommands(commands.Cog):
     """官方文章更新相關命令"""

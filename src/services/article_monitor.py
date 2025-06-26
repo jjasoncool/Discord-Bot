@@ -15,7 +15,7 @@ from typing import List, Dict, Optional
 from pathlib import Path
 from bs4 import BeautifulSoup
 
-logger = logging.getLogger('article_monitor')
+logger = logging.getLogger('discord_bot')
 
 class ArticleMonitor:
     """官方文章更新類別"""
@@ -160,185 +160,52 @@ class ArticleMonitor:
             try:
                 import pypandoc
 
-                # 先清理 HTML 內容，移除樣式和不必要的屬性
-                cleaned_html = self._preprocess_html_for_pandoc(html_content)
-
-                # 使用改進的 pypandoc 轉換 HTML 到 Markdown
+                # 使用 pypandoc 轉換 HTML 到 Markdown，保持原始換行
                 markdown_text = pypandoc.convert_text(
-                    cleaned_html,
+                    html_content,
                     'markdown',
                     format='html',
                     extra_args=[
-                        '--wrap=none',           # 不自動換行
-                        '--no-highlight',        # 不使用代碼高亮
-                        '--strip-comments',      # 移除 HTML 註釋
-                        '--reference-links',     # 使用參考式連結
-                        '--markdown-headings=atx',  # 使用 # 風格的標題
-                        '--normalize'            # 規範化 HTML 輸入（新添加）
+                        '--wrap=none',                    # 不自動換行
+                        '--no-highlight',                 # 不使用代碼高亮
+                        '--strip-comments',               # 移除 HTML 註釋
+                        '--markdown-headings=atx',        # 使用 # 風格的標題
+                        '--preserve-tabs',                # 保持 tab 字符
+                        '--from=html+hard_line_breaks'    # 保持硬換行
                     ]
                 )
 
-                # 清理 pypandoc 轉換後的內容
-                markdown_text = self._clean_pypandoc_output(markdown_text)
-
+                logger.info(f"pypandoc 轉換成功（保持換行），輸出長度: {len(markdown_text)} 字符")
                 return markdown_text, images
 
             except Exception as e:
                 logger.error(f"pypandoc 轉換失敗，使用備用方法: {e}")
 
-        # 備用方法：使用 BeautifulSoup 手動轉換
-        return self._fallback_html_parsing(html_content, images)
+        # 備用方法：使用 BeautifulSoup 簡單轉換
+        return self._simple_html_parsing(html_content, images)
 
-    def _clean_pypandoc_output(self, markdown_text: str) -> str:
-        """清理 pypandoc 轉換後的 Markdown 內容"""
-        # 移除多餘的反斜線
-        markdown_text = re.sub(r'\\', '', markdown_text)
-
-        # 移除多餘的空格和換行符
-        markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text)
-        markdown_text = re.sub(r'[ \t]+', ' ', markdown_text)
-
-        # 移除多餘的方括號和花括號內容
-        markdown_text = re.sub(r'\{[^}]*\}', '', markdown_text)
-        markdown_text = re.sub(r'\[[^\]]*style="[^"]*"[^\]]*\]', '', markdown_text)
-
-        # 修復列表格式
-        markdown_text = re.sub(r'^-\s+', '• ', markdown_text, flags=re.MULTILINE)
-        markdown_text = re.sub(r'^\*\s+', '• ', markdown_text, flags=re.MULTILINE)
-
-        # 修復粗體格式（確保 Discord 相容）
-        markdown_text = re.sub(r'\*\*([^*]+)\*\*', r'**\1**', markdown_text)
-
-        # 修復斜體格式
-        markdown_text = re.sub(r'\*([^*]+)\*', r'*\1*', markdown_text)
-
-        # 清理連結格式
-        markdown_text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'[\1](\2)', markdown_text)
-
-        # 移除參考式連結的定義部分（Discord 不支援）
-        markdown_text = re.sub(r'\n\s*\[[^\]]+\]:\s*https?://[^\s]+', '', markdown_text)
-
-        # 移除多餘的空行和空白字符
-        lines = []
-        for line in markdown_text.split('\n'):
-            line = line.strip()
-            if line:  # 只保留非空行
-                lines.append(line)
-
-        # 重新組合，適當添加空行
-        result = []
-        for i, line in enumerate(lines):
-            result.append(line)
-            # 在標題後添加空行
-            if line.startswith('#'):
-                result.append('')
-            # 在列表項後適當添加空行
-            elif i < len(lines) - 1 and line.startswith('•') and not lines[i + 1].startswith('•'):
-                result.append('')
-
-        return '\n'.join(result).strip()
-
-    def _fallback_html_parsing(self, html_content: str, images: List[str]) -> tuple[str, List[str]]:
-        """備用的 HTML 解析方法"""
+    def _simple_html_parsing(self, html_content: str, images: List[str]) -> tuple[str, List[str]]:
+        """簡化的 HTML 解析方法，只做基本清理"""
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
 
-            # 處理各種 HTML 標籤轉換為 Markdown
-            # 處理標題
-            for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
-                level = int(tag.name[1])
-                text = tag.get_text().strip()
-                if text:
-                    tag.string = '#' * level + ' ' + text + '\n\n'
+            # 移除 script, style, noscript 標籤
+            for tag in soup(['script', 'style', 'noscript']):
+                tag.decompose()
 
-            # 處理粗體和斜體
-            for tag in soup.find_all(['b', 'strong']):
-                text = tag.get_text().strip()
-                if text:
-                    tag.string = f"**{text}**"
+            # 直接獲取文字，保持原始結構
+            text = soup.get_text(separator='\n', strip=False)
 
-            for tag in soup.find_all(['i', 'em']):
-                text = tag.get_text().strip()
-                if text:
-                    tag.string = f"*{text}*"
+            # 只做最基本的清理
+            # 移除過多的空行（超過 3 行）
+            text = re.sub(r'\n{4,}', '\n\n\n', text)
 
-            # 處理連結
-            for tag in soup.find_all('a'):
-                href = tag.get('href', '')
-                text = tag.get_text().strip()
-                if href and text:
-                    if href.startswith('/'):
-                        href = self.BASE_URL + href
-                    tag.string = f"[{text}]({href})"
-
-            # 處理列表
-            for ul in soup.find_all('ul'):
-                items = ul.find_all('li')
-                list_text = ""
-                for item in items:
-                    item_text = item.get_text().strip()
-                    if item_text:
-                        list_text += f"• {item_text}\n"
-                if list_text:
-                    ul.string = list_text + "\n"
-
-            for ol in soup.find_all('ol'):
-                items = ol.find_all('li')
-                list_text = ""
-                for i, item in enumerate(items, 1):
-                    item_text = item.get_text().strip()
-                    if item_text:
-                        list_text += f"{i}. {item_text}\n"
-                if list_text:
-                    ol.string = list_text + "\n"
-
-            # 處理段落
-            for p in soup.find_all('p'):
-                text = p.get_text().strip()
-                if text:
-                    p.string = text + '\n\n'
-
-            # 處理換行
-            for br in soup.find_all('br'):
-                br.replace_with('\n')
-
-            # 處理區塊引用
-            for blockquote in soup.find_all('blockquote'):
-                text = blockquote.get_text().strip()
-                if text:
-                    quoted_text = '\n'.join([f"> {line}" for line in text.split('\n') if line.strip()])
-                    blockquote.string = quoted_text + '\n\n'
-
-            # 處理代碼區塊
-            for code in soup.find_all('code'):
-                text = code.get_text()
-                if text:
-                    code.string = f"`{text}`"
-
-            for pre in soup.find_all('pre'):
-                text = pre.get_text()
-                if text:
-                    pre.string = f"```\n{text}\n```\n"
-
-            # 獲取純文字內容
-            text = soup.get_text()
-
-            # 清理多餘的空白和換行
-            text = re.sub(r'\n\s*\n\s*\n', '\n\n', text)  # 合併多個換行
-            text = re.sub(r'[ \t]+', ' ', text)            # 合併多個空格
-            text = re.sub(r'^\s+|\s+$', '', text, flags=re.MULTILINE)  # 移除行首行尾空白
-            text = text.strip()
-
-            return text, images
+            logger.info(f"簡化解析完成，文本長度: {len(text)} 字符")
+            return text.strip(), images
 
         except Exception as e:
-            logger.error(f"備用 HTML 解析失敗: {e}")
-            # 最後的備用方案：只移除 HTML 標籤
-            try:
-                soup = BeautifulSoup(html_content, 'html.parser')
-                return soup.get_text().strip(), images
-            except:
-                return html_content, images
+            logger.error(f"簡化 HTML 解析失敗: {e}")
+            return html_content, images
 
     def format_article_embed(self, article: Dict) -> dict:
         """格式化文章為 Discord Embed"""
@@ -346,6 +213,7 @@ class ArticleMonitor:
 
         article_id = article.get('article_id', 'unknown')
         article_title = article.get('article_title', '無標題')
+
         logger.info(f"開始格式化文章 Embed: ID={article_id}, 標題='{article_title}'")
 
         # 獲取並解析文章內容
@@ -650,60 +518,7 @@ class ArticleMonitor:
             # 發生錯誤時使用預設檔名
             return f"image_{index}.jpg"
 
-    def _preprocess_html_for_pandoc(self, html_content: str) -> str:
-        """
-        預處理 HTML 內容，移除樣式和不必要的屬性，改善 pypandoc 轉換品質
-
-        Args:
-            html_content: 原始 HTML 內容
-
-        Returns:
-            str: 清理後的 HTML 內容
-        """
-        try:
-            soup = BeautifulSoup(html_content, 'html.parser')
-
-            # 移除所有樣式相關的標籤和屬性
-            for tag in soup.find_all():
-                # 移除 style 屬性
-                if 'style' in tag.attrs:
-                    del tag.attrs['style']
-
-                # 移除 class 屬性
-                if 'class' in tag.attrs:
-                    del tag.attrs['class']
-
-                # 移除 id 屬性
-                if 'id' in tag.attrs:
-                    del tag.attrs['id']
-
-                # 移除其他不必要的屬性
-                attrs_to_remove = ['width', 'height', 'align', 'valign', 'bgcolor',
-                                 'border', 'cellpadding', 'cellspacing', 'margin',
-                                 'padding', 'color', 'font-size', 'font-family',
-                                 'media-source', 'desc']
-                for attr in attrs_to_remove:
-                    if attr in tag.attrs:
-                        del tag.attrs[attr]
-
-            # 移除 script, style, noscript 標籤
-            for tag in soup(['script', 'style', 'noscript']):
-                tag.decompose()
-
-            # 簡化 div 標籤為 p 標籤（如果裡面只有文字）
-            for div in soup.find_all('div'):
-                if div.get_text().strip() and not div.find_all(['div', 'p', 'ul', 'ol', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
-                    div.name = 'p'
-
-            # 移除空的標籤
-            for tag in soup.find_all():
-                if not tag.get_text().strip() and not tag.find('img'):
-                    tag.decompose()
-
-            return str(soup)
-
-        except Exception as e:
-            logger.warning(f"HTML 預處理失敗，使用原始內容: {e}")
-            return html_content
+    # 移除了 _preprocess_html_for_pandoc 函數，不再需要手動預處理
+    # pypandoc 會直接處理原始 HTML
 
     # ...existing code...
