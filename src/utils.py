@@ -79,8 +79,12 @@ async def check_guild(interaction: discord.Interaction, owner_only: bool = False
             logger.info(f'使用者 {interaction.user} 嘗試使用僅限管理員的命令，已被拒絕')
             return False
 
-    # 檢查角色權限
+    # 檢查角色權限，但如果使用者是 owner 則直接通過
     if required_role:
+        owner_id = int(os.getenv('OWNER_ID', '0'))
+        if interaction.user.id == owner_id:
+            logger.info(f'使用者 {interaction.user} 是 owner，自動通過角色權限檢查')
+            return True
         config_file = "config.json"
         if os.path.exists(config_file):
             try:

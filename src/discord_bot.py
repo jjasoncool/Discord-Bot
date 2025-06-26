@@ -82,7 +82,7 @@ class MyBot(commands.Bot):
                 await self.load_extension(module)
                 logger.info(f"已載入指令模組: {module}")
             except Exception as e:
-                logger.error(f"載入指令模組 {module} 時發生錯誤: {str(e)}")
+                logger.error(f"載入指令模組 {module} 時發生錯誤: {str(e)}", exc_info=True)
 
         # 同步斜線命令
         try:
@@ -92,7 +92,7 @@ class MyBot(commands.Bot):
             logger.info(f"已同步 {len(cmds)} 個全局斜線命令")
 
         except Exception as e:
-            logger.error(f"斜線命令同步失敗: {str(e)}")
+            logger.error(f"斜線命令同步失敗: {str(e)}", exc_info=True)
 
 bot = MyBot()
 

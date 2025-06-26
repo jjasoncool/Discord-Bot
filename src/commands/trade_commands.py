@@ -323,6 +323,123 @@ class TradeCommands(commands.Cog):
             await thread.send("處理來源貼文封存時發生錯誤，來源貼文未被處理。詳細錯誤已記錄，請通知管理員處理。")
             logger.info(f"已因錯誤而無法處理來源貼文 {source_message.id}，詳細錯誤訊息已記錄")
 
+    @app_commands.command(name="set_item_prices", description="設定物品價格（賣家專用）")
+    async def set_item_prices_cmd(self, interaction: discord.Interaction):
+        """斜線命令：允許賣家設定物品價格，使用分頁功能"""
+        logger.info(f'收到來自 {interaction.user} 的 /set_item_prices 斜線命令')
+
+        from utils import check_guild
+        if not await check_guild(interaction, owner_only=False, required_role="Trader"):
+            return
+
+        import json
+        import os
+
+        # 確保 settings 目錄存在
+        os.makedirs("/app/settings", exist_ok=True)
+        prices_file_path = "/app/settings/item_prices.json"
+
+        # 讀取現有的價格設定
+        seller_prices = {}
+        if os.path.exists(prices_file_path):
+            try:
+                with open(prices_file_path, 'r', encoding='utf-8') as f:
+                    seller_prices = json.load(f)
+            except Exception as e:
+                logger.error(f"讀取價格檔案時發生錯誤: {str(e)}")
+                await interaction.response.send_message("無法讀取價格設定，請稍後再試。", ephemeral=True)
+                return
+
+        user_id = str(interaction.user.id)
+        if user_id not in seller_prices:
+            seller_prices[user_id] = {}
+
+        # 分頁設定
+        items_per_page = 5
+        total_pages = (len(ITEMS) + items_per_page - 1) // items_per_page
+        current_page = 0
+
+        def create_embed(page):
+            embed = discord.Embed(
+                title=f"設定物品價格 - 第 {page + 1} 頁 / {total_pages} 頁",
+                description="請使用「編輯」按鈕來設定價格，或使用按鈕切換頁面。",
+                color=discord.Color.purple()
+            )
+            start_idx = page * items_per_page
+            end_idx = min(start_idx + items_per_page, len(ITEMS))
+            for item in ITEMS[start_idx:end_idx]:
+                price = seller_prices[user_id].get(item['value'], 0)
+                embed.add_field(
+                    name=f"{item['label']} ({item['description']})",
+                    value=f"目前價格: {price}",
+                    inline=False
+                )
+            return embed
+
+        def create_view(page):
+            view = discord.ui.View()
+            if total_pages > 1:
+                if page > 0:
+                    prev_button = discord.ui.Button(label="上一頁", style=discord.ButtonStyle.blurple)
+                    prev_button.callback = lambda inter: update_page(inter, page - 1)
+                    view.add_item(prev_button)
+                if page < total_pages - 1:
+                    next_button = discord.ui.Button(label="下一頁", style=discord.ButtonStyle.blurple)
+                    next_button.callback = lambda inter: update_page(inter, page + 1)
+                    view.add_item(next_button)
+            edit_button = discord.ui.Button(label="編輯", style=discord.ButtonStyle.green)
+            edit_button.callback = lambda inter: edit_items(inter, page)
+            view.add_item(edit_button)
+            finish_button = discord.ui.Button(label="結束編輯", style=discord.ButtonStyle.red)
+            finish_button.callback = lambda inter: finish_editing(inter)
+            view.add_item(finish_button)
+            return view
+
+        async def update_page(interaction: discord.Interaction, new_page):
+            nonlocal current_page
+            current_page = new_page
+            await interaction.response.edit_message(embed=create_embed(current_page), view=create_view(current_page))
+
+        async def edit_items(interaction: discord.Interaction, page):
+            start_idx = page * items_per_page
+            end_idx = min(start_idx + items_per_page, len(ITEMS))
+            items_to_edit = ITEMS[start_idx:end_idx]
+
+            modal = discord.ui.Modal(title=f"編輯物品價格 - 第 {page + 1} 頁")
+            inputs = []
+            for item in items_to_edit:
+                price_input = discord.ui.TextInput(
+                    label=item['label'],
+                    placeholder="輸入價格（整數）",
+                    default=str(seller_prices[user_id].get(item['value'], 0))
+                )
+                modal.add_item(price_input)
+                inputs.append((item['value'], price_input))
+
+            async def on_submit(interaction: discord.Interaction):
+                try:
+                    for value, input_field in inputs:
+                        price = int(input_field.value)
+                        if price < 0:
+                            await interaction.response.send_message(f"{input_field.label} 的價格不能為負數，請重試。", ephemeral=True)
+                            return
+                        seller_prices[user_id][value] = price
+                    with open(prices_file_path, 'w', encoding='utf-8') as f:
+                        json.dump(seller_prices, f, ensure_ascii=False, indent=2)
+                    await interaction.response.send_message("已更新所有物品價格。", ephemeral=True)
+                    await interaction.followup.edit_message(interaction.message.id, embed=create_embed(current_page), view=create_view(current_page))
+                except ValueError:
+                    await interaction.response.send_message("所有價格必須是有效的整數，請重試。", ephemeral=True)
+
+            modal.on_submit = on_submit
+            await interaction.response.send_modal(modal)
+
+        async def finish_editing(interaction: discord.Interaction):
+            await interaction.response.edit_message(view=None)
+            await interaction.followup.send("價格設定已完成。", ephemeral=True)
+
+        await interaction.response.send_message(embed=create_embed(current_page), view=create_view(current_page), ephemeral=True)
+
     @app_commands.command(name="select_item", description="選擇一件物品進行購買")
     async def select_item_cmd(self, interaction: discord.Interaction):
         """斜線命令：顯示圖片和選擇器以選擇物品"""
@@ -330,7 +447,7 @@ class TradeCommands(commands.Cog):
 
         # 檢查是否在伺服器中使用並檢查角色權限
         from utils import check_guild
-        if not await check_guild(interaction, required_role="Trader"):
+        if not await check_guild(interaction, owner_only=False, required_role="Trader"):
             return
 
         embed = discord.Embed(
@@ -440,7 +557,9 @@ class TradeCommands(commands.Cog):
                 logger.info(f"使用者 {interaction.user.id} ({interaction.user.name}) 在 {current_time} 選擇了物品 {selected_option.label}")
 
                 # 檢查是否為限制只能購買一個的物品
-                restricted_items = ["universe_radio", "universe_special", "dragon_first_charge", "store_gift_pack"]
+                restricted_items = [item.value for item in select.options if item.value.startswith("store_gift_pack")] + [
+                    "universe_radio", "universe_special", "dragon_first_charge"
+                ]
                 if selected_option.value in restricted_items:
                     # 直接進入確認購買步驟，數量固定為1
                     embed, confirm_view = create_confirm_view(interaction, selected_option, 1)

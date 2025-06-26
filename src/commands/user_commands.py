@@ -1,14 +1,18 @@
+
+import json
+import os
 import logging
 import discord
 from discord import app_commands
 from discord.ext import commands
+from constants import ITEMS
 
 # 獲取 logger
 logger = logging.getLogger('discord_bot')
 
 # 監控頻道的字典，格式: {guild_id: {channel_id: [{關鍵字列表, 使用者ID, 通知設定}]}}
 monitored_channels = {}
-monitored_channels_file = "monitored_channels.json"
+monitored_channels_file = "settings/monitored_channels.json"
 
 import json
 import os
@@ -495,6 +499,90 @@ class UserCommands(commands.Cog):
                                 logger.warning(f"無法向使用者 {user.name}#{user.discriminator} 發送訊息，可能因為他們已關閉私人訊息")
                             except Exception as e:
                                 logger.error(f"發送關鍵字通知時發生錯誤: {str(e)}")
+
+    @app_commands.command(name="list_item_price", description="查看物品價格")
+    async def list_item_price_cmd(self, interaction: discord.Interaction):
+        """斜線命令：查看物品價格"""
+        logger.info(f'收到來自 {interaction.user} 的 /list_item_price 斜線命令')
+
+        from utils import check_guild
+        if not await check_guild(interaction):
+            return
+
+        prices_file_path = "/app/settings/item_prices.json"
+        prices = {}
+        if os.path.exists(prices_file_path):
+            try:
+                with open(prices_file_path, 'r', encoding='utf-8') as f:
+                    prices = json.load(f)
+            except Exception as e:
+                logger.error(f"讀取價格檔案時發生錯誤: {str(e)}")
+                await interaction.response.send_message("無法讀取價格設定，請稍後再試。", ephemeral=True)
+                return
+
+        if not prices:
+            await interaction.response.send_message("目前沒有設定任何物品價格。", ephemeral=True)
+            return
+
+        seller_options = []
+        for user_id in prices.keys():
+            member = interaction.guild.get_member(int(user_id))
+            if member:
+                user_name = member.display_name if hasattr(member, 'display_name') else member.name if hasattr(member, 'name') else f"使用者ID: {user_id}"
+            else:
+                try:
+                    member = await interaction.guild.fetch_member(int(user_id))
+                    user_name = member.display_name if hasattr(member, 'display_name') else member.name if hasattr(member, 'name') else f"使用者ID: {user_id}"
+                except (discord.NotFound, discord.HTTPException):
+                    user_name = f"使用者ID: {user_id}"
+            seller_options.append(discord.SelectOption(label=user_name, value=user_id))
+
+        if not seller_options:
+            await interaction.response.send_message("目前沒有賣家設定價格。", ephemeral=True)
+            return
+
+        seller_select = discord.ui.Select(
+            placeholder="選擇一位賣家...",
+            options=seller_options
+        )
+
+        async def seller_select_callback(interaction: discord.Interaction):
+            selected_seller_id = seller_select.values[0]
+            selected_seller = interaction.guild.get_member(int(selected_seller_id))
+            if not selected_seller:
+                try:
+                    selected_seller = await interaction.guild.fetch_member(int(selected_seller_id))
+                    seller_name = selected_seller.display_name if hasattr(selected_seller, 'display_name') else selected_seller.name if hasattr(selected_seller, 'name') else f"使用者ID: {selected_seller_id}"
+                except (discord.NotFound, discord.HTTPException):
+                    seller_name = f"使用者ID: {selected_seller_id}"
+            else:
+                seller_name = selected_seller.display_name if hasattr(selected_seller, 'display_name') else selected_seller.name if hasattr(selected_seller, 'name') else f"使用者ID: {selected_seller_id}"
+
+            embed = discord.Embed(
+                title=f"{seller_name} 的物品價格",
+                description="以下是所有物品的價格資訊：",
+                color=discord.Color.blue()
+            )
+            seller_prices = prices.get(selected_seller_id, {})
+            for item in ITEMS:
+                price = seller_prices.get(item['value'], "無價格設定")
+                embed.add_field(
+                    name=f"{item['label']} ({item['description']})",
+                    value=f"價格: {price}",
+                    inline=False
+                )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        seller_select.callback = seller_select_callback
+        seller_view = discord.ui.View()
+        seller_view.add_item(seller_select)
+
+        embed = discord.Embed(
+            title="查看物品價格",
+            description="請從以下選項中選擇一位賣家來查看其設定的價格。",
+            color=discord.Color.blue()
+        )
+        await interaction.response.send_message(embed=embed, view=seller_view, ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(UserCommands(bot))
