@@ -163,13 +163,13 @@ async def get_articles_for_discord(
         ).filter(
             ArticleMenu.start_time >= start_date
         )
-        
+
         # 根據排序參數決定排序方式
         if order.lower() == "desc":
             query = query.order_by(ArticleMenu.start_time.desc())
         else:  # 預設為 asc，舊到新
             query = query.order_by(ArticleMenu.start_time.asc())
-        
+
         query = query.limit(limit)
 
         results = query.all()

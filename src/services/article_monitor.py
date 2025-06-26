@@ -38,7 +38,7 @@ class ArticleMonitor:
             import pypandoc
             # 檢查 pandoc 是否已安裝
             pypandoc.get_pandoc_version()
-            logger.info("pypandoc 可用，將使用 pypandoc 進行 HTML 解析")
+            logger.info("pypandoc 可用，將使用改進的 pypandoc 進行 HTML 解析")
             return True
         except Exception as e:
             logger.warning(f"pypandoc 不可用，將使用備用解析方法: {e}")
@@ -160,15 +160,21 @@ class ArticleMonitor:
             try:
                 import pypandoc
 
-                # 使用 pypandoc 轉換 HTML 到 Markdown
+                # 先清理 HTML 內容，移除樣式和不必要的屬性
+                cleaned_html = self._preprocess_html_for_pandoc(html_content)
+
+                # 使用改進的 pypandoc 轉換 HTML 到 Markdown
                 markdown_text = pypandoc.convert_text(
-                    html_content,
+                    cleaned_html,
                     'markdown',
                     format='html',
                     extra_args=[
-                        '--wrap=none',  # 不自動換行
-                        '--no-highlight',  # 不使用代碼高亮
-                        '--reference-links',  # 使用參考式連結
+                        '--wrap=none',           # 不自動換行
+                        '--no-highlight',        # 不使用代碼高亮
+                        '--strip-comments',      # 移除 HTML 註釋
+                        '--reference-links',     # 使用參考式連結
+                        '--markdown-headings=atx',  # 使用 # 風格的標題
+                        '--normalize'            # 規範化 HTML 輸入（新添加）
                     ]
                 )
 
@@ -185,14 +191,20 @@ class ArticleMonitor:
 
     def _clean_pypandoc_output(self, markdown_text: str) -> str:
         """清理 pypandoc 轉換後的 Markdown 內容"""
-        # 移除多餘的換行符
-        markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text)
+        # 移除多餘的反斜線
+        markdown_text = re.sub(r'\\', '', markdown_text)
 
-        # 清理多餘的空格
+        # 移除多餘的空格和換行符
+        markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text)
         markdown_text = re.sub(r'[ \t]+', ' ', markdown_text)
+
+        # 移除多餘的方括號和花括號內容
+        markdown_text = re.sub(r'\{[^}]*\}', '', markdown_text)
+        markdown_text = re.sub(r'\[[^\]]*style="[^"]*"[^\]]*\]', '', markdown_text)
 
         # 修復列表格式
         markdown_text = re.sub(r'^-\s+', '• ', markdown_text, flags=re.MULTILINE)
+        markdown_text = re.sub(r'^\*\s+', '• ', markdown_text, flags=re.MULTILINE)
 
         # 修復粗體格式（確保 Discord 相容）
         markdown_text = re.sub(r'\*\*([^*]+)\*\*', r'**\1**', markdown_text)
@@ -206,7 +218,25 @@ class ArticleMonitor:
         # 移除參考式連結的定義部分（Discord 不支援）
         markdown_text = re.sub(r'\n\s*\[[^\]]+\]:\s*https?://[^\s]+', '', markdown_text)
 
-        return markdown_text.strip()
+        # 移除多餘的空行和空白字符
+        lines = []
+        for line in markdown_text.split('\n'):
+            line = line.strip()
+            if line:  # 只保留非空行
+                lines.append(line)
+
+        # 重新組合，適當添加空行
+        result = []
+        for i, line in enumerate(lines):
+            result.append(line)
+            # 在標題後添加空行
+            if line.startswith('#'):
+                result.append('')
+            # 在列表項後適當添加空行
+            elif i < len(lines) - 1 and line.startswith('•') and not lines[i + 1].startswith('•'):
+                result.append('')
+
+        return '\n'.join(result).strip()
 
     def _fallback_html_parsing(self, html_content: str, images: List[str]) -> tuple[str, List[str]]:
         """備用的 HTML 解析方法"""
@@ -524,7 +554,7 @@ class ArticleMonitor:
                 return
 
             logger.info(f"找到 {len(new_articles)} 篇新文章（已在資料庫層面按時間排序：舊→新）")
-            
+
             # 記錄文章時間順序（用於除錯）
             for i, article in enumerate(new_articles):
                 time_str = article.get('start_time') or article.get('create_time') or '無時間'
@@ -553,56 +583,6 @@ class ArticleMonitor:
             except Exception as e:
                 logger.error(f"監控循環發生錯誤: {e}")
                 await asyncio.sleep(60)  # 發生錯誤時短暫延遲後重試
-
-    async def test_html_parsing(self, html_content: str) -> Dict:
-        """
-        測試 HTML 解析功能
-
-        Args:
-            html_content: 要測試的 HTML 內容
-
-        Returns:
-            Dict: 包含解析結果的字典
-        """
-        try:
-            parsed_text, images = self._parse_html_content(html_content)
-
-            result = {
-                'success': True,
-                'pypandoc_used': self.pypandoc_available,
-                'original_html': html_content[:500] + "..." if len(html_content) > 500 else html_content,
-                'parsed_text': parsed_text[:1500] + "..." if len(parsed_text) > 1500 else parsed_text,
-                'images_found': len(images),
-                'image_urls': images[:5],  # 最多顯示前5張圖片
-                'text_length': len(parsed_text),
-                'has_markdown': any(char in parsed_text for char in ['**', '*', '#', '[', ']', '>', '`']),
-                'markdown_features': self._analyze_markdown_features(parsed_text)
-            }
-
-            return result
-
-        except Exception as e:
-            logger.error(f"HTML 解析測試失敗: {e}")
-            return {
-                'success': False,
-                'error': str(e),
-                'pypandoc_used': self.pypandoc_available,
-                'original_html': html_content[:200] + "..." if len(html_content) > 200 else html_content
-            }
-
-    def _analyze_markdown_features(self, text: str) -> Dict[str, int]:
-        """分析 Markdown 格式特徵"""
-        return {
-            'headers': len(re.findall(r'^#+\s', text, re.MULTILINE)),
-            'bold_text': len(re.findall(r'\*\*[^*]+\*\*', text)),
-            'italic_text': len(re.findall(r'\*[^*]+\*', text)),
-            'links': len(re.findall(r'\[([^\]]+)\]\([^)]+\)', text)),
-            'bullet_lists': len(re.findall(r'^•\s', text, re.MULTILINE)),
-            'numbered_lists': len(re.findall(r'^\d+\.\s', text, re.MULTILINE)),
-            'code_blocks': len(re.findall(r'```', text)),
-            'inline_code': len(re.findall(r'`[^`]+`', text)),
-            'blockquotes': len(re.findall(r'^>\s', text, re.MULTILINE))
-        }
 
     async def _download_image_as_file(self, image_url: str, session: aiohttp.ClientSession) -> Optional[io.BytesIO]:
         """
@@ -669,3 +649,61 @@ class ArticleMonitor:
         except Exception:
             # 發生錯誤時使用預設檔名
             return f"image_{index}.jpg"
+
+    def _preprocess_html_for_pandoc(self, html_content: str) -> str:
+        """
+        預處理 HTML 內容，移除樣式和不必要的屬性，改善 pypandoc 轉換品質
+
+        Args:
+            html_content: 原始 HTML 內容
+
+        Returns:
+            str: 清理後的 HTML 內容
+        """
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+
+            # 移除所有樣式相關的標籤和屬性
+            for tag in soup.find_all():
+                # 移除 style 屬性
+                if 'style' in tag.attrs:
+                    del tag.attrs['style']
+
+                # 移除 class 屬性
+                if 'class' in tag.attrs:
+                    del tag.attrs['class']
+
+                # 移除 id 屬性
+                if 'id' in tag.attrs:
+                    del tag.attrs['id']
+
+                # 移除其他不必要的屬性
+                attrs_to_remove = ['width', 'height', 'align', 'valign', 'bgcolor',
+                                 'border', 'cellpadding', 'cellspacing', 'margin',
+                                 'padding', 'color', 'font-size', 'font-family',
+                                 'media-source', 'desc']
+                for attr in attrs_to_remove:
+                    if attr in tag.attrs:
+                        del tag.attrs[attr]
+
+            # 移除 script, style, noscript 標籤
+            for tag in soup(['script', 'style', 'noscript']):
+                tag.decompose()
+
+            # 簡化 div 標籤為 p 標籤（如果裡面只有文字）
+            for div in soup.find_all('div'):
+                if div.get_text().strip() and not div.find_all(['div', 'p', 'ul', 'ol', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+                    div.name = 'p'
+
+            # 移除空的標籤
+            for tag in soup.find_all():
+                if not tag.get_text().strip() and not tag.find('img'):
+                    tag.decompose()
+
+            return str(soup)
+
+        except Exception as e:
+            logger.warning(f"HTML 預處理失敗，使用原始內容: {e}")
+            return html_content
+
+    # ...existing code...
