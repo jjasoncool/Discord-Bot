@@ -3,6 +3,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import asyncio
+# 從 constants.py 導入物品選項配置
+from constants import ITEMS
 
 # 獲取 logger
 logger = logging.getLogger('discord_bot')
@@ -15,6 +17,10 @@ class TradeCommands(commands.Cog):
     async def trade_info_cmd(self, interaction: discord.Interaction):
         """斜線命令：提供交易相關資訊"""
         logger.info(f'收到來自 {interaction.user} 的 /trade_info 斜線命令')
+
+        from utils import check_guild
+        if not await check_guild(interaction, required_role="Trader"):
+            return
 
         embed = discord.Embed(
             title="交易資訊",
@@ -322,9 +328,9 @@ class TradeCommands(commands.Cog):
         """斜線命令：顯示圖片和選擇器以選擇物品"""
         logger.info(f'收到來自 {interaction.user} 的 /select_item 斜線命令')
 
-        # 檢查是否在伺服器中使用
+        # 檢查是否在伺服器中使用並檢查角色權限
         from utils import check_guild
-        if not await check_guild(interaction):
+        if not await check_guild(interaction, required_role="Trader"):
             return
 
         embed = discord.Embed(
@@ -336,22 +342,7 @@ class TradeCommands(commands.Cog):
         file = discord.File("/app/static/items.png", filename="items.png")
         embed.set_image(url="attachment://items.png")
 
-        # 物品選項配置，未來可以從配置文件或數據庫中讀取
-        ITEMS = [
-            {"label": "月相觀測卡", "value": "moon_card", "description": "小月卡"},
-            {"label": "寰宇電台", "value": "universe_radio", "description": "大月卡"},
-            {"label": "寰宇特約", "value": "universe_special", "description": "特約月卡 - 含名片"},
-            {"label": "一條龍", "value": "dragon_first_charge", "description": "各檔位月相一次購買"},
-            {"label": "商城禮包", "value": "store_gift_pack", "description": "商城禮包自選"},
-            {"label": "60月相", "value": "moon_60", "description": "60月相"},
-            {"label": "300月相", "value": "moon_300", "description": "額外+30"},
-            {"label": "980月相", "value": "moon_980", "description": "額外+110"},
-            {"label": "1980月相", "value": "moon_1980", "description": "額外+260"},
-            {"label": "3280月相", "value": "moon_3280", "description": "額外+600"},
-            {"label": "6480月相", "value": "moon_6480", "description": "額外+1600"},
-            {"label": "32400月相", "value": "moon_32400", "description": "額外+8000"},
-            {"label": "64800月相", "value": "moon_64800", "description": "額外+16000"}
-        ]
+
 
         select = discord.ui.Select(
             placeholder="選擇一件物品...",

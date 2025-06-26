@@ -45,7 +45,7 @@ async def get_archive_channel_id(config_file="config.json", caller="unknown"):
     """從配置文件中讀取封存頻道 ID"""
     return await ChannelConfig.get_channel_id('archive_channel_id', config_file, caller)
 
-async def check_guild(interaction: discord.Interaction, owner_only: bool = False, admin_only: bool = False) -> bool:
+async def check_guild(interaction: discord.Interaction, owner_only: bool = False, admin_only: bool = False, required_role: str = None) -> bool:
     """
     檢查命令使用權限
 
@@ -53,6 +53,7 @@ async def check_guild(interaction: discord.Interaction, owner_only: bool = False
         interaction: Discord 互動物件
         owner_only: 是否僅限擁有者使用
         admin_only: 是否僅限管理員使用
+        required_role: 所需的角色名稱（例如 'Trader' 或 'Moderator'）
 
     Returns:
         bool: 是否通過權限檢查
@@ -77,6 +78,25 @@ async def check_guild(interaction: discord.Interaction, owner_only: bool = False
             await interaction.response.send_message("❌ 此命令僅限管理員使用！", ephemeral=True)
             logger.info(f'使用者 {interaction.user} 嘗試使用僅限管理員的命令，已被拒絕')
             return False
+
+    # 檢查角色權限
+    if required_role:
+        config_file = "config.json"
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, 'r') as f:
+                    config = json.load(f)
+                    allowed_role_ids = config.get("role_mapping", {}).get(required_role, [])
+                    if allowed_role_ids:  # 檢查是否有設定任何身份組 ID
+                        user_roles = [role.id for role in interaction.user.roles]
+                        if not any(role_id in user_roles for role_id in allowed_role_ids):
+                            await interaction.response.send_message(f"❌ 此命令僅限具有 {required_role} 角色的使用者使用！", ephemeral=True)
+                            logger.info(f'使用者 {interaction.user} 嘗試使用需要 {required_role} 角色的命令，已被拒絕')
+                            return False
+            except json.JSONDecodeError as e:
+                logger.error(f"無法讀取 {config_file}，JSON 解碼錯誤: {str(e)}")
+            except Exception as e:
+                logger.error(f"讀取 {config_file} 時發生未知錯誤: {str(e)}")
 
     return True
 
