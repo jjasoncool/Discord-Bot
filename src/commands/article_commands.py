@@ -401,13 +401,13 @@ class ArticleCommands(commands.Cog):
     async def test_multi_images(self, interaction: discord.Interaction):
         """測試多圖片附件發送功能"""
         from utils import check_guild
-        
+
         # 檢查權限
         if not await check_guild(interaction, admin_only=True):
             return
-            
+
         await interaction.response.defer(ephemeral=True)
-        
+
         try:
             # 創建測試用的多圖片文章數據
             test_article = {
@@ -426,23 +426,23 @@ class ArticleCommands(commands.Cog):
                 'start_time': '2025-06-26T12:00:00',
                 'article_type_name': '測試類別'
             }
-            
+
             # 發送到當前頻道
             success = await self.article_monitor.send_article_to_channel(
-                interaction.channel.id, 
+                interaction.channel.id,
                 test_article
             )
-            
+
             if success:
                 await interaction.followup.send(
                     "✅ 多圖片測試文章已發送！請檢查是否有：\n"
                     "1. 一個帶有第一張圖片的 Embed\n"
-                    "2. 一個包含其他 4 張圖片的附件訊息", 
+                    "2. 一個包含其他 4 張圖片的附件訊息",
                     ephemeral=True
                 )
             else:
                 await interaction.followup.send("❌ 發送測試文章失敗", ephemeral=True)
-                
+
         except Exception as e:
             logger.error(f"測試多圖片功能失敗: {e}")
             await interaction.followup.send(f"❌ 測試失敗：{str(e)}", ephemeral=True)

@@ -462,19 +462,19 @@ class ArticleMonitor:
     async def test_html_parsing(self, html_content: str) -> dict:
         """
         測試 HTML 解析功能
-        
+
         Args:
             html_content: 要測試的 HTML 內容
-            
+
         Returns:
             測試結果字典
         """
         try:
             logger.info("開始測試 HTML 解析功能")
-            
+
             # 使用現有的解析方法
             parsed_text, images = self._parse_html_content(html_content)
-            
+
             # 分析 Markdown 特徵
             markdown_features = {
                 'headers': parsed_text.count('#'),
@@ -484,7 +484,7 @@ class ArticleMonitor:
                 'bullet_lists': parsed_text.count('* '),
                 'numbered_lists': len([line for line in parsed_text.split('\n') if line.strip() and line.strip()[0].isdigit() and '.' in line[:5]])
             }
-            
+
             result = {
                 'success': True,
                 'parsed_text': parsed_text,
@@ -494,10 +494,10 @@ class ArticleMonitor:
                 'pypandoc_used': False,  # 現在固定為 False，因為已移除 pypandoc
                 'markdown_features': markdown_features
             }
-            
+
             logger.info(f"HTML 解析測試成功 - 文字長度: {len(parsed_text)}, 圖片數量: {len(images)}")
             return result
-            
+
         except Exception as e:
             logger.error(f"HTML 解析測試失敗: {e}")
             return {
