@@ -29,20 +29,7 @@ class ArticleMonitor:
         self.scraper_api_url = scraper_api_url
         self.sent_articles_file = Path("/app/services/sent_articles.json")
         self.sent_articles = self._load_sent_articles()
-        self.pypandoc_available = self._check_pypandoc()
         logger.info(f"初始化官方文章更新器，目標網站: {self.WEBSITE_NAME}")
-
-    def _check_pypandoc(self) -> bool:
-        """檢查 pypandoc 是否可用"""
-        try:
-            import pypandoc
-            # 檢查 pandoc 是否已安裝
-            pypandoc.get_pandoc_version()
-            logger.info("pypandoc 可用，將使用改進的 pypandoc 進行 HTML 解析")
-            return True
-        except Exception as e:
-            logger.warning(f"pypandoc 不可用，將使用備用解析方法: {e}")
-            return False
 
     def _load_sent_articles(self) -> set:
         """載入已發送的文章 ID 列表"""
@@ -85,7 +72,7 @@ class ArticleMonitor:
                     if response.status == 200:
                         data = await response.json()
                         if data.get('success'):
-                            logger.info(f"成功取得 {len(data['articles'])} 篇文章（已按時間排序：舊→新）")
+                            logger.debug(f"成功取得 {len(data['articles'])} 篇文章（已按時間排序：舊→新）")
                             return data['articles']
                         else:
                             logger.error(f"API 回應失敗: {data.get('message')}")
@@ -101,111 +88,60 @@ class ArticleMonitor:
 
     def _parse_html_content(self, html_content: str) -> tuple[str, List[str]]:
         """
-        解析 HTML 內容，轉換為 Discord 支援的 Markdown 格式
+        解析 HTML 內容，轉換為 Discord 支援的 Markdown 格式（使用 html2text）
 
         Returns:
             tuple: (純文字內容, 圖片URL列表)
         """
+        import html2text
         if not html_content:
             logger.debug("HTML 內容為空，跳過解析")
             return "", []
 
         logger.debug(f"開始解析 HTML 內容，長度: {len(html_content)} 字符")
 
-        # 首先使用 BeautifulSoup 提取圖片和清理內容
+        # 使用 BeautifulSoup 提取圖片
         images = []
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
-
-            # 收集所有圖片
             img_tags = soup.find_all('img')
             logger.debug(f"找到 {len(img_tags)} 個 img 標籤")
-
             for i, img in enumerate(img_tags):
                 src = img.get('src')
-                alt = img.get('alt', '')
-                logger.debug(f"  圖片 {i+1}: src='{src}', alt='{alt}'")
-
                 if src:
-                    original_src = src
-                    # 處理相對路徑
                     if src.startswith('//'):
                         src = 'https:' + src
-                        logger.debug(f"    轉換 // 路徑: {original_src} -> {src}")
                     elif src.startswith('/'):
-                        # 使用配置的基礎 URL
                         src = self.BASE_URL + src
-                        logger.debug(f"    轉換相對路徑: {original_src} -> {src}")
                     elif not src.startswith('http'):
                         src = f"{self.BASE_URL}/" + src.lstrip('/')
-                        logger.debug(f"    補全 URL: {original_src} -> {src}")
-                    else:
-                        logger.debug(f"    保持完整 URL: {src}")
-
                     images.append(src)
-                else:
-                    logger.debug(f"    跳過無 src 的圖片標籤")
-
             logger.debug(f"最終提取到 {len(images)} 張圖片: {images}")
-
-            # 移除 script 和 style 標籤
-            for script in soup(["script", "style", "noscript"]):
-                script.decompose()
-
         except Exception as e:
             logger.error(f"BeautifulSoup 解析失敗: {e}")
 
-        # 使用 pypandoc 進行 HTML 到 Markdown 轉換
-        if self.pypandoc_available:
-            try:
-                import pypandoc
-
-                # 使用 pypandoc 轉換 HTML 到 Markdown，保持原始換行
-                markdown_text = pypandoc.convert_text(
-                    html_content,
-                    'markdown',
-                    format='html',
-                    extra_args=[
-                        '--wrap=none',                    # 不自動換行
-                        '--no-highlight',                 # 不使用代碼高亮
-                        '--strip-comments',               # 移除 HTML 註釋
-                        '--markdown-headings=atx',        # 使用 # 風格的標題
-                        '--preserve-tabs',                # 保持 tab 字符
-                        '--from=html+hard_line_breaks'    # 保持硬換行
-                    ]
-                )
-
-                logger.info(f"pypandoc 轉換成功（保持換行），輸出長度: {len(markdown_text)} 字符")
-                return markdown_text, images
-
-            except Exception as e:
-                logger.error(f"pypandoc 轉換失敗，使用備用方法: {e}")
-
-        # 備用方法：使用 BeautifulSoup 簡單轉換
-        return self._simple_html_parsing(html_content, images)
-
-    def _simple_html_parsing(self, html_content: str, images: List[str]) -> tuple[str, List[str]]:
-        """簡化的 HTML 解析方法，只做基本清理"""
+        # 使用 html2text 轉換 HTML 到 Markdown
         try:
-            soup = BeautifulSoup(html_content, 'html.parser')
-
-            # 移除 script, style, noscript 標籤
-            for tag in soup(['script', 'style', 'noscript']):
-                tag.decompose()
-
-            # 直接獲取文字，保持原始結構
-            text = soup.get_text(separator='\n', strip=False)
-
-            # 只做最基本的清理
-            # 移除過多的空行（超過 3 行）
-            text = re.sub(r'\n{4,}', '\n\n\n', text)
-
-            logger.info(f"簡化解析完成，文本長度: {len(text)} 字符")
-            return text.strip(), images
-
+            h = html2text.HTML2Text()
+            h.body_width = 0  # 不自動換行
+            h.ignore_images = True  # 圖片已經另外處理
+            h.ignore_emphasis = False  # 保留粗體斜體
+            h.ignore_links = False  # 保留連結
+            h.ignore_tables = False
+            h.ignore_anchors = False
+            h.single_line_break = False  # 保持原本的換行
+            markdown_text = h.handle(html_content)
+            logger.info(f"html2text 轉換成功，輸出長度: {len(markdown_text)} 字符")
+            return markdown_text.strip(), images
         except Exception as e:
-            logger.error(f"簡化 HTML 解析失敗: {e}")
-            return html_content, images
+            logger.error(f"html2text 轉換失敗，僅回傳純文字: {e}")
+            # 最後備用方案：只取純文字
+            try:
+                soup = BeautifulSoup(html_content, 'html.parser')
+                text = soup.get_text(separator='\n', strip=False)
+                return text.strip(), images
+            except:
+                return html_content, images
 
     def format_article_embed(self, article: Dict) -> dict:
         """格式化文章為 Discord Embed"""
@@ -360,35 +296,39 @@ class ArticleMonitor:
             files = []
             if len(all_images) > 1:
                 logger.info(f"準備下載 {len(all_images) - 1} 張附件圖片")
+                logger.info(f"所有圖片 URL: {all_images}")
 
                 # 限制附件數量（Discord 最多 10 個附件）
                 max_attachments = min(9, len(all_images) - 1)  # 保留一個位置給可能的其他附件
                 attachment_images = all_images[1:max_attachments + 1]
+                logger.info(f"準備作為附件的圖片 URL: {attachment_images}")
 
                 async with aiohttp.ClientSession() as session:
                     for i, image_url in enumerate(attachment_images):
+                        logger.info(f"開始下載第 {i+2} 張圖片（附件 {i+1}）: {image_url}")
                         image_data = await self._download_image_as_file(image_url, session)
                         if image_data:
                             filename = self._get_image_filename(image_url, i + 2)
                             discord_file = discord.File(image_data, filename=filename)
                             files.append(discord_file)
-                            logger.debug(f"已準備附件: {filename}")
+                            logger.info(f"✅ 已準備附件: {filename}")
                         else:
-                            logger.warning(f"跳過無法下載的圖片: {image_url}")
+                            logger.warning(f"❌ 跳過無法下載的圖片: {image_url}")
 
                 logger.info(f"成功準備 {len(files)} 個圖片附件")
 
             # 先發送 embed 消息
             await channel.send(embed=embed)
-            logger.info("發送文章 embed 完成")
+            logger.info("📤 發送文章 embed 完成")
 
             # 如果有附件，稍後發送附件
             if files:
+                logger.info(f"📎 準備發送 {len(files)} 個圖片附件...")
                 await asyncio.sleep(0.5)  # 短暫延遲確保順序
                 await channel.send(files=files)
-                logger.info(f"發送 {len(files)} 個圖片附件完成")
+                logger.info(f"✅ 發送 {len(files)} 個圖片附件完成")
             else:
-                logger.info("無附件需要發送")
+                logger.info("📎 無附件需要發送")
 
             # 記錄已發送的文章
             self.sent_articles.add(article['article_id'])
@@ -418,7 +358,7 @@ class ArticleMonitor:
                     new_articles.append(article)
 
             if not new_articles:
-                logger.info("沒有新的未發送文章")
+                logger.debug("沒有新的未發送文章")
                 return
 
             logger.info(f"找到 {len(new_articles)} 篇新文章（已在資料庫層面按時間排序：舊→新）")
@@ -464,20 +404,21 @@ class ArticleMonitor:
             BytesIO 物件或 None（如果下載失敗）
         """
         try:
-            logger.debug(f"開始下載圖片: {image_url}")
+            logger.info(f"🔄 開始下載圖片: {image_url}")
             async with session.get(image_url, timeout=10) as response:
+                logger.info(f"📡 HTTP 回應狀態: {response.status} for {image_url}")
                 if response.status == 200:
                     content = await response.read()
                     # 檢查內容大小（Discord 限制 25MB，但我們設定更小的限制）
                     if len(content) > 8 * 1024 * 1024:  # 8MB 限制
-                        logger.warning(f"圖片過大，跳過: {image_url} ({len(content)} bytes)")
+                        logger.warning(f"⚠️ 圖片過大，跳過: {image_url} ({len(content)} bytes)")
                         return None
 
                     image_data = io.BytesIO(content)
-                    logger.debug(f"成功下載圖片: {image_url} ({len(content)} bytes)")
+                    logger.info(f"✅ 成功下載圖片: {image_url} ({len(content)} bytes)")
                     return image_data
                 else:
-                    logger.warning(f"下載圖片失敗，狀態碼 {response.status}: {image_url}")
+                    logger.warning(f"❌ 下載圖片失敗，狀態碼 {response.status}: {image_url}")
                     return None
 
         except asyncio.TimeoutError:
@@ -518,7 +459,54 @@ class ArticleMonitor:
             # 發生錯誤時使用預設檔名
             return f"image_{index}.jpg"
 
-    # 移除了 _preprocess_html_for_pandoc 函數，不再需要手動預處理
-    # pypandoc 會直接處理原始 HTML
-
-    # ...existing code...
+    async def test_html_parsing(self, html_content: str) -> dict:
+        """
+        測試 HTML 解析功能
+        
+        Args:
+            html_content: 要測試的 HTML 內容
+            
+        Returns:
+            測試結果字典
+        """
+        try:
+            logger.info("開始測試 HTML 解析功能")
+            
+            # 使用現有的解析方法
+            parsed_text, images = self._parse_html_content(html_content)
+            
+            # 分析 Markdown 特徵
+            markdown_features = {
+                'headers': parsed_text.count('#'),
+                'bold_text': parsed_text.count('**'),
+                'italic_text': parsed_text.count('*') - parsed_text.count('**') * 2,
+                'links': parsed_text.count('['),
+                'bullet_lists': parsed_text.count('* '),
+                'numbered_lists': len([line for line in parsed_text.split('\n') if line.strip() and line.strip()[0].isdigit() and '.' in line[:5]])
+            }
+            
+            result = {
+                'success': True,
+                'parsed_text': parsed_text,
+                'text_length': len(parsed_text),
+                'images_found': len(images),
+                'image_urls': images[:5],  # 只顯示前5張圖片
+                'pypandoc_used': False,  # 現在固定為 False，因為已移除 pypandoc
+                'markdown_features': markdown_features
+            }
+            
+            logger.info(f"HTML 解析測試成功 - 文字長度: {len(parsed_text)}, 圖片數量: {len(images)}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"HTML 解析測試失敗: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'parsed_text': '',
+                'text_length': 0,
+                'images_found': 0,
+                'image_urls': [],
+                'pypandoc_used': False,
+                'markdown_features': {}
+            }

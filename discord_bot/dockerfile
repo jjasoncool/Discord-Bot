@@ -3,7 +3,7 @@ WORKDIR /app
 # Update and install security packages
 RUN apt-get update && \
     apt-get upgrade -y && \
-    apt-get install -y --no-install-recommends ca-certificates pandoc && \
+    apt-get install -y --no-install-recommends ca-certificates && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
