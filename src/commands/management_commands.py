@@ -2,6 +2,7 @@ import logging
 import discord
 from discord import app_commands
 from discord.ext import commands
+from utils import get_paginated_options, create_paginated_view, ITEMS_PER_PAGE
 
 # 獲取 logger
 logger = logging.getLogger('discord_bot')
@@ -150,90 +151,43 @@ class ManagementCommands(commands.Cog):
                 await interaction.response.send_message(f"沒有可供選擇的{selected_type}頻道！", ephemeral=True)
                 return
 
-            ITEMS_PER_PAGE = 25
-            current_page = 0
+            async def on_select_callback(interaction, selected_value):
+                selected_channel_id = int(selected_value)
+                channel = interaction.guild.get_channel(selected_channel_id)
+                if channel and channel.type == channel_info["type"]:
+                    # 儲存設定到 JSON 檔案
+                    import json
+                    import os
+                    config_file = "config.json"
+                    config = {}
+                    if os.path.exists(config_file):
+                        try:
+                            with open(config_file, 'r') as f:
+                                config = json.load(f)
+                        except json.JSONDecodeError:
+                            logger.error(f"無法讀取 {config_file}，將創建新檔案")
 
-            def get_paginated_options(page):
-                start_idx = page * ITEMS_PER_PAGE
-                end_idx = start_idx + ITEMS_PER_PAGE
-                return channel_options[start_idx:end_idx]
+                    config[channel_info["key"]] = selected_channel_id
+                    with open(config_file, 'w') as f:
+                        json.dump(config, f, indent=2)
 
-            def update_view(page):
-                channel_select = discord.ui.Select(
-                    placeholder=f"選擇一個{selected_type}頻道... (第 {page + 1} 頁)" if len(channel_options) > ITEMS_PER_PAGE else f"選擇一個{selected_type}頻道...",
-                    options=get_paginated_options(page)
-                )
+                    await interaction.response.edit_message(view=None)
+                    await interaction.followup.send(
+                        f"✅ 已將{selected_type}頻道設定為 **{channel.name}** (ID: {selected_channel_id})！",
+                        ephemeral=True
+                    )
+                    logger.info(f"{selected_type}頻道已設定為 {channel.name} (ID: {selected_channel_id})")
+                else:
+                    await interaction.response.send_message(f"選擇的頻道無效或不是{selected_type}頻道，請重試。", ephemeral=True)
 
-                async def channel_select_callback(interaction: discord.Interaction):
-                    selected_channel_id = int(channel_select.values[0])
-                    channel = interaction.guild.get_channel(selected_channel_id)
-                    if channel and channel.type == channel_info["type"]:
-                        # 儲存設定到 JSON 檔案
-                        import json
-                        import os
-                        config_file = "config.json"
-                        config = {}
-                        if os.path.exists(config_file):
-                            try:
-                                with open(config_file, 'r') as f:
-                                    config = json.load(f)
-                            except json.JSONDecodeError:
-                                logger.error(f"無法讀取 {config_file}，將創建新檔案")
-
-                        config[channel_info["key"]] = selected_channel_id
-                        with open(config_file, 'w') as f:
-                            json.dump(config, f, indent=2)
-
-                        await interaction.response.edit_message(view=None)
-                        await interaction.followup.send(
-                            f"✅ 已將{selected_type}頻道設定為 **{channel.name}** (ID: {selected_channel_id})！",
-                            ephemeral=True
-                        )
-                        logger.info(f"{selected_type}頻道已設定為 {channel.name} (ID: {selected_channel_id})")
-                    else:
-                        await interaction.response.send_message(f"選擇的頻道無效或不是{selected_type}頻道，請重試。", ephemeral=True)
-
-                channel_select.callback = channel_select_callback
-
-                view = discord.ui.View()
-                view.add_item(channel_select)
-
-                # 只有在頻道數量超過一頁時才添加分頁按鈕
-                if len(channel_options) > ITEMS_PER_PAGE:
-                    prev_button = discord.ui.Button(label="上一頁", style=discord.ButtonStyle.primary, disabled=page <= 0)
-                    next_button = discord.ui.Button(label="下一頁", style=discord.ButtonStyle.primary, disabled=(page + 1) * ITEMS_PER_PAGE >= len(channel_options))
-
-                    async def prev_button_callback(interaction: discord.Interaction):
-                        nonlocal current_page
-                        current_page -= 1
-                        new_view = update_view(current_page)
-                        embed = discord.Embed(
-                            title=f"選擇{selected_type}頻道",
-                            description=f"請從以下選項中選擇一個{selected_type}頻道作為{channel_info['desc']}。(第 {current_page + 1} 頁)",
-                            color=channel_info["color"]
-                        )
-                        await interaction.response.edit_message(embed=embed, view=new_view)
-
-                    async def next_button_callback(interaction: discord.Interaction):
-                        nonlocal current_page
-                        current_page += 1
-                        new_view = update_view(current_page)
-                        embed = discord.Embed(
-                            title=f"選擇{selected_type}頻道",
-                            description=f"請從以下選項中選擇一個{selected_type}頻道作為{channel_info['desc']}。(第 {current_page + 1} 頁)",
-                            color=channel_info["color"]
-                        )
-                        await interaction.response.edit_message(embed=embed, view=new_view)
-
-                    prev_button.callback = prev_button_callback
-                    next_button.callback = next_button_callback
-
-                    view.add_item(prev_button)
-                    view.add_item(next_button)
-
-                return view
-
-            channel_view = update_view(current_page)
+            current_page, channel_view = create_paginated_view(
+                channel_options,
+                lambda page: f"選擇一個{selected_type}頻道... (第 {page + 1} 頁)" if len(channel_options) > ITEMS_PER_PAGE else f"選擇一個{selected_type}頻道...",
+                f"選擇{selected_type}頻道",
+                lambda page: f"請從以下選項中選擇一個{selected_type}頻道作為{channel_info['desc']}。(第 {page + 1} 頁)" if len(channel_options) > ITEMS_PER_PAGE else f"請從以下選項中選擇一個{selected_type}頻道作為{channel_info['desc']}",
+                channel_info["color"],
+                on_select_callback
+            )
 
             embed = discord.Embed(
                 title=f"選擇{selected_type}頻道",

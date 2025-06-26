@@ -79,3 +79,102 @@ async def check_guild(interaction: discord.Interaction, owner_only: bool = False
             return False
 
     return True
+
+def get_paginated_options(options, page, items_per_page=25):
+    """
+    獲取指定頁的分頁選項
+
+    Args:
+        options: 選項列表
+        page: 頁數
+        items_per_page: 每頁項目數，預設為25
+
+    Returns:
+        list: 指定頁的選項列表
+    """
+    start_idx = page * items_per_page
+    end_idx = start_idx + items_per_page
+    return options[start_idx:end_idx]
+
+ITEMS_PER_PAGE = 25
+
+def create_paginated_view(options, placeholder_text, embed_title, embed_description, embed_color, on_select_callback):
+    """
+    創建分頁視圖
+
+    Args:
+        options: 選項列表
+        placeholder_text: 選擇框的佔位符文本
+        embed_title: 嵌入訊息的標題
+        embed_description: 嵌入訊息的描述
+        embed_color: 嵌入訊息的顏色
+        on_select_callback: 選擇回調函數
+
+    Returns:
+        tuple: (current_page, view)
+    """
+    current_page = 0
+
+    def update_view(page):
+        if callable(placeholder_text):
+            placeholder = placeholder_text(page)
+        else:
+            placeholder = placeholder_text + (f" (第 {page + 1} 頁)" if len(options) > ITEMS_PER_PAGE else "")
+
+        channel_select = discord.ui.Select(
+            placeholder=placeholder,
+            options=get_paginated_options(options, page, ITEMS_PER_PAGE)
+        )
+
+        async def channel_select_callback(interaction: discord.Interaction):
+            selected_value = channel_select.values[0]
+            await on_select_callback(interaction, selected_value)
+
+        channel_select.callback = channel_select_callback
+
+        view = discord.ui.View()
+        view.add_item(channel_select)
+
+        if len(options) > ITEMS_PER_PAGE:
+            prev_button = discord.ui.Button(label="上一頁", style=discord.ButtonStyle.primary, disabled=page <= 0)
+            next_button = discord.ui.Button(label="下一頁", style=discord.ButtonStyle.primary, disabled=(page + 1) * ITEMS_PER_PAGE >= len(options))
+
+            async def prev_button_callback(interaction: discord.Interaction):
+                nonlocal current_page
+                current_page -= 1
+                new_view = update_view(current_page)
+                if callable(embed_description):
+                    desc = embed_description(current_page)
+                else:
+                    desc = embed_description + (f" (第 {current_page + 1} 頁)" if len(options) > ITEMS_PER_PAGE else "")
+                embed = discord.Embed(
+                    title=embed_title,
+                    description=desc,
+                    color=embed_color
+                )
+                await interaction.response.edit_message(embed=embed, view=new_view)
+
+            async def next_button_callback(interaction: discord.Interaction):
+                nonlocal current_page
+                current_page += 1
+                new_view = update_view(current_page)
+                if callable(embed_description):
+                    desc = embed_description(current_page)
+                else:
+                    desc = embed_description + (f" (第 {current_page + 1} 頁)" if len(options) > ITEMS_PER_PAGE else "")
+                embed = discord.Embed(
+                    title=embed_title,
+                    description=desc,
+                    color=embed_color
+                )
+                await interaction.response.edit_message(embed=embed, view=new_view)
+
+            prev_button.callback = prev_button_callback
+            next_button.callback = next_button_callback
+
+            view.add_item(prev_button)
+            view.add_item(next_button)
+
+        return view
+
+    return current_page, update_view(current_page)
