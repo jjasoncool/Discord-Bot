@@ -39,7 +39,6 @@ class TradeCommands(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-    @app_commands.command(name="cancel_trade", description="取消當前交易")
     async def cancel_trade_cmd(self, interaction: discord.Interaction):
         """斜線命令：取消當前交易並鎖定 thread"""
         logger.info(f'收到來自 {interaction.user} 的 /cancel_trade 斜線命令')

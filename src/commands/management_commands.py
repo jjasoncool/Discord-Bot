@@ -99,12 +99,6 @@ class ManagementCommands(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # monitor_channel_cmd 已移動到 user_commands.py
-
-    # stop_monitoring_cmd 已移動到 user_commands.py
-
-    # list_monitored_cmd 已移動到 user_commands.py
-
     @app_commands.command(name="set_channel", description="設定特定功能的頻道")
     async def set_channel_cmd(self, interaction: discord.Interaction):
         """斜線命令：設定特定功能的頻道"""

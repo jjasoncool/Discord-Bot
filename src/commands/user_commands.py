@@ -214,9 +214,9 @@ class UserCommands(commands.Cog):
         )
         await interaction.response.send_message(embed=embed, view=channel_view, ephemeral=True)
 
-    @app_commands.command(name="stop_monitoring", description="停止您設定的所有監控")
+    @app_commands.command(name="stop_monitoring", description="停止監控指定頻道")
     async def stop_monitoring_cmd(self, interaction: discord.Interaction):
-        """斜線命令：停止您設定的所有監控"""
+        """斜線命令：停止監控指定頻道"""
         logger.info(f'收到來自 {interaction.user} 的 /stop_monitoring 斜線命令')
 
         if not await self._check_guild_and_owner(interaction, owner_only=False):
@@ -224,36 +224,182 @@ class UserCommands(commands.Cog):
 
         guild_id = interaction.guild.id
         user_id = interaction.user.id
-        removed_channels = []
 
-        if guild_id in monitored_channels:
-            for channel_id in list(monitored_channels[guild_id].keys()):
-                settings_list = monitored_channels[guild_id][channel_id]
-                # 移除符合使用者 ID 的設定
-                original_length = len(settings_list)
-                settings_list = [setting for setting in settings_list if setting['user_id'] != user_id]
-                if len(settings_list) < original_length:
-                    channel = interaction.guild.get_channel(channel_id)
-                    channel_name = channel.name if channel else f"ID: {channel_id}"
-                    removed_channels.append(channel_name)
-                if settings_list:
-                    monitored_channels[guild_id][channel_id] = settings_list
-                else:
-                    del monitored_channels[guild_id][channel_id]
-
-            if not monitored_channels[guild_id]:
-                del monitored_channels[guild_id]
-
-            if removed_channels:
-                save_monitored_channels()
-                await interaction.response.send_message(
-                    f"✅ 已停止監控以下頻道：\n" + "\n".join(f"- **{name}**" for name in removed_channels),
-                    ephemeral=True
-                )
-            else:
-                await self._send_error_message(interaction, "您未設定任何監控！")
-        else:
+        # 檢查使用者是否有任何監控設定
+        if guild_id not in monitored_channels or not monitored_channels[guild_id]:
             await self._send_error_message(interaction, "您未設定任何監控！")
+            return
+
+        # 找出使用者有監控設定的頻道
+        user_monitored_channels = []
+        for channel_id, settings_list in monitored_channels[guild_id].items():
+            if any(setting['user_id'] == user_id for setting in settings_list):
+                channel = interaction.guild.get_channel(channel_id)
+                if channel and isinstance(channel, (discord.TextChannel, discord.ForumChannel)):
+                    user_monitored_channels.append(channel)
+
+        if not user_monitored_channels:
+            await self._send_error_message(interaction, "您未設定任何監控！")
+            return
+
+        # 創建頻道選單，實現分頁功能
+        channel_options = [
+            discord.SelectOption(
+                label=channel.name,
+                value=str(channel.id),
+                description=f"ID: {channel.id}",
+                emoji="📝" if isinstance(channel, discord.TextChannel) else "📌"
+            )
+            for channel in user_monitored_channels
+        ]
+
+        ITEMS_PER_PAGE = 25
+        current_page = 0
+
+        def get_paginated_options(page):
+            start_idx = page * ITEMS_PER_PAGE
+            end_idx = start_idx + ITEMS_PER_PAGE
+            return channel_options[start_idx:end_idx]
+
+        def update_view(page):
+            placeholder_text = f"選擇要停止監控的頻道..." if len(channel_options) <= ITEMS_PER_PAGE else f"選擇要停止監控的頻道... (第 {page + 1} 頁)"
+            channel_select = discord.ui.Select(
+                placeholder=placeholder_text,
+                options=get_paginated_options(page)
+            )
+
+            async def channel_select_callback(interaction: discord.Interaction):
+                selected_channel_id = int(channel_select.values[0])
+                channel = interaction.guild.get_channel(selected_channel_id)
+
+                if channel and isinstance(channel, (discord.TextChannel, discord.ForumChannel)):
+                    # 移除該頻道中使用者的監控設定
+                    settings_list = monitored_channels[guild_id][selected_channel_id]
+                    user_settings = [setting for setting in settings_list if setting['user_id'] == user_id]
+
+                    if user_settings:
+                        # 移除使用者的設定
+                        monitored_channels[guild_id][selected_channel_id] = [
+                            setting for setting in settings_list if setting['user_id'] != user_id
+                        ]
+
+                        # 如果該頻道沒有其他人的監控設定了，則刪除該頻道
+                        if not monitored_channels[guild_id][selected_channel_id]:
+                            del monitored_channels[guild_id][selected_channel_id]
+
+                        # 如果該伺服器沒有任何監控設定了，則刪除該伺服器
+                        if not monitored_channels[guild_id]:
+                            del monitored_channels[guild_id]
+
+                        save_monitored_channels()
+
+                        # 顯示停止的監控詳情
+                        keywords_info = []
+                        for setting in user_settings:
+                            keywords = ", ".join(f"`{kw}`" for kw in setting['keywords'])
+                            keywords_info.append(keywords)
+
+                        await interaction.response.edit_message(view=None)
+                        await interaction.followup.send(
+                            f"✅ 已停止監控頻道 **{channel.name}**！\n"
+                            f"停止的監控關鍵字: {', '.join(keywords_info)}",
+                            ephemeral=True
+                        )
+                    else:
+                        await interaction.response.send_message("您在此頻道沒有任何監控設定！", ephemeral=True)
+                else:
+                    await interaction.response.send_message("選擇的頻道無效或不是文字/論壇頻道，請重試。", ephemeral=True)
+
+            channel_select.callback = channel_select_callback
+
+            prev_button = discord.ui.Button(label="上一頁", style=discord.ButtonStyle.primary, disabled=page <= 0)
+            next_button = discord.ui.Button(label="下一頁", style=discord.ButtonStyle.primary, disabled=(page + 1) * ITEMS_PER_PAGE >= len(channel_options))
+
+            async def prev_button_callback(interaction: discord.Interaction):
+                nonlocal current_page
+                current_page -= 1
+                new_view = update_view(current_page)
+                description_text = f"請從以下選項中選擇一個要停止監控的頻道。" if len(channel_options) <= ITEMS_PER_PAGE else f"請從以下選項中選擇一個要停止監控的頻道。(第 {current_page + 1} 頁)"
+                embed = discord.Embed(
+                    title="選擇要停止監控的頻道",
+                    description=description_text,
+                    color=discord.Color.red()
+                )
+                await interaction.response.edit_message(embed=embed, view=new_view)
+
+            async def next_button_callback(interaction: discord.Interaction):
+                nonlocal current_page
+                current_page += 1
+                new_view = update_view(current_page)
+                description_text = f"請從以下選項中選擇一個要停止監控的頻道。" if len(channel_options) <= ITEMS_PER_PAGE else f"請從以下選項中選擇一個要停止監控的頻道。(第 {current_page + 1} 頁)"
+                embed = discord.Embed(
+                    title="選擇要停止監控的頻道",
+                    description=description_text,
+                    color=discord.Color.red()
+                )
+                await interaction.response.edit_message(embed=embed, view=new_view)
+
+            prev_button.callback = prev_button_callback
+            next_button.callback = next_button_callback
+
+            view = discord.ui.View()
+            view.add_item(channel_select)
+            if len(channel_options) > ITEMS_PER_PAGE:
+                view.add_item(prev_button)
+                view.add_item(next_button)
+            return view
+
+        channel_view = update_view(current_page)
+
+        description_text = f"請從以下選項中選擇一個要停止監控的頻道。" if len(channel_options) <= ITEMS_PER_PAGE else f"請從以下選項中選擇一個要停止監控的頻道。(第 {current_page + 1} 頁)"
+        embed = discord.Embed(
+            title="選擇要停止監控的頻道",
+            description=description_text,
+            color=discord.Color.red()
+        )
+
+        # 第一個訊息：嵌入 + 選擇框
+        await interaction.response.send_message(embed=embed, view=channel_view, ephemeral=True)
+
+        # 新增「停止所有監控」按鈕
+        class StopAllButton(discord.ui.Button):
+            def __init__(self):
+                super().__init__(label="🛑 停止所有監控", style=discord.ButtonStyle.danger, custom_id="stop_all_monitoring")
+
+            async def callback(self, interaction: discord.Interaction):
+                guild_id = interaction.guild.id
+                user_id = interaction.user.id
+                removed_channels = []
+                if guild_id in monitored_channels:
+                    for channel_id in list(monitored_channels[guild_id].keys()):
+                        settings_list = monitored_channels[guild_id][channel_id]
+                        original_length = len(settings_list)
+                        settings_list = [setting for setting in settings_list if setting['user_id'] != user_id]
+                        if len(settings_list) < original_length:
+                            channel = interaction.guild.get_channel(channel_id)
+                            channel_name = channel.name if channel else f"ID: {channel_id}"
+                            removed_channels.append(channel_name)
+                        if settings_list:
+                            monitored_channels[guild_id][channel_id] = settings_list
+                        else:
+                            del monitored_channels[guild_id][channel_id]
+                    if not monitored_channels[guild_id]:
+                        del monitored_channels[guild_id]
+                    if removed_channels:
+                        save_monitored_channels()
+                        await interaction.response.edit_message(view=None)
+                        await interaction.followup.send(
+                            f"✅ 已停止監控以下所有頻道：\n" + "\n".join(f"- **{name}**" for name in removed_channels),
+                            ephemeral=True
+                        )
+                        return
+                await interaction.response.send_message("您未設定任何監控！", ephemeral=True)
+
+        stop_all_view = discord.ui.View()
+        stop_all_view.add_item(StopAllButton())
+
+        # 第二個訊息：文字 + 按鈕
+        await interaction.followup.send("如果要取消所有頻道的監控，請點選下方按鈕：", view=stop_all_view, ephemeral=True)
 
     @app_commands.command(name="list_monitored", description="列出目前監控的所有頻道")
     async def list_monitored_cmd(self, interaction: discord.Interaction):

@@ -397,56 +397,6 @@ class ArticleCommands(commands.Cog):
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="test_multi_images", description="測試多圖片附件發送功能")
-    async def test_multi_images(self, interaction: discord.Interaction):
-        """測試多圖片附件發送功能"""
-        from utils import check_guild
-
-        # 檢查權限
-        if not await check_guild(interaction, admin_only=True):
-            return
-
-        await interaction.response.defer(ephemeral=True)
-
-        try:
-            # 創建測試用的多圖片文章數據
-            test_article = {
-                'article_id': 'test_multi_img',
-                'article_title': '多圖片測試文章',
-                'article_desc': '這是一個測試多張圖片附件發送的文章',
-                'article_content_full': '''
-                <h1>多圖片測試</h1>
-                <p>這篇文章包含多張測試圖片：</p>
-                <img src="https://via.placeholder.com/300x200/FF0000/FFFFFF?text=Image+1" alt="紅色測試圖1">
-                <img src="https://via.placeholder.com/300x200/00FF00/FFFFFF?text=Image+2" alt="綠色測試圖2">
-                <img src="https://via.placeholder.com/300x200/0000FF/FFFFFF?text=Image+3" alt="藍色測試圖3">
-                <img src="https://via.placeholder.com/300x200/FFFF00/000000?text=Image+4" alt="黃色測試圖4">
-                <img src="https://via.placeholder.com/300x200/FF00FF/FFFFFF?text=Image+5" alt="紫色測試圖5">
-                ''',
-                'start_time': '2025-06-26T12:00:00',
-                'article_type_name': '測試類別'
-            }
-
-            # 發送到當前頻道
-            success = await self.article_monitor.send_article_to_channel(
-                interaction.channel.id,
-                test_article
-            )
-
-            if success:
-                await interaction.followup.send(
-                    "✅ 多圖片測試文章已發送！請檢查是否有：\n"
-                    "1. 一個帶有第一張圖片的 Embed\n"
-                    "2. 一個包含其他 4 張圖片的附件訊息",
-                    ephemeral=True
-                )
-            else:
-                await interaction.followup.send("❌ 發送測試文章失敗", ephemeral=True)
-
-        except Exception as e:
-            logger.error(f"測試多圖片功能失敗: {e}")
-            await interaction.followup.send(f"❌ 測試失敗：{str(e)}", ephemeral=True)
-
 async def setup(bot):
     """載入 Cog"""
     await bot.add_cog(ArticleCommands(bot))
