@@ -65,6 +65,25 @@ class ForumMonitor(commands.Cog):
                 logger.error(f"獲取使用者 {payload.user_id} 時發生錯誤: {str(e)}")
                 return
 
+            # 檢查使用者是否具有 Trader 角色
+            guild = self.bot.get_guild(payload.guild_id)
+            if guild is None:
+                logger.error(f"無法找到伺服器 {payload.guild_id}")
+                return
+
+            member = guild.get_member(payload.user_id)
+            if member is None:
+                logger.error(f"無法找到伺服器中的使用者 {payload.user_id}")
+                return
+
+            # 使用 check_role 函數檢查角色權限
+            from utils import check_role
+            has_trader_role = await check_role(member, required_role="Trader")
+            logger.info(f"使用者 {member.name} 是否具有 Trader 角色: {has_trader_role}")
+            if not has_trader_role:
+                logger.info(f"使用者 {member.name} 沒有 Trader 角色，忽略反應事件")
+                return
+
             logger.info(f"使用者 {user.name} 在交易論壇頻道對訊息 {message.id} 新增了 {str(payload.emoji)} 反應")
             await self.send_cart_delivery_notification(message, user)
         except Exception as e:
@@ -187,15 +206,11 @@ class ForumMonitor(commands.Cog):
 
                         # 調用 cancel_trade_cmd 流程
                         try:
+                            from commands.trade_commands import TradeCommands
                             trade_cog = self.bot.get_cog('TradeCommands')
                             if trade_cog:
-                                command = next((cmd for cmd in self.bot.tree.get_commands() if cmd.name == 'cancel_trade'), None)
-                                if command:
-                                    await interaction.response.send_message(f"{interaction.user.mention} 已取消交易。", ephemeral=False)
-                                    await command._callback(trade_cog, interaction)
-                                else:
-                                    await interaction.response.send_message("無法找到取消交易命令，請稍後再試。", ephemeral=True)
-                                    logger.error("無法找到取消交易命令 'cancel_trade'")
+                                await interaction.response.send_message(f"{interaction.user.mention} 已取消交易。", ephemeral=False)
+                                await trade_cog.cancel_trade_cmd(interaction)
                             else:
                                 await interaction.response.send_message("無法找到交易命令模組，請稍後再試。", ephemeral=True)
                                 logger.error("無法找到交易命令模組 'TradeCommands'")

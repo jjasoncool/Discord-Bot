@@ -447,7 +447,7 @@ class TradeCommands(commands.Cog):
 
         # 檢查是否在伺服器中使用並檢查角色權限
         from utils import check_guild
-        if not await check_guild(interaction, owner_only=False, required_role="Trader"):
+        if not await check_guild(interaction, owner_only=False):
             return
 
         embed = discord.Embed(

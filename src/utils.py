@@ -45,6 +45,40 @@ async def get_archive_channel_id(config_file="config.json", caller="unknown"):
     """從配置文件中讀取封存頻道 ID"""
     return await ChannelConfig.get_channel_id('archive_channel_id', config_file, caller)
 
+async def check_role(user, required_role: str = None) -> bool:
+    """
+    檢查使用者是否具有特定角色
+
+    Args:
+        user: Discord 使用者或成員對象
+        required_role: 所需的角色名稱（例如 'Trader' 或 'Moderator'）
+
+    Returns:
+        bool: 使用者是否具有所需角色
+    """
+    if required_role:
+        owner_id = int(os.getenv('OWNER_ID', '0'))
+        if user.id == owner_id:
+            logger.info(f'使用者 {user.name} 是 owner，自動通過角色權限檢查')
+            return True
+        config_file = "config.json"
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, 'r') as f:
+                    config = json.load(f)
+                    allowed_role_ids = config.get("role_mapping", {}).get(required_role, [])
+                    if allowed_role_ids:  # 檢查是否有設定任何身份組 ID
+                        user_roles = [role.id for role in user.roles] if hasattr(user, 'roles') else []
+                        if not any(role_id in user_roles for role_id in allowed_role_ids):
+                            logger.info(f'使用者 {user.name} 嘗試使用需要 {required_role} 角色的功能，已被拒絕')
+                            return False
+            except json.JSONDecodeError as e:
+                logger.error(f"無法讀取 {config_file}，JSON 解碼錯誤: {str(e)}")
+            except Exception as e:
+                logger.error(f"讀取 {config_file} 時發生未知錯誤: {str(e)}")
+        return True if not allowed_role_ids else False
+    return True
+
 async def check_guild(interaction: discord.Interaction, owner_only: bool = False, admin_only: bool = False, required_role: str = None) -> bool:
     """
     檢查命令使用權限
@@ -79,28 +113,11 @@ async def check_guild(interaction: discord.Interaction, owner_only: bool = False
             logger.info(f'使用者 {interaction.user} 嘗試使用僅限管理員的命令，已被拒絕')
             return False
 
-    # 檢查角色權限，但如果使用者是 owner 則直接通過
+    # 檢查角色權限
     if required_role:
-        owner_id = int(os.getenv('OWNER_ID', '0'))
-        if interaction.user.id == owner_id:
-            logger.info(f'使用者 {interaction.user} 是 owner，自動通過角色權限檢查')
-            return True
-        config_file = "config.json"
-        if os.path.exists(config_file):
-            try:
-                with open(config_file, 'r') as f:
-                    config = json.load(f)
-                    allowed_role_ids = config.get("role_mapping", {}).get(required_role, [])
-                    if allowed_role_ids:  # 檢查是否有設定任何身份組 ID
-                        user_roles = [role.id for role in interaction.user.roles]
-                        if not any(role_id in user_roles for role_id in allowed_role_ids):
-                            await interaction.response.send_message(f"❌ 此命令僅限具有 {required_role} 角色的使用者使用！", ephemeral=True)
-                            logger.info(f'使用者 {interaction.user} 嘗試使用需要 {required_role} 角色的命令，已被拒絕')
-                            return False
-            except json.JSONDecodeError as e:
-                logger.error(f"無法讀取 {config_file}，JSON 解碼錯誤: {str(e)}")
-            except Exception as e:
-                logger.error(f"讀取 {config_file} 時發生未知錯誤: {str(e)}")
+        if not await check_role(interaction.user, required_role):
+            await interaction.response.send_message(f"❌ 此命令僅限具有 {required_role} 角色的使用者使用！", ephemeral=True)
+            return False
 
     return True
 
