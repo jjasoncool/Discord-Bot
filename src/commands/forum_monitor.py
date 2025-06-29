@@ -1,8 +1,6 @@
 import logging
 import discord
 from discord.ext import commands
-import json
-import os
 
 # 獲取 logger
 logger = logging.getLogger('discord_bot')

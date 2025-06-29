@@ -2,7 +2,7 @@ import logging
 import discord
 from discord import app_commands
 from discord.ext import commands
-from utils import get_paginated_options, create_paginated_view, ITEMS_PER_PAGE
+from utils import create_paginated_view, ITEMS_PER_PAGE
 
 # 獲取 logger
 logger = logging.getLogger('discord_bot')
