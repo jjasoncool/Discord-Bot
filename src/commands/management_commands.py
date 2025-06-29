@@ -22,14 +22,8 @@ class ManagementCommands(commands.Cog):
         """發送錯誤訊息"""
         await interaction.response.send_message(message, ephemeral=True)
 
-    @app_commands.command(name="list_channels", description="列出所有可見的頻道")
-    async def list_channels_cmd(self, interaction: discord.Interaction):
-        """斜線命令：列出伺服器中所有可見的頻道"""
-        logger.info(f'收到來自 {interaction.user} 的 /list_channels 斜線命令')
-
-        if not await self._check_guild_and_owner(interaction, owner_only=True):
-            return
-
+    async def _list_channels(self, interaction: discord.Interaction):
+        """列出伺服器中所有可見的頻道"""
         # 建立頻道列表
         text_channels = []
         voice_channels = []
@@ -75,14 +69,8 @@ class ManagementCommands(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="list_roles", description="列出所有身份組及其ID")
-    async def list_roles_cmd(self, interaction: discord.Interaction):
-        """斜線命令：列出伺服器中所有身份組及其ID"""
-        logger.info(f'收到來自 {interaction.user} 的 /list_roles 斜線命令')
-
-        if not await self._check_guild_and_owner(interaction, owner_only=True):
-            return
-
+    async def _list_roles(self, interaction: discord.Interaction):
+        """列出伺服器中所有身份組及其ID"""
         # 建立身份組列表
         roles = [f"🎭 {role.name} (ID: {role.id})" for role in interaction.guild.roles if not role.is_default()]
 
@@ -100,10 +88,35 @@ class ManagementCommands(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="set_channel", description="設定特定功能的頻道")
+    @app_commands.command(name="server_info", description="檢視伺服器相關資訊")
+    async def server_info_cmd(self, interaction: discord.Interaction):
+        """斜線命令：檢視伺服器相關資訊"""
+        logger.info(f'收到來自 {interaction.user} 的 /server_info 斜線命令')
+
+        if not await self._check_guild_and_owner(interaction, owner_only=True):
+            return
+
+        # 創建操作按鈕
+        channels_button = discord.ui.Button(label="列出頻道", style=discord.ButtonStyle.primary, custom_id="list_channels")
+        roles_button = discord.ui.Button(label="列出身份組", style=discord.ButtonStyle.secondary, custom_id="list_roles")
+
+        channels_button.callback = self._list_channels
+        roles_button.callback = self._list_roles
+
+        action_view = discord.ui.View()
+        action_view.add_item(channels_button)
+        action_view.add_item(roles_button)
+
+        embed = discord.Embed(
+            title="檢視伺服器資訊",
+            description="請選擇您要檢視的伺服器資訊。",
+            color=discord.Color.greyple()
+        )
+        await interaction.response.send_message(embed=embed, view=action_view, ephemeral=True)
+
     async def set_channel_cmd(self, interaction: discord.Interaction):
-        """斜線命令：設定特定功能的頻道"""
-        logger.info(f'收到來自 {interaction.user} 的 /set_channel 斜線命令')
+        """設定特定功能的頻道"""
+        logger.info(f'收到來自 {interaction.user} 的 set_channel 請求')
 
         if not await self._check_guild_and_owner(interaction, owner_only=True):
             return
@@ -207,9 +220,8 @@ class ManagementCommands(commands.Cog):
         )
         await interaction.response.send_message(embed=embed, view=type_view, ephemeral=True)
 
-    @app_commands.command(name="set_role_permissions", description="設定角色的命令執行權限")
     async def set_role_permissions_cmd(self, interaction: discord.Interaction):
-        """斜線命令：設定角色的命令執行權限"""
+        """設定角色的命令執行權限"""
         logger.info(f'收到來自 {interaction.user} 的 /set_role_permissions 斜線命令')
 
         if not await self._check_guild_and_owner(interaction, owner_only=True):
@@ -324,9 +336,8 @@ class ManagementCommands(commands.Cog):
         )
         await interaction.response.send_message(embed=embed, view=type_view, ephemeral=True)
 
-    @app_commands.command(name="list_role_permissions", description="列出角色的命令執行權限設定")
     async def list_role_permissions_cmd(self, interaction: discord.Interaction):
-        """斜線命令：列出角色的命令執行權限設定"""
+        """列出角色的命令執行權限設定"""
         logger.info(f'收到來自 {interaction.user} 的 /list_role_permissions 斜線命令')
 
         if not await self._check_guild_and_owner(interaction, owner_only=True):
@@ -379,9 +390,8 @@ class ManagementCommands(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="remove_role_permissions", description="移除角色的命令執行權限")
     async def remove_role_permissions_cmd(self, interaction: discord.Interaction):
-        """斜線命令：移除角色的命令執行權限"""
+        """移除角色的命令執行權限"""
         logger.info(f'收到來自 {interaction.user} 的 /remove_role_permissions 斜線命令')
 
         if not await self._check_guild_and_owner(interaction, owner_only=True):
@@ -489,6 +499,75 @@ class ManagementCommands(commands.Cog):
             color=discord.Color.greyple()
         )
         await interaction.response.send_message(embed=embed, view=type_view, ephemeral=True)
+
+    async def role_manager_cmd(self, interaction: discord.Interaction):
+        """管理角色的命令執行權限"""
+        logger.info(f'收到來自 {interaction.user} 的 role_manager 請求')
+
+        if not await self._check_guild_and_owner(interaction, owner_only=True):
+            return
+
+        # 創建操作按鈕
+        set_button = discord.ui.Button(label="設定角色權限", style=discord.ButtonStyle.primary, custom_id="set_role_permissions")
+        list_button = discord.ui.Button(label="列出角色權限", style=discord.ButtonStyle.secondary, custom_id="list_role_permissions")
+        remove_button = discord.ui.Button(label="移除角色權限", style=discord.ButtonStyle.danger, custom_id="remove_role_permissions")
+
+        async def set_button_callback(interaction: discord.Interaction):
+            await self.set_role_permissions_cmd(interaction)
+
+        async def list_button_callback(interaction: discord.Interaction):
+            await self.list_role_permissions_cmd(interaction)
+
+        async def remove_button_callback(interaction: discord.Interaction):
+            await self.remove_role_permissions_cmd(interaction)
+
+        set_button.callback = set_button_callback
+        list_button.callback = list_button_callback
+        remove_button.callback = remove_button_callback
+
+        action_view = discord.ui.View()
+        action_view.add_item(set_button)
+        action_view.add_item(list_button)
+        action_view.add_item(remove_button)
+
+        embed = discord.Embed(
+            title="管理角色權限",
+            description="請選擇您要執行的操作。",
+            color=discord.Color.greyple()
+        )
+        await interaction.response.send_message(embed=embed, view=action_view, ephemeral=True)
+
+    @app_commands.command(name="server_manager", description="管理伺服器設定")
+    async def server_manager_cmd(self, interaction: discord.Interaction):
+        """斜線命令：管理伺服器設定"""
+        logger.info(f'收到來自 {interaction.user} 的 /server_manager 斜線命令')
+
+        if not await self._check_guild_and_owner(interaction, owner_only=True):
+            return
+
+        # 創建操作按鈕
+        role_button = discord.ui.Button(label="角色管理", style=discord.ButtonStyle.primary, custom_id="role_manager")
+        channel_button = discord.ui.Button(label="頻道設定", style=discord.ButtonStyle.secondary, custom_id="set_channel")
+
+        async def role_button_callback(interaction: discord.Interaction):
+            await self.role_manager_cmd(interaction)
+
+        async def channel_button_callback(interaction: discord.Interaction):
+            await self.set_channel_cmd(interaction)
+
+        role_button.callback = role_button_callback
+        channel_button.callback = channel_button_callback
+
+        action_view = discord.ui.View()
+        action_view.add_item(role_button)
+        action_view.add_item(channel_button)
+
+        embed = discord.Embed(
+            title="伺服器管理",
+            description="請選擇您要管理的項目。",
+            color=discord.Color.greyple()
+        )
+        await interaction.response.send_message(embed=embed, view=action_view, ephemeral=True)
 
     # on_message 監聽器已移動到 user_commands.py
 

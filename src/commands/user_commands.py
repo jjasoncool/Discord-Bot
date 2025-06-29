@@ -71,13 +71,8 @@ class UserCommands(commands.Cog):
         """發送錯誤訊息"""
         await interaction.response.send_message(message, ephemeral=True)
 
-    @app_commands.command(name="monitor_channel", description="監控指定頻道的訊息，可用逗號分隔多個關鍵字")
-    @app_commands.describe(
-        keywords="要監控的關鍵字（用逗號分隔）",
-        notify="是否在發現關鍵字時通知您"
-    )
-    async def monitor_channel_cmd(self, interaction: discord.Interaction, keywords: str, notify: bool = True):
-        """斜線命令：設定監控特定頻道的訊息"""
+    async def monitor_channel_cmd(self, interaction: discord.Interaction, keywords: str = None, notify: bool = True):
+        """設定監控特定頻道的訊息"""
         logger.info(f'收到來自 {interaction.user} 的 /monitor_channel 斜線命令，參數: keywords="{keywords}", notify={notify}')
 
         if not await self._check_guild_and_owner(interaction, owner_only=False):
@@ -176,9 +171,8 @@ class UserCommands(commands.Cog):
         )
         await interaction.response.send_message(embed=embed, view=channel_view, ephemeral=True)
 
-    @app_commands.command(name="stop_monitoring", description="停止監控指定頻道")
     async def stop_monitoring_cmd(self, interaction: discord.Interaction):
-        """斜線命令：停止監控指定頻道"""
+        """停止監控指定頻道"""
         logger.info(f'收到來自 {interaction.user} 的 /stop_monitoring 斜線命令')
 
         if not await self._check_guild_and_owner(interaction, owner_only=False):
@@ -316,9 +310,8 @@ class UserCommands(commands.Cog):
         # 第二個訊息：文字 + 按鈕
         await interaction.followup.send("如果要取消所有頻道的監控，請點選下方按鈕：", view=stop_all_view, ephemeral=True)
 
-    @app_commands.command(name="list_monitored", description="列出目前監控的所有頻道")
     async def list_monitored_cmd(self, interaction: discord.Interaction):
-        """斜線命令：列出目前監控的所有頻道"""
+        """列出目前監控的所有頻道"""
         logger.info(f'收到來自 {interaction.user} 的 /list_monitored 斜線命令')
 
         if not await self._check_guild_and_owner(interaction, owner_only=False):
@@ -499,6 +492,59 @@ class UserCommands(commands.Cog):
                                 logger.warning(f"無法向使用者 {user.name}#{user.discriminator} 發送訊息，可能因為他們已關閉私人訊息")
                             except Exception as e:
                                 logger.error(f"發送關鍵字通知時發生錯誤: {str(e)}")
+
+    @app_commands.command(name="watch_keywords", description="設定頻道中的關鍵字監控")
+    async def watch_keywords_cmd(self, interaction: discord.Interaction):
+        """斜線命令：設定頻道中的關鍵字監控"""
+        logger.info(f'收到來自 {interaction.user} 的 /watch_keywords 斜線命令')
+
+        if not await self._check_guild_and_owner(interaction, owner_only=False):
+            return
+
+        # 創建操作按鈕
+        monitor_button = discord.ui.Button(label="監控頻道關鍵字", style=discord.ButtonStyle.primary, custom_id="monitor_channel")
+        stop_button = discord.ui.Button(label="停止監控", style=discord.ButtonStyle.danger, custom_id="stop_monitoring")
+        list_button = discord.ui.Button(label="顯示監控列表", style=discord.ButtonStyle.secondary, custom_id="list_monitored")
+
+        async def monitor_button_callback(interaction: discord.Interaction):
+            # 創建關鍵字輸入框
+            modal = discord.ui.Modal(title="設定監控關鍵字")
+            keywords_input = discord.ui.TextInput(
+                label="監控關鍵字（用逗號分隔）",
+                placeholder="輸入要監控的關鍵字，例如：交易,出售,求購",
+                required=True,
+                style=discord.TextStyle.short
+            )
+            modal.add_item(keywords_input)
+
+            async def on_submit(interaction: discord.Interaction):
+                keywords = keywords_input.value
+                await self.monitor_channel_cmd(interaction, keywords, True)
+
+            modal.on_submit = on_submit
+            await interaction.response.send_modal(modal)
+
+        async def stop_button_callback(interaction: discord.Interaction):
+            await self.stop_monitoring_cmd(interaction)
+
+        async def list_button_callback(interaction: discord.Interaction):
+            await self.list_monitored_cmd(interaction)
+
+        monitor_button.callback = monitor_button_callback
+        stop_button.callback = stop_button_callback
+        list_button.callback = list_button_callback
+
+        action_view = discord.ui.View()
+        action_view.add_item(monitor_button)
+        action_view.add_item(list_button)
+        action_view.add_item(stop_button)
+
+        embed = discord.Embed(
+            title="頻道關鍵字監控",
+            description="請選擇您要執行的操作：\n- **監控頻道關鍵字**：設定要在頻道中監控的關鍵字，當訊息包含這些關鍵字時您會收到通知。\n- **停止監控**：停止對特定頻道的關鍵字監控。\n- **顯示監控列表**：查看所有人設定的監控項目。",
+            color=discord.Color.greyple()
+        )
+        await interaction.response.send_message(embed=embed, view=action_view, ephemeral=True)
 
     @app_commands.command(name="list_item_price", description="查看物品價格")
     async def list_item_price_cmd(self, interaction: discord.Interaction):

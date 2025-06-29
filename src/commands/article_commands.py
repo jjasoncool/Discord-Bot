@@ -346,7 +346,7 @@ class ArticleCommands(commands.Cog):
 
                 embed.add_field(
                     name="🔧 解析器",
-                    value="pypandoc" if result['pypandoc_used'] else "BeautifulSoup",
+                    value="html2text + BeautifulSoup",
                     inline=True
                 )
 
