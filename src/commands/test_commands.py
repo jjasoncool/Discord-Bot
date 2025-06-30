@@ -52,53 +52,6 @@ class TestCommands(commands.Cog):
             logger.error(f"發送匿名訊息時發生錯誤: {str(e)}")
             await interaction.response.send_message("發送訊息時發生錯誤，請稍後再試。", ephemeral=True)
 
-    @app_commands.command(name="multi_select_demo", description="示範多選功能的命令")
-    async def multi_select_demo_cmd(self, interaction: discord.Interaction):
-        """斜線命令：示範多選功能"""
-        logger.info(f'收到來自 {interaction.user} 的 /multi_select_demo 命令')
-
-        # 創建多選下拉選單
-        select = discord.ui.Select(
-            placeholder="選擇多個選項...",
-            min_values=1,
-            max_values=15,
-            options=[
-                discord.SelectOption(label="選項 1", value="option1", description="第一個選項"),
-                discord.SelectOption(label="選項 2", value="option2", description="第二個選項"),
-                discord.SelectOption(label="選項 3", value="option3", description="第三個選項"),
-                discord.SelectOption(label="選項 4", value="option4", description="第四個選項"),
-                discord.SelectOption(label="選項 5", value="option5", description="第五個選項"),
-                discord.SelectOption(label="選項 6", value="option6", description="第六個選項"),
-                discord.SelectOption(label="選項 7", value="option7", description="第七個選項"),
-                discord.SelectOption(label="選項 8", value="option8", description="第八個選項"),
-                discord.SelectOption(label="選項 9", value="option9", description="第九個選項"),
-                discord.SelectOption(label="選項 10", value="option10", description="第十個選項"),
-                discord.SelectOption(label="選項 11", value="option11", description="第十一個選項"),
-                discord.SelectOption(label="選項 12", value="option12", description="第十二個選項"),
-                discord.SelectOption(label="選項 13", value="option13", description="第十三個選項"),
-                discord.SelectOption(label="選項 14", value="option14", description="第十四個選項"),
-                discord.SelectOption(label="選項 15", value="option15", description="第十五個選項")
-            ]
-        )
-
-        async def select_callback(interaction: discord.Interaction):
-            """處理多選下拉選單的回調，顯示用戶選擇的選項"""
-            logger.info(f'開始執行 multi_select_demo select_callback，選擇的選項: {select.values}')
-            try:
-                selected_options = ", ".join(select.values) if select.values else "未選擇任何選項"
-                await interaction.response.send_message(f"您選擇了: {selected_options}", ephemeral=True)
-                logger.info(f'成功處理多選，選項: {selected_options}')
-            except Exception as e:
-                error_details = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
-                logger.error(f'multi_select_demo select_callback 錯誤: {str(e)}\n詳細錯誤信息:\n{error_details}')
-                await interaction.response.send_message("發生錯誤，請稍後再試。", ephemeral=True)
-
-        select.callback = select_callback
-        view = discord.ui.View()
-        view.add_item(select)
-
-        await interaction.response.send_message("請從以下選項中選擇一個或多個：", view=view, ephemeral=True)
-
     @app_commands.command(name="list_forum_posts", description="列出特定論壇頻道的前20則貼文")
     async def list_forum_posts_cmd(self, interaction: discord.Interaction):
         """斜線命令：列出特定論壇頻道的前20則貼文"""
@@ -233,6 +186,152 @@ class TestCommands(commands.Cog):
         """回應一個 Hello World 訊息"""
         logger.info(f'收到來自 {ctx.author} 的 helloworld 前綴命令')
         await ctx.send(f'👋 Hello World! 您好，{ctx.author.mention}！我是一個由 Discord.py 驅動的機器人。')
+
+
+    @app_commands.command(name="multi_select_demo", description="示範多選功能的命令")
+    async def multi_select_demo_cmd(self, interaction: discord.Interaction):
+        """斜線命令：示範多選功能"""
+        logger.info(f'收到來自 {interaction.user} 的 /multi_select_demo 命令')
+
+        # 定義選項
+        OPTIONS = [
+            {"label": "選項 1", "value": "option1", "description": "第一個選項"},
+            {"label": "選項 2", "value": "option2", "description": "第二個選項"},
+            {"label": "選項 3", "value": "option3", "description": "第三個選項"},
+            {"label": "選項 4", "value": "option4", "description": "第四個選項"},
+            {"label": "選項 5", "value": "option5", "description": "第五個選項"},
+            {"label": "選項 6", "value": "option6", "description": "第六個選項"},
+            {"label": "選項 7", "value": "option7", "description": "第七個選項"},
+            {"label": "選項 8", "value": "option8", "description": "第八個選項"},
+            {"label": "選項 9", "value": "option9", "description": "第九個選項"},
+            {"label": "選項 10", "value": "option10", "description": "第十個選項"},
+            {"label": "選項 11", "value": "option11", "description": "第十一個選項"},
+            {"label": "選項 12", "value": "option12", "description": "第十二個選項"},
+            {"label": "選項 13", "value": "option13", "description": "第十三個選項"},
+            {"label": "選項 14", "value": "option14", "description": "第十四個選項"},
+            {"label": "選項 15", "value": "option15", "description": "第十五個選項"}
+        ]
+
+        # 創建多選下拉選單
+        select = discord.ui.Select(
+            placeholder="選擇多個選項...",
+            min_values=1,
+            max_values=len(OPTIONS),
+            options=[discord.SelectOption(**opt) for opt in OPTIONS]
+        )
+
+        async def select_callback(interaction: discord.Interaction):
+            """處理多選下拉選單的回調，進入數量指定階段"""
+            logger.info(f'開始執行 multi_select_demo select_callback，選擇的選項: {select.values}')
+            try:
+                if not select.values:
+                    await interaction.response.send_message("您未選擇任何選項。", ephemeral=True)
+                    return
+
+                selected_items = {value: 1 for value in select.values}
+                items_per_page = 5
+                total_pages = (len(selected_items) + items_per_page - 1) // items_per_page
+                current_page = 0
+
+                def create_embed(page):
+                    embed = discord.Embed(
+                        title=f"選取項目 - 第 {page + 1} 頁 / {total_pages} 頁",
+                        description="請使用「編輯」按鈕來設定數量，或使用按鈕切換頁面。",
+                        color=discord.Color.blue()
+                    )
+                    start_idx = page * items_per_page
+                    end_idx = min(start_idx + items_per_page, len(selected_items))
+                    page_items = list(selected_items.keys())[start_idx:end_idx]
+                    for value in page_items:
+                        label = next(opt['label'] for opt in OPTIONS if opt['value'] == value)
+                        embed.add_field(
+                            name=label,
+                            value=f"數量: {selected_items[value]}",
+                            inline=False
+                        )
+                    return embed
+
+                def create_view(page):
+                    view = discord.ui.View()
+                    if total_pages > 1:
+                        if page > 0:
+                            prev_button = discord.ui.Button(label="上一頁", style=discord.ButtonStyle.blurple)
+                            prev_button.callback = lambda inter: update_page(inter, page - 1)
+                            view.add_item(prev_button)
+                        if page < total_pages - 1:
+                            next_button = discord.ui.Button(label="下一頁", style=discord.ButtonStyle.blurple)
+                            next_button.callback = lambda inter: update_page(inter, page + 1)
+                            view.add_item(next_button)
+                    edit_button = discord.ui.Button(label="編輯", style=discord.ButtonStyle.green)
+                    edit_button.callback = lambda inter: edit_items(inter, page)
+                    view.add_item(edit_button)
+                    finish_button = discord.ui.Button(label="完成", style=discord.ButtonStyle.red)
+                    finish_button.callback = lambda inter: finish_editing(inter)
+                    view.add_item(finish_button)
+                    return view
+
+                async def update_page(interaction: discord.Interaction, new_page):
+                    nonlocal current_page
+                    current_page = new_page
+                    await interaction.response.edit_message(embed=create_embed(current_page), view=create_view(current_page))
+
+                async def edit_items(interaction: discord.Interaction, page):
+                    start_idx = page * items_per_page
+                    end_idx = min(start_idx + items_per_page, len(selected_items))
+                    page_items = list(selected_items.keys())[start_idx:end_idx]
+
+                    modal = discord.ui.Modal(title=f"編輯數量 - 第 {page + 1} 頁")
+                    inputs = []
+                    for value in page_items:
+                        label = next(opt['label'] for opt in OPTIONS if opt['value'] == value)
+                        qty_input = discord.ui.TextInput(
+                            label=label,
+                            placeholder="輸入數量（整數）",
+                            default=str(selected_items[value])
+                        )
+                        modal.add_item(qty_input)
+                        inputs.append((value, qty_input))
+
+                    async def on_submit(interaction: discord.Interaction):
+                        try:
+                            for value, input_field in inputs:
+                                qty = int(input_field.value)
+                                if qty < 1:
+                                    await interaction.response.send_message(f"{input_field.label} 的數量不能小於 1，請重試。", ephemeral=True)
+                                    return
+                                selected_items[value] = qty
+                            await interaction.response.send_message(f"已更新第 {page + 1} 頁的數量。", ephemeral=True)
+                            await interaction.followup.edit_message(interaction.message.id, embed=create_embed(current_page), view=create_view(current_page))
+                        except ValueError:
+                            await interaction.response.send_message("所有數量必須是有效的整數，請重試。", ephemeral=True)
+
+                    modal.on_submit = on_submit
+                    await interaction.response.send_modal(modal)
+
+                async def finish_editing(interaction: discord.Interaction):
+                    summary_embed = discord.Embed(
+                        title="最終確認",
+                        description="您的選擇如下：",
+                        color=discord.Color.green()
+                    )
+                    for value in selected_items:
+                        label = next(opt['label'] for opt in OPTIONS if opt['value'] == value)
+                        summary_embed.add_field(name=label, value=f"數量: {selected_items[value]}", inline=False)
+                    await interaction.response.edit_message(embed=summary_embed, view=None)
+                    logger.info(f'用戶已完成選擇: {selected_items}')
+
+                await interaction.response.send_message(embed=create_embed(current_page), view=create_view(current_page), ephemeral=True)
+            except Exception as e:
+                error_details = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+                logger.error(f'multi_select_demo select_callback 錯誤: {str(e)}\n詳細錯誤信息:\n{error_details}')
+                await interaction.response.send_message("發生錯誤，請稍後再試。", ephemeral=True)
+
+        select.callback = select_callback
+        view = discord.ui.View()
+        view.add_item(select)
+
+        await interaction.response.send_message("請從以下選項中選擇一個或多個：", view=view, ephemeral=True)
+
 
 async def setup(bot):
     await bot.add_cog(TestCommands(bot))
