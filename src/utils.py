@@ -69,14 +69,16 @@ async def check_role(user, required_role: str = None) -> bool:
                     allowed_role_ids = config.get("role_mapping", {}).get(required_role, [])
                     if allowed_role_ids:  # 檢查是否有設定任何身份組 ID
                         user_roles = [role.id for role in user.roles] if hasattr(user, 'roles') else []
-                        if not any(role_id in user_roles for role_id in allowed_role_ids):
+                        if any(role_id in user_roles for role_id in allowed_role_ids):
+                            return True
+                        else:
                             logger.info(f'使用者 {user.name} 嘗試使用需要 {required_role} 角色的功能，已被拒絕')
                             return False
             except json.JSONDecodeError as e:
                 logger.error(f"無法讀取 {config_file}，JSON 解碼錯誤: {str(e)}")
             except Exception as e:
                 logger.error(f"讀取 {config_file} 時發生未知錯誤: {str(e)}")
-        return True if not allowed_role_ids else False
+        return False  # 如果配置文件不存在或角色未定義，則拒絕訪問
     return True
 
 async def check_guild(interaction: discord.Interaction, owner_only: bool = False, admin_only: bool = False, required_role: str = None) -> bool:
