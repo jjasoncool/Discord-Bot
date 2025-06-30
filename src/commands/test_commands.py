@@ -52,6 +52,53 @@ class TestCommands(commands.Cog):
             logger.error(f"發送匿名訊息時發生錯誤: {str(e)}")
             await interaction.response.send_message("發送訊息時發生錯誤，請稍後再試。", ephemeral=True)
 
+    @app_commands.command(name="multi_select_demo", description="示範多選功能的命令")
+    async def multi_select_demo_cmd(self, interaction: discord.Interaction):
+        """斜線命令：示範多選功能"""
+        logger.info(f'收到來自 {interaction.user} 的 /multi_select_demo 命令')
+
+        # 創建多選下拉選單
+        select = discord.ui.Select(
+            placeholder="選擇多個選項...",
+            min_values=1,
+            max_values=15,
+            options=[
+                discord.SelectOption(label="選項 1", value="option1", description="第一個選項"),
+                discord.SelectOption(label="選項 2", value="option2", description="第二個選項"),
+                discord.SelectOption(label="選項 3", value="option3", description="第三個選項"),
+                discord.SelectOption(label="選項 4", value="option4", description="第四個選項"),
+                discord.SelectOption(label="選項 5", value="option5", description="第五個選項"),
+                discord.SelectOption(label="選項 6", value="option6", description="第六個選項"),
+                discord.SelectOption(label="選項 7", value="option7", description="第七個選項"),
+                discord.SelectOption(label="選項 8", value="option8", description="第八個選項"),
+                discord.SelectOption(label="選項 9", value="option9", description="第九個選項"),
+                discord.SelectOption(label="選項 10", value="option10", description="第十個選項"),
+                discord.SelectOption(label="選項 11", value="option11", description="第十一個選項"),
+                discord.SelectOption(label="選項 12", value="option12", description="第十二個選項"),
+                discord.SelectOption(label="選項 13", value="option13", description="第十三個選項"),
+                discord.SelectOption(label="選項 14", value="option14", description="第十四個選項"),
+                discord.SelectOption(label="選項 15", value="option15", description="第十五個選項")
+            ]
+        )
+
+        async def select_callback(interaction: discord.Interaction):
+            """處理多選下拉選單的回調，顯示用戶選擇的選項"""
+            logger.info(f'開始執行 multi_select_demo select_callback，選擇的選項: {select.values}')
+            try:
+                selected_options = ", ".join(select.values) if select.values else "未選擇任何選項"
+                await interaction.response.send_message(f"您選擇了: {selected_options}", ephemeral=True)
+                logger.info(f'成功處理多選，選項: {selected_options}')
+            except Exception as e:
+                error_details = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+                logger.error(f'multi_select_demo select_callback 錯誤: {str(e)}\n詳細錯誤信息:\n{error_details}')
+                await interaction.response.send_message("發生錯誤，請稍後再試。", ephemeral=True)
+
+        select.callback = select_callback
+        view = discord.ui.View()
+        view.add_item(select)
+
+        await interaction.response.send_message("請從以下選項中選擇一個或多個：", view=view, ephemeral=True)
+
     @app_commands.command(name="list_forum_posts", description="列出特定論壇頻道的前20則貼文")
     async def list_forum_posts_cmd(self, interaction: discord.Interaction):
         """斜線命令：列出特定論壇頻道的前20則貼文"""
