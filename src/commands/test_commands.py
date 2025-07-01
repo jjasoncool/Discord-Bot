@@ -242,13 +242,21 @@ class TestCommands(commands.Cog):
                     start_idx = page * items_per_page
                     end_idx = min(start_idx + items_per_page, len(selected_items))
                     page_items = list(selected_items.keys())[start_idx:end_idx]
-                    for value in page_items:
+                    all_items = list(selected_items.keys())
+                    for value in all_items:
                         label = next(opt['label'] for opt in OPTIONS if opt['value'] == value)
-                        embed.add_field(
-                            name=label,
-                            value=f"數量: {selected_items[value]}",
-                            inline=False
-                        )
+                        if value in page_items:
+                            embed.add_field(
+                                name=" ",
+                                value=f"**{label}: {selected_items[value]}個**",
+                                inline=False
+                            )
+                        else:
+                            embed.add_field(
+                                name=" ",
+                                value=f"{label}: {selected_items[value]}個",
+                                inline=False
+                            )
                     return embed
 
                 def create_view(page):
@@ -286,24 +294,38 @@ class TestCommands(commands.Cog):
                         label = next(opt['label'] for opt in OPTIONS if opt['value'] == value)
                         qty_input = discord.ui.TextInput(
                             label=label,
-                            placeholder="輸入數量（整數）",
+                            placeholder="輸入數量（1-10）",
                             default=str(selected_items[value])
                         )
                         modal.add_item(qty_input)
                         inputs.append((value, qty_input))
 
                     async def on_submit(interaction: discord.Interaction):
+                        error_fields = []
                         try:
                             for value, input_field in inputs:
-                                qty = int(input_field.value)
-                                if qty < 1:
-                                    await interaction.response.send_message(f"{input_field.label} 的數量不能小於 1，請重試。", ephemeral=True)
-                                    return
+                                qty_str = input_field.value.strip()
+                                if not qty_str.isdigit():
+                                    error_fields.append(f"{input_field.label}: 必須是有效的整數")
+                                    continue
+                                qty = int(qty_str)
+                                if qty < 1 or qty > 10:
+                                    error_fields.append(f"{input_field.label}: 數量必須介於 1 到 10 之間")
+                                    continue
                                 selected_items[value] = qty
+                            if error_fields:
+                                error_embed = discord.Embed(
+                                    title="輸入錯誤",
+                                    description="以下項目的數量輸入有誤，請修正後重新提交：\n" + "\n".join(error_fields),
+                                    color=discord.Color.red()
+                                )
+                                await interaction.response.send_message(embed=error_embed, ephemeral=True)
+                                return
                             await interaction.response.send_message(f"已更新第 {page + 1} 頁的數量。", ephemeral=True)
                             await interaction.followup.edit_message(interaction.message.id, embed=create_embed(current_page), view=create_view(current_page))
-                        except ValueError:
-                            await interaction.response.send_message("所有數量必須是有效的整數，請重試。", ephemeral=True)
+                        except Exception as e:
+                            logger.error(f"處理數量提交時發生錯誤: {str(e)}")
+                            await interaction.response.send_message("處理數量時發生錯誤，請重試。", ephemeral=True)
 
                     modal.on_submit = on_submit
                     await interaction.response.send_modal(modal)

@@ -13,6 +13,7 @@ class TradeCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+
     @app_commands.command(name="trade_info", description="查詢交易相關資訊")
     async def trade_info_cmd(self, interaction: discord.Interaction):
         """斜線命令：提供交易相關資訊"""
@@ -387,12 +388,15 @@ class TradeCommands(commands.Cog):
                     next_button = discord.ui.Button(label="下一頁", style=discord.ButtonStyle.blurple)
                     next_button.callback = lambda inter: update_page(inter, page + 1)
                     view.add_item(next_button)
-            edit_button = discord.ui.Button(label="編輯", style=discord.ButtonStyle.green)
+            edit_button = discord.ui.Button(label="編輯", style=discord.ButtonStyle.primary)
             edit_button.callback = lambda inter: edit_items(inter, page)
             view.add_item(edit_button)
-            finish_button = discord.ui.Button(label="結束編輯", style=discord.ButtonStyle.red)
+            finish_button = discord.ui.Button(label="完成", style=discord.ButtonStyle.success)
             finish_button.callback = lambda inter: finish_editing(inter)
             view.add_item(finish_button)
+            cancel_button = discord.ui.Button(label="取消", style=discord.ButtonStyle.danger)
+            cancel_button.callback = lambda inter: self.handle_cancel(inter, "設定物品價格", "操作已取消。")
+            view.add_item(cancel_button)
             return view
 
         async def update_page(interaction: discord.Interaction, new_page):
@@ -440,9 +444,9 @@ class TradeCommands(commands.Cog):
 
         await interaction.response.send_message(embed=create_embed(current_page), view=create_view(current_page), ephemeral=True)
 
-    @app_commands.command(name="select_item", description="選擇一件物品進行購買")
+    @app_commands.command(name="select_item", description="選擇一或多樣物品進行購買")
     async def select_item_cmd(self, interaction: discord.Interaction):
-        """斜線命令：顯示圖片和選擇器以選擇物品"""
+        """斜線命令：顯示圖片和選擇器以選擇多件物品"""
         logger.info(f'收到來自 {interaction.user} 的 /select_item 斜線命令')
 
         # 檢查是否在伺服器中使用並檢查角色權限
@@ -452,158 +456,247 @@ class TradeCommands(commands.Cog):
 
         embed = discord.Embed(
             title="選擇物品",
-            description="請從以下選項中選擇一件物品進行購買。",
+            description="請從以下選項中選擇一件或多件物品進行購買。",
             color=discord.Color.blue()
         )
         # 從本地上傳圖片文件
         file = discord.File("/app/static/items.png", filename="items.png")
         embed.set_image(url="attachment://items.png")
 
-
-
         select = discord.ui.Select(
-            placeholder="選擇一件物品...",
+            placeholder="選擇多件物品...",
+            min_values=1,
+            max_values=len(ITEMS),
             options=[discord.SelectOption(**item) for item in ITEMS]
         )
 
-        def create_confirm_view(interaction: discord.Interaction, selected_option, quantity):
-            embed = discord.Embed(
-                title="確認購買",
-                description=f"您選擇了 {quantity} 個 {selected_option.label}，請確認或取消。",
-                color=discord.Color.blue()
-            )
+        async def handle_cancel(interaction: discord.Interaction, operation: str, message: str, additional_log: str = ""):
+            """處理取消操作"""
+            await interaction.response.edit_message(view=None)
+            await interaction.followup.send(message, ephemeral=True)
+            logger.info(f'用戶 {interaction.user} 已取消{operation}操作。{additional_log}')
 
-            confirm_button = discord.ui.Button(label="確定", style=discord.ButtonStyle.green)
-            cancel_button = discord.ui.Button(label="取消", style=discord.ButtonStyle.red)
-
-            async def confirm_callback(interaction: discord.Interaction, selected_label=selected_option.label, qty=quantity):
-                logger.info(f"使用者 {interaction.user.id} ({interaction.user.name}) 確認購買 {qty} 個 {selected_label}")
-                await interaction.response.edit_message(view=None)
-                await interaction.followup.send(f"您已確認購買 {qty} 個 {selected_label}", ephemeral=True)
-                # 完全移除所有互動元素
-                await interaction.followup.edit_message(interaction.message.id, view=None)
-
-                # 檢查是否已設定交易論壇頻道
-                from utils import get_trade_forum_channel_id
-                logger.debug("準備調用 get_trade_forum_channel_id 函數 (調用者: TradeCommands)")
-                forum_channel_id = await get_trade_forum_channel_id(config_file="config.json", caller="TradeCommands")
-                logger.debug(f"從 get_trade_forum_channel_id 函數返回的 forum_channel_id: {forum_channel_id} (調用者: TradeCommands)")
-                if forum_channel_id == 1234567890:
-                    await interaction.followup.send(
-                        "交易論壇頻道尚未設定，請通知管理員。",
-                        ephemeral=True
-                    )
-                    logger.warning("交易論壇頻道未設定，使用預設佔位符 ID")
-                    return
-
-                try:
-                    forum_channel = interaction.guild.get_channel(forum_channel_id)
-                    if forum_channel and forum_channel.type == discord.ChannelType.forum:
-                        thread_title = f"{interaction.user.display_name} - 需要購買 {qty} 個 {selected_label}"
-                        thread_content = f"群友 {interaction.user.mention} ({interaction.user.name}) 需要購買 {qty} 個 {selected_label}。"
-                        # 嘗試找到名為「代儲」的標籤，如果找不到則嘗試創建一個新標籤
-                        applied_tags = []
-                        for tag in forum_channel.available_tags:
-                            if tag.name == "代儲":
-                                applied_tags.append(tag)
-                                break
-                        if not applied_tags:
-                            try:
-                                # 嘗試創建新標籤
-                                new_tag = await forum_channel.create_tag(name="代儲")
-                                applied_tags.append(new_tag)
-                                logger.info(f"已創建新標籤「代儲」並應用到貼文")
-                            except Exception as tag_error:
-                                logger.error(f"創建新標籤「代儲」時發生錯誤: {str(tag_error)}")
-                                # 如果創建標籤失敗，則不使用標籤繼續創建貼文
-
-                        await forum_channel.create_thread(name=thread_title, content=thread_content, applied_tags=applied_tags)
-                        logger.info(f"在論壇頻道 {forum_channel_id} 新增貼文: {thread_title}，使用標籤: {applied_tags if applied_tags else '無'}")
-                    else:
-                        logger.error(f"無法找到論壇頻道 {forum_channel_id} 或該頻道不是論壇類型")
-                        await interaction.followup.send(
-                            "無法找到設定的論壇頻道，請確認設定或重新使用 `/set_trade_forum_channel` 命令設定。",
-                            ephemeral=True
-                        )
-                except Exception as e:
-                    logger.error(f"處理論壇頻道 {forum_channel_id} 時發生錯誤: {str(e)}")
-                    await interaction.followup.send(
-                        "無法處理論壇頻道操作，請確認機器人有相關權限或聯繫管理員。",
-                        ephemeral=True
-                    )
-
-            async def cancel_callback(interaction: discord.Interaction, selected_label=selected_option.label, qty=quantity):
-                logger.info(f"使用者 {interaction.user.id} ({interaction.user.name}) 取消購買 {qty} 個 {selected_label}")
-                await interaction.response.edit_message(view=None)
-                await interaction.followup.send(f"您已取消購買 {qty} 個 {selected_label}", ephemeral=True)
-                # 完全移除所有互動元素
-                await interaction.followup.edit_message(interaction.message.id, view=None)
-
-            confirm_button.callback = lambda inter: confirm_callback(inter)
-            cancel_button.callback = lambda inter: cancel_callback(inter)
-
-            confirm_view = discord.ui.View()
-            confirm_view.add_item(confirm_button)
-            confirm_view.add_item(cancel_button)
-
-            return embed, confirm_view
 
         async def select_callback(interaction: discord.Interaction):
-            # 獲取選中選項的標籤
-            selected_option = next((option for option in select.options if option.value == select.values[0]), None)
-            if selected_option:
-                from datetime import datetime
-                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                logger.info(f"使用者 {interaction.user.id} ({interaction.user.name}) 在 {current_time} 選擇了物品 {selected_option.label}")
+            """處理多選下拉選單的回調，進入數量指定階段"""
+            logger.info(f'開始執行 select_item select_callback，選擇的選項: {select.values}')
+            try:
+                if not select.values:
+                    await interaction.response.send_message("您未選擇任何選項。", ephemeral=True)
+                    return
 
-                # 檢查是否為限制只能購買一個的物品
-                restricted_items = [item.value for item in select.options if item.value.startswith("store_gift_pack")] + [
-                    "universe_radio", "universe_special", "dragon_first_charge"
-                ]
-                if selected_option.value in restricted_items:
-                    # 直接進入確認購買步驟，數量固定為1
-                    embed, confirm_view = create_confirm_view(interaction, selected_option, 1)
-                    await interaction.response.send_message(embed=embed, view=confirm_view, ephemeral=True)
-                else:
-                    # 先發送數量選擇框
+                selected_items = {value: 1 for value in select.values}
+                items_per_page = 5
+                total_pages = (len(selected_items) + items_per_page - 1) // items_per_page
+                current_page = 0
+
+                def create_embed(page):
                     embed = discord.Embed(
-                        title="選擇數量",
-                        description=f"您選擇了 {selected_option.label}，請選擇購買數量。",
+                        title=f"選取物品 - 第 {page + 1} 頁 / {total_pages} 頁",
+                        description="請使用「編輯」按鈕來設定數量，或使用按鈕切換其他項目編輯數量。",
                         color=discord.Color.blue()
                     )
+                    start_idx = page * items_per_page
+                    end_idx = min(start_idx + items_per_page, len(selected_items))
+                    page_items = list(selected_items.keys())[start_idx:end_idx]
+                    all_items = list(selected_items.keys())
+                    for value in all_items:
+                        label = next(opt.label for opt in select.options if opt.value == value)
+                        if value in page_items:
+                            embed.add_field(
+                                name=" ",
+                                value=f"**{label}: {selected_items[value]}個**",
+                                inline=False
+                            )
+                        else:
+                            embed.add_field(
+                                name=" ",
+                                value=f"{label}: {selected_items[value]}個",
+                                inline=False
+                            )
+                    return embed
 
-                    # 根據所選物品動態設置數量選項
-                    quantity_options = [
-                        discord.SelectOption(label="1", value="1"),
-                        discord.SelectOption(label="2", value="2"),
-                        discord.SelectOption(label="3", value="3"),
-                        discord.SelectOption(label="4", value="4"),
-                        discord.SelectOption(label="5", value="5")
+                def create_view(page):
+                    view = discord.ui.View()
+                    if total_pages > 1:
+                        if page > 0:
+                            prev_button = discord.ui.Button(label="上一頁", style=discord.ButtonStyle.blurple)
+                            prev_button.callback = lambda inter: update_page(inter, page - 1)
+                            view.add_item(prev_button)
+                        if page < total_pages - 1:
+                            next_button = discord.ui.Button(label="下一頁", style=discord.ButtonStyle.blurple)
+                            next_button.callback = lambda inter: update_page(inter, page + 1)
+                            view.add_item(next_button)
+                    edit_button = discord.ui.Button(label="編輯", style=discord.ButtonStyle.primary)
+                    edit_button.callback = lambda inter: edit_items(inter, page)
+                    view.add_item(edit_button)
+                    finish_button = discord.ui.Button(label="完成", style=discord.ButtonStyle.success)
+                    finish_button.callback = lambda inter: finish_editing(inter)
+                    view.add_item(finish_button)
+                    cancel_button = discord.ui.Button(label="取消", style=discord.ButtonStyle.danger)
+                    cancel_button.callback = lambda inter: handle_cancel(inter, "選取物品", "操作已取消。")
+                    view.add_item(cancel_button)
+                    return view
+
+                async def update_page(interaction: discord.Interaction, new_page):
+                    nonlocal current_page
+                    current_page = new_page
+                    await interaction.response.edit_message(embed=create_embed(current_page), view=create_view(current_page))
+
+                async def edit_items(interaction: discord.Interaction, page):
+                    start_idx = page * items_per_page
+                    end_idx = min(start_idx + items_per_page, len(selected_items))
+                    page_items = list(selected_items.keys())[start_idx:end_idx]
+
+                    modal = discord.ui.Modal(title=f"編輯數量 - 第 {page + 1} 頁")
+                    inputs = []
+                    restricted_items = [item.value for item in select.options if item.value.startswith("store_gift_pack")] + [
+                        "universe_radio", "universe_special", "dragon_first_charge"
                     ]
-                    if selected_option.value == "moon_card":
-                        quantity_options.append(discord.SelectOption(label="6", value="6"))
-                    else:
-                        quantity_options.append(discord.SelectOption(label="10", value="10"))
+                    for value in page_items:
+                        label = next(opt.label for opt in select.options if opt.value == value)
+                        qty_input = discord.ui.TextInput(
+                            label=label,
+                            placeholder="輸入數量（1-10）",
+                            default=str(selected_items[value]),
+                            style=discord.TextStyle.short,
+                            required=False if value in restricted_items else True,
+                            custom_id=f"qty_{value}"
+                        )
+                        if value in restricted_items:
+                            qty_input.disabled = True
+                        modal.add_item(qty_input)
+                        inputs.append((value, qty_input))
 
-                    quantity_select = discord.ui.Select(
-                        placeholder="選擇數量...",
-                        options=quantity_options
+                    async def on_submit(interaction: discord.Interaction):
+                        error_fields = []
+                        try:
+                            for value, input_field in inputs:
+                                qty_str = input_field.value.strip()
+                                if not qty_str.isdigit():
+                                    error_fields.append(f"{input_field.label}: 必須是有效的整數")
+                                    continue
+                                qty = int(qty_str)
+                                if qty < 1 or qty > 10:
+                                    error_fields.append(f"{input_field.label}: 數量必須介於 1 到 10 之間")
+                                    continue
+                                # 檢查是否為限制只能購買一個的物品
+                                restricted_items = [item.value for item in select.options if item.value.startswith("store_gift_pack")] + [
+                                    "universe_radio", "universe_special", "dragon_first_charge"
+                                ]
+                                if value in restricted_items and qty > 1:
+                                    error_fields.append(f"{input_field.label}: 此物品限制只能購買 1 個")
+                                    continue
+                                selected_items[value] = qty
+                            if error_fields:
+                                error_embed = discord.Embed(
+                                    title="輸入錯誤",
+                                    description="以下項目的數量輸入有誤，請修正後重新提交：\n" + "\n".join(error_fields),
+                                    color=discord.Color.red()
+                                )
+                                await interaction.response.send_message(embed=error_embed, ephemeral=True)
+                                return
+                            await interaction.response.send_message(f"已更新第 {page + 1} 頁的數量。", ephemeral=True)
+                            await interaction.followup.edit_message(interaction.message.id, embed=create_embed(current_page), view=create_view(current_page))
+                        except Exception as e:
+                            logger.error(f"處理數量提交時發生錯誤: {str(e)}")
+                            await interaction.response.send_message("處理數量時發生錯誤，請重試。", ephemeral=True)
+
+                    modal.on_submit = on_submit
+                    await interaction.response.send_modal(modal)
+
+                async def finish_editing(interaction: discord.Interaction):
+                    summary_embed = discord.Embed(
+                        title="最終確認",
+                        description="您的選擇如下：",
+                        color=discord.Color.green()
                     )
+                    purchase_summary = []
+                    for value in selected_items:
+                        label = next(opt.label for opt in select.options if opt.value == value)
+                        summary_embed.add_field(name=label, value=f"數量: {selected_items[value]}", inline=False)
+                        purchase_summary.append(f"{selected_items[value]} 個 {label}")
 
-                    async def quantity_callback(interaction: discord.Interaction):
-                        quantity = quantity_select.values[0]
-                        logger.info(f"使用者 {interaction.user.id} ({interaction.user.name}) 選擇了數量 {quantity} 個 {selected_option.label}")
-                        await interaction.response.edit_message(view=None)
-                        embed, confirm_view = create_confirm_view(interaction, selected_option, quantity)
-                        await interaction.followup.send(embed=embed, view=confirm_view, ephemeral=True)
+                    def create_confirm_view():
+                        view = discord.ui.View()
+                        confirm_button = discord.ui.Button(label="確定購買", style=discord.ButtonStyle.green)
+                        cancel_button = discord.ui.Button(label="取消購買", style=discord.ButtonStyle.red)
 
-                    quantity_select.callback = quantity_callback
-                    quantity_view = discord.ui.View()
-                    quantity_view.add_item(quantity_select)
+                        async def confirm_callback(interaction: discord.Interaction):
+                            await interaction.response.edit_message(view=None)
+                            await interaction.followup.send(f"您已確認購買：\n" + "\n".join(purchase_summary), ephemeral=True)
+                            logger.info(f'用戶已確認購買: {selected_items}')
 
-                    await interaction.response.send_message(embed=embed, view=quantity_view, ephemeral=True)
-            else:
-                await interaction.response.send_message("選擇出錯，請重試", ephemeral=True)
+                            # 檢查是否已設定交易論壇頻道
+                            from utils import get_trade_forum_channel_id
+                            logger.debug("準備調用 get_trade_forum_channel_id 函數 (調用者: TradeCommands)")
+                            forum_channel_id = await get_trade_forum_channel_id(config_file="config.json", caller="TradeCommands")
+                            logger.debug(f"從 get_trade_forum_channel_id 函數返回的 forum_channel_id: {forum_channel_id} (調用者: TradeCommands)")
+                            if forum_channel_id == 1234567890:
+                                await interaction.followup.send(
+                                    "交易論壇頻道尚未設定，請通知管理員。",
+                                    ephemeral=True
+                                )
+                                logger.warning("交易論壇頻道未設定，使用預設佔位符 ID")
+                                return
+
+                            try:
+                                forum_channel = interaction.guild.get_channel(forum_channel_id)
+                                if forum_channel and forum_channel.type == discord.ChannelType.forum:
+                                    if len(purchase_summary) == 1:
+                                        thread_title = f"{interaction.user.display_name} - 需要購買 {purchase_summary[0]}"
+                                    else:
+                                        thread_title = f"{interaction.user.display_name} - 需要購買多件物品"
+                                    thread_content = f"群友 {interaction.user.mention} ({interaction.user.name}) 需要購買：\n" + "\n".join(purchase_summary)
+                                    # 嘗試找到名為「代儲」的標籤，如果找不到則嘗試創建一個新標籤
+                                    applied_tags = []
+                                    for tag in forum_channel.available_tags:
+                                        if tag.name == "代儲":
+                                            applied_tags.append(tag)
+                                            break
+                                    if not applied_tags:
+                                        try:
+                                            # 嘗試創建新標籤
+                                            new_tag = await forum_channel.create_tag(name="代儲")
+                                            applied_tags.append(new_tag)
+                                            logger.info(f"已創建新標籤「代儲」並應用到貼文")
+                                        except Exception as tag_error:
+                                            logger.error(f"創建新標籤「代儲」時發生錯誤: {str(tag_error)}")
+                                            # 如果創建標籤失敗，則不使用標籤繼續創建貼文
+
+                                    await forum_channel.create_thread(name=thread_title, content=thread_content, applied_tags=applied_tags)
+                                    logger.info(f"在論壇頻道 {forum_channel_id} 新增貼文: {thread_title}，使用標籤: {applied_tags if applied_tags else '無'}")
+                                else:
+                                    logger.error(f"無法找到論壇頻道 {forum_channel_id} 或該頻道不是論壇類型")
+                                    await interaction.followup.send(
+                                        "無法找到設定的論壇頻道，請確認設定或重新使用 `/set_trade_forum_channel` 命令設定。",
+                                        ephemeral=True
+                                    )
+                            except Exception as e:
+                                logger.error(f"處理論壇頻道 {forum_channel_id} 時發生錯誤: {str(e)}")
+                                await interaction.followup.send(
+                                    "無法處理論壇頻道操作，請確認機器人有相關權限或聯繫管理員。",
+                                    ephemeral=True
+                                )
+
+                        async def cancel_callback(interaction: discord.Interaction):
+                            await interaction.response.edit_message(view=None)
+                            await interaction.followup.send("您已取消購買。", ephemeral=True)
+                            logger.info(f'用戶已取消購買: {selected_items}')
+
+                        confirm_button.callback = confirm_callback
+                        cancel_button.callback = cancel_callback
+                        view.add_item(confirm_button)
+                        view.add_item(cancel_button)
+                        return view
+
+                    await interaction.response.edit_message(embed=summary_embed, view=create_confirm_view())
+
+                await interaction.response.send_message(embed=create_embed(current_page), view=create_view(current_page), ephemeral=True)
+            except Exception as e:
+                error_details = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+                logger.error(f'select_item select_callback 錯誤: {str(e)}\n詳細錯誤信息:\n{error_details}')
+                await interaction.response.send_message("發生錯誤，請稍後再試。", ephemeral=True)
 
         select.callback = select_callback
         view = discord.ui.View()
