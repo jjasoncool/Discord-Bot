@@ -16,7 +16,7 @@ monitored_channels_file = "settings/monitored_channels.json"
 
 import json
 import os
-from utils import get_paginated_options, create_paginated_view, ITEMS_PER_PAGE
+from utils import create_paginated_view, ITEMS_PER_PAGE
 
 def load_monitored_channels():
     """從檔案中讀取監控設定"""
@@ -546,6 +546,33 @@ class UserCommands(commands.Cog):
         )
         await interaction.response.send_message(embed=embed, view=action_view, ephemeral=True)
 
+    async def get_user_item_prices(self, user_id: int, guild: discord.Guild = None) -> dict:
+        """根據用戶 ID 獲取物品價格資訊"""
+        prices_file_path = "/app/settings/item_prices.json"
+        prices = {}
+        if os.path.exists(prices_file_path):
+            try:
+                with open(prices_file_path, 'r', encoding='utf-8') as f:
+                    prices = json.load(f)
+            except Exception as e:
+                logger.error(f"讀取價格檔案時發生錯誤: {str(e)}")
+                return {}
+
+        user_id_str = str(user_id)
+        if user_id_str not in prices:
+            return {}
+
+        user_prices = prices.get(user_id_str, {})
+        result = {}
+        for item in ITEMS:
+            price = user_prices.get(item['value'], "無價格設定")
+            result[item['value']] = {
+                'label': item['label'],
+                'description': item['description'],
+                'price': price
+            }
+        return result
+
     @app_commands.command(name="list_item_price", description="查看物品價格")
     async def list_item_price_cmd(self, interaction: discord.Interaction):
         """斜線命令：查看物品價格"""
@@ -609,14 +636,16 @@ class UserCommands(commands.Cog):
                 description="以下是所有物品的價格資訊：",
                 color=discord.Color.blue()
             )
-            seller_prices = prices.get(selected_seller_id, {})
-            for item in ITEMS:
-                price = seller_prices.get(item['value'], "無價格設定")
-                embed.add_field(
-                    name=f"{item['label']} ({item['description']})",
-                    value=f"價格: {price}",
-                    inline=False
-                )
+            seller_prices = await self.get_user_item_prices(int(selected_seller_id))
+            if seller_prices:
+                for item_value, details in seller_prices.items():
+                    embed.add_field(
+                        name=f"{details['label']} ({details['description']})",
+                        value=f"價格: {details['price']}",
+                        inline=False
+                    )
+            else:
+                embed.description = "此用戶未設定任何物品價格。"
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
         seller_select.callback = seller_select_callback

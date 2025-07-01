@@ -239,6 +239,42 @@ class ForumMonitor(commands.Cog):
                     # 在創建後將使用者加入 thread
                     await thread.add_user(post_author)
                     await thread.add_user(reacting_user)
+                    # 獲取 reacting_user 的價格資訊
+                    from commands.user_commands import UserCommands
+                    user_cog = self.bot.get_cog('UserCommands')
+                    if user_cog:
+                        user_prices = await user_cog.get_user_item_prices(reacting_user.id)
+                        if user_prices:
+                            price_embed = discord.Embed(
+                                title=f"{reacting_user.display_name} 的物品價格",
+                                description="以下是對方設定的物品價格資訊：",
+                                color=discord.Color.blue()
+                            )
+                            has_price = False
+                            for item_value, details in user_prices.items():
+                                price = details['price']
+                                if price != "無價格設定":
+                                    price_embed.add_field(
+                                        name=f"{details['label']} ({details['description']})",
+                                        value=f"價格: {price}",
+                                        inline=False
+                                    )
+                                    has_price = True
+                            if not has_price:
+                                price_embed.description = "對方未設定任何物品價格。"
+                        else:
+                            price_embed = discord.Embed(
+                                title=f"{reacting_user.display_name} 的物品價格",
+                                description="對方未設定任何物品價格。",
+                                color=discord.Color.blue()
+                            )
+                    else:
+                        price_embed = discord.Embed(
+                            title="無法獲取物品價格",
+                            description="無法獲取對方的物品價格資訊。",
+                            color=discord.Color.red()
+                        )
+
                     await thread.send(
                         f"使用者 {reacting_user.mention} 對交易貼文 {message.jump_url} 有興趣\n"
                         f"貼文者為 {post_author.mention}\n"
@@ -246,6 +282,7 @@ class ForumMonitor(commands.Cog):
                         f"請在這裡確認交易細節。",
                         view=TransactionView(self.bot)
                     )
+                    await thread.send(embed=price_embed)
                     logger.info(f"已在頻道 {delivery_channel.name} 中為交易創建私有 thread: {thread_name}，來源貼文 ID: {source_thread_id}")
                 except Exception as e:
                     logger.error(f"創建私有 thread 時發生錯誤: {str(e)}")
