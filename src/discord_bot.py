@@ -57,6 +57,8 @@ logger.info(f"日誌目錄內容: {os.listdir('/logs') if os.path.exists('/logs'
 intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
+intents.members = True  # 啟用成員意圖以獲取成員信息
+intents.presences = True  # 啟用狀態意圖以獲取用戶狀態信息
 
 # 指令模組清單
 COMMAND_MODULES = [

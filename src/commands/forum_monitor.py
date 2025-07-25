@@ -47,6 +47,11 @@ class ForumMonitor(commands.Cog):
 
         logger.info(f"收到反應事件: 表情符號={str(payload.emoji)}, 頻道ID={payload.channel_id}, 訊息ID={payload.message_id}, 使用者ID={payload.user_id}")
 
+        # 檢查是否為機器人的反應，如果是則忽略
+        if payload.user_id == self.bot.user.id:
+            logger.debug(f"忽略機器人自己的反應事件")
+            return
+
         channel = self.bot.get_channel(payload.channel_id)
         if channel is None:
             logger.error(f"無法找到頻道 {payload.channel_id}")
@@ -69,20 +74,77 @@ class ForumMonitor(commands.Cog):
                 logger.error(f"無法找到伺服器 {payload.guild_id}")
                 return
 
-            member = guild.get_member(payload.user_id)
-            if member is None:
-                logger.error(f"無法找到伺服器中的使用者 {payload.user_id}")
-                return
+            # 使用多種方式嘗試獲取成員資訊
+            member = None
+
+            # 啟用調試模式時使用詳細的調試信息
+            if logger.isEnabledFor(logging.DEBUG):
+                member = await self.debug_member_access(guild, payload.user_id)
+            else:
+                # 方法1: 從快取獲取成員
+                member = guild.get_member(payload.user_id)
+                if member:
+                    logger.debug(f"從快取成功獲取使用者 {payload.user_id}")
+                else:
+                    logger.debug(f"快取中未找到使用者 {payload.user_id}，嘗試從 API 獲取")
+
+                    # 方法2: 從 API 獲取成員
+                    try:
+                        member = await guild.fetch_member(payload.user_id)
+                        logger.info(f"從 API 成功獲取使用者 {payload.user_id}")
+                    except discord.NotFound:
+                        logger.warning(f"使用者 {payload.user_id} 不在伺服器 {guild.name} 中，可能已離開伺服器")
+
+                        # 方法3: 嘗試通過反應事件的 user 對象獲取更多信息
+                        try:
+                            # 先獲取用戶對象，然後檢查是否在伺服器中
+                            user = await self.bot.fetch_user(payload.user_id)
+                            logger.info(f"成功獲取用戶對象: {user.name}#{user.discriminator}")
+
+                            # 檢查用戶是否真的不在伺服器中
+                            # 有時候 fetch_member 會失敗但用戶實際上還在伺服器中
+                            logger.warning(f"用戶 {user.name}#{user.discriminator} 存在但無法作為成員獲取，可能是權限問題或用戶狀態問題")
+                            return
+                        except Exception as user_e:
+                            logger.error(f"無法獲取用戶對象 {payload.user_id}: {str(user_e)}")
+                            return
+                    except discord.Forbidden:
+                        logger.error(f"沒有權限獲取使用者 {payload.user_id} 的資訊")
+                        return
+                    except Exception as e:
+                        logger.error(f"獲取伺服器成員 {payload.user_id} 時發生錯誤: {str(e)}")
+
+                        # 方法4: 作為最後手段，嘗試直接使用 user 對象進行角色檢查
+                        try:
+                            user = await self.bot.fetch_user(payload.user_id)
+                            logger.warning(f"無法獲取成員對象，但可以獲取用戶對象: {user.name}#{user.discriminator}")
+                            logger.warning(f"跳過角色檢查，因為無法獲取成員的角色資訊")
+                            return
+                        except Exception as fallback_e:
+                            logger.error(f"最終回退方案也失敗: {str(fallback_e)}")
+                            return
 
             # 使用 check_role 函數檢查角色權限
             from utils import check_role
-            has_trader_role = await check_role(member, required_role="Trader")
-            logger.info(f"使用者 {member.name} 是否具有 Trader 角色: {has_trader_role}")
-            if not has_trader_role:
-                logger.info(f"使用者 {member.name} 沒有 Trader 角色，忽略反應事件")
+
+            # 確保我們有有效的成員對象
+            if member is None:
+                logger.error(f"無法獲取成員對象進行角色檢查，忽略反應事件")
                 return
 
-            logger.info(f"使用者 {user.name} 在交易論壇頻道對訊息 {message.id} 新增了 {str(payload.emoji)} 反應")
+            has_trader_role = await check_role(member, required_role="Trader")
+
+            # 處理 Discord 用戶名格式變化（新版本可能沒有 discriminator）
+            user_display = f"{member.name}#{member.discriminator}" if member.discriminator != "0" else member.name
+            logger.info(f"使用者 {user_display} (ID: {member.id}) 是否具有 Trader 角色: {has_trader_role}")
+
+            if not has_trader_role:
+                logger.info(f"使用者 {user_display} 沒有 Trader 角色，忽略反應事件")
+                return
+
+            # 同樣處理 user 對象的顯示名稱
+            user_display_name = f"{user.name}#{user.discriminator}" if user.discriminator != "0" else user.name
+            logger.info(f"使用者 {user_display_name} 在交易論壇頻道對訊息 {message.id} 新增了 {str(payload.emoji)} 反應")
             await self.send_cart_delivery_notification(message, user)
         except Exception as e:
             logger.error(f"處理反應事件時發生錯誤: {str(e)}")
@@ -288,6 +350,43 @@ class ForumMonitor(commands.Cog):
                     logger.error(f"創建私有 thread 時發生錯誤: {str(e)}")
         else:
             logger.error(f"無法找到購物車交付頻道 {delivery_channel_id}")
+
+    async def debug_member_access(self, guild, user_id):
+        """調試成員獲取的多種方式"""
+        logger.debug(f"=== 調試成員獲取方式 for user {user_id} in guild {guild.name} ===")
+
+        # 方式1: get_member (快取)
+        member_from_cache = guild.get_member(user_id)
+        logger.debug(f"get_member (快取): {member_from_cache is not None}")
+
+        # 方式2: fetch_member (API)
+        try:
+            member_from_api = await guild.fetch_member(user_id)
+            logger.debug(f"fetch_member (API): 成功")
+        except discord.NotFound:
+            logger.debug(f"fetch_member (API): NotFound")
+            member_from_api = None
+        except discord.Forbidden:
+            logger.debug(f"fetch_member (API): Forbidden")
+            member_from_api = None
+        except Exception as e:
+            logger.debug(f"fetch_member (API): 錯誤 - {str(e)}")
+            member_from_api = None
+
+        # 方式3: 檢查機器人權限
+        bot_member = guild.get_member(self.bot.user.id)
+        if bot_member:
+            permissions = bot_member.guild_permissions
+            logger.debug(f"機器人權限 - view_audit_log: {permissions.view_audit_log}")
+            logger.debug(f"機器人權限 - manage_guild: {permissions.manage_guild}")
+            logger.debug(f"機器人權限 - read_message_history: {permissions.read_message_history}")
+
+        # 方式4: 檢查 guild 的成員數量和設定
+        logger.debug(f"伺服器成員數 (快取): {guild.member_count}")
+        logger.debug(f"伺服器大型狀態: {guild.large}")
+        logger.debug(f"伺服器成員快取大小: {len(guild.members)}")
+
+        return member_from_cache or member_from_api
 
 async def setup(bot):
     await bot.add_cog(ForumMonitor(bot))
