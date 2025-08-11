@@ -550,9 +550,7 @@ class TradeCommands(commands.Cog):
 
                     modal = discord.ui.Modal(title=f"編輯數量 - 第 {page + 1} 頁")
                     inputs = []
-                    restricted_items = [item.value for item in select.options if item.value.startswith("store_gift_pack")] + [
-                        "universe_radio", "universe_special", "dragon_first_charge"
-                    ]
+                    restricted_items = ["universe_radio", "universe_special", "dragon_first_charge"]
                     for value in page_items:
                         label = next(opt.label for opt in select.options if opt.value == value)
                         qty_input = discord.ui.TextInput(
@@ -581,9 +579,7 @@ class TradeCommands(commands.Cog):
                                     error_fields.append(f"{input_field.label}: 數量必須介於 1 到 10 之間")
                                     continue
                                 # 檢查是否為限制只能購買一個的物品
-                                restricted_items = [item.value for item in select.options if item.value.startswith("store_gift_pack")] + [
-                                    "universe_radio", "universe_special", "dragon_first_charge"
-                                ]
+                                restricted_items = ["universe_radio", "universe_special", "dragon_first_charge"]
                                 if value in restricted_items and qty > 1:
                                     error_fields.append(f"{input_field.label}: 此物品限制只能購買 1 個")
                                     continue
