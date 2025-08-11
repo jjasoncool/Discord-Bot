@@ -86,6 +86,30 @@ class ArticleMonitor:
 
         return []
 
+    async def fetch_article_by_id(self, article_id: int) -> Optional[Dict]:
+        """從 scraper API 根據 ID 取得單篇文章"""
+        try:
+            url = f"{self.scraper_api_url}/api/articles/{article_id}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=15) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if data.get('success') and data.get('article'):
+                            logger.info(f"成功根據 ID {article_id} 取得文章")
+                            return data['article']
+                        else:
+                            logger.error(f"API 回應錯誤（ID: {article_id}）: {data.get('message', '未知錯誤')}")
+                    else:
+                        # 嘗試解析錯誤回應
+                        try:
+                            error_data = await response.json()
+                            logger.error(f"API 請求失敗（ID: {article_id}），狀態碼: {response.status}, 細節: {error_data.get('detail')}")
+                        except Exception:
+                             logger.error(f"API 請求失敗（ID: {article_id}），狀態碼: {response.status}")
+        except Exception as e:
+            logger.error(f"根據 ID {article_id} 取得文章時發生錯誤: {e}")
+        return None
+
     def _parse_html_content(self, html_content: str) -> tuple[str, List[str]]:
         """
         解析 HTML 內容，轉換為 Discord 支援的 Markdown 格式（使用 html2text）
@@ -274,7 +298,7 @@ class ArticleMonitor:
         return embed
 
     async def send_article_to_channel(self, channel_id: int, article: Dict):
-        """發送文章到指定頻道（支援多圖片附件）"""
+        """發送文章到指定頻道（支援多圖片附件，並在超過限制時分批發送）"""
         import discord
 
         try:
@@ -292,41 +316,46 @@ class ArticleMonitor:
             _, desc_images = self._parse_html_content(description)
             all_images = content_images + desc_images
 
-            # 準備附件（第二張圖片開始）
-            files = []
-            if len(all_images) > 1:
-                logger.info(f"準備下載 {len(all_images) - 1} 張附件圖片")
-                logger.info(f"所有圖片 URL: {all_images}")
-
-                # 限制附件數量（Discord 最多 10 個附件）
-                max_attachments = min(9, len(all_images) - 1)  # 保留一個位置給可能的其他附件
-                attachment_images = all_images[1:max_attachments + 1]
-                logger.info(f"準備作為附件的圖片 URL: {attachment_images}")
-
-                async with aiohttp.ClientSession() as session:
-                    for i, image_url in enumerate(attachment_images):
-                        logger.info(f"開始下載第 {i+2} 張圖片（附件 {i+1}）: {image_url}")
-                        image_data = await self._download_image_as_file(image_url, session)
-                        if image_data:
-                            filename = self._get_image_filename(image_url, i + 2)
-                            discord_file = discord.File(image_data, filename=filename)
-                            files.append(discord_file)
-                            logger.info(f"✅ 已準備附件: {filename}")
-                        else:
-                            logger.warning(f"❌ 跳過無法下載的圖片: {image_url}")
-
-                logger.info(f"成功準備 {len(files)} 個圖片附件")
-
-            # 先發送 embed 消息
+            # 先發送主要的 embed 消息
             await channel.send(embed=embed)
             logger.info("📤 發送文章 embed 完成")
 
-            # 如果有附件，稍後發送附件
-            if files:
-                logger.info(f"📎 準備發送 {len(files)} 個圖片附件...")
-                await asyncio.sleep(0.5)  # 短暫延遲確保順序
-                await channel.send(files=files)
-                logger.info(f"✅ 發送 {len(files)} 個圖片附件完成")
+            # 處理附件圖片（從第二張開始）
+            if len(all_images) > 1:
+                attachment_images = all_images[1:]
+                logger.info(f"總共有 {len(attachment_images)} 張附件圖片需要發送。")
+
+                # 將附件圖片分塊，每塊最多 10 張
+                chunk_size = 10
+                image_chunks = [attachment_images[i:i + chunk_size] for i in range(0, len(attachment_images), chunk_size)]
+
+                for i, chunk in enumerate(image_chunks):
+                    logger.info(f"準備發送第 {i+1} 批附件，共 {len(chunk)} 張圖片。")
+                    files = []
+                    async with aiohttp.ClientSession() as session:
+                        for j, image_url in enumerate(chunk):
+                            # 計算原始圖片索引
+                            original_index = sum(len(c) for c in image_chunks[:i]) + j + 2
+                            logger.info(f"開始下載第 {original_index} 張圖片（批次 {i+1}，圖片 {j+1}）: {image_url}")
+                            download_result = await self._download_image_as_file(image_url, session)
+                            if download_result:
+                                image_data, detected_ext = download_result
+                                filename = self._get_image_filename_with_ext(image_url, original_index, detected_ext)
+                                discord_file = discord.File(image_data, filename=filename)
+                                files.append(discord_file)
+                                logger.info(f"✅ 已準備附件: {filename}")
+                            else:
+                                logger.warning(f"❌ 跳過無法下載的圖片: {image_url}")
+
+                    if files:
+                        logger.info(f"📎 準備發送 {len(files)} 個圖片附件...")
+                        await asyncio.sleep(0.5)  # 短暫延遲確保順序
+
+                        # 直接發送附件，不顯示提示訊息
+                        await channel.send(files=files)
+                        logger.info(f"✅ 發送 {len(files)} 個圖片附件完成")
+                    else:
+                        logger.warning(f"批次 {i+1} 中沒有成功準備的附件。")
             else:
                 logger.info("📎 無附件需要發送")
 
@@ -348,7 +377,7 @@ class ArticleMonitor:
             articles = await self.fetch_recent_articles(days=3)
 
             if not articles:
-                logger.info("沒有找到新文章")
+                logger.info("[排程]沒有找到新文章")
                 return
 
             # 篩選出未發送的文章
@@ -358,30 +387,31 @@ class ArticleMonitor:
                     new_articles.append(article)
 
             if not new_articles:
-                logger.debug("沒有新的未發送文章")
+                logger.info("[排程]沒有新的未發送文章")
                 return
 
-            logger.info(f"找到 {len(new_articles)} 篇新文章（已在資料庫層面按時間排序：舊→新）")
+            logger.info(f"[排程]找到 {len(new_articles)} 篇新文章（已在資料庫層面按時間排序：舊→新）")
 
             # 記錄文章時間順序（用於除錯）
             for i, article in enumerate(new_articles):
                 time_str = article.get('start_time') or article.get('create_time') or '無時間'
-                logger.debug(f"  第 {i+1} 篇: {article.get('article_id')} - {time_str}")
+                logger.debug(f"[排程]  第 {i+1} 篇: {article.get('article_id')} - {time_str}")
 
             # 發送新文章到所有指定頻道
             for article in new_articles:
                 for channel_id in channel_ids:
                     success = await self.send_article_to_channel(channel_id, article)
                     if success:
+                        logger.info(f"[排程]成功發送文章 {article['article_id']} 到頻道 {channel_id}")
                         # 每篇文章之間稍微延遲，避免頻率限制
                         await asyncio.sleep(1)
 
         except Exception as e:
-            logger.error(f"檢查新文章時發生錯誤: {e}")
+            logger.error(f"[排程]檢查新文章時發生錯誤: {e}")
 
     async def start_monitoring(self, channel_ids: List[int], check_interval: int = 180):
         """開始監控文章（每3分鐘檢查一次）"""
-        logger.info(f"開始監控文章，檢查間隔: {check_interval} 秒")
+        logger.info(f"[排程]開始監控文章，檢查間隔: {check_interval} 秒")
 
         while True:
             try:
@@ -389,19 +419,19 @@ class ArticleMonitor:
                 await asyncio.sleep(check_interval)
 
             except Exception as e:
-                logger.error(f"監控循環發生錯誤: {e}")
+                logger.error(f"[排程]監控循環發生錯誤: {e}")
                 await asyncio.sleep(60)  # 發生錯誤時短暫延遲後重試
 
-    async def _download_image_as_file(self, image_url: str, session: aiohttp.ClientSession) -> Optional[io.BytesIO]:
+    async def _download_image_as_file(self, image_url: str, session: aiohttp.ClientSession) -> Optional[tuple]:
         """
-        下載圖片並返回 BytesIO 物件
+        下載圖片並返回 BytesIO 物件和檔案副檔名
 
         Args:
             image_url: 圖片 URL
             session: aiohttp 會話
 
         Returns:
-            BytesIO 物件或 None（如果下載失敗）
+            (BytesIO 物件, 副檔名) 或 None（如果下載失敗）
         """
         try:
             logger.info(f"🔄 開始下載圖片: {image_url}")
@@ -414,9 +444,23 @@ class ArticleMonitor:
                         logger.warning(f"⚠️ 圖片過大，跳過: {image_url} ({len(content)} bytes)")
                         return None
 
+                    # 從 Content-Type 推斷副檔名
+                    content_type = response.headers.get('content-type', '').lower()
+                    ext = '.jpg'  # 預設
+                    if 'png' in content_type:
+                        ext = '.png'
+                    elif 'gif' in content_type:
+                        ext = '.gif'
+                    elif 'webp' in content_type:
+                        ext = '.webp'
+                    elif 'bmp' in content_type:
+                        ext = '.bmp'
+                    elif 'jpeg' in content_type or 'jpg' in content_type:
+                        ext = '.jpg'
+
                     image_data = io.BytesIO(content)
-                    logger.info(f"✅ 成功下載圖片: {image_url} ({len(content)} bytes)")
-                    return image_data
+                    logger.info(f"✅ 成功下載圖片: {image_url} ({len(content)} bytes), Content-Type: {content_type}, 推斷副檔名: {ext}")
+                    return (image_data, ext)
                 else:
                     logger.warning(f"❌ 下載圖片失敗，狀態碼 {response.status}: {image_url}")
                     return None
@@ -427,6 +471,53 @@ class ArticleMonitor:
         except Exception as e:
             logger.error(f"下載圖片時發生錯誤 {image_url}: {e}")
             return None
+
+    def _get_image_filename_with_ext(self, image_url: str, index: int, detected_ext: str) -> str:
+        """
+        從 URL 獲取圖片檔名，優先使用檢測到的副檔名
+
+        Args:
+            image_url: 圖片 URL
+            index: 圖片索引
+            detected_ext: 從 Content-Type 檢測到的副檔名
+
+        Returns:
+            檔名字串
+        """
+        try:
+            # 嘗試從 URL 解析檔名
+            from urllib.parse import urlparse
+            parsed = urlparse(image_url)
+            filename = os.path.basename(parsed.path)
+
+            # 檢查是否有檔名（不包含副檔名）
+            name, url_ext = os.path.splitext(filename)
+            
+            # 優先使用檢測到的副檔名，其次使用 URL 中的副檔名
+            final_ext = detected_ext
+            if not final_ext and url_ext and url_ext.lower() in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']:
+                final_ext = url_ext
+
+            # 如果還是沒有副檔名，使用預設
+            if not final_ext:
+                final_ext = '.jpg'
+
+            # 如果有合適的檔名，就使用它
+            if name and len(name) > 0:
+                filename = name + final_ext
+            else:
+                filename = f"image_{index}{final_ext}"
+
+            # 確保檔名是安全的（移除特殊字符）
+            import re
+            filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+
+            return filename
+
+        except Exception as e:
+            logger.warning(f"生成圖片檔名時發生錯誤: {e}, URL: {image_url}")
+            # 發生錯誤時使用預設檔名
+            return f"image_{index}{detected_ext or '.jpg'}"
 
     def _get_image_filename(self, image_url: str, index: int) -> str:
         """
@@ -445,17 +536,41 @@ class ArticleMonitor:
             parsed = urlparse(image_url)
             filename = os.path.basename(parsed.path)
 
-            # 如果沒有副檔名，根據常見情況添加
-            if not os.path.splitext(filename)[1]:
-                filename += '.jpg'  # 預設為 jpg
+            # 檢查是否有副檔名
+            name, ext = os.path.splitext(filename)
+            
+            # 如果沒有副檔名，或者副檔名不是常見的圖片格式，就根據 URL 判斷或使用預設
+            if not ext or ext.lower() not in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']:
+                # 嘗試從 URL 中判斷圖片格式
+                if '.png' in image_url.lower():
+                    ext = '.png'
+                elif '.gif' in image_url.lower():
+                    ext = '.gif'
+                elif '.webp' in image_url.lower():
+                    ext = '.webp'
+                elif '.bmp' in image_url.lower():
+                    ext = '.bmp'
+                else:
+                    ext = '.jpg'  # 預設為 jpg
+                
+                # 如果原本有檔名但沒有正確副檔名，就保留檔名
+                if name:
+                    filename = name + ext
+                else:
+                    filename = f"image_{index}{ext}"
 
             # 如果檔名為空或只有副檔名，使用索引
             if not filename or filename.startswith('.'):
                 filename = f"image_{index}.jpg"
 
+            # 確保檔名是安全的（移除特殊字符）
+            import re
+            filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+
             return filename
 
-        except Exception:
+        except Exception as e:
+            logger.warning(f"生成圖片檔名時發生錯誤: {e}, URL: {image_url}")
             # 發生錯誤時使用預設檔名
             return f"image_{index}.jpg"
 

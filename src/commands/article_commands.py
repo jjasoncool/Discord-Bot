@@ -397,6 +397,60 @@ class ArticleCommands(commands.Cog):
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
 
+    @app_commands.command(name="resend_article", description="根據文章 ID 重新發送一篇文章")
+    @app_commands.describe(article_id="要重新發送的文章 ID")
+    async def resend_article(self, interaction: discord.Interaction, article_id: int):
+        """根據文章 ID 重新發送一篇文章到監控的頻道，用於測試"""
+        from utils import check_guild
+
+        # 檢查權限
+        if not await check_guild(interaction, admin_only=True):
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            if not self.article_monitor:
+                await interaction.followup.send("❌ 官方文章更新器未初始化", ephemeral=True)
+                return
+
+            # 檢查是否有監控的頻道
+            if not self.monitored_channels:
+                await interaction.followup.send("❌ 沒有設定監控頻道，請先使用 `/article_manager` 開始監控。", ephemeral=True)
+                return
+
+            # 根據 ID 取得文章
+            article = await self.article_monitor.fetch_article_by_id(article_id)
+
+            if not article:
+                await interaction.followup.send(f"❌ 找不到 ID 為 `{article_id}` 的文章。", ephemeral=True)
+                return
+
+            # 發送到所有監控的頻道
+            success_count = 0
+            for channel_id in self.monitored_channels:
+                success = await self.article_monitor.send_article_to_channel(channel_id, article)
+                if success:
+                    success_count += 1
+
+            if success_count > 0:
+                channel_names = []
+                for channel_id in self.monitored_channels:
+                    channel = self.bot.get_channel(channel_id)
+                    channel_names.append(f"#{channel.name}" if channel else f"<#{channel_id}>")
+
+                await interaction.followup.send(
+                    f"✅ 已成功將文章 `{article_id}` 重新發送到 {success_count} 個頻道：{', '.join(channel_names)}",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(f"❌ 發送文章 `{article_id}` 到所有頻道都失敗，請查看日誌。", ephemeral=True)
+
+        except Exception as e:
+            logger.error(f"重新發送文章 {article_id} 失敗: {e}")
+            await interaction.followup.send(f"❌ 重新發送文章時發生錯誤：{str(e)}", ephemeral=True)
+
+
 async def setup(bot):
     """載入 Cog"""
     await bot.add_cog(ArticleCommands(bot))

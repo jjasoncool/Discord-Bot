@@ -44,6 +44,12 @@ class NewArticlesResponse(BaseModel):
     articles: List[ArticleResponse]
     total_count: int
 
+class SingleArticleResponse(BaseModel):
+    """單一文章查詢回應模型"""
+    success: bool
+    article: Optional[ArticleResponse] = None
+    message: Optional[str] = None
+
 # 依賴注入：獲取資料庫 session
 def get_db():
     """獲取資料庫 session"""
@@ -208,7 +214,7 @@ async def get_articles_for_discord(
         logger.error(f"Discord Bot 查詢文章時發生錯誤: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"查詢文章失敗: {str(e)}")
 
-@app.get("/api/articles/{article_id}", response_model=ArticleResponse)
+@app.get("/api/articles/{article_id}", response_model=SingleArticleResponse)
 async def get_article_by_id(
     article_id: int,
     db: Session = Depends(get_db)
@@ -221,7 +227,7 @@ async def get_article_by_id(
         db: 資料庫 session
 
     Returns:
-        ArticleResponse: 文章資料
+        SingleArticleResponse: 包含單一文章資料或錯誤訊息的回應
     """
     try:
         article = db.query(ArticleMenu).outerjoin(
@@ -231,17 +237,18 @@ async def get_article_by_id(
         ).first()
 
         if not article:
-            raise HTTPException(status_code=404, detail=f"找不到 ID 為 {article_id} 的文章")
+            logger.warning(f"API 查詢：找不到 ID 為 {article_id} 的文章")
+            return SingleArticleResponse(success=False, message=f"找不到 ID 為 {article_id} 的文章")
 
         # 獲取關聯的詳細資料
         detail = article.article_detail if hasattr(article, 'article_detail') else None
 
-        return ArticleResponse(
+        response_data = ArticleResponse(
             article_id=article.article_id,
             article_title=article.article_title,
             article_desc=article.article_desc,
-            article_content=article.article_content,  # 主表簡短版本
-            article_content_full=detail.article_content if detail else None,  # 副表完整版本
+            article_content=article.article_content,
+            article_content_full=detail.article_content if detail else None,
             article_type=article.article_type,
             article_type_name=detail.article_type_name if detail else None,
             create_time=article.create_time.isoformat() if article.create_time else "",
@@ -252,10 +259,11 @@ async def get_article_by_id(
             game_id=detail.game_id if detail else None
         )
 
-    except HTTPException:
-        raise
+        return SingleArticleResponse(success=True, article=response_data)
+
     except Exception as e:
         logger.error(f"查詢文章 {article_id} 時發生錯誤: {str(e)}", exc_info=True)
+        # 保持 HTTP 500 錯誤，因為這是伺服器內部錯誤
         raise HTTPException(status_code=500, detail=f"查詢文章失敗: {str(e)}")
 
 @app.get("/api/debug/tables")
