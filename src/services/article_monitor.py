@@ -14,8 +14,11 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from pathlib import Path
 from bs4 import BeautifulSoup
+from utils.logger_config import get_discord_bot_logger, get_article_monitor_logger
 
-logger = logging.getLogger('discord_bot')
+# 設置日誌器（使用統一配置）
+logger = get_discord_bot_logger()
+article_logger = get_article_monitor_logger()
 
 class ArticleMonitor:
     """官方文章更新類別"""
@@ -377,7 +380,7 @@ class ArticleMonitor:
             articles = await self.fetch_recent_articles(days=3)
 
             if not articles:
-                logger.info("[排程]沒有找到新文章")
+                article_logger.info("[排程]沒有找到新文章")
                 return
 
             # 篩選出未發送的文章
@@ -387,10 +390,11 @@ class ArticleMonitor:
                     new_articles.append(article)
 
             if not new_articles:
-                logger.info("[排程]沒有新的未發送文章")
+                # 使用專門的文章監控日誌器記錄，避免汙染主日誌
+                article_logger.info("[排程]沒有新的未發送文章")
                 return
 
-            logger.info(f"[排程]找到 {len(new_articles)} 篇新文章（已在資料庫層面按時間排序：舊→新）")
+            article_logger.info(f"[排程]找到 {len(new_articles)} 篇新文章（已在資料庫層面按時間排序：舊→新）")
 
             # 記錄文章時間順序（用於除錯）
             for i, article in enumerate(new_articles):
@@ -411,7 +415,7 @@ class ArticleMonitor:
 
     async def start_monitoring(self, channel_ids: List[int], check_interval: int = 180):
         """開始監控文章（每3分鐘檢查一次）"""
-        logger.info(f"[排程]開始監控文章，檢查間隔: {check_interval} 秒")
+        article_logger.info(f"[排程]開始監控文章，檢查間隔: {check_interval} 秒")
 
         while True:
             try:
@@ -419,7 +423,7 @@ class ArticleMonitor:
                 await asyncio.sleep(check_interval)
 
             except Exception as e:
-                logger.error(f"[排程]監控循環發生錯誤: {e}")
+                article_logger.error(f"[排程]監控循環發生錯誤: {e}")
                 await asyncio.sleep(60)  # 發生錯誤時短暫延遲後重試
 
     async def _download_image_as_file(self, image_url: str, session: aiohttp.ClientSession) -> Optional[tuple]:
@@ -492,7 +496,7 @@ class ArticleMonitor:
 
             # 檢查是否有檔名（不包含副檔名）
             name, url_ext = os.path.splitext(filename)
-            
+
             # 優先使用檢測到的副檔名，其次使用 URL 中的副檔名
             final_ext = detected_ext
             if not final_ext and url_ext and url_ext.lower() in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']:
@@ -538,7 +542,7 @@ class ArticleMonitor:
 
             # 檢查是否有副檔名
             name, ext = os.path.splitext(filename)
-            
+
             # 如果沒有副檔名，或者副檔名不是常見的圖片格式，就根據 URL 判斷或使用預設
             if not ext or ext.lower() not in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']:
                 # 嘗試從 URL 中判斷圖片格式
@@ -552,7 +556,7 @@ class ArticleMonitor:
                     ext = '.bmp'
                 else:
                     ext = '.jpg'  # 預設為 jpg
-                
+
                 # 如果原本有檔名但沒有正確副檔名，就保留檔名
                 if name:
                     filename = name + ext

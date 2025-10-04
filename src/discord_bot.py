@@ -4,49 +4,22 @@ import time
 import logging
 import asyncio
 import json
-from logging.handlers import RotatingFileHandler
 import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
+from utils.logger_config import get_discord_bot_logger
 
 # 載入環境變數
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
-LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
 
-# 設置日誌系統
-logger = logging.getLogger('discord_bot')
-# 設置日誌級別
-log_level = getattr(logging, LOG_LEVEL, logging.INFO)
-logger.setLevel(log_level)
-
-# 控制台處理器
-console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setLevel(log_level)
-console_format = logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s', '%Y-%m-%d %H:%M:%S')
-console_handler.setFormatter(console_format)
-
-# 文件處理器（帶輪替）
-file_handler = RotatingFileHandler(
-    '/logs/discord_bot.log',
-    maxBytes=10*1024*1024,  # 10MB
-    backupCount=50,          # 保留50個備份
-    encoding='utf-8'
-)
-
-file_handler.setLevel(log_level)
-file_format = logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s', '%Y-%m-%d %H:%M:%S')
-file_handler.setFormatter(file_format)
-
-# 添加處理器到logger
-logger.addHandler(console_handler)
-logger.addHandler(file_handler)
+# 設置日誌系統（使用統一配置）
+logger = get_discord_bot_logger()
 
 # 記錄環境變數和系統信息（安全方式）
 logger.info(f"Discord 機器人啟動於 {time.strftime('%Y-%m-%d %H:%M:%S')}")
 logger.info(f"Python 版本: {sys.version}")
-logger.info(f"日誌級別設置為: {LOG_LEVEL}")
 logger.info(f"日誌文件位置: /logs/discord_bot.log")
 logger.info(f"環境變數中的 DISCORD_TOKEN: {'已設置' if TOKEN else '未設置'}")
 logger.info(f"當前工作目錄: {os.getcwd()}")
