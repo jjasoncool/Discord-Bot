@@ -3,6 +3,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import asyncio
+import traceback
 # 從 constants.py 導入物品選項配置
 from constants import ITEMS
 
