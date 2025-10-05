@@ -19,7 +19,7 @@ class TradeCommands(commands.Cog):
         """斜線命令：提供交易相關資訊"""
         logger.info(f'收到來自 {interaction.user} 的 /trade_info 斜線命令')
 
-        from utils import check_guild
+        from utils.utils import check_guild
         if not await check_guild(interaction, required_role="Trader"):
             return
 
@@ -97,7 +97,7 @@ class TradeCommands(commands.Cog):
         logger.info(f"已鎖定並封存 thread {thread.name}，ID: {thread.id}")
 
         # 清除來源貼文中的反應
-        from utils import get_trade_forum_channel_id
+        from utils.utils import get_trade_forum_channel_id
         try:
             forum_channel_id = await get_trade_forum_channel_id(config_file="config.json", caller="TradeCommands")
             logger.info(f"獲取到交易論壇頻道 ID: {forum_channel_id}")
@@ -153,7 +153,7 @@ class TradeCommands(commands.Cog):
 
     async def handle_trade_confirmation(self, message, source_post_id):
         """處理交易確認請求"""
-        from utils import get_trade_forum_channel_id
+        from utils.utils import get_trade_forum_channel_id
         thread = message.channel
         thread_name = thread.name
 
@@ -268,7 +268,7 @@ class TradeCommands(commands.Cog):
 
     async def archive_source_message(self, thread, source_message):
         """將來源貼文內容複製到 archive 頻道並刪除來源貼文"""
-        from utils import get_archive_channel_id
+        from utils.utils import get_archive_channel_id
         try:
             archive_channel_id = await get_archive_channel_id(config_file="config.json", caller="TradeCommands")
             archive_channel = self.bot.get_channel(archive_channel_id)
@@ -329,7 +329,7 @@ class TradeCommands(commands.Cog):
         """斜線命令：允許賣家設定物品價格，使用分頁功能"""
         logger.info(f'收到來自 {interaction.user} 的 /set_item_prices 斜線命令')
 
-        from utils import check_guild
+        from utils.utils import check_guild
         if not await check_guild(interaction, owner_only=False, required_role="Trader"):
             return
 
@@ -450,7 +450,7 @@ class TradeCommands(commands.Cog):
         logger.info(f'收到來自 {interaction.user} 的 /select_item 斜線命令')
 
         # 檢查是否在伺服器中使用並檢查角色權限
-        from utils import check_guild
+        from utils.utils import check_guild
         if not await check_guild(interaction, owner_only=False):
             return
 
@@ -624,7 +624,7 @@ class TradeCommands(commands.Cog):
                             logger.info(f'用戶已確認購買: {selected_items}')
 
                             # 檢查是否已設定交易論壇頻道
-                            from utils import get_trade_forum_channel_id
+                            from utils.utils import get_trade_forum_channel_id
                             logger.debug("準備調用 get_trade_forum_channel_id 函數 (調用者: TradeCommands)")
                             forum_channel_id = await get_trade_forum_channel_id(config_file="config.json", caller="TradeCommands")
                             logger.debug(f"從 get_trade_forum_channel_id 函數返回的 forum_channel_id: {forum_channel_id} (調用者: TradeCommands)")

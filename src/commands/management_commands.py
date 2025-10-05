@@ -2,7 +2,7 @@ import logging
 import discord
 from discord import app_commands
 from discord.ext import commands
-from utils import create_paginated_view, ITEMS_PER_PAGE
+from utils.utils import create_paginated_view, ITEMS_PER_PAGE
 
 # 獲取 logger
 logger = logging.getLogger('discord_bot')
@@ -15,7 +15,7 @@ class ManagementCommands(commands.Cog):
 
     async def _check_guild_and_owner(self, interaction: discord.Interaction, owner_only: bool = True, admin_only: bool = False) -> bool:
         """檢查命令是否在伺服器中使用且使用者是否有相應權限"""
-        from utils import check_guild
+        from utils.utils import check_guild
         return await check_guild(interaction, owner_only=owner_only, admin_only=admin_only)
 
     async def _send_error_message(self, interaction: discord.Interaction, message: str):

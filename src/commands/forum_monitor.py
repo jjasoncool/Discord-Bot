@@ -17,7 +17,7 @@ class ForumMonitor(commands.Cog):
             logger.debug(f"忽略非目標表情符號: {str(payload.emoji)}，目標表情符號列表: {self.target_emojis}")
             return  # 只處理指定的表情符號
 
-        from utils import get_trade_forum_channel_id
+        from utils.utils import get_trade_forum_channel_id
         logger.debug("準備調用 get_trade_forum_channel_id 函數 (調用者: ForumMonitor)")
         forum_channel_id = await get_trade_forum_channel_id(config_file="config.json", caller="ForumMonitor")
         logger.info(f"獲取到交易論壇頻道 ID: {forum_channel_id}")
@@ -125,7 +125,7 @@ class ForumMonitor(commands.Cog):
                             return
 
             # 使用 check_role 函數檢查角色權限
-            from utils import check_role
+            from utils.utils import check_role
 
             # 確保我們有有效的成員對象
             if member is None:
@@ -151,7 +151,7 @@ class ForumMonitor(commands.Cog):
 
     async def send_cart_delivery_notification(self, message, reacting_user):
         """發送購物車交付通知到指定頻道"""
-        from utils import get_cart_delivery_channel_id
+        from utils.utils import get_cart_delivery_channel_id
         logger.debug("準備調用 get_cart_delivery_channel_id 函數 (調用者: ForumMonitor)")
         delivery_channel_id = await get_cart_delivery_channel_id(config_file="config.json", caller="ForumMonitor")
         logger.info(f"獲取到購物車交付頻道 ID: {delivery_channel_id}")

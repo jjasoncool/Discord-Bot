@@ -27,7 +27,7 @@ class ArticleCommands(commands.Cog):
     @app_commands.command(name="article_manager", description="官方文章更新管理中心")
     async def article_manager(self, interaction: discord.Interaction):
         """官方文章更新管理中心 - 統一入口"""
-        from utils import check_guild
+        from utils.utils import check_guild
 
         # 檢查權限
         if not await check_guild(interaction, admin_only=True):
@@ -401,7 +401,7 @@ class ArticleCommands(commands.Cog):
     @app_commands.describe(article_id="要重新發送的文章 ID")
     async def resend_article(self, interaction: discord.Interaction, article_id: int):
         """根據文章 ID 重新發送一篇文章到監控的頻道，用於測試"""
-        from utils import check_guild
+        from utils.utils import check_guild
 
         # 檢查權限
         if not await check_guild(interaction, admin_only=True):

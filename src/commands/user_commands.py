@@ -16,7 +16,7 @@ monitored_channels_file = "settings/monitored_channels.json"
 
 import json
 import os
-from utils import create_paginated_view, ITEMS_PER_PAGE
+from utils.utils import create_paginated_view, ITEMS_PER_PAGE
 
 def load_monitored_channels():
     """從檔案中讀取監控設定"""
@@ -64,7 +64,7 @@ class UserCommands(commands.Cog):
 
     async def _check_guild_and_owner(self, interaction: discord.Interaction, owner_only: bool = False) -> bool:
         """檢查命令是否在伺服器中使用且使用者是否為伺服器擁有者（如果啟用了限制）"""
-        from utils import check_guild
+        from utils.utils import check_guild
         return await check_guild(interaction, owner_only)
 
     async def _send_error_message(self, interaction: discord.Interaction, message: str):
@@ -371,7 +371,7 @@ class UserCommands(commands.Cog):
     async def on_message(self, message):
         # 避免處理機器人訊息（包括自己的訊息），除非是在交易論壇頻道中
         if message.author.bot:
-            from utils import get_trade_forum_channel_id
+            from utils.utils import get_trade_forum_channel_id
             # 獲取交易論壇頻道 ID
             try:
                 trade_forum_channel_id = await get_trade_forum_channel_id(config_file="config.json", caller="UserCommands")
@@ -578,7 +578,7 @@ class UserCommands(commands.Cog):
         """斜線命令：查看物品價格"""
         logger.info(f'收到來自 {interaction.user} 的 /list_item_price 斜線命令')
 
-        from utils import check_guild
+        from utils.utils import check_guild
         if not await check_guild(interaction):
             return
 
