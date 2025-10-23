@@ -7,3 +7,5 @@ fake-useragent
 fastapi
 uvicorn
 pydantic
+selenium
+webdriver-manager
