@@ -27,5 +27,19 @@ DATABASE_CONFIG = {
 FEATURES = {
     "save_to_json": True,  # 是否同時儲存 JSON 檔案
     "save_to_database": True,  # 是否儲存到資料庫
-    "debug_mode": False  # 除錯模式
+    "debug_mode": False,  # 除錯模式
+}
+
+# Facebook 抓取設定
+FACEBOOK_CONFIG = {
+    "target_url": "https://www.facebook.com/WutheringWaves.ZH/",
+    "max_links": 3,
+    "headless": True,
+    "scroll_rounds": 6,
+    "human_delay_min": (0.35, 0.9),  # 隨機延遲範圍
+    "debug_mode": FEATURES["debug_mode"],  # 從功能設定讀取除錯模式
+    "json_output_file": "data/fb_posts.json",  # FB 貼文 JSON 檔案名稱 (相對 data 目錄)
+    "html_log_dir": "./logs",  # HTML 日誌目錄
+    "data_dir": "./data",  # 資料檔案目錄
+    "max_scraping_sessions": 3,  # 保留幾次擷取結果 (會根據 max_links 計算最大 HTML 檔案數)
 }
