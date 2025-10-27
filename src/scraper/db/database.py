@@ -7,7 +7,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 
-from .models import ArticleMenu, ArticleDetail, SystemState
+from .models import ArticleMenu, ArticleDetail, SystemState, FBPost, FBImage
 from utils.datetime_utils import parse_datetime
 from utils.logger import get_logger
 
@@ -186,6 +186,39 @@ class DatabaseManager:
             self.session.rollback()
         except Exception as e:
             self.logger.error(f"回滾失敗: {str(e)}", exc_info=True)
+
+    def get_fb_post_by_url(self, url: str) -> Optional[FBPost]:
+        """根據 URL 查詢 FB 貼文"""
+        try:
+            return self.session.query(FBPost).filter(FBPost.url == url).first()
+        except Exception as e:
+            self.logger.error(f"查詢 FB 貼文失敗: {str(e)}")
+            return None
+
+    def save_fb_post(self, post_data: dict) -> Optional[FBPost]:
+        """儲存單篇 FB 貼文（不檢查重複，由呼叫方處理）"""
+        try:
+            new_post = FBPost(
+                post_id=post_data["post_id"],
+                url=post_data["url"],
+                text=post_data.get("text", ""),
+                text_md=post_data.get("text_md", ""),
+                timestamp=parse_datetime(post_data.get("timestamp"))
+            )
+            self.session.add(new_post)
+            self.session.flush()  # 確保 new_post.id 已被指派
+
+            # 儲存圖片 - 使用資料庫自增 id 作為外鍵
+            if post_data.get("images"):
+                for img_url in post_data["images"]:
+                    new_img = FBImage(fb_post_id=new_post.id, image_url=img_url)
+                    self.session.add(new_img)
+
+            return new_post
+
+        except Exception as e:
+            self.logger.error(f"儲存 FB 貼文失敗: {str(e)}")
+            return None
 
     def close(self):
         """關閉 session"""

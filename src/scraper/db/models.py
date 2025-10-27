@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, ForeignKey, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime, timezone
@@ -98,6 +98,45 @@ class SystemState(Base):
 
     def __repr__(self):
         return f"<SystemState(key='{self.key}', value='{self.value}')>"
+
+class FBPost(Base):
+    """Facebook 貼文主表"""
+    __tablename__ = 'fb_posts'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    post_id = Column(String(100), unique=True, nullable=False, index=True)  # fb_20241201_123456_1
+    url = Column(String(1000), unique=True, nullable=False, index=True)  # 貼文 URL
+    text = Column(Text)  # 純文字內容
+    text_md = Column(Text)  # Discord Markdown 格式文字
+    timestamp = Column(DateTime)  # 貼文時間戳
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    # 關聯：一對多圖片
+    images = relationship("FBImage", back_populates="post", cascade="all, delete-orphan")
+
+    def __repr__(self):
+        return f"<FBPost(post_id='{self.post_id}', url='{self.url}')>"
+
+class FBImage(Base):
+    """Facebook 貼文圖片子表"""
+    __tablename__ = 'fb_images'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    fb_post_id = Column(Integer, ForeignKey('fb_posts.id'), nullable=False)  # 使用主表 id 作為外鍵
+    image_url = Column(String(1000), nullable=False)  # 圖片 URL
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    # 關聯
+    post = relationship("FBPost", back_populates="images")
+
+    # 複合唯一約束：同貼文不重複，同 URL 可重複但不同貼文
+    __table_args__ = (
+        UniqueConstraint('fb_post_id', 'image_url', name='unique_post_image'),
+    )
+
+    def __repr__(self):
+        return f"<FBImage(fb_post_id={self.fb_post_id}, image_url='{self.image_url}')>"
 
 # 建立資料庫引擎
 engine = create_engine(DATABASE_CONFIG["url"], echo=False)

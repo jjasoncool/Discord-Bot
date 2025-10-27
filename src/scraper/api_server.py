@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 from pydantic import BaseModel
 
-from db.models import ArticleMenu, ArticleDetail, get_db_session
+from db.models import ArticleMenu, ArticleDetail, FBPost, FBImage, get_db_session
 from utils.logger import get_logger
 
 # 建立 FastAPI 實例
@@ -48,6 +48,33 @@ class SingleArticleResponse(BaseModel):
     """單一文章查詢回應模型"""
     success: bool
     article: Optional[ArticleResponse] = None
+    message: Optional[str] = None
+
+class FBPostResponse(BaseModel):
+    """FB 貼文回應模型"""
+    id: int
+    post_id: str
+    url: str
+    text: Optional[str]
+    text_md: Optional[str]
+    timestamp: Optional[str]
+    created_at: str
+    images: List[str]
+
+    class Config:
+        from_attributes = True
+
+class FBPostsResponse(BaseModel):
+    """FB 貼文列表回應模型"""
+    success: bool
+    message: str
+    posts: List[FBPostResponse]
+    total_count: int
+
+class SingleFBPostResponse(BaseModel):
+    """單一 FB 貼文查詢回應模型"""
+    success: bool
+    post: Optional[FBPostResponse] = None
     message: Optional[str] = None
 
 # 依賴注入：獲取資料庫 session
@@ -266,6 +293,106 @@ async def get_article_by_id(
         # 保持 HTTP 500 錯誤，因為這是伺服器內部錯誤
         raise HTTPException(status_code=500, detail=f"查詢文章失敗: {str(e)}")
 
+@app.get("/api/fb_posts/recent", response_model=FBPostsResponse)
+async def get_recent_fb_posts(
+    days: int = 7,
+    limit: int = 20,
+    db: Session = Depends(get_db)
+):
+    """
+    獲取最近的 FB 貼文
+
+    Args:
+        days: 查詢天數，預設7天
+        limit: 回傳數量限制，預設20筆
+        db: 資料庫 session
+
+    Returns:
+        FBPostsResponse: 包含 FB 貼文列表的回應
+    """
+    try:
+        # 計算查詢的開始時間
+        start_date = datetime.now() - timedelta(days=days)
+
+        logger.info(f"查詢 {days} 天內的 FB 貼文，從 {start_date} 開始")
+
+        # 查詢最近的 FB 貼文，按 created_at 降序排列
+        posts = db.query(FBPost).filter(
+            FBPost.created_at >= start_date
+        ).order_by(FBPost.created_at.desc()).limit(limit).all()
+
+        # 轉換為回應格式
+        post_responses = []
+        for post in posts:
+            # 獲取關聯的圖片
+            images = [img.image_url for img in post.images] if hasattr(post, 'images') else []
+
+            post_responses.append(FBPostResponse(
+                id=post.id,
+                post_id=post.post_id,
+                url=post.url,
+                text=post.text,
+                text_md=post.text_md,
+                timestamp=post.timestamp.isoformat() if post.timestamp else None,
+                created_at=post.created_at.isoformat(),
+                images=images
+            ))
+
+        logger.info(f"找到 {len(post_responses)} 篇 FB 貼文")
+
+        return FBPostsResponse(
+            success=True,
+            message=f"成功獲取 {len(post_responses)} 篇 FB 貼文",
+            posts=post_responses,
+            total_count=len(post_responses)
+        )
+
+    except Exception as e:
+        logger.error(f"查詢 FB 貼文時發生錯誤: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"查詢 FB 貼文失敗: {str(e)}")
+
+@app.get("/api/fb_posts/{post_id}", response_model=SingleFBPostResponse)
+async def get_fb_post_by_id(
+    post_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    根據 FB 貼文 ID 獲取特定貼文
+
+    Args:
+        post_id: FB 貼文 ID
+        db: 資料庫 session
+
+    Returns:
+        SingleFBPostResponse: 包含單一 FB 貼文資料或錯誤訊息的回應
+    """
+    try:
+        post = db.query(FBPost).filter(FBPost.post_id == post_id).first()
+
+        if not post:
+            logger.warning(f"API 查詢：找不到 post_id 為 {post_id} 的 FB 貼文")
+            return SingleFBPostResponse(success=False, message=f"找不到 post_id 為 {post_id} 的 FB 貼文")
+
+        # 獲取關聯的圖片
+        images = [img.image_url for img in post.images] if hasattr(post, 'images') else []
+
+        response_data = FBPostResponse(
+            id=post.id,
+            post_id=post.post_id,
+            url=post.url,
+            text=post.text,
+            text_md=post.text_md,
+            timestamp=post.timestamp.isoformat() if post.timestamp else None,
+            created_at=post.created_at.isoformat(),
+            images=images
+        )
+
+        return SingleFBPostResponse(success=True, post=response_data)
+
+    except Exception as e:
+        logger.error(f"查詢 FB 貼文 {post_id} 時發生錯誤: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"查詢 FB 貼文失敗: {str(e)}")
+
 @app.get("/api/debug/tables")
 async def debug_table_structure(db: Session = Depends(get_db)):
     """
@@ -275,6 +402,8 @@ async def debug_table_structure(db: Session = Depends(get_db)):
         # 檢查主表資料
         main_count = db.query(ArticleMenu).count()
         detail_count = db.query(ArticleDetail).count()
+        fb_post_count = db.query(FBPost).count()
+        fb_image_count = db.query(FBImage).count()
 
         # 檢查有關聯的資料數量
         joined_count = db.query(ArticleMenu).join(
@@ -284,11 +413,14 @@ async def debug_table_structure(db: Session = Depends(get_db)):
         # 取得最新的一筆資料來檢查結構
         latest_main = db.query(ArticleMenu).order_by(ArticleMenu.created_at.desc()).first()
         latest_detail = db.query(ArticleDetail).order_by(ArticleDetail.created_at.desc()).first()
+        latest_fb_post = db.query(FBPost).order_by(FBPost.created_at.desc()).first()
 
         result = {
             "table_counts": {
                 "article_menus": main_count,
                 "article_details": detail_count,
+                "fb_posts": fb_post_count,
+                "fb_images": fb_image_count,
                 "joined_records": joined_count
             },
             "latest_main_article": {
@@ -302,7 +434,13 @@ async def debug_table_structure(db: Session = Depends(get_db)):
                 "title": latest_detail.article_title if latest_detail else None,
                 "has_content": bool(latest_detail.article_content) if latest_detail else False,
                 "type_name": latest_detail.article_type_name if latest_detail else None
-            } if latest_detail else None
+            } if latest_detail else None,
+            "latest_fb_post": {
+                "id": latest_fb_post.id if latest_fb_post else None,
+                "post_id": latest_fb_post.post_id if latest_fb_post else None,
+                "url": latest_fb_post.url if latest_fb_post else None,
+                "created_at": latest_fb_post.created_at.isoformat() if latest_fb_post else None
+            } if latest_fb_post else None
         }
 
         return result

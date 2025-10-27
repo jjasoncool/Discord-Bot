@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 import uvicorn
 
 from container import ServiceContainer
+from services.fb_scraper_service import FBScraperService
 from utils.logger import get_logger, log_startup_info
 
 # 載入環境變數
@@ -45,6 +46,22 @@ def main_scrape_task():
             scraper_service.db_manager.close()
 
 
+def fb_scrape_task():
+    """Facebook 爬蟲任務"""
+    try:
+        logger.info("開始執行 Facebook 爬蟲任務")
+        fb_service = FBScraperService()
+        results = fb_service.scrape_facebook_posts()
+
+        if results:
+            logger.info(f"Facebook 爬蟲任務完成，抓取到 {len(results)} 篇貼文")
+        else:
+            logger.warning("Facebook 爬蟲任務完成，但未抓取到貼文")
+
+    except Exception as e:
+        logger.error(f"Facebook 爬蟲任務發生未預期錯誤: {str(e)}", exc_info=True)
+
+
 def start_api_server():
     """啟動 API 服務器"""
     from api_server import app
@@ -72,13 +89,14 @@ def main():
 
     # 設定定時任務
     schedule.every(15).minutes.do(main_scrape_task)
+    schedule.every(1).hours.do(fb_scrape_task)
 
     # 立即執行一次
     logger.info("執行初始爬蟲任務")
     main_scrape_task()
 
     # 啟動定時任務循環
-    logger.info("定時任務已啟動，每15分鐘執行一次")
+    logger.info("定時任務已啟動：每15分鐘執行文章爬蟲，每1小時執行 Facebook 爬蟲")
     while True:
         try:
             schedule.run_pending()

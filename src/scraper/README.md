@@ -126,19 +126,48 @@ docker run \
 ### 資料庫遷移
 使用 Alembic 進行資料庫版本控制：
 
-```bash
-# 建立新的遷移檔案
-alembic revision --autogenerate -m "描述變更內容"
+#### 常用 Alembic 指令說明
 
-# 執行遷移
-alembic upgrade head
+- **建立遷移檔案**：
+  ```bash
+  python -m alembic revision --autogenerate -m "描述變更內容"
+  ```
+  這個指令會自動比較當前資料庫模型與實際資料庫結構的差異，生成遷移檔案。
 
-# 查看遷移歷史
-alembic history
+- **執行遷移**：
+  ```bash
+  python -m alembic upgrade head
+  ```
+  將所有未執行的遷移套用到資料庫。
 
-# 回退到上一版本
-alembic downgrade -1
-```
+- **查看遷移歷史**：
+  ```bash
+  python -m alembic history
+  ```
+  顯示所有遷移檔案的歷史記錄。
+
+- **回退遷移**：
+  ```bash
+  python -m alembic downgrade -1
+  ```
+  回退到前一個遷移版本。
+
+- **標記當前版本**：
+  ```bash
+  python -m alembic stamp <revision_id>
+  ```
+  將資料庫標記為指定的遷移版本（不執行遷移）。
+
+#### 遷移檔案位置
+遷移檔案會自動生成在 `db/migrations/versions/` 目錄下，每個檔案都包含：
+- 版本號（時間戳）
+- 升級函式（upgrade）
+- 降級函式（downgrade）
+
+#### 注意事項
+- 遷移檔案一旦執行後不應手動修改
+- 如果需要修改資料庫結構，應建立新的遷移檔案
+- 在生產環境執行遷移前，務必先在測試環境驗證
 
 ### 錯誤排查
 1. 查看程式日誌輸出，大部分錯誤都有詳細的上下文資訊

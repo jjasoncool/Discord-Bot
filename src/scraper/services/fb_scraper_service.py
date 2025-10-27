@@ -71,6 +71,14 @@ except ImportError:
     logger_available = False
     print("警告: 無法載入 logger，將使用標準輸出")
 
+try:
+    from db.database import DatabaseManager
+    from db.models import get_db_session
+    db_available = True
+except ImportError:
+    db_available = False
+    print("警告: 無法載入資料庫模組，將只儲存到 JSON")
+
 
 class FBScraperService:
     """
@@ -93,6 +101,13 @@ class FBScraperService:
         # 建立設定副本（避免外部引用被修改）
         self.config = FACEBOOK_CONFIG.copy()
         self.logger = self._get_logger()
+
+        # 初始化資料庫管理器
+        if db_available:
+            db_session = get_db_session()
+            self.db_manager = DatabaseManager(db_session)
+        else:
+            self.db_manager = None
 
         # 路徑設定 (根據環境選擇目錄)
         is_docker = self._is_in_docker()
@@ -1043,7 +1058,7 @@ class FBScraperService:
                 self.ensure_only_main_tab(driver)
 
             self.logger.info(f"\n=== 結果（共 {len(results)} 篇）===")
-            self._save_fb_posts_to_json(results)
+            self._save_fb_posts(results)
             return results
 
         except Exception as e:
@@ -1057,6 +1072,36 @@ class FBScraperService:
                     driver.quit()
                 except Exception:
                     pass
+
+    # ---------- 整合儲存（資料庫 + JSON） ----------
+    def _save_fb_posts(self, new_posts: List[Dict]) -> None:
+        """同時儲存 FB 貼文到資料庫和 JSON（以 URL 去重）"""
+        try:
+            # === 資料庫儲存邏輯 ===
+            db_added_count = 0
+            if self.db_manager:
+                for post in new_posts:
+                    # 檢查 URL 是否已存在於資料庫
+                    existing = self.db_manager.get_fb_post_by_url(post["url"])
+                    if not existing:
+                        # 新增到資料庫
+                        fb_post = self.db_manager.save_fb_post(post)
+                        if fb_post:
+                            db_added_count += 1
+
+                if db_added_count > 0:
+                    self.db_manager.commit()
+                    self.logger.info(f"✅ 資料庫已新增 {db_added_count} 篇 FB 貼文")
+            else:
+                self.logger.warning("資料庫管理器不可用，跳過資料庫儲存")
+
+            # === JSON 儲存邏輯（保持原有） ===
+            self._save_fb_posts_to_json(new_posts)
+
+        except Exception as e:
+            self.logger.error(f"儲存 FB 貼文失敗: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
 
     # ---------- 儲存 JSON（以 URL 去重；排序） ----------
     def _save_fb_posts_to_json(self, new_posts: List[Dict]) -> None:
