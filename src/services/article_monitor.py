@@ -10,17 +10,20 @@ import re
 import io
 import os
 import tempfile
+import discord
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional
 from pathlib import Path
+from typing import List, Dict, Optional
 from bs4 import BeautifulSoup
 from utils.logger_config import get_discord_bot_logger, get_article_monitor_logger
+
+from .base_monitor import BaseContentMonitor
 
 # 設置日誌器（使用統一配置）
 logger = get_discord_bot_logger()
 article_logger = get_article_monitor_logger()
 
-class ArticleMonitor:
+class ArticleMonitor(BaseContentMonitor):
     """官方文章更新類別"""
 
     # 網站配置
@@ -28,40 +31,10 @@ class ArticleMonitor:
     WEBSITE_NAME = "鳴潮官方網站"
 
     def __init__(self, bot, scraper_api_url: str = "http://scraper:8000"):
-        self.bot = bot
-        self.scraper_api_url = scraper_api_url
-        self.sent_articles_file = Path("/app/services/sent_articles.json")
-        self.sent_articles = self._load_sent_articles()
+        super().__init__(bot, scraper_api_url)
         logger.info(f"初始化官方文章更新器，目標網站: {self.WEBSITE_NAME}")
 
-    def _load_sent_articles(self) -> set:
-        """載入已發送的文章 ID 列表"""
-        try:
-            if self.sent_articles_file.exists():
-                with open(self.sent_articles_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                return set(data.get('sent_article_ids', []))
-        except Exception as e:
-            logger.error(f"載入已發送文章列表失敗: {e}")
-        return set()
-
-    def _save_sent_articles(self):
-        """儲存已發送的文章 ID 列表"""
-        try:
-            # 只保留最近 7 天的記錄，避免檔案過大
-            cutoff_date = datetime.now() - timedelta(days=7)
-
-            data = {
-                'sent_article_ids': list(self.sent_articles),
-                'last_updated': datetime.now().isoformat(),
-                'cutoff_date': cutoff_date.isoformat()
-            }
-
-            with open(self.sent_articles_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-
-        except Exception as e:
-            logger.error(f"儲存已發送文章列表失敗: {e}")
+    # 已發送文章追蹤現在由 BaseContentMonitor 處理
 
     async def fetch_recent_articles(self, days: int = 3) -> List[Dict]:
         """從 scraper API 取得最近的文章"""
@@ -363,8 +336,7 @@ class ArticleMonitor:
                 logger.info("📎 無附件需要發送")
 
             # 記錄已發送的文章
-            self.sent_articles.add(article['article_id'])
-            self._save_sent_articles()
+            self.mark_content_as_sent('article', article['article_id'])
 
             logger.info(f"成功發送文章 {article['article_id']} 到頻道 {channel_id}")
             return True
@@ -386,7 +358,7 @@ class ArticleMonitor:
             # 篩選出未發送的文章
             new_articles = []
             for article in articles:
-                if article['article_id'] not in self.sent_articles:
+                if not self.is_content_sent('article', article['article_id']):
                     new_articles.append(article)
 
             if not new_articles:
@@ -425,6 +397,19 @@ class ArticleMonitor:
             except Exception as e:
                 article_logger.error(f"[排程]監控循環發生錯誤: {e}")
                 await asyncio.sleep(60)  # 發生錯誤時短暫延遲後重試
+
+    async def start_fb_monitoring(self, channel_ids: List[int], check_interval: int = 3600):
+        """開始監控 FB 貼文（每1小時檢查一次）"""
+        logger.info(f"[FB]開始監控 FB 貼文，檢查間隔: {check_interval} 秒")
+
+        while True:
+            try:
+                await self.check_and_send_fb_posts(channel_ids)
+                await asyncio.sleep(check_interval)
+
+            except Exception as e:
+                logger.error(f"[FB]監控循環發生錯誤: {e}")
+                await asyncio.sleep(300)  # 發生錯誤時5分鐘後重試
 
     async def _download_image_as_file(self, image_url: str, session: aiohttp.ClientSession) -> Optional[tuple]:
         """
@@ -629,3 +614,107 @@ class ArticleMonitor:
                 'pypandoc_used': False,
                 'markdown_features': {}
             }
+
+    # FB 貼文監控功能
+    async def fetch_recent_fb_posts(self, days: int = 7) -> List[Dict]:
+        """從 scraper API 取得最近的 FB 貼文"""
+        return await self.fetch_content_from_api("/api/fb_posts/recent", {"days": days, "limit": 20})
+
+    async def send_fb_post_to_channel(self, channel_id: int, fb_post: Dict) -> bool:
+        """發送 FB 貼文到指定頻道"""
+        try:
+            embed = self.format_fb_embed(fb_post)
+
+            # 處理圖片附件
+            images = fb_post.get('images', [])
+            files = []
+
+            if len(images) > 1:
+                # 第一張圖片用於 embed，其餘作為附件
+                attachment_images = images[1:]
+                async with aiohttp.ClientSession() as session:
+                    for i, image_url in enumerate(attachment_images[:9]):  # 最多9張附件
+                        try:
+                            async with session.get(image_url, timeout=10) as response:
+                                if response.status == 200:
+                                    content = await response.read()
+                                    if len(content) <= 8 * 1024 * 1024:  # 8MB 限制
+                                        image_data = io.BytesIO(content)
+                                        filename = f"fb_image_{i+2}.jpg"
+                                        discord_file = discord.File(image_data, filename=filename)
+                                        files.append(discord_file)
+                        except Exception as e:
+                            logger.warning(f"下載 FB 圖片失敗: {image_url}, {e}")
+
+            # 發送到頻道
+            success = await self.send_embed_to_channels(embed, [channel_id], files)
+
+            if success:
+                self.mark_content_as_sent('fbpost', fb_post['id'])
+                logger.info(f"成功發送 FB 貼文 {fb_post['id']} 到頻道 {channel_id}")
+
+            return success
+
+        except Exception as e:
+            logger.error(f"發送 FB 貼文到頻道失敗: {e}")
+            return False
+
+    def format_fb_embed(self, fb_post: Dict):
+        """格式化 FB 貼文為 Discord Embed"""
+
+        embed = discord.Embed(
+            title="Facebook 貼文",
+            description=fb_post.get('text', '')[:2000],
+            color=0x1877F2,  # FB 藍色
+            timestamp=datetime.fromisoformat(fb_post['created_at']),
+            url=fb_post['url']
+        )
+
+        # 添加來源資訊
+        embed.add_field(name="📘 來源", value="Facebook", inline=True)
+
+        # 如果有 post_id，添加為額外資訊
+        if fb_post.get('post_id'):
+            embed.add_field(name="🆔 貼文 ID", value=fb_post['post_id'], inline=True)
+
+        # 處理圖片
+        images = fb_post.get('images', [])
+        if images:
+            embed.set_image(url=images[0])
+
+        # 添加 footer
+        embed.set_footer(text="鳴潮官方 Facebook")
+
+        return embed
+
+    async def check_and_send_fb_posts(self, channel_ids: List[int]):
+        """檢查並發送新的 FB 貼文"""
+        try:
+            fb_posts = await self.fetch_recent_fb_posts(days=7)
+
+            if not fb_posts:
+                logger.info("[FB] 沒有找到新 FB 貼文")
+                return
+
+            # 篩選未發送的貼文
+            new_posts = []
+            for post in fb_posts:
+                if not self.is_content_sent('fbpost', post['id']):
+                    new_posts.append(post)
+
+            if not new_posts:
+                logger.info("[FB] 沒有新的未發送 FB 貼文")
+                return
+
+            logger.info(f"[FB] 找到 {len(new_posts)} 篇新 FB 貼文")
+
+            # 發送到所有指定頻道
+            for post in new_posts:
+                for channel_id in channel_ids:
+                    success = await self.send_fb_post_to_channel(channel_id, post)
+                    if success:
+                        logger.info(f"[FB] 成功發送 FB 貼文 {post['id']} 到頻道 {channel_id}")
+                        await asyncio.sleep(2)  # 延遲避免頻率限制
+
+        except Exception as e:
+            logger.error(f"[FB] 檢查 FB 貼文時發生錯誤: {e}")

@@ -205,6 +205,21 @@ async def auto_start_article_monitor(bot):
 
         logger.info(f"✅ 已自動啟動官方文章更新！更新頻道: {channel.name} (ID: {article_monitor_channel_id})")
 
+        # 同時啟動 FB 貼文監控（使用相同的頻道）
+        if channel:
+            # 檢查是否已經有 FB 監控任務
+            if not hasattr(article_commands, 'fb_monitoring_task') or not article_commands.fb_monitoring_task or article_commands.fb_monitoring_task.done():
+                # 啟動 FB 監控任務
+                article_commands.fb_monitoring_task = asyncio.create_task(
+                    article_commands.article_monitor.start_fb_monitoring(
+                        channel_ids=[article_monitor_channel_id],
+                        check_interval=3600  # 1小時檢查一次 FB 貼文
+                    )
+                )
+                logger.info(f"✅ 已自動啟動 FB 貼文監控！更新頻道: {channel.name} (ID: {article_monitor_channel_id})")
+            else:
+                logger.info("FB 貼文監控已經在運行中")
+
     except Exception as e:
         logger.error(f"自動啟動官方文章更新時發生錯誤: {e}", exc_info=True)
 
