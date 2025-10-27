@@ -662,9 +662,13 @@ class ArticleMonitor(BaseContentMonitor):
     def format_fb_embed(self, fb_post: Dict):
         """格式化 FB 貼文為 Discord Embed"""
 
+        # 優先使用 text_md（Discord Markdown 格式），如果沒有則使用 text
+        description_text = fb_post.get('text_md') or fb_post.get('text', '')
+        description = description_text[:2000] if description_text else ''
+
         embed = discord.Embed(
             title="Facebook 貼文",
-            description=fb_post.get('text', '')[:2000],
+            description=description,
             color=0x1877F2,  # FB 藍色
             timestamp=datetime.fromisoformat(fb_post['created_at']),
             url=fb_post['url']
@@ -672,10 +676,6 @@ class ArticleMonitor(BaseContentMonitor):
 
         # 添加來源資訊
         embed.add_field(name="📘 來源", value="Facebook", inline=True)
-
-        # 如果有 post_id，添加為額外資訊
-        if fb_post.get('post_id'):
-            embed.add_field(name="🆔 貼文 ID", value=fb_post['post_id'], inline=True)
 
         # 處理圖片
         images = fb_post.get('images', [])

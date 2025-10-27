@@ -357,21 +357,31 @@ async def get_fb_post_by_id(
     db: Session = Depends(get_db)
 ):
     """
-    根據 FB 貼文 ID 獲取特定貼文
+    根據 FB 貼文 ID 或資料庫 ID 獲取特定貼文
+    智能判斷：如果是純數字，視為資料庫 ID；否則視為 post_id
 
     Args:
-        post_id: FB 貼文 ID
+        post_id: FB 貼文 ID 或資料庫 ID
         db: 資料庫 session
 
     Returns:
         SingleFBPostResponse: 包含單一 FB 貼文資料或錯誤訊息的回應
     """
     try:
-        post = db.query(FBPost).filter(FBPost.post_id == post_id).first()
+        # 智能判斷：嘗試將輸入解析為數字（資料庫 ID）
+        try:
+            db_id = int(post_id)
+            # 如果是數字，用資料庫 ID 查詢
+            post = db.query(FBPost).filter(FBPost.id == db_id).first()
+            query_type = f"資料庫 ID {db_id}"
+        except ValueError:
+            # 如果不是數字，用 post_id 查詢
+            post = db.query(FBPost).filter(FBPost.post_id == post_id).first()
+            query_type = f"post_id {post_id}"
 
         if not post:
-            logger.warning(f"API 查詢：找不到 post_id 為 {post_id} 的 FB 貼文")
-            return SingleFBPostResponse(success=False, message=f"找不到 post_id 為 {post_id} 的 FB 貼文")
+            logger.warning(f"API 查詢：找不到 {query_type} 的 FB 貼文")
+            return SingleFBPostResponse(success=False, message=f"找不到 {query_type} 的 FB 貼文")
 
         # 獲取關聯的圖片
         images = [img.image_url for img in post.images] if hasattr(post, 'images') else []

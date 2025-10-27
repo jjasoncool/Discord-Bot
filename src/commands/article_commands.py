@@ -397,10 +397,13 @@ class ArticleCommands(commands.Cog):
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="resend_article", description="根據文章 ID 重新發送一篇文章")
-    @app_commands.describe(article_id="要重新發送的文章 ID")
-    async def resend_article(self, interaction: discord.Interaction, article_id: int):
-        """根據文章 ID 重新發送一篇文章到監控的頻道，用於測試"""
+    @app_commands.command(name="resend_article", description="根據 ID 重新發送文章或 FB 貼文")
+    @app_commands.describe(
+        id="要重新發送的內容 ID",
+        type="內容類型 (article 或 fb)"
+    )
+    async def resend_article(self, interaction: discord.Interaction, id: str, type: str = "article"):
+        """根據 ID 重新發送文章或 FB 貼文到監控的頻道，用於測試"""
         from utils.utils import check_guild
 
         # 檢查權限
@@ -419,17 +422,64 @@ class ArticleCommands(commands.Cog):
                 await interaction.followup.send("❌ 沒有設定監控頻道，請先使用 `/article_manager` 開始監控。", ephemeral=True)
                 return
 
-            # 根據 ID 取得文章
-            article = await self.article_monitor.fetch_article_by_id(article_id)
+            content_type = type.lower()
+            if content_type not in ["article", "fb", "fb_post"]:
+                await interaction.followup.send("❌ 內容類型必須是 'article' 或 'fb'", ephemeral=True)
+                return
 
-            if not article:
-                await interaction.followup.send(f"❌ 找不到 ID 為 `{article_id}` 的文章。", ephemeral=True)
+            # 根據類型處理
+            if content_type == "article":
+                # 處理文章
+                try:
+                    article_id = int(id)
+                except ValueError:
+                    await interaction.followup.send("❌ 文章 ID 必須是數字", ephemeral=True)
+                    return
+
+                # 根據 ID 取得文章
+                content = await self.article_monitor.fetch_article_by_id(article_id)
+                content_name = f"文章 `{article_id}`"
+                send_method = self.article_monitor.send_article_to_channel
+
+            else:  # fb or fb_post
+                # 處理 FB 貼文
+                try:
+                    fb_db_id = int(id)
+                except ValueError:
+                    await interaction.followup.send("❌ FB 貼文 ID 必須是數字（資料庫 ID）", ephemeral=True)
+                    return
+
+                # 從 API 根據資料庫 ID 獲取單篇 FB 貼文
+                try:
+                    import aiohttp
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(f"http://scraper:8000/api/fb_posts/{fb_db_id}", timeout=10) as response:
+                            if response.status == 200:
+                                data = await response.json()
+                                if data.get('success') and data.get('post'):
+                                    content = data['post']
+                                else:
+                                    await interaction.followup.send(f"❌ 找不到資料庫 ID 為 `{fb_db_id}` 的 FB 貼文。", ephemeral=True)
+                                    return
+                            else:
+                                await interaction.followup.send(f"❌ API 請求失敗：{response.status}", ephemeral=True)
+                                return
+                except Exception as e:
+                    logger.error(f"獲取 FB 貼文資料庫 ID {fb_db_id} 失敗: {e}")
+                    await interaction.followup.send(f"❌ 獲取 FB 貼文時發生錯誤：{str(e)}", ephemeral=True)
+                    return
+
+                content_name = f"FB 貼文 `{fb_db_id}`"
+                send_method = self.article_monitor.send_fb_post_to_channel
+
+            if not content:
+                await interaction.followup.send(f"❌ 找不到 {content_name}。", ephemeral=True)
                 return
 
             # 發送到所有監控的頻道
             success_count = 0
             for channel_id in self.monitored_channels:
-                success = await self.article_monitor.send_article_to_channel(channel_id, article)
+                success = await send_method(channel_id, content)
                 if success:
                     success_count += 1
 
@@ -440,15 +490,15 @@ class ArticleCommands(commands.Cog):
                     channel_names.append(f"#{channel.name}" if channel else f"<#{channel_id}>")
 
                 await interaction.followup.send(
-                    f"✅ 已成功將文章 `{article_id}` 重新發送到 {success_count} 個頻道：{', '.join(channel_names)}",
+                    f"✅ 已成功將{content_name}重新發送到 {success_count} 個頻道：{', '.join(channel_names)}",
                     ephemeral=True
                 )
             else:
-                await interaction.followup.send(f"❌ 發送文章 `{article_id}` 到所有頻道都失敗，請查看日誌。", ephemeral=True)
+                await interaction.followup.send(f"❌ 發送{content_name}到所有頻道都失敗，請查看日誌。", ephemeral=True)
 
         except Exception as e:
-            logger.error(f"重新發送文章 {article_id} 失敗: {e}")
-            await interaction.followup.send(f"❌ 重新發送文章時發生錯誤：{str(e)}", ephemeral=True)
+            logger.error(f"重新發送內容 {id} 失敗: {e}")
+            await interaction.followup.send(f"❌ 重新發送內容時發生錯誤：{str(e)}", ephemeral=True)
 
 
 async def setup(bot):
