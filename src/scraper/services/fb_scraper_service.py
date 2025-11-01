@@ -13,13 +13,19 @@ Facebook 貼文抓取服務類別，支持模組調用和獨立執行
 
 - 新增（本版）：
   1) hashtag 多個支援，並在 JSON 另輸出 text_md（Discord 可直接點的 Markdown 超連結）。
-  2) 由貼文小圖追到「照片頁」，從 og:image 擷取大圖 URL（images 只回大圖；支援多張）。
-  3) 分頁管理精簡版：每次開始抓「新的一篇」貼文前，先關閉主分頁以外的所有分頁，避免累積造成記憶體暴衝。
-  4) 存檔 URL 規格：一律 canonical 成 https://www.facebook.com/...（移除追蹤參數；非 m.），
-     但實際導航仍可用 m.facebook.com 以降低登入牆。
-  5) fb_url_list：logs/fb_url_list.txt 累積紀錄（不覆蓋、不重複）。
-  6) JSON 去重以 URL 為準（不是 post_id），排序依 timestamp 由新到舊。
-  7) debug_mode：只有在 debug_mode=True 才落地 page_source_*.html，避免 log 過多。
+  2) 由貼文小圖追到「照片頁」，從 og:image 擷取大圖 URL（images 只回大圖）。
+  3) **分頁管理精簡版**：每次開始抓「新的一篇」貼文前，先關閉主分頁以外的所有分頁，避免累積造成記憶體暴衝。
+     （依你的要求，移除先前的外網判斷與其他額外檢查）
+
+  # 新增（本版再強化）：
+  4) content_hash（唯一）：以 clean_text(text) + 規範化後 images 路徑（去 query/fragment）做 SHA256，
+     作為內容唯一特徵，寫入 JSON 與 DB，並作為去重的唯一依據。
+  5) 去重決策集中在 _save_fb_posts_to_json：**只看 content_hash**，合併時僅「補空白欄位」、文字取較長、圖片取較多。
+  6) URL 欄位策略固定：`url` 儲存「傳統數字型」連結；`pfbid_url` 儲存 `/posts/pfbid...`。
+     若抓不到其中一種，可留空；重複時只補空白，不覆蓋既有非空。
+  7) 連結在 collect_first_n_links 階段即正規化（www + 去 tracking）；同時 logs/fb_url_list.txt 持續累積、不重複。
+  8) JSON 做出 insert/update/noop 決策的同時，**同步生成 DB ops** 並一次性套用到 DB（DB 不再重複判斷）。
+  9) debug_mode=True 時才落地 page_source_*.html 與 test_fb_results_*.json，控制日誌檔量。
 """
 
 import os
@@ -28,6 +34,7 @@ import time
 import json
 import random
 import html as ihtml
+import hashlib
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 from urllib.parse import urlparse, parse_qs, urlunparse, urlencode, urljoin, unquote
@@ -71,6 +78,8 @@ except ImportError:
     logger_available = False
     print("警告: 無法載入 logger，將使用標準輸出")
 
+# 注意：依你現有專案做法，get_db_session 從 db.models 匯入；DatabaseManager 從 db.database 匯入
+#（這點保持與你現有代碼一致）:contentReference[oaicite:4]{index=4}
 try:
     from db.database import DatabaseManager
     from db.models import get_db_session
@@ -95,19 +104,12 @@ class FBScraperService:
 
     def __init__(self):
         """初始化 FB 抓取服務"""
-        if not SELENIUM_AVAILABLE:
-            raise ImportError("Selenium 未安裝，無法使用 FB 抓取服務")
-
-        # 建立設定副本（避免外部引用被修改）
-        self.config = FACEBOOK_CONFIG.copy()
+        self.config = FACEBOOK_CONFIG.copy()  # 建立副本，避免修改原始設定
         self.logger = self._get_logger()
 
-        # 初始化資料庫管理器
-        if db_available:
-            db_session = get_db_session()
-            self.db_manager = DatabaseManager(db_session)
-        else:
-            self.db_manager = None
+        # 確保依賴可用
+        if not SELENIUM_AVAILABLE:
+            raise ImportError("Selenium 未安裝，無法使用 FB 抓取服務")
 
         # 路徑設定 (根據環境選擇目錄)
         is_docker = self._is_in_docker()
@@ -156,9 +158,9 @@ class FBScraperService:
             return get_logger('fb_scraper')
         else:
             class SimpleLogger:
-                def info(self, msg): print(f"INFO: {msg}")
-                def error(self, msg): print(f"ERROR: {msg}")
-                def warning(self, msg): print(f"WARNING: {msg}")
+                def info(self, msg): print(f"[INFO] {msg}")
+                def error(self, msg): print(f"[ERROR] {msg}")
+                def warning(self, msg): print(f"[WARNING] {msg}")
             return SimpleLogger()
 
     # ---------- 人類式行為 & Driver ----------
@@ -275,7 +277,7 @@ class FBScraperService:
                 continue
         return closed
 
-    # ---------- 分頁管理（精簡清理） ----------
+    # ---------- 分頁管理（極簡清理） ----------
     def ensure_only_main_tab(self, driver):
         """
         僅保留主分頁：
@@ -317,9 +319,7 @@ class FBScraperService:
 
     def open_in_new_tab(self, driver, url) -> Optional[str]:
         """
-        開新分頁（精簡；不做額外判斷）
-        - 先用 Selenium 4 API；失敗再用 window.open。
-        - 回傳新分頁 handle；發生例外時回 None。
+        **極簡開新分頁**：不做額外判斷；回傳新分頁 handle；失敗回 None。
         """
         try:
             try:
@@ -338,7 +338,7 @@ class FBScraperService:
             self.logger.error(f"開新分頁失敗：{e}")
             return None
 
-    # ---------- 連結蒐集 ----------
+    # ---------- 連結蒐集（主頁面） ----------
     def extract_links_via_dom(self, driver):
         """通過 DOM 提取貼文詳情連結"""
         script = """
@@ -391,7 +391,9 @@ class FBScraperService:
         return uniq[:20]
 
     def collect_first_n_links(self, driver, n=None, scroll_rounds=None):
-        """收集前 n 個貼文詳情連結"""
+        """
+        收集前 n 個貼文詳情連結（**收集完成後立即做 URL 正規化與落地 fb_url_list**）
+        """
         if n is None:
             n = self.config.get("max_links", 3)
         if scroll_rounds is None:
@@ -417,16 +419,15 @@ class FBScraperService:
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             self.human_move_and_scroll(driver)
 
-        links = links[:n]
-
-        # 存一份 canonical URL 到 fb_url_list（累積、不重複，且一律 www）
-        canon_links = [self.normalize_fb_url_for_storage(u) for u in links]
+        # 第一時間就正規化成 canonical（www、移除追蹤）
+        canon_links = [self.normalize_fb_url_for_storage(u) for u in links[:n]]
+        # 存一份 canonical URL 到 fb_url_list（累積、不重複）
         self._append_fb_url_list(canon_links)
 
-        self.logger.info(f"取得貼文連結數量：{len(links)}")
-        for i, u in enumerate(links, 1):
+        self.logger.info(f"取得貼文連結數量：{len(canon_links)}")
+        for i, u in enumerate(canon_links, 1):
             self.logger.info(f"  #{i}: {u}")
-        return links
+        return canon_links
 
     # ---------- 詳情頁擷取 ----------
     def node_in_comments(self, driver, node) -> bool:
@@ -508,57 +509,57 @@ class FBScraperService:
         except Exception:
             return None
 
-    # ---------- URL 正規化 / hashtag 文字處理 ----------
+    # ---------- URL 正規化 ----------
     def normalize_fb_url_for_storage(self, url: str) -> str:
         """
-        存檔用的 canonical FB 連結：
-        - 網域一律換成 www.facebook.com
+        存檔用 canonical FB 連結（www）：
+        - 網域一律 www.facebook.com
         - 移除追蹤參數，但保留辨識所需（story.php 需 story_fbid/id；photo 需 fbid/set）
-        - 其他網址（非FB）原樣返回
+        - /posts/NNN、/posts/pfbid...、/permalink/NNN 直接去掉 query/fragment
         """
+        s = (url or "").strip()
+        if not s:
+            return s
         try:
-            p = urlparse(ihtml.unescape(url.strip()))
+            p = urlparse(ihtml.unescape(s))
         except Exception:
-            return (url or "").strip()
+            return s
 
-        # 只處理 facebook.com
         if "facebook.com" not in p.netloc:
-            return (url or "").strip()
+            # 非 FB 原樣返回（但去掉 fragment）
+            return urlunparse((p.scheme or "https", p.netloc, p.path.rstrip("/"), "", p.query, ""))
 
         netloc = "www.facebook.com"
-
-        keep_keys = set()
-        if p.path.startswith("/story.php"):
-            keep_keys = {"story_fbid", "id"}
-        elif p.path.startswith("/photo") or p.path.startswith("/photo.php"):
-            keep_keys = {"fbid", "set", "type"}
-        else:
-            keep_keys = set()
-
+        path = p.path
         q = parse_qs(p.query)
-        new_q = {k: v for k, v in q.items() if k in keep_keys and v}
+        new_q = {}
 
-        cleaned = urlunparse((
-            p.scheme or "https",
-            netloc,
-            p.path,
-            "",  # params
-            urlencode(new_q, doseq=True),
-            ""   # fragment
-        ))
-        return cleaned
+        if path.startswith("/story.php"):
+            # 僅保留辨識所需
+            for k in ("story_fbid", "id"):
+                if k in q and q[k]:
+                    new_q[k] = q[k]
+        elif path.startswith("/photo") or path.startswith("/photo.php"):
+            for k in ("fbid", "set", "type"):
+                if k in q and q[k]:
+                    new_q[k] = q[k]
+        else:
+            # /posts/xxx 或 /permalink/xxx 或其他 slug + 尾段 id 的 URL
+            # 直接去 query
+            new_q = {}
+
+        return urlunparse((p.scheme or "https", netloc, path.rstrip("/"), "", urlencode(new_q, doseq=True), ""))
 
     def normalize_fb_url_for_nav(self, url: str) -> str:
         """
-        瀏覽器導航用：為了降低登入牆，偏好 m.facebook.com
-        （僅在確定是 facebook 連結時才轉；非FB網址原樣）
+        瀏覽器導航用：為了降低登入牆，偏好 m.facebook.com（仅轉 FB 網域）
         """
         try:
             p = urlparse(ihtml.unescape(url.strip()))
         except Exception:
-            return (url or "").strip()
+            return url.strip()
         if "facebook.com" not in p.netloc:
-            return (url or "").strip()
+            return url.strip()
         netloc = "m.facebook.com"
         return urlunparse((p.scheme or "https", netloc, p.path, "", p.query, ""))
 
@@ -571,10 +572,8 @@ class FBScraperService:
             abs_url = urljoin(base_url, href)
         except Exception:
             abs_url = href
-
         try:
             p = urlparse(abs_url)
-            # 解開 Facebook link shim： https://l.facebook.com/l.php?u=ENCODED_URL&h=...
             if p.netloc.endswith("facebook.com") and p.path == "/l.php":
                 q = parse_qs(p.query)
                 if "u" in q and q["u"]:
@@ -583,6 +582,42 @@ class FBScraperService:
             pass
         return abs_url
 
+    # ---------- 內容雜湊與圖片正規化 ----------
+    def _canonical_image(self, u: str) -> str:
+        """移除 query/fragment，僅保留 scheme://host/path"""
+        try:
+            p = urlparse(u)
+            if not p.scheme or not p.netloc:
+                return u
+            return urlunparse((p.scheme, p.netloc, p.path.rstrip("/"), "", "", ""))
+        except Exception:
+            return u
+
+    def _normalize_urls_in_text(self, text: str) -> str:
+        """將文字中的 URL 替換成 canonical（去 query/fragment），降低同文不同參數造成的差異"""
+        if not text:
+            return ""
+        def repl(m):
+            u = m.group(0)
+            try:
+                p = urlparse(u)
+                return urlunparse((p.scheme or "https", p.netloc, p.path.rstrip("/"), "", "", ""))
+            except Exception:
+                return u
+        out = re.sub(r'https?://[^\s)]+', repl, text, flags=re.IGNORECASE)
+        out = re.sub(r"[ \t]+", " ", out)
+        out = re.sub(r"\n{3,}", "\n\n", out)
+        return out.strip().lower()
+
+    def _build_content_hash(self, text: str, images: List[str]) -> str:
+        """SHA256( normalize(text) + '\n' + join(sorted(canonical_images)) )"""
+        t = self._normalize_urls_in_text(self.clean_text(text or ""))
+        imgs = [self._canonical_image(x) for x in (images or []) if x]
+        imgs = sorted(list(dict.fromkeys(imgs)))
+        payload = (t + "\n" + "\n".join(imgs)).encode("utf-8", errors="ignore")
+        return hashlib.sha256(payload).hexdigest()
+
+    # ---------- 文字抽取（略；保留你原本流程） ----------
     def _apply_hashtag_markdown(self, plain_text: str, hashtag_map: Dict[str, str]) -> str:
         """把 #hashtag 轉 Markdown 連結（支援多個），保持其他文字不變。"""
         if not hashtag_map:
@@ -640,7 +675,6 @@ class FBScraperService:
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text, hashtag_map
 
-    # ---------- 文字抽取主流程 ----------
     def _extract_from_message_scopes(self, driver, container) -> Tuple[str, Dict[str, str]]:
         """從 message 容器提取文字（innerHTML + 連結展開 + hashtag map）"""
         scopes = []
@@ -755,18 +789,15 @@ class FBScraperService:
         return ""
 
     def extract_text_from_root(self, driver, root) -> Tuple[str, str]:
-        """
-        從根元素提取文字（含保存 page_source 以便除錯）
-        回傳：(text, text_md)
-        """
+        """從根元素提取文字（含保存 page_source 以便除錯）；回傳：(text, text_md)"""
         self.logger.info("摘取文字中...")
 
-        # 取得 page_source；只有 debug_mode 時才落地存檔，避免 logs 過多
-        page_source = driver.page_source or ""
+        # 在 debug_mode 才落地 HTML
         if self.config.get("debug_mode", False):
+            page_source = driver.page_source or ""
             filename = f"page_source_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
             filepath = os.path.join(self.config["html_log_dir"], filename)
-            self._cleanup_old_html_files()  # 僅 debug 時清理
+            self._cleanup_old_html_files()
             try:
                 with open(filepath, 'w', encoding='utf-8') as f:
                     f.write(page_source)
@@ -774,14 +805,14 @@ class FBScraperService:
             except Exception:
                 pass
 
-        # A. 直接從 message 容器擷取（首選）
+        # A. message 容器
         plain, hmap = self._extract_from_message_scopes(driver, root)
         if plain:
             text_md = self._apply_hashtag_markdown(plain, hmap)
             self.logger.info(f"直接自 message 容器取得文字（長度 {len(plain)}）")
             return plain[:self.TEXT_MAX_LEN], text_md[:self.TEXT_MAX_LEN]
 
-        # B. 段落聚合備援
+        # B. 段落聚合
         candidates: List[Tuple[str, Dict[str, str]]] = []
         try:
             scopes = [root]
@@ -803,7 +834,8 @@ class FBScraperService:
             self.logger.info(f"段落聚合取得文字（長度 {len(best_plain)}）")
             return best_plain[:self.TEXT_MAX_LEN], text_md[:self.TEXT_MAX_LEN]
 
-        # C. OG 描述備援
+        # C. OG 備援
+        page_source = driver.page_source or ""
         og = self._extract_from_og(page_source)
         if og:
             self.logger.info(f"從 og:description 備援取得文字（長度 {len(og)}）")
@@ -837,9 +869,7 @@ class FBScraperService:
         return ("/photo/?" in u) or ("/photo.php" in u) or ("/photos/" in u)
 
     def _get_og_image_from_page(self, driver, url: str) -> Optional[str]:
-        """
-        在「新分頁」開啟照片頁，取 og:image；完畢立即關閉該分頁。
-        """
+        """在「新分頁」開啟照片頁，取 og:image；完畢立即關閉該分頁。"""
         photo_handle = self.open_in_new_tab(driver, url)
         if not photo_handle:
             return None
@@ -850,7 +880,7 @@ class FBScraperService:
                 og = soup.find("meta", attrs={"property": "og:image"})
                 if og and og.get("content"):
                     return ihtml.unescape(og.get("content", "").strip())
-            # 備援：找顯示中的大圖 <img>
+            # 備援：取第一張顯示中的 img
             try:
                 img = driver.find_element(By.CSS_SELECTOR, "img[src]")
                 src = img.get_attribute("src") or ""
@@ -871,12 +901,9 @@ class FBScraperService:
                 pass
 
     def extract_images_from_root(self, driver, root, limit=8) -> List[str]:
-        """
-        從根元素提取圖片（先找縮圖與其照片頁鏈結，再去照片頁拿 og:image；失敗才回退縮圖）
-        只收貼文主體的圖片；排除 emoji/UI 與留言中的圖。
-        """
+        """從根元素提取圖片（嘗試照片頁 og:image；否則退回縮圖）"""
         self.logger.info("摘取圖片中...")
-        thumbs: List[Tuple[int, str, Optional[str]]] = []  # (score, thumb_src, anchor_href)
+        thumbs: List[Tuple[int, str, Optional[str]]] = []
         try:
             nodes = root.find_elements(By.CSS_SELECTOR, "img[src]")
         except Exception:
@@ -923,16 +950,104 @@ class FBScraperService:
                 full_url = self._get_og_image_from_page(driver, photo_nav)
             if not full_url:
                 full_url = thumb_src
-            if full_url and full_url not in seen_full:
-                seen_full.add(full_url)
-                fulls.append(full_url)
+            canon_full = self._canonical_image(full_url)
+            if canon_full and canon_full not in seen_full:
+                seen_full.add(canon_full)
+                fulls.append(canon_full)
             if len(fulls) >= limit:
                 break
 
         return fulls
 
+    # ---------- URL 取得：數字型 vs pfbid ----------
+    def _extract_canonical_www_url(self, driver) -> str:
+        """優先取 og:url 或 rel=canonical，否則用 current_url；最後正規化為 www 存檔"""
+        html = driver.page_source or ""
+        cand = None
+        if BS4_AVAILABLE and html:
+            try:
+                soup = BeautifulSoup(html, "html.parser")
+                link_can = soup.find("link", attrs={"rel": "canonical"})
+                if link_can and link_can.get("href"):
+                    cand = link_can.get("href").strip()
+                if not cand:
+                    og = soup.find("meta", attrs={"property": "og:url"})
+                    if og and og.get("content"):
+                        cand = og.get("content").strip()
+            except Exception:
+                pass
+        if not cand:
+            cand = driver.current_url
+        return self.normalize_fb_url_for_storage(cand)
+
+    def _extract_pfbid_url(self, driver) -> Optional[str]:
+        """嘗試從 current_url 或頁面上的 <a> 找到 /posts/pfbid... 連結"""
+        cur = driver.current_url or ""
+        if "/posts/pfbid" in cur:
+            return self.normalize_fb_url_for_storage(cur)
+        # 再掃描頁面
+        try:
+            anchors = driver.find_elements(By.CSS_SELECTOR, "a[href*='/posts/pfbid']")
+            for a in anchors:
+                href = a.get_attribute("href") or ""
+                if "/posts/pfbid" in href:
+                    return self.normalize_fb_url_for_storage(href)
+        except Exception:
+            pass
+        return None
+
+    def _extract_numeric_url(self, driver) -> Optional[str]:
+        """
+        取出「傳統數字型」連結：
+        - /permalink/<page>/<post>
+        - /posts/<digits>
+        - /story.php?story_fbid=...&id=...
+        """
+        def is_numeric_path(u: str) -> bool:
+            p = urlparse(u)
+            if "/posts/pfbid" in p.path.lower():
+                return False
+            if re.search(r"/posts/\d+", p.path):
+                return True
+            if re.search(r"/permalink/\d+/\d+", p.path):
+                return True
+            if p.path.startswith("/story.php"):
+                qs = parse_qs(p.query)
+                return ("story_fbid" in qs and "id" in qs)
+            return False
+
+        # 1) 看 canonical / og:url
+        cand = self._extract_canonical_www_url(driver)
+        if cand and is_numeric_path(cand):
+            return self.normalize_fb_url_for_storage(cand)
+
+        # 2) 掃描 anchors
+        try:
+            anchors = driver.find_elements(By.CSS_SELECTOR, "a[href]")
+            for a in anchors:
+                href = a.get_attribute("href") or ""
+                if not href:
+                    continue
+                absu = self._resolve_href(href, driver.current_url)
+                if absu and is_numeric_path(absu):
+                    return self.normalize_fb_url_for_storage(absu)
+        except Exception:
+            pass
+
+        return None
+
     def extract_timestamp(self, driver, root):
-        """提取時間戳"""
+        """提取時間戳（先抓 article:published_time；再抓 time[datetime]/abbr[data-utime]）"""
+        try:
+            html = driver.page_source or ""
+            if BS4_AVAILABLE and html:
+                soup = BeautifulSoup(html, "html.parser")
+                meta_ts = soup.find("meta", attrs={"property": "article:published_time"})
+                if meta_ts and meta_ts.get("content"):
+                    return meta_ts.get("content").strip()
+        except Exception:
+            pass
+
         for sel in ["time[datetime]", "abbr[data-utime]"]:
             try:
                 te = root.find_element(By.CSS_SELECTOR, sel)
@@ -949,17 +1064,17 @@ class FBScraperService:
 
     def extract_post_by_url(self, driver, url, idx=1):
         """根據 URL 提取單篇貼文（文字 + 圖片）"""
-        # ★ 每篇開始前，先清掉其他分頁（只留主分頁）
+        # ★ 開始抓新的一篇前，先清掉其他分頁
         self.ensure_only_main_tab(driver)
 
-        # 導航用：m 站；存檔用：www 站（清 tracking）
+        # 收到的 url 已是正規化（www）。導航用 m 站，存檔仍用 www canonical。
         open_url = self.normalize_fb_url_for_nav(url)
-        save_url = self.normalize_fb_url_for_storage(url)
 
-        # 新分頁開啟貼文詳情
+        # 用「新分頁」打開貼文詳情
         new_handle = self.open_in_new_tab(driver, open_url)
         if not new_handle:
-            return {"url": save_url, "text": "", "text_md": "", "images": [], "timestamp": None}
+            # 導航失敗也回傳基礎結構
+            return {"url": "", "pfbid_url": "", "text": "", "text_md": "", "images": [], "timestamp": None, "content_hash": None}
 
         try:
             try:
@@ -969,16 +1084,22 @@ class FBScraperService:
             except Exception:
                 pass
 
-            time.sleep(random.uniform(1.2, 2.0))
+            self.human_sleep(1.2, 2.0)
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(0.8)
+            self.human_sleep(0.6, 1.0)
             self.wait_page_loaded(driver)
-
             self.logger.info(f"貼文載入完成：{driver.current_url}")
+
+            # 取兩種 URL
+            pfbid_url = self._extract_pfbid_url(driver) or ""
+            numeric_url = self._extract_numeric_url(driver) or ""
 
             root = self.get_post_root(driver)
             if not root:
-                return {"url": save_url, "text": "", "text_md": "", "images": [], "timestamp": None}
+                return {
+                    "url": numeric_url, "pfbid_url": pfbid_url,
+                    "text": "", "text_md": "", "images": [], "timestamp": None, "content_hash": None
+                }
 
             try:
                 for sc in root.find_elements(By.CSS_SELECTOR, self.MESSAGE_SELECTORS):
@@ -986,13 +1107,21 @@ class FBScraperService:
             except Exception:
                 pass
 
-            # 文字（plain + Discord Markdown）
             text, text_md = self.extract_text_from_root(driver, root)
-            # 圖片（大圖 URL）
             images = self.extract_images_from_root(driver, root, limit=8)
             ts     = self.extract_timestamp(driver, root)
 
-            data = {"url": save_url, "text": text, "text_md": text_md, "images": images, "timestamp": ts}
+            content_hash = self._build_content_hash(text, images)
+
+            data = {
+                "url": numeric_url,        # 傳統數字型（可為空字串）
+                "pfbid_url": pfbid_url,    # 新制 pfbid（可為空字串）
+                "text": text,
+                "text_md": text_md,
+                "images": images,
+                "timestamp": ts,
+                "content_hash": content_hash,
+            }
 
             if text:
                 preview = (text[:160] + "...") if len(text) > 160 else text
@@ -1027,7 +1156,7 @@ class FBScraperService:
             self.logger.info(f"目標：{self.config['target_url']}")
             self.human_sleep(1.0, 2.0)
             driver.get(self.config["target_url"])
-            time.sleep(random.uniform(1.2, 2.0))
+            self.human_sleep(1.2, 2.0)
             self.close_login_wall(driver)
 
             # 初始化主分頁 handle
@@ -1044,21 +1173,18 @@ class FBScraperService:
             results = []
             for i, url in enumerate(links, 1):
                 self.logger.info(f"\n--- 解析第 {i} 篇 ---")
-
-                # 保險再次清理分頁（你要求的行為）
+                # 再保險清一次（你要求的行為）
                 self.ensure_only_main_tab(driver)
 
                 data = self.extract_post_by_url(driver, url, idx=i)
-
-                # post_id 保留（但去重依 URL）
                 data["post_id"] = f"fb_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{i}"
                 results.append(data)
 
                 # 再保險清一次（若照片頁意外殘留）
                 self.ensure_only_main_tab(driver)
 
-            self.logger.info(f"\n=== 結果（共 {len(results)} 篇）===")
-            self._save_fb_posts(results)
+            # 集中決策：去重 + 合併 + 產生 DB ops + 寫 JSON + 套 DB
+            self._save_fb_posts_to_json(results)
             return results
 
         except Exception as e:
@@ -1073,100 +1199,222 @@ class FBScraperService:
                 except Exception:
                     pass
 
-    # ---------- 整合儲存（資料庫 + JSON） ----------
-    def _save_fb_posts(self, new_posts: List[Dict]) -> None:
-        """同時儲存 FB 貼文到資料庫和 JSON（以 URL 去重）"""
+    # ---------- 儲存 JSON（以 content_hash 為唯一；同時產生 DB ops） ----------
+    def _load_existing_json(self) -> Dict:
+        """讀取 data/fb_posts.json；不存在則回基本結構"""
+        filepath = os.path.join(self.config["data_dir"], "fb_posts.json")
+        if not os.path.exists(filepath):
+            return {"source": "facebook", "last_updated": None, "total_posts": 0, "posts": []}
         try:
-            # === 資料庫儲存邏輯 ===
-            db_added_count = 0
-            if self.db_manager:
-                for post in new_posts:
-                    # 檢查 URL 是否已存在於資料庫
-                    existing = self.db_manager.get_fb_post_by_url(post["url"])
-                    if not existing:
-                        # 新增到資料庫
-                        fb_post = self.db_manager.save_fb_post(post)
-                        if fb_post:
-                            db_added_count += 1
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            posts = data.get("posts", []) if isinstance(data, dict) else data
+            # 舊資料相容：把 _content_hash 轉為 content_hash
+            for p in posts:
+                if p.get("_content_hash") and not p.get("content_hash"):
+                    p["content_hash"] = p["_content_hash"]
+                # 規範 URL
+                if p.get("url"):
+                    p["url"] = self.normalize_fb_url_for_storage(p["url"])
+                if p.get("pfbid_url"):
+                    p["pfbid_url"] = self.normalize_fb_url_for_storage(p["pfbid_url"])
+            return {"source": "facebook", "last_updated": data.get("last_updated"), "total_posts": len(posts), "posts": posts}
+        except Exception:
+            return {"source": "facebook", "last_updated": None, "total_posts": 0, "posts": []}
 
-                if db_added_count > 0:
-                    self.db_manager.commit()
-                    self.logger.info(f"✅ 資料庫已新增 {db_added_count} 篇 FB 貼文")
-            else:
-                self.logger.warning("資料庫管理器不可用，跳過資料庫儲存")
+    def _merge_fields_for_duplicate(self, base: Dict, incoming: Dict) -> bool:
+        """
+        合併同一 content_hash 的資料：
+        - 只補「空白」的 url/pfbid_url（不覆蓋非空值）
+        - text/text_md 取較長
+        - images 取數量較多（同時去重）
+        - timestamp 若 base 無而 incoming 有，則補上
+        回傳：是否有變動
+        """
+        changed = False
 
-            # === JSON 儲存邏輯（保持原有） ===
-            self._save_fb_posts_to_json(new_posts)
+        # URL 欄位策略：只補空白
+        if (not base.get("url")) and incoming.get("url"):
+            base["url"] = self.normalize_fb_url_for_storage(incoming["url"])
+            changed = True
+        if (not base.get("pfbid_url")) and incoming.get("pfbid_url"):
+            base["pfbid_url"] = self.normalize_fb_url_for_storage(incoming["pfbid_url"])
+            changed = True
 
-        except Exception as e:
-            self.logger.error(f"儲存 FB 貼文失敗: {e}")
-            import traceback
-            self.logger.error(traceback.format_exc())
+        # 文本取較長
+        def longer(a: Optional[str], b: Optional[str]) -> str:
+            a = a or ""
+            b = b or ""
+            return b if len(b) > len(a) else a
 
-    # ---------- 儲存 JSON（以 URL 去重；排序） ----------
+        new_text = longer(base.get("text"), incoming.get("text"))
+        if new_text != (base.get("text") or ""):
+            base["text"] = new_text
+            changed = True
+
+        new_text_md = longer(base.get("text_md"), incoming.get("text_md"))
+        if new_text_md != (base.get("text_md") or ""):
+            base["text_md"] = new_text_md
+            changed = True
+
+        # 圖片取較多（同時做 canonical 去重）
+        imgs_old = [self._canonical_image(x) for x in (base.get("images") or []) if x]
+        imgs_new = [self._canonical_image(x) for x in (incoming.get("images") or []) if x]
+        uniq_old = list(dict.fromkeys(imgs_old))
+        uniq_new = list(dict.fromkeys(imgs_new))
+        if len(uniq_new) > len(uniq_old):
+            base["images"] = uniq_new
+            changed = True
+        else:
+            base["images"] = uniq_old
+
+        # 時間戳：若 base 無而 incoming 有
+        if (not base.get("timestamp")) and incoming.get("timestamp"):
+            base["timestamp"] = incoming["timestamp"]
+            changed = True
+
+        # 重新計算 content_hash（照理應相同，但保險）
+        base["content_hash"] = self._build_content_hash(base.get("text", ""), base.get("images", []))
+
+        # 更新 last_seen
+        base["last_seen"] = datetime.now().isoformat()
+
+        return changed
+
     def _save_fb_posts_to_json(self, new_posts: List[Dict]) -> None:
-        """儲存 Facebook 貼文到持續更新的 JSON 檔案 (以 URL 去重，按時間排序)"""
+        """
+        儲存 Facebook 貼文到 JSON 並以同決策同步資料庫。
+        * 唯一鍵：content_hash
+        * 決策：insert / update / noop
+        """
         try:
-            filepath = os.path.join(self.config["data_dir"], "fb_posts.json")
+            bundle = self._load_existing_json()
+            existing_posts: List[Dict] = bundle.get("posts", [])
 
-            existing_posts: List[Dict] = []
-            if os.path.exists(filepath):
-                try:
-                    with open(filepath, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                        if isinstance(data, dict) and "posts" in data:
-                            existing_posts = data.get("posts", [])
-                        elif isinstance(data, list):
-                            existing_posts = data
-                except (json.JSONDecodeError, KeyError):
-                    self.logger.warning("現有 JSON 檔案格式有誤，將覆蓋")
-                    existing_posts = []
-
-            # 規一化舊資料的 URL
+            # 建 content_hash 索引
+            by_hash: Dict[str, Dict] = {}
             for p in existing_posts:
-                if 'url' in p:
-                    p['url'] = self.normalize_fb_url_for_storage(p['url'])
+                h = p.get("content_hash")
+                if h and h not in by_hash:
+                    by_hash[h] = p
 
-            # 以 URL 為 key 去重
-            def key_url(p: Dict) -> str:
-                return self.normalize_fb_url_for_storage(p.get('url', '')).strip()
-
-            existed_by_url = { key_url(p): p for p in existing_posts if p.get('url') }
-
+            # DB 操作清單
+            ops: List[Dict] = []
             added_count = 0
-            for post in new_posts:
-                u = key_url(post)
-                if u and u not in existed_by_url:
-                    post['url'] = u  # 存檔一律 www + 去追蹤
-                    existing_posts.append(post)
-                    existed_by_url[u] = post
+            updated_count = 0
+            noop_count = 0
+
+            for np in new_posts:
+                ch = np.get("content_hash") or self._build_content_hash(np.get("text", ""), np.get("images", []))
+                if not ch:
+                    # 沒有 hash，略過此篇
+                    noop_count += 1
+                    continue
+
+                # 規範 URL 欄位
+                if np.get("url"):
+                    np["url"] = self.normalize_fb_url_for_storage(np["url"])
+                if np.get("pfbid_url"):
+                    np["pfbid_url"] = self.normalize_fb_url_for_storage(np["pfbid_url"])
+
+                np["content_hash"] = ch
+                np["last_seen"] = datetime.now().isoformat()
+
+                if ch not in by_hash:
+                    # 全新 → insert
+                    existing_posts.append(np)
+                    by_hash[ch] = np
                     added_count += 1
+                    ops.append({"action": "insert", "post": dict(np)})
+                else:
+                    # 已存在 → 合併
+                    target = by_hash[ch]
+                    before = json.dumps({
+                        "url": target.get("url") or "",
+                        "pfbid_url": target.get("pfbid_url") or "",
+                        "text_len": len(target.get("text") or ""),
+                        "text_md_len": len(target.get("text_md") or ""),
+                        "img_n": len(target.get("images") or []),
+                        "timestamp": target.get("timestamp") or ""
+                    }, ensure_ascii=False, sort_keys=True)
 
-            if added_count == 0:
-                self.logger.info("沒有新的貼文需要儲存")
+                    changed = self._merge_fields_for_duplicate(target, np)
 
-            # 排序（新到舊；timestamp 可能為 None）
-            def get_sort_key(post):
-                timestamp = post.get('timestamp') or ""
-                return timestamp
-            existing_posts.sort(key=get_sort_key, reverse=True)
+                    after = json.dumps({
+                        "url": target.get("url") or "",
+                        "pfbid_url": target.get("pfbid_url") or "",
+                        "text_len": len(target.get("text") or ""),
+                        "text_md_len": len(target.get("text_md") or ""),
+                        "img_n": len(target.get("images") or []),
+                        "timestamp": target.get("timestamp") or ""
+                    }, ensure_ascii=False, sort_keys=True)
 
-            data = {
-                "source": "facebook",
-                "last_updated": datetime.now().isoformat(),
-                "total_posts": len(existing_posts),
-                "posts": existing_posts
-            }
+                    if changed and before != after:
+                        updated_count += 1
+                        ops.append({"action": "update", "post": dict(target)})
+                    else:
+                        noop_count += 1  # JSON 不需異動 → DB 也不動
 
+            # 排序（有 timestamp 的放前面）
+            existing_posts.sort(key=lambda p: p.get("timestamp") or "", reverse=True)
+            bundle["posts"] = existing_posts
+            bundle["last_updated"] = datetime.now().isoformat()
+            bundle["total_posts"] = len(existing_posts)
+
+            # 寫檔
+            filepath = os.path.join(self.config["data_dir"], "fb_posts.json")
             with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+                json.dump(bundle, f, ensure_ascii=False, indent=2)
 
-            self.logger.info(f"✅ FB 貼文 JSON 已更新：新增 {added_count} 篇，總計 {len(existing_posts)} 篇")
+            self.logger.info(f"✅ FB 貼文 JSON 已更新：新增 {added_count}、更新 {updated_count}、無變動 {noop_count}；總計 {len(existing_posts)} 篇")
+
+            # 以相同決策同步 DB（DB 不做自行去重判斷）
+            if db_available and ops:
+                self._sync_db_from_ops(ops)
+            elif db_available:
+                self.logger.info("資料庫：無需異動（全部為 noop）")
 
         except Exception as e:
             self.logger.error(f"儲存 FB 貼文 JSON 失敗: {e}")
             import traceback
             self.logger.error(traceback.format_exc())
+
+    # ---------- 以 JSON 決策同步到資料庫 ----------
+    def _sync_db_from_ops(self, ops: List[Dict]) -> None:
+        """
+        僅依據 JSON 決策執行資料庫操作：
+        - action == insert → 以 content_hash 新增
+        - action == update → 以 content_hash 定位並「補空白欄位 / 合併較長文本 / 合併新圖片」
+        - 不處理 noop
+        """
+        if not db_available:
+            self.logger.warning("資料庫模組不可用，跳過資料庫儲存")
+            return
+
+        session = None
+        try:
+            session = get_db_session()
+            db_manager = DatabaseManager(session)
+
+            inserted = 0
+            updated = 0
+
+            db_manager.sync_fb_posts_ops(ops)  # 新增的精準同步方法（見 database.py）
+            inserted = sum(1 for op in ops if op.get("action") == "insert")
+            updated = sum(1 for op in ops if op.get("action") == "update")
+
+            db_manager.commit()
+            self.logger.info(f"✅ FB 貼文資料庫已同步：新增 {inserted}、更新 {updated}")
+
+        except Exception as e:
+            self.logger.error(f"同步 FB 貼文到資料庫失敗: {e}")
+            if session:
+                session.rollback()
+            import traceback
+            self.logger.error(traceback.format_exc())
+        finally:
+            if session:
+                session.close()
 
     # ---------- fb_url_list（累積、不重複；存 logs） ----------
     def _append_fb_url_list(self, urls: List[str]):
@@ -1199,11 +1447,9 @@ class FBScraperService:
         except Exception as e:
             self.logger.error(f"寫入 fb_url_list.txt 失敗: {e}")
 
-    # ---------- 只在 debug_mode 清理 HTML 檔 ----------
+    # ---------- 工具 ----------
     def _cleanup_old_html_files(self):
-        """清理舊的 HTML 日誌檔案，只保留最近 max_scraping_sessions × max_links 個結果（debug_mode 時啟用）"""
-        if not self.config.get("debug_mode", False):
-            return
+        """清理舊的 HTML 日誌檔案，只保留最近 max_scraping_sessions × max_links 個結果（僅在 debug_mode 寫檔前呼叫）"""
         try:
             html_dir = self.config["html_log_dir"]
             max_files = self.config["max_html_files"]
@@ -1265,6 +1511,8 @@ def main():
             print(f"\n--- 貼文 {i} ---")
             print(f"ID: {post.get('post_id')}")
             print(f"URL: {post.get('url')}")
+            if post.get('pfbid_url'):
+                print(f"pfbid_url: {post.get('pfbid_url')}")
             text = post.get('text', '')
             text_md = post.get('text_md', '')
             if text:
@@ -1277,8 +1525,8 @@ def main():
                 print(f"文字(Discord Markdown): {preview_md}")
             print(f"圖片數量(大圖): {len(post.get('images', []))}")
             print(f"時間戳: {post.get('timestamp')}")
+            print(f"content_hash: {post.get('content_hash')}")
 
-        # 僅在 debug_mode 時另寫一份測試輸出
         if results and service.config.get("debug_mode", False):
             filename = f"test_fb_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
             filepath = os.path.join(service.config["html_log_dir"], filename)

@@ -54,7 +54,8 @@ class FBPostResponse(BaseModel):
     """FB 貼文回應模型"""
     id: int
     post_id: str
-    url: str
+    url: Optional[str]
+    pfbid_url: Optional[str]
     text: Optional[str]
     text_md: Optional[str]
     timestamp: Optional[str]
@@ -331,6 +332,7 @@ async def get_recent_fb_posts(
                 id=post.id,
                 post_id=post.post_id,
                 url=post.url,
+                pfbid_url=post.pfbid_url,
                 text=post.text,
                 text_md=post.text_md,
                 timestamp=post.timestamp.isoformat() if post.timestamp else None,
@@ -390,6 +392,7 @@ async def get_fb_post_by_id(
             id=post.id,
             post_id=post.post_id,
             url=post.url,
+            pfbid_url=post.pfbid_url,
             text=post.text,
             text_md=post.text_md,
             timestamp=post.timestamp.isoformat() if post.timestamp else None,

@@ -398,8 +398,8 @@ class ArticleMonitor(BaseContentMonitor):
                 article_logger.error(f"[排程]監控循環發生錯誤: {e}")
                 await asyncio.sleep(60)  # 發生錯誤時短暫延遲後重試
 
-    async def start_fb_monitoring(self, channel_ids: List[int], check_interval: int = 3600):
-        """開始監控 FB 貼文（每1小時檢查一次）"""
+    async def start_fb_monitoring(self, channel_ids: List[int], check_interval: int = 600):
+        """開始監控 FB 貼文（每10分鐘檢查一次）"""
         logger.info(f"[FB]開始監控 FB 貼文，檢查間隔: {check_interval} 秒")
 
         while True:
@@ -666,12 +666,15 @@ class ArticleMonitor(BaseContentMonitor):
         description_text = fb_post.get('text_md') or fb_post.get('text', '')
         description = description_text[:2000] if description_text else ''
 
+        # 優先使用 url 欄位，如果 url 是空的則使用 pfbid_url
+        embed_url = fb_post.get('url') or fb_post.get('pfbid_url')
+
         embed = discord.Embed(
             title="Facebook 貼文",
             description=description,
             color=0x1877F2,  # FB 藍色
             timestamp=datetime.fromisoformat(fb_post['created_at']),
-            url=fb_post['url']
+            url=embed_url
         )
 
         # 添加來源資訊

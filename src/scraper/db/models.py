@@ -104,16 +104,23 @@ class FBPost(Base):
     __tablename__ = 'fb_posts'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    post_id = Column(String(100), unique=True, nullable=False, index=True)  # fb_20241201_123456_1
-    url = Column(String(1000), unique=True, nullable=False, index=True)  # 貼文 URL
+    post_id = Column(String(100))  # fb_20241201_123456_1
+    url = Column(String(1000))  # 貼文 URL (數字 ID 格式)
+    pfbid_url = Column(String(1000))  # PFBID 格式 URL
     text = Column(Text)  # 純文字內容
     text_md = Column(Text)  # Discord Markdown 格式文字
+    content_hash = Column(String(256), unique=True, nullable=False, index=True)  # 内容hash，用于判断文章内容，唯一，不可为空
     timestamp = Column(DateTime)  # 貼文時間戳
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     # 關聯：一對多圖片
     images = relationship("FBImage", back_populates="post", cascade="all, delete-orphan")
+
+    # 唯一約束：確保 url 和 pfbid_url 組合不重複
+    __table_args__ = (
+        UniqueConstraint('url', 'pfbid_url', name='unique_fb_urls'),
+    )
 
     def __repr__(self):
         return f"<FBPost(post_id='{self.post_id}', url='{self.url}')>"
