@@ -9,6 +9,7 @@ from typing import List, Optional
 from pydantic import BaseModel
 
 from db.models import ArticleMenu, ArticleDetail, FBPost, FBImage, get_db_session
+from sqlalchemy.orm import joinedload
 from utils.logger import get_logger
 
 # 建立 FastAPI 實例
@@ -317,8 +318,8 @@ async def get_recent_fb_posts(
 
         logger.info(f"查詢 {days} 天內的 FB 貼文，從 {start_date} 開始")
 
-        # 查詢最近的 FB 貼文，按 created_at 降序排列
-        posts = db.query(FBPost).filter(
+        # 查詢最近的 FB 貼文，按 created_at 降序排列，並載入關聯圖片
+        posts = db.query(FBPost).options(joinedload(FBPost.images)).filter(
             FBPost.created_at >= start_date
         ).order_by(FBPost.created_at.desc()).limit(limit).all()
 
@@ -373,12 +374,12 @@ async def get_fb_post_by_id(
         # 智能判斷：嘗試將輸入解析為數字（資料庫 ID）
         try:
             db_id = int(post_id)
-            # 如果是數字，用資料庫 ID 查詢
-            post = db.query(FBPost).filter(FBPost.id == db_id).first()
+            # 如果是數字，用資料庫 ID 查詢，並載入關聯圖片
+            post = db.query(FBPost).options(joinedload(FBPost.images)).filter(FBPost.id == db_id).first()
             query_type = f"資料庫 ID {db_id}"
         except ValueError:
-            # 如果不是數字，用 post_id 查詢
-            post = db.query(FBPost).filter(FBPost.post_id == post_id).first()
+            # 如果不是數字，用 post_id 查詢，並載入關聯圖片
+            post = db.query(FBPost).options(joinedload(FBPost.images)).filter(FBPost.post_id == post_id).first()
             query_type = f"post_id {post_id}"
 
         if not post:

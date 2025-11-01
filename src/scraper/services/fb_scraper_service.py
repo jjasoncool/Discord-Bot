@@ -11,34 +11,41 @@ Facebook 貼文抓取服務類別，支持模組調用和獨立執行
 - 圖片擷取：濾掉 data:image 與 svg 佔位圖，避免混入 UI/placeholder。
 - 保留：你新增的資料目錄、持續寫入 JSON（去重並排序）、config 讀取等功能。
 
-- 新增（本版）：
+- 新增：
   1) hashtag 多個支援，並在 JSON 另輸出 text_md（Discord 可直接點的 Markdown 超連結）。
   2) 由貼文小圖追到「照片頁」，從 og:image 擷取大圖 URL（images 只回大圖）。
-  3) **分頁管理精簡版**：每次開始抓「新的一篇」貼文前，先關閉主分頁以外的所有分頁，避免累積造成記憶體暴衝。
-     （依你的要求，移除先前的外網判斷與其他額外檢查）
+  3) **分頁管理精簡版**：每次開始抓「新的一篇」貼文前，先關閉主分頁以外的所有分頁。
 
-  # 新增（本版再強化）：
   4) content_hash（唯一）：以 clean_text(text) + 規範化後 images 路徑（去 query/fragment）做 SHA256，
-     作為內容唯一特徵，寫入 JSON 與 DB，並作為去重的唯一依據。
+     作為內容唯一特徵。
   5) 去重決策集中在 _save_fb_posts_to_json：**只看 content_hash**，合併時僅「補空白欄位」、文字取較長、圖片取較多。
   6) URL 欄位策略固定：`url` 儲存「傳統數字型」連結；`pfbid_url` 儲存 `/posts/pfbid...`。
-     若抓不到其中一種，可留空；重複時只補空白，不覆蓋既有非空。
-  7) 連結在 collect_first_n_links 階段即正規化（www + 去 tracking）；同時 logs/fb_url_list.txt 持續累積、不重複。
-  8) JSON 做出 insert/update/noop 決策的同時，**同步生成 DB ops** 並一次性套用到 DB（DB 不再重複判斷）。
-  9) debug_mode=True 時才落地 page_source_*.html 與 test_fb_results_*.json，控制日誌檔量。
+  7) collect_first_n_links 階段即正規化（www + 去 tracking）；同時 logs/fb_url_list.txt 持續累積、不重複。
+  8) JSON 做出 insert/update/noop 決策的同時，同步生成 DB ops 並一次性套用到 DB。
+  9) debug_mode=True 時才落地 page_source_*.html 與 test_fb_results_*.json。
+
+  10) **時間戳修正（本版）**：
+      使用 `python-dateutil` 解析，支援：
+        - <meta property="article:published_time">
+        - <abbr data-utime>（epoch 秒）
+        - <time datetime>
+        - 新 Comet 介面：時間連結上的 aria-label / title / data-tooltip-content / data-store（hover 後 tooltip）
+      中文（上午/下午/中午/晚上、年/月/日、星期）會先正規化再交給 dateutil。
+      若沒有時區資訊，採用 config["timezone"]（預設 Asia/Taipei）視為本地時間再轉 UTC ISO。
 """
 
 import os
-import re
+import unicodedata, re
 import time
 import json
 import random
 import html as ihtml
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple
 from urllib.parse import urlparse, parse_qs, urlunparse, urlencode, urljoin, unquote
 
+# === 依賴 ===
 try:
     from selenium import webdriver
     from selenium.webdriver.firefox.options import Options as FirefoxOptions
@@ -78,8 +85,7 @@ except ImportError:
     logger_available = False
     print("警告: 無法載入 logger，將使用標準輸出")
 
-# 注意：依你現有專案做法，get_db_session 從 db.models 匯入；DatabaseManager 從 db.database 匯入
-#（這點保持與你現有代碼一致）:contentReference[oaicite:4]{index=4}
+# DB
 try:
     from db.database import DatabaseManager
     from db.models import get_db_session
@@ -87,6 +93,13 @@ try:
 except ImportError:
     db_available = False
     print("警告: 無法載入資料庫模組，將只儲存到 JSON")
+
+# === python-dateutil ===
+try:
+    from dateutil import parser as duparser
+    from dateutil.tz import gettz
+except Exception as _e:
+    raise ImportError("本版需要 python-dateutil，請先安裝：pip install python-dateutil") from _e
 
 
 class FBScraperService:
@@ -104,14 +117,14 @@ class FBScraperService:
 
     def __init__(self):
         """初始化 FB 抓取服務"""
-        self.config = FACEBOOK_CONFIG.copy()  # 建立副本，避免修改原始設定
+        self.config = FACEBOOK_CONFIG.copy()
         self.logger = self._get_logger()
 
         # 確保依賴可用
         if not SELENIUM_AVAILABLE:
             raise ImportError("Selenium 未安裝，無法使用 FB 抓取服務")
 
-        # 路徑設定 (根據環境選擇目錄)
+        # 環境與資料夾
         is_docker = self._is_in_docker()
         self.config["html_log_dir"] = "/logs" if is_docker else "./logs"
         self.config["data_dir"]     = "/app/data" if is_docker else "./data"
@@ -138,6 +151,10 @@ class FBScraperService:
 
         # 主分頁 handle（啟動後會記錄）
         self.main_handle: Optional[str] = None
+
+        # 時區設定（供 dateutil 解析無時區字串時使用）
+        self.timezone_str = self.config.get("timezone", "Asia/Taipei")
+        self.tzinfo = gettz(self.timezone_str) or gettz("UTC")
 
     # ---------------- 基本工具 ----------------
     def _is_in_docker(self) -> bool:
@@ -591,8 +608,29 @@ class FBScraperService:
         except Exception:
             return u
 
+    def _normalize_for_hash(self, s: str) -> str:
+        if not s:
+            return ""
+        # 1) Unicode 正規化
+        s = unicodedata.normalize("NFKC", s)
+        # 2) 各式空白 → 普通空白；移除不可見字元
+        trans = {
+            0x00A0: 0x20, 0x202F: 0x20, 0x2009: 0x20, 0x2002: 0x20, 0x2003: 0x20,
+            0x2004: 0x20, 0x2005: 0x20, 0x2006: 0x20, 0x2007: 0x20, 0x2008: 0x20,
+        }
+        s = s.translate(trans)
+        s = s.translate({ord(c): None for c in "\u200b\u200d\u2060\ufeff"})
+        # 3) 統一換行
+        s = s.replace("\r\n", "\n").replace("\r", "\n")
+        # 4) 壓縮空白（含行首空白）
+        s = re.sub(r"[ \t]+", " ", s)
+        s = re.sub(r"\n[ \t]+", "\n", s)
+        s = re.sub(r"\n{3,}", "\n\n", s)
+        # 5) 去頭尾、轉小寫
+        return s.strip().lower()
+
     def _normalize_urls_in_text(self, text: str) -> str:
-        """將文字中的 URL 替換成 canonical（去 query/fragment），降低同文不同參數造成的差異"""
+        """將文字中的 URL 替換成 canonical（去 query/fragment），並移除 hashtag，降低同文不同參數造成的差異"""
         if not text:
             return ""
         def repl(m):
@@ -603,19 +641,19 @@ class FBScraperService:
             except Exception:
                 return u
         out = re.sub(r'https?://[^\s)]+', repl, text, flags=re.IGNORECASE)
+        # 移除 hashtag（因為不同抓取時 hashtag 連結可能不同）
+        out = re.sub(r'#\w+', '', out)
         out = re.sub(r"[ \t]+", " ", out)
         out = re.sub(r"\n{3,}", "\n\n", out)
-        return out.strip().lower()
+        return self._normalize_for_hash(out)
 
     def _build_content_hash(self, text: str, images: List[str]) -> str:
-        """SHA256( normalize(text) + '\n' + join(sorted(canonical_images)) )"""
+        """SHA256( normalize(text) ) - content_hash 只基於文章內容，不包含圖片"""
         t = self._normalize_urls_in_text(self.clean_text(text or ""))
-        imgs = [self._canonical_image(x) for x in (images or []) if x]
-        imgs = sorted(list(dict.fromkeys(imgs)))
-        payload = (t + "\n" + "\n".join(imgs)).encode("utf-8", errors="ignore")
+        payload = t.encode("utf-8", errors="ignore")
         return hashlib.sha256(payload).hexdigest()
 
-    # ---------- 文字抽取（略；保留你原本流程） ----------
+    # ---------- 文字抽取 ----------
     def _apply_hashtag_markdown(self, plain_text: str, hashtag_map: Dict[str, str]) -> str:
         if not hashtag_map:
             return plain_text
@@ -713,7 +751,7 @@ class FBScraperService:
         best_plain, best_map = max(out_candidates, key=lambda x: len(x[0]))
         if len(best_plain) > self.TEXT_MAX_LEN:
             best_plain = best_plain[:self.TEXT_MAX_LEN]
-        return best_plain, best_map
+        return best_plain, self._apply_hashtag_markdown(best_plain, best_map) and best_map or best_map
 
     def _extract_from_paragraphs(self, driver, scope) -> Tuple[str, Dict[str, str]]:
         try:
@@ -1004,30 +1042,200 @@ class FBScraperService:
 
         return None
 
-    def extract_timestamp(self, driver, root):
-        """提取時間戳（先抓 article:published_time；再抓 time[datetime]/abbr[data-utime]）"""
+    # ---------- 時間工具（dateutil） ----------
+    def _iso_utc_from_epoch(self, sec: int) -> str:
+        dt = datetime.fromtimestamp(int(sec), tz=timezone.utc)
+        return dt.isoformat().replace("+00:00", "Z")
+
+    def _to_utc_iso(self, dt) -> str:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=self.tzinfo or gettz("UTC"))
+        return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _normalize_datetime_text(self, s: str) -> str:
+        """
+        將中文日期時間轉為 dateutil 可解析的字串（不做繁瑣 parsing，只做最小正規化）
+        範例：2025年1月1日 星期六下午7:00 -> 2025-1-1 7:00 PM
+        """
+        if not s:
+            return s
+        t = s.strip()
+        t = t.replace("：", ":")
+        # 去除星期
+        t = re.sub(r"星期[一二三四五六日天]", " ", t)
+        t = re.sub(r"週[一二三四五六日天]", " ", t)
+        # 年月日替換
+        t = t.replace("年", "-").replace("月", "-").replace("日", " ")
+        # 中文 AM/PM
+        t = t.replace("上午", " AM ").replace("早上", " AM ").replace("清晨", " AM ")
+        t = t.replace("下午", " PM ").replace("中午", " PM ").replace("晚上", " PM ").replace("傍晚", " PM ")
+        # 把「PM 7:00」換成「7:00 PM」
+        t = re.sub(r"\b(AM|PM)\s*(\d{1,2}:\d{2})", r"\2 \1", t, flags=re.IGNORECASE)
+        # 7點 / 7時 → 7:00
+        t = re.sub(r"(\d{1,2})\s*[點时時]", r"\1:00", t)
+        # 壓空白
+        t = re.sub(r"\s+", " ", t).strip()
+        return t
+
+    def _parse_datetime_any(self, s: str) -> Optional[str]:
+        """
+        使用 python-dateutil 解析任何字串：
+        - 純數字（10/13位）→ epoch
+        - 中文正規化 → parse(fuzzy=True)
+        - 其他格式交給 parse（含 ISO8601）
+        回傳 ISO8601 UTC（Z）
+        """
+        if not s:
+            return None
+        st = s.strip()
+
+        # epoch 秒/毫秒
+        if re.fullmatch(r"\d{10,13}", st):
+            sec = int(st[:10])
+            return self._iso_utc_from_epoch(sec)
+
+        # 中文正規化再 parse
+        norm = self._normalize_datetime_text(st)
+        try:
+            dt = duparser.parse(norm, fuzzy=True)
+            return self._to_utc_iso(dt)
+        except Exception:
+            pass
+
+        # 最後再嘗試原字串
+        try:
+            dt = duparser.parse(st, fuzzy=True)
+            return self._to_utc_iso(dt)
+        except Exception:
+            return None
+
+    def _hover(self, driver, elem, pause=0.25):
+        try:
+            ActionChains(driver).move_to_element(elem).pause(pause).perform()
+        except Exception:
+            pass
+
+    def extract_timestamp(self, driver, root) -> Optional[str]:
+        """
+        盡可能從貼文本體取出「絕對時間」並轉成 ISO8601 UTC（Z）：
+          1) <meta property="article:published_time">
+          2) <abbr data-utime> / <time datetime>
+          3) aria-label / title / data-tooltip-content / data-store（hover 後 tooltip）
+          4) 全頁備援掃描
+        """
+        # A. meta: article:published_time
         try:
             html = driver.page_source or ""
             if BS4_AVAILABLE and html:
                 soup = BeautifulSoup(html, "html.parser")
                 meta_ts = soup.find("meta", attrs={"property": "article:published_time"})
                 if meta_ts and meta_ts.get("content"):
-                    return meta_ts.get("content").strip()
+                    iso = self._parse_datetime_any(meta_ts.get("content").strip())
+                    if iso:
+                        return iso
         except Exception:
             pass
 
-        for sel in ["time[datetime]", "abbr[data-utime]"]:
+        # B. data-utime / datetime（root 範圍）
+        for sel, attr in [("abbr[data-utime]", "data-utime"), ("time[datetime]", "datetime")]:
             try:
-                te = root.find_element(By.CSS_SELECTOR, sel)
-                dt = te.get_attribute("datetime") or te.get_attribute("data-utime")
-                if dt:
+                elems = root.find_elements(By.CSS_SELECTOR, sel)
+            except Exception:
+                elems = []
+            for e in elems:
+                try:
+                    if self.node_in_comments(driver, e):
+                        continue
+                    val = (e.get_attribute(attr) or "").strip()
+                    if not val:
+                        continue
+                    iso = self._parse_datetime_any(val)
+                    if iso:
+                        return iso
+                except Exception:
+                    continue
+
+        # C. aria-label / title / data-tooltip-content / data-store（含 hover / tooltip）
+        selectors = [
+            "a[aria-label]", "span[aria-label]", "abbr[title]", "[data-tooltip-content]",
+            "[title]", "[data-store]"
+        ]
+        for sel in selectors:
+            try:
+                elems = root.find_elements(By.CSS_SELECTOR, sel)
+            except Exception:
+                elems = []
+            for e in elems:
+                try:
+                    if not e.is_displayed():
+                        continue
+                except Exception:
+                    pass
+                if self.node_in_comments(driver, e):
+                    continue
+
+                # 先 hover 以觸發 tooltip（若有）
+                self._hover(driver, e)
+
+                # data-store 可能是 JSON（含 epoch）
+                ds = e.get_attribute("data-store") or ""
+                if ds:
                     try:
-                        ts = int(dt)
-                        return datetime.fromtimestamp(ts).isoformat() + "Z"
+                        obj = json.loads(ds)
+                        for k in ("time", "publish_time", "creation_time", "timestamp"):
+                            if k in obj and str(obj[k]).isdigit():
+                                return self._iso_utc_from_epoch(int(str(obj[k])[:10]))
                     except Exception:
-                        return dt
+                        pass
+
+                for attr in ("data-utime", "datetime", "data-tooltip-content", "aria-label", "title"):
+                    val = e.get_attribute(attr) or ""
+                    if not val:
+                        continue
+                    iso = self._parse_datetime_any(val)
+                    if iso:
+                        return iso
+
+                # tooltip DOM
+                try:
+                    tooltips = driver.find_elements(By.CSS_SELECTOR, "div[role='tooltip']")
+                    for t in tooltips:
+                        txt = (t.text or "").strip()
+                        iso = self._parse_datetime_any(txt)
+                        if iso:
+                            return iso
+                except Exception:
+                    pass
+
+        # D. 全頁備援掃描
+        try:
+            all_candidates = driver.find_elements(By.CSS_SELECTOR,
+                "abbr[data-utime], time[datetime], a[aria-label], span[aria-label], [data-tooltip-content], [title]"
+            )
+        except Exception:
+            all_candidates = []
+        for e in all_candidates:
+            try:
+                if self.node_in_comments(driver, e):
+                    continue
+                for attr in ("data-utime", "datetime", "data-tooltip-content", "aria-label", "title", "data-store"):
+                    val = e.get_attribute(attr) or ""
+                    if not val:
+                        continue
+                    if attr == "data-store":
+                        try:
+                            obj = json.loads(val)
+                            for k in ("time", "publish_time", "creation_time", "timestamp"):
+                                if k in obj and str(obj[k]).isdigit():
+                                    return self._iso_utc_from_epoch(int(str(obj[k])[:10]))
+                        except Exception:
+                            continue
+                    iso = self._parse_datetime_any(val)
+                    if iso:
+                        return iso
             except Exception:
                 continue
+
         return None
 
     def extract_post_by_url(self, driver, url, idx=1):
@@ -1078,8 +1286,8 @@ class FBScraperService:
             content_hash = self._build_content_hash(text, images)
 
             data = {
-                "url": numeric_url,        # 傳統數字型（可為空字串）
-                "pfbid_url": pfbid_url,    # 新制 pfbid（可為空字串）
+                "url": numeric_url,
+                "pfbid_url": pfbid_url,
                 "text": text,
                 "text_md": text_md,
                 "images": images,
@@ -1245,19 +1453,26 @@ class FBScraperService:
     def _save_fb_posts_to_json(self, new_posts: List[Dict]) -> None:
         """
         儲存 Facebook 貼文到 JSON 並以同決策同步資料庫。
-        * 唯一鍵：content_hash
+        * 兩道去重關卡：
+          1. 第一道：url 或 pfbid_url（如果找到相同 URL，檢查 content_hash）
+          2. 第二道：content_hash（如果 content_hash 相同，合併；不同，新增新的）
         * 決策：insert / update / noop
         """
         try:
             bundle = self._load_existing_json()
             existing_posts: List[Dict] = bundle.get("posts", [])
 
-            # 建 content_hash 索引
-            by_hash: Dict[str, Dict] = {}
+            # 建 url 和 pfbid_url 索引（第一道關卡）
+            by_url: Dict[str, Dict] = {}
+            by_pfbid_url: Dict[str, Dict] = {}
+
             for p in existing_posts:
-                h = p.get("content_hash")
-                if h and h not in by_hash:
-                    by_hash[h] = p
+                url = p.get("url") or ""
+                pfbid_url = p.get("pfbid_url") or ""
+                if url:
+                    by_url[url] = p
+                if pfbid_url:
+                    by_pfbid_url[pfbid_url] = p
 
             # DB 操作清單
             ops: List[Dict] = []
@@ -1266,55 +1481,121 @@ class FBScraperService:
             noop_count = 0
 
             for np in new_posts:
-                ch = np.get("content_hash") or self._build_content_hash(np.get("text", ""), np.get("images", []))
-                if not ch:
-                    # 沒有 hash，略過此篇
-                    noop_count += 1
-                    continue
-
                 # 規範 URL 欄位
                 if np.get("url"):
                     np["url"] = self.normalize_fb_url_for_storage(np["url"])
                 if np.get("pfbid_url"):
                     np["pfbid_url"] = self.normalize_fb_url_for_storage(np["pfbid_url"])
 
+                # 建立 content_hash（用於第二道關卡）
+                ch = np.get("content_hash") or self._build_content_hash(np.get("text", ""), np.get("images", []))
                 np["content_hash"] = ch
                 np["last_seen"] = datetime.now().isoformat()
 
-                if ch not in by_hash:
-                    # 全新 → insert
-                    existing_posts.append(np)
-                    by_hash[ch] = np
-                    added_count += 1
-                    ops.append({"action": "insert", "post": dict(np)})
-                else:
-                    # 已存在 → 合併
-                    target = by_hash[ch]
-                    before = json.dumps({
-                        "url": target.get("url") or "",
-                        "pfbid_url": target.get("pfbid_url") or "",
-                        "text_len": len(target.get("text") or ""),
-                        "text_md_len": len(target.get("text_md") or ""),
-                        "img_n": len(target.get("images") or []),
-                        "timestamp": target.get("timestamp") or ""
-                    }, ensure_ascii=False, sort_keys=True)
+                new_url = np.get("url") or ""
+                new_pfbid_url = np.get("pfbid_url") or ""
 
-                    changed = self._merge_fields_for_duplicate(target, np)
+                # 第一道關卡：檢查相同種類的 URL
+                existing_post = None
+                url_type = None
 
-                    after = json.dumps({
-                        "url": target.get("url") or "",
-                        "pfbid_url": target.get("pfbid_url") or "",
-                        "text_len": len(target.get("text") or ""),
-                        "text_md_len": len(target.get("text_md") or ""),
-                        "img_n": len(target.get("images") or []),
-                        "timestamp": target.get("timestamp") or ""
-                    }, ensure_ascii=False, sort_keys=True)
+                if new_url and new_url in by_url:
+                    existing_post = by_url[new_url]
+                    url_type = "url"
+                elif new_pfbid_url and new_pfbid_url in by_pfbid_url:
+                    existing_post = by_pfbid_url[new_pfbid_url]
+                    url_type = "pfbid_url"
 
-                    if changed and before != after:
-                        updated_count += 1
-                        ops.append({"action": "update", "post": dict(target)})
+                if existing_post:
+                    # 第二道關卡：檢查 content_hash
+                    existing_hash = existing_post.get("content_hash")
+                    if existing_hash == ch:
+                        # content_hash 相同 → 合併欄位
+                        before = json.dumps({
+                            "url": existing_post.get("url") or "",
+                            "pfbid_url": existing_post.get("pfbid_url") or "",
+                            "text_len": len(existing_post.get("text") or ""),
+                            "text_md_len": len(existing_post.get("text_md") or ""),
+                            "img_n": len(existing_post.get("images") or []),
+                            "timestamp": existing_post.get("timestamp") or "",
+                            "content_hash": existing_post.get("content_hash") or ""
+                        }, ensure_ascii=False, sort_keys=True)
+
+                        changed = self._merge_fields_for_duplicate(existing_post, np)
+
+                        after = json.dumps({
+                            "url": existing_post.get("url") or "",
+                            "pfbid_url": existing_post.get("pfbid_url") or "",
+                            "text_len": len(existing_post.get("text") or ""),
+                            "text_md_len": len(existing_post.get("text_md") or ""),
+                            "img_n": len(existing_post.get("images") or []),
+                            "timestamp": existing_post.get("timestamp") or "",
+                            "content_hash": existing_post.get("content_hash") or ""
+                        }, ensure_ascii=False, sort_keys=True)
+
+                        if changed and before != after:
+                            updated_count += 1
+                            ops.append({"action": "update", "post": dict(existing_post)})
+                        else:
+                            noop_count += 1  # JSON 不需異動 → DB 也不動
                     else:
-                        noop_count += 1  # JSON 不需異動 → DB 也不動
+                        # content_hash 不同 → 更新現有貼文（相同 URL 的不同內容版本）
+                        # 保留 URL，更新內容
+                        existing_post.update({
+                            "text": np.get("text", ""),
+                            "text_md": np.get("text_md", ""),
+                            "images": np.get("images", []),
+                            "timestamp": np.get("timestamp"),
+                            "content_hash": ch,
+                            "last_seen": np["last_seen"]
+                        })
+
+                        # 如果新貼文有缺少的 URL 欄位，補上
+                        if url_type == "url" and not existing_post.get("pfbid_url") and np.get("pfbid_url"):
+                            existing_post["pfbid_url"] = np["pfbid_url"]
+                        elif url_type == "pfbid_url" and not existing_post.get("url") and np.get("url"):
+                            existing_post["url"] = np["url"]
+
+                        updated_count += 1
+                        ops.append({"action": "update", "post": dict(existing_post)})
+                else:
+                    # 第一道關卡沒有找到 → 檢查是否有相同 content_hash 的貼文（跨種類 URL）
+                    existing_by_hash = None
+                    for p in existing_posts:
+                        if p.get("content_hash") == ch:
+                            existing_by_hash = p
+                            break
+
+                    if existing_by_hash:
+                        # 找到相同 content_hash → 合併 URL 欄位
+                        changed = False
+                        if not existing_by_hash.get("url") and new_url:
+                            existing_by_hash["url"] = new_url
+                            changed = True
+                        if not existing_by_hash.get("pfbid_url") and new_pfbid_url:
+                            existing_by_hash["pfbid_url"] = new_pfbid_url
+                            changed = True
+
+                        # 更新 last_seen
+                        existing_by_hash["last_seen"] = np["last_seen"]
+
+                        if changed:
+                            updated_count += 1
+                            ops.append({"action": "update", "post": dict(existing_by_hash)})
+                        else:
+                            noop_count += 1
+                    else:
+                        # 都沒有找到 → 新增
+                        existing_posts.append(np)
+
+                        # 更新索引
+                        if new_url:
+                            by_url[new_url] = np
+                        if new_pfbid_url:
+                            by_pfbid_url[new_pfbid_url] = np
+
+                        added_count += 1
+                        ops.append({"action": "insert", "post": dict(np)})
 
             # 排序（有 timestamp 的放前面）
             existing_posts.sort(key=lambda p: p.get("timestamp") or "", reverse=True)

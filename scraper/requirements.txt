@@ -10,3 +10,4 @@ pydantic
 selenium
 webdriver-manager
 beautifulsoup4
+python-dateutil

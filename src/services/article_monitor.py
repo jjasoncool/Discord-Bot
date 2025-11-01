@@ -669,11 +669,25 @@ class ArticleMonitor(BaseContentMonitor):
         # 優先使用 url 欄位，如果 url 是空的則使用 pfbid_url
         embed_url = fb_post.get('url') or fb_post.get('pfbid_url')
 
+        # 優先使用 timestamp（貼文發佈時間），如果沒有則使用 created_at（資料庫記錄時間）
+        timestamp_str = fb_post.get('timestamp') or fb_post.get('created_at')
+        timestamp = None
+        if timestamp_str:
+            try:
+                # 處理 ISO 格式時間戳
+                if timestamp_str.endswith('Z'):
+                    timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                else:
+                    timestamp = datetime.fromisoformat(timestamp_str)
+            except ValueError as e:
+                logger.warning(f"無法解析 FB 貼文時間戳 '{timestamp_str}': {e}")
+                timestamp = None
+
         embed = discord.Embed(
             title="Facebook 貼文",
             description=description,
             color=0x1877F2,  # FB 藍色
-            timestamp=datetime.fromisoformat(fb_post['created_at']),
+            timestamp=timestamp,
             url=embed_url
         )
 
@@ -683,7 +697,10 @@ class ArticleMonitor(BaseContentMonitor):
         # 處理圖片
         images = fb_post.get('images', [])
         if images:
+            logger.info(f"FB 貼文 {fb_post.get('id', 'unknown')} 設定圖片: {images[0]}")
             embed.set_image(url=images[0])
+        else:
+            logger.info(f"FB 貼文 {fb_post.get('id', 'unknown')} 沒有圖片")
 
         # 添加 footer
         embed.set_footer(text="鳴潮官方 Facebook")
