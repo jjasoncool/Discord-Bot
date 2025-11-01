@@ -419,9 +419,7 @@ class FBScraperService:
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             self.human_move_and_scroll(driver)
 
-        # 第一時間就正規化成 canonical（www、移除追蹤）
         canon_links = [self.normalize_fb_url_for_storage(u) for u in links[:n]]
-        # 存一份 canonical URL 到 fb_url_list（累積、不重複）
         self._append_fb_url_list(canon_links)
 
         self.logger.info(f"取得貼文連結數量：{len(canon_links)}")
@@ -526,7 +524,6 @@ class FBScraperService:
             return s
 
         if "facebook.com" not in p.netloc:
-            # 非 FB 原樣返回（但去掉 fragment）
             return urlunparse((p.scheme or "https", p.netloc, p.path.rstrip("/"), "", p.query, ""))
 
         netloc = "www.facebook.com"
@@ -535,7 +532,6 @@ class FBScraperService:
         new_q = {}
 
         if path.startswith("/story.php"):
-            # 僅保留辨識所需
             for k in ("story_fbid", "id"):
                 if k in q and q[k]:
                     new_q[k] = q[k]
@@ -544,8 +540,6 @@ class FBScraperService:
                 if k in q and q[k]:
                     new_q[k] = q[k]
         else:
-            # /posts/xxx 或 /permalink/xxx 或其他 slug + 尾段 id 的 URL
-            # 直接去 query
             new_q = {}
 
         return urlunparse((p.scheme or "https", netloc, path.rstrip("/"), "", urlencode(new_q, doseq=True), ""))
@@ -584,12 +578,16 @@ class FBScraperService:
 
     # ---------- 內容雜湊與圖片正規化 ----------
     def _canonical_image(self, u: str) -> str:
-        """移除 query/fragment，僅保留 scheme://host/path"""
+        """移除 query/fragment，僅保留 scheme://host/path；但 Facebook CDN 圖片保留 query 以確保可訪問"""
         try:
             p = urlparse(u)
             if not p.scheme or not p.netloc:
                 return u
-            return urlunparse((p.scheme, p.netloc, p.path.rstrip("/"), "", "", ""))
+            # 對於 Facebook CDN 圖片，保留 query parameters 以確保可訪問
+            if 'fbcdn.net' in p.netloc and p.query:
+                return urlunparse((p.scheme, p.netloc, p.path.rstrip("/"), "", p.query, ""))
+            else:
+                return urlunparse((p.scheme, p.netloc, p.path.rstrip("/"), "", "", ""))
         except Exception:
             return u
 
@@ -619,56 +617,38 @@ class FBScraperService:
 
     # ---------- 文字抽取（略；保留你原本流程） ----------
     def _apply_hashtag_markdown(self, plain_text: str, hashtag_map: Dict[str, str]) -> str:
-        """把 #hashtag 轉 Markdown 連結（支援多個），保持其他文字不變。"""
         if not hashtag_map:
             return plain_text
         out = plain_text
-        # 長字優先，避免 #鳴 與 #鳴潮 的替換互相影響
         for tag in sorted(hashtag_map.keys(), key=len, reverse=True):
             url = hashtag_map[tag]
             out = out.replace(tag, f"[{tag}]({url})")
         return out
 
     def _html_to_text_and_hashtags(self, html_fragment: str, base_url: str) -> Tuple[str, Dict[str, str]]:
-        """
-        解析 innerHTML → (plain_text, hashtag_map)
-        - 一般連結：以完整 URL 取代超連結文字（避免 FB 顯示「……」）
-        - hashtag 超連結：保留成「#文字」，並收集 hashtag_map[#文字] = 完整 FB hashtag 連結
-        """
         if not html_fragment:
             return "", {}
         if not BS4_AVAILABLE:
             txt = re.sub(r"<[^>]+>", "", html_fragment)
             return self.clean_text(ihtml.unescape(txt)), {}
-
         soup = BeautifulSoup(html_fragment, "html.parser")
-
-        # 刪除非內容節點
         for tag in soup(["script", "style", "noscript"]):
             tag.decompose()
-
         hashtag_map: Dict[str, str] = {}
-
         for a in soup.find_all("a"):
             href = a.get("href") or ""
             resolved = self._resolve_href(href, base_url)
             display = a.get_text() or ""
-
             is_hashtag = ("/hashtag/" in resolved) or display.strip().startswith("#")
             if is_hashtag:
                 tag_text = display.strip() if display.strip().startswith("#") else f"#{display.strip()}"
                 hashtag_map[tag_text] = resolved
-                # 用純 hashtag 文字取代整個 <a>
                 a.replace_with(tag_text)
             else:
-                # 其他連結：用完整 URL 取代（避免被 FB 用省略號截斷）
                 replacement = resolved.strip() if resolved else display
                 a.replace_with(replacement)
-
-        # 換行處理
         for br in soup.find_all("br"):
             br.replace_with("\n")
-
         text = soup.get_text(separator="\n")
         text = ihtml.unescape(text)
         text = self.clean_text(text)
@@ -676,7 +656,6 @@ class FBScraperService:
         return text, hashtag_map
 
     def _extract_from_message_scopes(self, driver, container) -> Tuple[str, Dict[str, str]]:
-        """從 message 容器提取文字（innerHTML + 連結展開 + hashtag map）"""
         scopes = []
         try:
             scopes = container.find_elements(By.CSS_SELECTOR, self.MESSAGE_SELECTORS)
@@ -693,11 +672,9 @@ class FBScraperService:
 
         for sc in scopes:
             try:
-                # 先展開查看更多
                 self.expand_see_more_in_scope(driver, sc)
             except Exception:
                 pass
-
             try:
                 html_fragment = sc.get_attribute("innerHTML") or ""
                 plain, hmap = self._html_to_text_and_hashtags(html_fragment, base_url)
@@ -707,7 +684,6 @@ class FBScraperService:
             except Exception:
                 continue
 
-        # JS 備援：取 innerHTML 再走同樣流程
         if not out_candidates:
             try:
                 js = """
@@ -734,14 +710,12 @@ class FBScraperService:
         if not out_candidates:
             return "", {}
 
-        # 取最長的候選
         best_plain, best_map = max(out_candidates, key=lambda x: len(x[0]))
         if len(best_plain) > self.TEXT_MAX_LEN:
             best_plain = best_plain[:self.TEXT_MAX_LEN]
         return best_plain, best_map
 
     def _extract_from_paragraphs(self, driver, scope) -> Tuple[str, Dict[str, str]]:
-        """從段落聚合提取文字（同樣替換 <a> 為 href，並收集 hashtag）"""
         try:
             self.expand_see_more_in_scope(driver, scope)
         except Exception:
@@ -776,7 +750,6 @@ class FBScraperService:
         return ("\n\n".join(out).strip(), hashtag_union)
 
     def _extract_from_og(self, page_source: str) -> str:
-        """從 OG meta 提取文字（最後備援）"""
         if not BS4_AVAILABLE:
             return ""
         try:
@@ -846,7 +819,6 @@ class FBScraperService:
 
     # ---------- 圖片擷取（含大圖） ----------
     def _nearest_anchor_href(self, driver, node) -> str:
-        """往上找最近的 <a href>，回傳 href（若無則空字串）"""
         try:
             return driver.execute_script("""
                 let el = arguments[0];
@@ -862,7 +834,6 @@ class FBScraperService:
             return ""
 
     def _is_photo_link(self, url: str) -> bool:
-        """是否為 FB 照片頁連結"""
         if not url:
             return False
         u = url.lower()
@@ -890,7 +861,6 @@ class FBScraperService:
                 pass
             return None
         finally:
-            # 關閉照片分頁並切回主分頁
             try:
                 driver.close()
             except Exception:
@@ -930,7 +900,6 @@ class FBScraperService:
         if not thumbs:
             return []
 
-        # 依 score 排序 + 去重（以縮圖 src 去重）
         unique_thumbs, seen = [], set()
         for score, src, href in sorted(thumbs, key=lambda x: x[0], reverse=True):
             if src in seen:
@@ -945,7 +914,6 @@ class FBScraperService:
         for _, thumb_src, href in unique_thumbs:
             full_url = None
             if href and self._is_photo_link(href):
-                # 照片頁導航用 m 站（穩定），但圖片 URL 最終不改
                 photo_nav = self.normalize_fb_url_for_nav(href)
                 full_url = self._get_og_image_from_page(driver, photo_nav)
             if not full_url:
@@ -954,6 +922,7 @@ class FBScraperService:
             if canon_full and canon_full not in seen_full:
                 seen_full.add(canon_full)
                 fulls.append(canon_full)
+                self.logger.info(f"抓取圖片 URL: {canon_full}")
             if len(fulls) >= limit:
                 break
 
@@ -985,7 +954,6 @@ class FBScraperService:
         cur = driver.current_url or ""
         if "/posts/pfbid" in cur:
             return self.normalize_fb_url_for_storage(cur)
-        # 再掃描頁面
         try:
             anchors = driver.find_elements(By.CSS_SELECTOR, "a[href*='/posts/pfbid']")
             for a in anchors:
@@ -1064,13 +1032,9 @@ class FBScraperService:
 
     def extract_post_by_url(self, driver, url, idx=1):
         """根據 URL 提取單篇貼文（文字 + 圖片）"""
-        # ★ 開始抓新的一篇前，先清掉其他分頁
         self.ensure_only_main_tab(driver)
 
-        # 收到的 url 已是正規化（www）。導航用 m 站，存檔仍用 www canonical。
         open_url = self.normalize_fb_url_for_nav(url)
-
-        # 用「新分頁」打開貼文詳情
         new_handle = self.open_in_new_tab(driver, open_url)
         if not new_handle:
             # 導航失敗也回傳基礎結構
@@ -1133,7 +1097,6 @@ class FBScraperService:
             return data
 
         finally:
-            # 關掉貼文分頁 → 回主分頁
             try:
                 driver.close()
             except Exception:
@@ -1173,14 +1136,12 @@ class FBScraperService:
             results = []
             for i, url in enumerate(links, 1):
                 self.logger.info(f"\n--- 解析第 {i} 篇 ---")
-                # 再保險清一次（你要求的行為）
                 self.ensure_only_main_tab(driver)
 
                 data = self.extract_post_by_url(driver, url, idx=i)
                 data["post_id"] = f"fb_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{i}"
                 results.append(data)
 
-                # 再保險清一次（若照片頁意外殘留）
                 self.ensure_only_main_tab(driver)
 
             # 集中決策：去重 + 合併 + 產生 DB ops + 寫 JSON + 套 DB
