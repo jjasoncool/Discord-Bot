@@ -7,3 +7,4 @@ src/scraper/articles.db
 src/scraper/articles_bk.db
 src/services/sent_articles.json
 src/settings/item_prices.json
+staged_diff.txt
