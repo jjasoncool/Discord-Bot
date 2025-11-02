@@ -16,6 +16,7 @@ class ArticleCommands(commands.Cog):
         self.bot = bot
         self.article_monitor = None
         self.monitoring_task = None
+        self.fb_monitoring_task = None
         self.monitored_channels = []
 
     async def cog_load(self):

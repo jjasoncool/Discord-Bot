@@ -213,7 +213,7 @@ async def auto_start_article_monitor(bot):
                 article_commands.fb_monitoring_task = asyncio.create_task(
                     article_commands.article_monitor.start_fb_monitoring(
                         channel_ids=[article_monitor_channel_id],
-                        check_interval=3600  # 1小時檢查一次 FB 貼文
+                        check_interval=600  # 10分鐘檢查一次 FB 貼文
                     )
                 )
                 logger.info(f"✅ 已自動啟動 FB 貼文監控！更新頻道: {channel.name} (ID: {article_monitor_channel_id})")
