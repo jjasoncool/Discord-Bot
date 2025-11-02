@@ -32,6 +32,15 @@ Facebook 貼文抓取服務類別，支持模組調用和獨立執行
         - 新 Comet 介面：時間連結上的 aria-label / title / data-tooltip-content / data-store（hover 後 tooltip）
       中文（上午/下午/中午/晚上、年/月/日、星期）會先正規化再交給 dateutil。
       若沒有時區資訊，採用 config["timezone"]（預設 Asia/Taipei）視為本地時間再轉 UTC ISO。
+
+  11) **本版新增（強化 timestamp 擷取）**：
+      A. 在 extract_timestamp 最前面，直接從 `page_source` 以 regex 抓取嵌入 JSON 的
+         `"creation_time":<epoch>` 或 `"publish_time":<epoch>`（Comet SSR 會提供）；
+         例如你提供的頁面有：
+         - `"post_context":{"object_fbtype":266,"publish_time":1761908406,...}`（tracking JSON） :contentReference[oaicite:3]{index=3}
+         - `"timestamp":{"...","story":{"creation_time":1761908406,...}}`（同頁） :contentReference[oaicite:4]{index=4}
+      B. 若全數失敗，再嘗試解析「相對時間」（如 `2天`、`3小時`、`剛剛` 等）轉為絕對時間。
+      C. 同步在寫入資料庫前，把 JSON 中的 `timestamp`（ISO/UTC）轉為 SQLite DATETIME（`YYYY-MM-DD HH:MM:SS`，以本地時區表示）。
 """
 
 import os
@@ -41,7 +50,8 @@ import json
 import random
 import html as ihtml
 import hashlib
-from datetime import datetime, timezone
+import copy  # 本版新增：為了不改動寫回 JSON 的內容，DB 同步時複製 ops
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional, Tuple
 from urllib.parse import urlparse, parse_qs, urlunparse, urlencode, urljoin, unquote
 
@@ -390,9 +400,9 @@ class FBScraperService:
         """通過頁面原始碼提取貼文詳情連結（備援）"""
         html = driver.page_source or ""
         pats = [
-            r'https://m\.facebook\.com/story\.php\?[^"\']+',
-            r'https://m\.facebook\.com/[^"\']+/posts/[^"\']+',
-            r'https://m\.facebook\.com/[^"\']+/permalink/[^"\']+',
+            r'https://m\\.facebook\\.com/story\\.php\\?[^"\\\']+',
+            r'https://m\\.facebook\\.com/[^"\\\']+/posts/[^"\\\']+',
+            r'https://m\\.facebook\\.com/[^"\\\']+/permalink/[^"\\\']+',
         ]
         hrefs = []
         for pat in pats:
@@ -748,10 +758,11 @@ class FBScraperService:
         if not out_candidates:
             return "", {}
 
+        # 保留你原本邏輯：取最長者
         best_plain, best_map = max(out_candidates, key=lambda x: len(x[0]))
         if len(best_plain) > self.TEXT_MAX_LEN:
             best_plain = best_plain[:self.TEXT_MAX_LEN]
-        return best_plain, self._apply_hashtag_markdown(best_plain, best_map) and best_map or best_map
+        return best_plain, best_map
 
     def _extract_from_paragraphs(self, driver, scope) -> Tuple[str, Dict[str, str]]:
         try:
@@ -1052,6 +1063,24 @@ class FBScraperService:
             dt = dt.replace(tzinfo=self.tzinfo or gettz("UTC"))
         return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
+    # 本版新增：把 ISO / epoch 轉成 SQLite DATETIME（本地時區，無時區字尾）
+    def _to_sqlite_datetime_local(self, iso_or_epoch: str) -> Optional[str]:
+        if not iso_or_epoch:
+            return None
+        s = str(iso_or_epoch).strip()
+        try:
+            if re.fullmatch(r"\d{10,13}", s):
+                sec = int(s[:10])
+                dt = datetime.fromtimestamp(sec, tz=timezone.utc).astimezone(self.tzinfo)
+            else:
+                dt = duparser.parse(s)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)  # 若是像 "2025-01-01 12:00:00" 當作 UTC
+                dt = dt.astimezone(self.tzinfo)
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return None
+
     def _normalize_datetime_text(self, s: str) -> str:
         """
         將中文日期時間轉為 dateutil 可解析的字串（不做繁瑣 parsing，只做最小正規化）
@@ -1069,10 +1098,10 @@ class FBScraperService:
         # 中文 AM/PM
         t = t.replace("上午", " AM ").replace("早上", " AM ").replace("清晨", " AM ")
         t = t.replace("下午", " PM ").replace("中午", " PM ").replace("晚上", " PM ").replace("傍晚", " PM ")
-        # 把「PM 7:00」換成「7:00 PM」
-        t = re.sub(r"\b(AM|PM)\s*(\d{1,2}:\d{2})", r"\2 \1", t, flags=re.IGNORECASE)
         # 7點 / 7時 → 7:00
         t = re.sub(r"(\d{1,2})\s*[點时時]", r"\1:00", t)
+        # 把「PM 7:00」換成「7:00 PM」
+        t = re.sub(r"\b(AM|PM)\s*(\d{1,2}:\d{2})", r"\2 \1", t, flags=re.IGNORECASE)
         # 壓空白
         t = re.sub(r"\s+", " ", t).strip()
         return t
@@ -1115,17 +1144,98 @@ class FBScraperService:
         except Exception:
             pass
 
+    # 本版新增：從 page_source 直接抓 Comet 內嵌 JSON 的 epoch（creation_time / publish_time）
+    def _epoch_from_pagesource(self, html: str) -> Optional[int]:
+        if not html:
+            return None
+        # 先針對典型結構做較嚴謹的兩個樣式
+        pats = [
+            r'"timestamp"\s*:\s*{[^{}]*"story"\s*:\s*{[^{}]*"creation_time"\s*:\s*(\d{10,})',
+            r'"post_context"\s*:\s*{[^{}]*"publish_time"\s*:\s*(\d{10,})',
+        ]
+        for pat in pats:
+            m = re.search(pat, html)
+            if m:
+                try:
+                    return int(m.group(1))
+                except Exception:
+                    pass
+        # 最後寬鬆掃描
+        m2 = re.search(r'"(?:creation_time|publish_time)"\s*:\s*(\d{10,})', html)
+        if m2:
+            try:
+                return int(m2.group(1))
+            except Exception:
+                return None
+        return None
+
+    # 本版新增：相對時間（2天、3小時、剛剛）→ 轉 epoch
+    def _epoch_from_relative_text(self, s: str) -> Optional[int]:
+        if not s:
+            return None
+        t = s.strip()
+        now = datetime.now(tz=self.tzinfo)
+        # 剛剛
+        if t in ("剛剛", "刚刚"):
+            return int(now.timestamp())
+        # X 分鐘 / 小時 / 天 / 週 / 月 / 年
+        m = re.match(r"(\d+)\s*(分鐘|分|小時|小时|天|週|周|週數|星期|月|年)", t)
+        if not m:
+            # 英文相對：min/hours/days/weeks/months/years ago
+            m2 = re.match(r"(\d+)\s*(min|mins|minutes|hour|hours|day|days|week|weeks|month|months|year|years)", t, flags=re.I)
+            if m2:
+                num = int(m2.group(1))
+                unit = m2.group(2).lower()
+                delta = {
+                    "min": timedelta(minutes=num), "mins": timedelta(minutes=num), "minutes": timedelta(minutes=num),
+                    "hour": timedelta(hours=num),  "hours": timedelta(hours=num),
+                    "day": timedelta(days=num),    "days": timedelta(days=num),
+                    "week": timedelta(weeks=num),  "weeks": timedelta(weeks=num),
+                    "month": timedelta(days=30*num),"months": timedelta(days=30*num),
+                    "year": timedelta(days=365*num),"years": timedelta(days=365*num),
+                }[unit]
+                return int((now - delta).timestamp())
+            return None
+        num = int(m.group(1))
+        unit = m.group(2)
+        if unit in ("分鐘", "分"):
+            delta = timedelta(minutes=num)
+        elif unit in ("小時", "小时"):
+            delta = timedelta(hours=num)
+        elif unit in ("天",):
+            delta = timedelta(days=num)
+        elif unit in ("週", "周", "週數", "星期"):
+            delta = timedelta(weeks=num)
+        elif unit in ("月",):
+            delta = timedelta(days=30*num)
+        elif unit in ("年",):
+            delta = timedelta(days=365*num)
+        else:
+            return None
+        return int((now - delta).timestamp())
+
     def extract_timestamp(self, driver, root) -> Optional[str]:
         """
         盡可能從貼文本體取出「絕對時間」並轉成 ISO8601 UTC（Z）：
+          0) **本版新增**：先從 page_source 讀取 creation_time/publish_time（epoch）
           1) <meta property="article:published_time">
           2) <abbr data-utime> / <time datetime>
           3) aria-label / title / data-tooltip-content / data-store（hover 後 tooltip）
-          4) 全頁備援掃描
+          4) 全頁備援掃描（含 data-store JSON）
+          5) **本版新增**：相對時間字樣（2天/3小時/剛剛）
         """
-        # A. meta: article:published_time
+        html = driver.page_source or ""
+
+        # 0) 先用 page_source 的嵌入 JSON 拿 epoch（最可靠）
         try:
-            html = driver.page_source or ""
+            epoch0 = self._epoch_from_pagesource(html)
+            if epoch0:
+                return self._iso_utc_from_epoch(epoch0)
+        except Exception:
+            pass
+
+        # 1) meta: article:published_time
+        try:
             if BS4_AVAILABLE and html:
                 soup = BeautifulSoup(html, "html.parser")
                 meta_ts = soup.find("meta", attrs={"property": "article:published_time"})
@@ -1136,7 +1246,7 @@ class FBScraperService:
         except Exception:
             pass
 
-        # B. data-utime / datetime（root 範圍）
+        # 2) data-utime / datetime（root 範圍）
         for sel, attr in [("abbr[data-utime]", "data-utime"), ("time[datetime]", "datetime")]:
             try:
                 elems = root.find_elements(By.CSS_SELECTOR, sel)
@@ -1149,13 +1259,16 @@ class FBScraperService:
                     val = (e.get_attribute(attr) or "").strip()
                     if not val:
                         continue
+                    # data-utime 通常就是 epoch
+                    if attr == "data-utime" and val.isdigit():
+                        return self._iso_utc_from_epoch(int(val[:10]))
                     iso = self._parse_datetime_any(val)
                     if iso:
                         return iso
                 except Exception:
                     continue
 
-        # C. aria-label / title / data-tooltip-content / data-store（含 hover / tooltip）
+        # 3) aria-label / title / data-tooltip-content / data-store（含 hover / tooltip）
         selectors = [
             "a[aria-label]", "span[aria-label]", "abbr[title]", "[data-tooltip-content]",
             "[title]", "[data-store]"
@@ -1183,8 +1296,9 @@ class FBScraperService:
                     try:
                         obj = json.loads(ds)
                         for k in ("time", "publish_time", "creation_time", "timestamp"):
-                            if k in obj and str(obj[k]).isdigit():
-                                return self._iso_utc_from_epoch(int(str(obj[k])[:10]))
+                            vv = obj.get(k)
+                            if vv is not None and str(vv).isdigit():
+                                return self._iso_utc_from_epoch(int(str(vv)[:10]))
                     except Exception:
                         pass
 
@@ -1192,6 +1306,10 @@ class FBScraperService:
                     val = e.get_attribute(attr) or ""
                     if not val:
                         continue
+                    # 可能是相對字樣
+                    ep = self._epoch_from_relative_text(val)
+                    if ep:
+                        return self._iso_utc_from_epoch(ep)
                     iso = self._parse_datetime_any(val)
                     if iso:
                         return iso
@@ -1201,16 +1319,19 @@ class FBScraperService:
                     tooltips = driver.find_elements(By.CSS_SELECTOR, "div[role='tooltip']")
                     for t in tooltips:
                         txt = (t.text or "").strip()
+                        ep = self._epoch_from_relative_text(txt)
+                        if ep:
+                            return self._iso_utc_from_epoch(ep)
                         iso = self._parse_datetime_any(txt)
                         if iso:
                             return iso
                 except Exception:
                     pass
 
-        # D. 全頁備援掃描
+        # 4) 全頁備援掃描（含 data-store）
         try:
             all_candidates = driver.find_elements(By.CSS_SELECTOR,
-                "abbr[data-utime], time[datetime], a[aria-label], span[aria-label], [data-tooltip-content], [title]"
+                "abbr[data-utime], time[datetime], a[aria-label], span[aria-label], [data-tooltip-content], [title], [data-store]"
             )
         except Exception:
             all_candidates = []
@@ -1218,23 +1339,40 @@ class FBScraperService:
             try:
                 if self.node_in_comments(driver, e):
                     continue
-                for attr in ("data-utime", "datetime", "data-tooltip-content", "aria-label", "title", "data-store"):
-                    val = e.get_attribute(attr) or ""
-                    if not val:
-                        continue
-                    if attr == "data-store":
-                        try:
-                            obj = json.loads(val)
-                            for k in ("time", "publish_time", "creation_time", "timestamp"):
-                                if k in obj and str(obj[k]).isdigit():
-                                    return self._iso_utc_from_epoch(int(str(obj[k])[:10]))
-                        except Exception:
-                            continue
-                    iso = self._parse_datetime_any(val)
-                    if iso:
-                        return iso
+                ds = e.get_attribute("data-store") or ""
+                if ds:
+                    try:
+                        obj = json.loads(ds)
+                        for k in ("time", "publish_time", "creation_time", "timestamp"):
+                            vv = obj.get(k)
+                            if vv is not None and str(vv).isdigit():
+                                return self._iso_utc_from_epoch(int(str(vv)[:10]))
+                    except Exception:
+                        pass
+                v = (e.get_attribute("data-utime") or "").strip()
+                if v.isdigit():
+                    return self._iso_utc_from_epoch(int(v[:10]))
+                for attr in ("datetime", "aria-label", "title", "data-tooltip-content"):
+                    val = (e.get_attribute(attr) or "").strip()
+                    if val:
+                        ep = self._epoch_from_relative_text(val)
+                        if ep:
+                            return self._iso_utc_from_epoch(ep)
+                        iso = self._parse_datetime_any(val)
+                        if iso:
+                            return iso
             except Exception:
                 continue
+
+        # 5) 最後一招：直接從 page_source 裡抓「相對時間」字樣
+        try:
+            rel = re.search(r">(剛剛|刚刚|\d+\s*(?:分鐘|分|小時|小时|天|週|周|星期|月|年))<", html)
+            if rel:
+                ep = self._epoch_from_relative_text(rel.group(1))
+                if ep:
+                    return self._iso_utc_from_epoch(ep)
+        except Exception:
+            pass
 
         return None
 
@@ -1283,6 +1421,37 @@ class FBScraperService:
             images = self.extract_images_from_root(driver, root, limit=8)
             ts     = self.extract_timestamp(driver, root)
 
+            # ★ 修正：若在 m 站抓不到時間，改嘗試 www 站 canonical 重新抓一次（正確處理分頁返回）
+            if not ts:
+                try:
+                    current_post_handle = driver.current_window_handle  # ★ 記錄目前這篇貼文的分頁
+                    www_url = self.normalize_fb_url_for_storage(driver.current_url)
+                    if www_url:
+                        backup_handle = self.open_in_new_tab(driver, www_url)
+                        if backup_handle:
+                            try:
+                                WebDriverWait(driver, 8).until(
+                                    EC.presence_of_element_located((By.CSS_SELECTOR, "article, [role='article']"))
+                                )
+                            except Exception:
+                                pass
+                            self.human_sleep(0.6, 1.0)
+                            root2 = self.get_post_root(driver)
+                            ts2 = self.extract_timestamp(driver, root2 or root)
+                            if ts2:
+                                ts = ts2
+                            # 關掉備援分頁並回到原貼文分頁
+                            try:
+                                driver.close()
+                            except Exception:
+                                pass
+                            try:
+                                driver.switch_to.window(current_post_handle)  # ★ 切回原來貼文分頁
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
             content_hash = self._build_content_hash(text, images)
 
             data = {
@@ -1291,7 +1460,7 @@ class FBScraperService:
                 "text": text,
                 "text_md": text_md,
                 "images": images,
-                "timestamp": ts,
+                "timestamp": ts,   # JSON 仍存 ISO/UTC（Z）
                 "content_hash": content_hash,
             }
 
@@ -1628,10 +1797,25 @@ class FBScraperService:
         - action == insert → 以 content_hash 新增
         - action == update → 以 content_hash 定位並「補空白欄位 / 合併較長文本 / 合併新圖片」
         - 不處理 noop
+
+        本版修正：
+        - 寫入 SQLite 前，把 post['timestamp'] 從 ISO/UTC 或 epoch 統一轉為 SQLite DATETIME（YYYY-MM-DD HH:MM:SS，本地時區）
+        - 為避免影響 JSON 寫入內容，這裡對 ops 做淺複製並轉換後再丟給 DB 層
         """
         if not db_available:
             self.logger.warning("資料庫模組不可用，跳過資料庫儲存")
             return
+
+        # 準備送往 DB 的 ops 副本（只轉 timestamp 格式）
+        ops_for_db: List[Dict] = []
+        for op in ops:
+            op_copy = {"action": op.get("action"), "post": dict(op.get("post") or {})}
+            ts_iso = op_copy["post"].get("timestamp")
+            if ts_iso:
+                ts_db = self._to_sqlite_datetime_local(ts_iso)
+                if ts_db:
+                    op_copy["post"]["timestamp"] = ts_db  # DB 端收到的是 SQLite DATETIME 字串
+            ops_for_db.append(op_copy)
 
         session = None
         try:
@@ -1641,9 +1825,9 @@ class FBScraperService:
             inserted = 0
             updated = 0
 
-            db_manager.sync_fb_posts_ops(ops)  # 新增的精準同步方法（見 database.py）
-            inserted = sum(1 for op in ops if op.get("action") == "insert")
-            updated = sum(1 for op in ops if op.get("action") == "update")
+            db_manager.sync_fb_posts_ops(ops_for_db)  # 用轉好時間格式的 ops
+            inserted = sum(1 for op in ops_for_db if op.get("action") == "insert")
+            updated = sum(1 for op in ops_for_db if op.get("action") == "update")
 
             db_manager.commit()
             self.logger.info(f"✅ FB 貼文資料庫已同步：新增 {inserted}、更新 {updated}")
@@ -1766,7 +1950,7 @@ def main():
                 preview_md = text_md[:100] + "..." if len(text_md) > 100 else text_md
                 print(f"文字(Discord Markdown): {preview_md}")
             print(f"圖片數量(大圖): {len(post.get('images', []))}")
-            print(f"時間戳: {post.get('timestamp')}")
+            print(f"時間戳(JSON/ISO UTC): {post.get('timestamp')}")
             print(f"content_hash: {post.get('content_hash')}")
 
         if results and service.config.get("debug_mode", False):
