@@ -91,7 +91,11 @@ def main():
     schedule.every(15).minutes.do(main_scrape_task)
     schedule.every(1).hours.do(fb_scrape_task)
 
-    # 立即執行一次
+    # 立即執行一次 Facebook 爬蟲
+    logger.info("執行初始 Facebook 爬蟲任務")
+    fb_scrape_task()
+
+    # 立即執行一次主要爬蟲
     logger.info("執行初始爬蟲任務")
     main_scrape_task()
 
