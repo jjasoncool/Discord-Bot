@@ -428,9 +428,9 @@ class ArticleMonitor(BaseContentMonitor):
                 logger.info(f"📡 HTTP 回應狀態: {response.status} for {image_url}")
                 if response.status == 200:
                     content = await response.read()
-                    # 檢查內容大小（Discord 限制 25MB，但我們設定更小的限制）
-                    if len(content) > 8 * 1024 * 1024:  # 8MB 限制
-                        logger.warning(f"⚠️ 圖片過大，跳過: {image_url} ({len(content)} bytes)")
+                    # 檢查內容大小（Discord 限制 25MB）
+                    if len(content) > 25 * 1024 * 1024:  # 25MB 限制
+                        logger.warning(f"⚠️ 圖片過大，超過 Discord 上限，跳過: {image_url} ({len(content)} bytes)")
                         return None
 
                     # 從 Content-Type 推斷副檔名
@@ -638,7 +638,7 @@ class ArticleMonitor(BaseContentMonitor):
                             async with session.get(image_url, timeout=10) as response:
                                 if response.status == 200:
                                     content = await response.read()
-                                    if len(content) <= 8 * 1024 * 1024:  # 8MB 限制
+                                    if len(content) <= 25 * 1024 * 1024:  # 25MB 限制
                                         image_data = io.BytesIO(content)
                                         filename = f"fb_image_{i+2}.jpg"
                                         discord_file = discord.File(image_data, filename=filename)
