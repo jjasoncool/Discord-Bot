@@ -6,6 +6,23 @@ import discord
 # 獲取 logger
 logger = logging.getLogger('discord_bot')
 
+
+async def safe_send_interaction_message(
+    interaction: discord.Interaction,
+    content: str = None,
+    *,
+    ephemeral: bool = True,
+    **kwargs
+):
+    """
+    安全回覆 Interaction：
+    - 若尚未回覆，使用 interaction.response.send_message
+    - 若已回覆，改用 interaction.followup.send
+    """
+    if interaction.response.is_done():
+        return await interaction.followup.send(content=content, ephemeral=ephemeral, **kwargs)
+    return await interaction.response.send_message(content=content, ephemeral=ephemeral, **kwargs)
+
 class ChannelConfig:
     """管理從配置文件中讀取頻道 ID 的類別"""
     DEFAULT_ID = 1234567890  # 預設佔位符 ID
@@ -96,7 +113,7 @@ async def check_guild(interaction: discord.Interaction, owner_only: bool = False
     """
     # 檢查是否在伺服器中使用
     if not interaction.guild:
-        await interaction.response.send_message("此命令只能在伺服器中使用，無法在私人訊息中使用。", ephemeral=True)
+        await safe_send_interaction_message(interaction, "此命令只能在伺服器中使用，無法在私人訊息中使用。", ephemeral=True)
         logger.info(f'使用者 {interaction.user} 嘗試在私人訊息中使用命令，已被拒絕')
         return False
 
@@ -104,21 +121,21 @@ async def check_guild(interaction: discord.Interaction, owner_only: bool = False
     if owner_only:
         owner_id = int(os.getenv('OWNER_ID', '0'))
         if interaction.user.id != owner_id:
-            await interaction.response.send_message("❌ 此命令僅限指定擁有者使用！", ephemeral=True)
+            await safe_send_interaction_message(interaction, "❌ 此命令僅限指定擁有者使用！", ephemeral=True)
             logger.info(f'使用者 {interaction.user} 嘗試使用僅限擁有者的命令，已被拒絕')
             return False
 
     # 檢查管理員權限
     elif admin_only:
         if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ 此命令僅限管理員使用！", ephemeral=True)
+            await safe_send_interaction_message(interaction, "❌ 此命令僅限管理員使用！", ephemeral=True)
             logger.info(f'使用者 {interaction.user} 嘗試使用僅限管理員的命令，已被拒絕')
             return False
 
     # 檢查角色權限
     if required_role:
         if not await check_role(interaction.user, required_role):
-            await interaction.response.send_message(f"❌ 此命令僅限具有 {required_role} 角色的使用者使用！", ephemeral=True)
+            await safe_send_interaction_message(interaction, f"❌ 此命令僅限具有 {required_role} 角色的使用者使用！", ephemeral=True)
             return False
 
     return True

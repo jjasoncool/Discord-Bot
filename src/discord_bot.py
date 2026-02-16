@@ -9,6 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 from utils.logger_config import get_discord_bot_logger
+from utils.utils import safe_send_interaction_message
 
 # 載入環境變數
 load_dotenv()
@@ -115,12 +116,14 @@ async def on_app_command_error(interaction: discord.Interaction, error):
     logger.error(f"斜線命令錯誤: {str(error)}")
 
     if isinstance(error, app_commands.errors.CommandOnCooldown):
-        await interaction.response.send_message(
+        await safe_send_interaction_message(
+            interaction,
             f"請稍等片刻再使用此命令。剩餘冷卻時間: {error.retry_after:.2f}秒",
             ephemeral=True
         )
     else:
-        await interaction.response.send_message(
+        await safe_send_interaction_message(
+            interaction,
             f"執行命令時發生錯誤: {str(error)}",
             ephemeral=True
         )

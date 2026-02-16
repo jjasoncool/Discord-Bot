@@ -6,6 +6,7 @@ import asyncio
 import traceback
 # 從 constants.py 導入物品選項配置
 from constants import ITEMS
+from utils.utils import safe_send_interaction_message
 
 # 獲取 logger
 logger = logging.getLogger('discord_bot')
@@ -44,7 +45,7 @@ class TradeCommands(commands.Cog):
             inline=False
         )
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await safe_send_interaction_message(interaction, embed=embed, ephemeral=True)
 
 
     async def cancel_trade_cmd(self, interaction: discord.Interaction):
@@ -349,7 +350,7 @@ class TradeCommands(commands.Cog):
                     seller_prices = json.load(f)
             except Exception as e:
                 logger.error(f"讀取價格檔案時發生錯誤: {str(e)}")
-                await interaction.response.send_message("無法讀取價格設定，請稍後再試。", ephemeral=True)
+                await safe_send_interaction_message(interaction, "無法讀取價格設定，請稍後再試。", ephemeral=True)
                 return
 
         user_id = str(interaction.user.id)
@@ -382,20 +383,28 @@ class TradeCommands(commands.Cog):
             view = discord.ui.View()
             if total_pages > 1:
                 if page > 0:
-                    prev_button = discord.ui.Button(label="上一頁", style=discord.ButtonStyle.blurple)
+                    prev_button = discord.ui.Button(
+                        label="上一頁",
+                        style=discord.ButtonStyle.blurple,
+                        custom_id=f"set_prices_prev_{page}"
+                    )
                     prev_button.callback = lambda inter: update_page(inter, page - 1)
                     view.add_item(prev_button)
                 if page < total_pages - 1:
-                    next_button = discord.ui.Button(label="下一頁", style=discord.ButtonStyle.blurple)
+                    next_button = discord.ui.Button(
+                        label="下一頁",
+                        style=discord.ButtonStyle.blurple,
+                        custom_id=f"set_prices_next_{page}"
+                    )
                     next_button.callback = lambda inter: update_page(inter, page + 1)
                     view.add_item(next_button)
-            edit_button = discord.ui.Button(label="編輯", style=discord.ButtonStyle.primary)
+            edit_button = discord.ui.Button(label="編輯", style=discord.ButtonStyle.primary, custom_id=f"set_prices_edit_{page}")
             edit_button.callback = lambda inter: edit_items(inter, page)
             view.add_item(edit_button)
-            finish_button = discord.ui.Button(label="完成", style=discord.ButtonStyle.success)
+            finish_button = discord.ui.Button(label="完成", style=discord.ButtonStyle.success, custom_id="set_prices_finish")
             finish_button.callback = lambda inter: finish_editing(inter)
             view.add_item(finish_button)
-            cancel_button = discord.ui.Button(label="取消", style=discord.ButtonStyle.danger)
+            cancel_button = discord.ui.Button(label="取消", style=discord.ButtonStyle.danger, custom_id="set_prices_cancel")
             cancel_button.callback = lambda inter: self.handle_cancel(inter, "設定物品價格", "操作已取消。")
             view.add_item(cancel_button)
             return view
@@ -410,34 +419,44 @@ class TradeCommands(commands.Cog):
             end_idx = min(start_idx + items_per_page, len(ITEMS))
             items_to_edit = ITEMS[start_idx:end_idx]
 
-            modal = discord.ui.Modal(title=f"編輯物品價格 - 第 {page + 1} 頁")
-            inputs = []
-            for item in items_to_edit:
-                price_input = discord.ui.TextInput(
-                    label=item['label'],
-                    placeholder="輸入價格（整數）",
-                    default=str(seller_prices[user_id].get(item['value'], 0))
-                )
-                modal.add_item(price_input)
-                inputs.append((item['value'], price_input))
+            class EditItemPricesModal(discord.ui.Modal):
+                def __init__(self):
+                    super().__init__(title=f"編輯物品價格 - 第 {page + 1} 頁")
+                    self.inputs = []
+                    for item in items_to_edit:
+                        price_input = discord.ui.TextInput(
+                            label=item['label'],
+                            placeholder="輸入價格（整數）",
+                            default=str(seller_prices[user_id].get(item['value'], 0))
+                        )
+                        self.add_item(price_input)
+                        self.inputs.append((item['value'], price_input))
 
-            async def on_submit(interaction: discord.Interaction):
-                try:
-                    for value, input_field in inputs:
-                        price = int(input_field.value)
-                        if price < 0:
-                            await interaction.response.send_message(f"{input_field.label} 的價格不能為負數，請重試。", ephemeral=True)
-                            return
-                        seller_prices[user_id][value] = price
-                    with open(prices_file_path, 'w', encoding='utf-8') as f:
-                        json.dump(seller_prices, f, ensure_ascii=False, indent=2)
-                    await interaction.response.send_message("已更新所有物品價格。", ephemeral=True)
-                    await interaction.followup.edit_message(interaction.message.id, embed=create_embed(current_page), view=create_view(current_page))
-                except ValueError:
-                    await interaction.response.send_message("所有價格必須是有效的整數，請重試。", ephemeral=True)
+                async def on_submit(self, interaction: discord.Interaction):
+                    try:
+                        for value, input_field in self.inputs:
+                            price = int(input_field.value)
+                            if price < 0:
+                                await safe_send_interaction_message(interaction, f"{input_field.label} 的價格不能為負數，請重試。", ephemeral=True)
+                                return
+                            seller_prices[user_id][value] = price
 
-            modal.on_submit = on_submit
-            await interaction.response.send_modal(modal)
+                        with open(prices_file_path, 'w', encoding='utf-8') as f:
+                            json.dump(seller_prices, f, ensure_ascii=False, indent=2)
+
+                        await safe_send_interaction_message(interaction, "已更新所有物品價格。", ephemeral=True)
+                        await interaction.followup.edit_message(
+                            interaction.message.id,
+                            embed=create_embed(current_page),
+                            view=create_view(current_page)
+                        )
+                    except ValueError:
+                        await safe_send_interaction_message(interaction, "所有價格必須是有效的整數，請重試。", ephemeral=True)
+                    except Exception as e:
+                        logger.error(f"處理物品價格提交時發生錯誤: {str(e)}")
+                        await safe_send_interaction_message(interaction, "處理價格時發生錯誤，請重試。", ephemeral=True)
+
+            await interaction.response.send_modal(EditItemPricesModal())
 
         async def finish_editing(interaction: discord.Interaction):
             await interaction.response.edit_message(view=None)
@@ -468,6 +487,7 @@ class TradeCommands(commands.Cog):
             placeholder="選擇多件物品...",
             min_values=1,
             max_values=len(ITEMS),
+            custom_id="select_item_main",
             options=[discord.SelectOption(**item) for item in ITEMS]
         )
 
@@ -483,7 +503,7 @@ class TradeCommands(commands.Cog):
             logger.info(f'開始執行 select_item select_callback，選擇的選項: {select.values}')
             try:
                 if not select.values:
-                    await interaction.response.send_message("您未選擇任何選項。", ephemeral=True)
+                    await safe_send_interaction_message(interaction, "您未選擇任何選項。", ephemeral=True)
                     return
 
                 selected_items = {value: 1 for value in select.values}
@@ -521,20 +541,28 @@ class TradeCommands(commands.Cog):
                     view = discord.ui.View()
                     if total_pages > 1:
                         if page > 0:
-                            prev_button = discord.ui.Button(label="上一頁", style=discord.ButtonStyle.blurple)
+                            prev_button = discord.ui.Button(
+                                label="上一頁",
+                                style=discord.ButtonStyle.blurple,
+                                custom_id=f"select_item_prev_{page}"
+                            )
                             prev_button.callback = lambda inter: update_page(inter, page - 1)
                             view.add_item(prev_button)
                         if page < total_pages - 1:
-                            next_button = discord.ui.Button(label="下一頁", style=discord.ButtonStyle.blurple)
+                            next_button = discord.ui.Button(
+                                label="下一頁",
+                                style=discord.ButtonStyle.blurple,
+                                custom_id=f"select_item_next_{page}"
+                            )
                             next_button.callback = lambda inter: update_page(inter, page + 1)
                             view.add_item(next_button)
-                    edit_button = discord.ui.Button(label="編輯", style=discord.ButtonStyle.primary)
+                    edit_button = discord.ui.Button(label="編輯", style=discord.ButtonStyle.primary, custom_id=f"select_item_edit_{page}")
                     edit_button.callback = lambda inter: edit_items(inter, page)
                     view.add_item(edit_button)
-                    finish_button = discord.ui.Button(label="完成", style=discord.ButtonStyle.success)
+                    finish_button = discord.ui.Button(label="完成", style=discord.ButtonStyle.success, custom_id="select_item_finish")
                     finish_button.callback = lambda inter: finish_editing(inter)
                     view.add_item(finish_button)
-                    cancel_button = discord.ui.Button(label="取消", style=discord.ButtonStyle.danger)
+                    cancel_button = discord.ui.Button(label="取消", style=discord.ButtonStyle.danger, custom_id="select_item_cancel")
                     cancel_button.callback = lambda inter: handle_cancel(inter, "選取物品", "操作已取消。")
                     view.add_item(cancel_button)
                     return view
@@ -549,58 +577,67 @@ class TradeCommands(commands.Cog):
                     end_idx = min(start_idx + items_per_page, len(selected_items))
                     page_items = list(selected_items.keys())[start_idx:end_idx]
 
-                    modal = discord.ui.Modal(title=f"編輯數量 - 第 {page + 1} 頁")
-                    inputs = []
-                    restricted_items = ["universe_radio", "universe_special", "dragon_first_charge"]
-                    for value in page_items:
-                        label = next(opt.label for opt in select.options if opt.value == value)
-                        qty_input = discord.ui.TextInput(
-                            label=label,
-                            placeholder="輸入數量（1-10）",
-                            default=str(selected_items[value]),
-                            style=discord.TextStyle.short,
-                            required=False if value in restricted_items else True,
-                            custom_id=f"qty_{value}"
-                        )
-                        if value in restricted_items:
-                            qty_input.disabled = True
-                        modal.add_item(qty_input)
-                        inputs.append((value, qty_input))
+                    class EditItemQuantitiesModal(discord.ui.Modal):
+                        def __init__(self):
+                            super().__init__(title=f"編輯數量 - 第 {page + 1} 頁")
+                            self.inputs = []
+                            self.restricted_items = ["universe_radio", "universe_special", "dragon_first_charge"]
 
-                    async def on_submit(interaction: discord.Interaction):
-                        error_fields = []
-                        try:
-                            for value, input_field in inputs:
-                                qty_str = input_field.value.strip()
-                                if not qty_str.isdigit():
-                                    error_fields.append(f"{input_field.label}: 必須是有效的整數")
-                                    continue
-                                qty = int(qty_str)
-                                if qty < 1 or qty > 10:
-                                    error_fields.append(f"{input_field.label}: 數量必須介於 1 到 10 之間")
-                                    continue
-                                # 檢查是否為限制只能購買一個的物品
-                                restricted_items = ["universe_radio", "universe_special", "dragon_first_charge"]
-                                if value in restricted_items and qty > 1:
-                                    error_fields.append(f"{input_field.label}: 此物品限制只能購買 1 個")
-                                    continue
-                                selected_items[value] = qty
-                            if error_fields:
-                                error_embed = discord.Embed(
-                                    title="輸入錯誤",
-                                    description="以下項目的數量輸入有誤，請修正後重新提交：\n" + "\n".join(error_fields),
-                                    color=discord.Color.red()
+                            for value in page_items:
+                                label = next(opt.label for opt in select.options if opt.value == value)
+                                qty_input = discord.ui.TextInput(
+                                    label=label,
+                                    placeholder="輸入數量（1-10）",
+                                    default=str(selected_items[value]),
+                                    style=discord.TextStyle.short,
+                                    required=False if value in self.restricted_items else True,
+                                    custom_id=f"qty_{value}"
                                 )
-                                await interaction.response.send_message(embed=error_embed, ephemeral=True)
-                                return
-                            await interaction.response.send_message(f"已更新第 {page + 1} 頁的數量。", ephemeral=True)
-                            await interaction.followup.edit_message(interaction.message.id, embed=create_embed(current_page), view=create_view(current_page))
-                        except Exception as e:
-                            logger.error(f"處理數量提交時發生錯誤: {str(e)}")
-                            await interaction.response.send_message("處理數量時發生錯誤，請重試。", ephemeral=True)
+                                if value in self.restricted_items:
+                                    qty_input.disabled = True
+                                self.add_item(qty_input)
+                                self.inputs.append((value, qty_input))
 
-                    modal.on_submit = on_submit
-                    await interaction.response.send_modal(modal)
+                        async def on_submit(self, interaction: discord.Interaction):
+                            error_fields = []
+                            try:
+                                for value, input_field in self.inputs:
+                                    qty_str = input_field.value.strip()
+                                    if not qty_str.isdigit():
+                                        error_fields.append(f"{input_field.label}: 必須是有效的整數")
+                                        continue
+
+                                    qty = int(qty_str)
+                                    if qty < 1 or qty > 10:
+                                        error_fields.append(f"{input_field.label}: 數量必須介於 1 到 10 之間")
+                                        continue
+
+                                    if value in self.restricted_items and qty > 1:
+                                        error_fields.append(f"{input_field.label}: 此物品限制只能購買 1 個")
+                                        continue
+
+                                    selected_items[value] = qty
+
+                                if error_fields:
+                                    error_embed = discord.Embed(
+                                        title="輸入錯誤",
+                                        description="以下項目的數量輸入有誤，請修正後重新提交：\n" + "\n".join(error_fields),
+                                        color=discord.Color.red()
+                                    )
+                                    await safe_send_interaction_message(interaction, embed=error_embed, ephemeral=True)
+                                    return
+
+                                await safe_send_interaction_message(interaction, f"已更新第 {page + 1} 頁的數量。", ephemeral=True)
+                                await interaction.followup.edit_message(
+                                    interaction.message.id,
+                                    embed=create_embed(current_page),
+                                    view=create_view(current_page)
+                                )
+                            except Exception as e:
+                                logger.error(f"處理數量提交時發生錯誤: {str(e)}")
+                                await safe_send_interaction_message(interaction, "處理數量時發生錯誤，請重試。", ephemeral=True)
+
+                    await interaction.response.send_modal(EditItemQuantitiesModal())
 
                 async def finish_editing(interaction: discord.Interaction):
                     summary_embed = discord.Embed(
@@ -616,8 +653,8 @@ class TradeCommands(commands.Cog):
 
                     def create_confirm_view():
                         view = discord.ui.View()
-                        confirm_button = discord.ui.Button(label="確定購買", style=discord.ButtonStyle.green)
-                        cancel_button = discord.ui.Button(label="取消購買", style=discord.ButtonStyle.red)
+                        confirm_button = discord.ui.Button(label="確定購買", style=discord.ButtonStyle.green, custom_id="select_item_confirm_purchase")
+                        cancel_button = discord.ui.Button(label="取消購買", style=discord.ButtonStyle.red, custom_id="select_item_cancel_purchase")
 
                         async def confirm_callback(interaction: discord.Interaction):
                             await interaction.response.edit_message(view=None)
@@ -693,7 +730,7 @@ class TradeCommands(commands.Cog):
             except Exception as e:
                 error_details = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
                 logger.error(f'select_item select_callback 錯誤: {str(e)}\n詳細錯誤信息:\n{error_details}')
-                await interaction.response.send_message("發生錯誤，請稍後再試。", ephemeral=True)
+                await safe_send_interaction_message(interaction, "發生錯誤，請稍後再試。", ephemeral=True)
 
         select.callback = select_callback
         view = discord.ui.View()

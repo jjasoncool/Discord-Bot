@@ -16,7 +16,7 @@ monitored_channels_file = "settings/monitored_channels.json"
 
 import json
 import os
-from utils.utils import create_paginated_view, ITEMS_PER_PAGE
+from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message
 
 def load_monitored_channels():
     """從檔案中讀取監控設定"""
@@ -69,7 +69,24 @@ class UserCommands(commands.Cog):
 
     async def _send_error_message(self, interaction: discord.Interaction, message: str):
         """發送錯誤訊息"""
-        await interaction.response.send_message(message, ephemeral=True)
+        await safe_send_interaction_message(interaction, message, ephemeral=True)
+
+    class KeywordsModal(discord.ui.Modal, title="設定監控關鍵字"):
+        def __init__(self, cog: "UserCommands", notify: bool = True):
+            super().__init__()
+            self.cog = cog
+            self.notify = notify
+            self.keywords_input = discord.ui.TextInput(
+                label="監控關鍵字（用逗號分隔）",
+                placeholder="輸入要監控的關鍵字，例如：交易,出售,求購",
+                required=True,
+                style=discord.TextStyle.short
+            )
+            self.add_item(self.keywords_input)
+
+        async def on_submit(self, interaction: discord.Interaction):
+            keywords = self.keywords_input.value
+            await self.cog.monitor_channel_cmd(interaction, keywords, self.notify)
 
     async def monitor_channel_cmd(self, interaction: discord.Interaction, keywords: str = None, notify: bool = True):
         """設定監控特定頻道的訊息"""
@@ -81,7 +98,7 @@ class UserCommands(commands.Cog):
         # 獲取使用者有權限查看的文字頻道和論壇頻道
         member = interaction.guild.me if interaction.guild.me else interaction.guild.get_member(interaction.user.id)
         if member is None:
-            await interaction.response.send_message("無法獲取您的成員資訊，請重試。", ephemeral=True)
+            await safe_send_interaction_message(interaction, "無法獲取您的成員資訊，請重試。", ephemeral=True)
             return
 
         channels = [channel for channel in interaction.guild.channels
@@ -89,7 +106,7 @@ class UserCommands(commands.Cog):
                    and channel.permissions_for(member).view_channel]
 
         if not channels:
-            await interaction.response.send_message("您沒有權限查看任何文字或論壇頻道！", ephemeral=True)
+            await safe_send_interaction_message(interaction, "您沒有權限查看任何文字或論壇頻道！", ephemeral=True)
             return
 
         # 創建頻道選單，實現分頁功能
@@ -104,7 +121,7 @@ class UserCommands(commands.Cog):
         ]
 
         if not channel_options:
-            await interaction.response.send_message("沒有可供選擇的頻道！", ephemeral=True)
+            await safe_send_interaction_message(interaction, "沒有可供選擇的頻道！", ephemeral=True)
             return
 
         async def on_select_callback(interaction, selected_value):
@@ -114,7 +131,7 @@ class UserCommands(commands.Cog):
                 # 解析關鍵字列表
                 keyword_list = [kw.strip() for kw in keywords.split(',') if kw.strip()]
                 if not keyword_list:
-                    await interaction.response.send_message("請提供至少一個要監控的關鍵字！", ephemeral=True)
+                    await safe_send_interaction_message(interaction, "請提供至少一個要監控的關鍵字！", ephemeral=True)
                     return
 
                 # 設定監控
@@ -153,7 +170,7 @@ class UserCommands(commands.Cog):
                     ephemeral=True
                 )
             else:
-                await interaction.response.send_message("選擇的頻道無效或不是文字/論壇頻道，請重試。", ephemeral=True)
+                await safe_send_interaction_message(interaction, "選擇的頻道無效或不是文字/論壇頻道，請重試。", ephemeral=True)
 
         current_page, channel_view = create_paginated_view(
             channel_options,
@@ -247,9 +264,9 @@ class UserCommands(commands.Cog):
                         ephemeral=True
                     )
                 else:
-                    await interaction.response.send_message("您在此頻道沒有任何監控設定！", ephemeral=True)
+                    await safe_send_interaction_message(interaction, "您在此頻道沒有任何監控設定！", ephemeral=True)
             else:
-                await interaction.response.send_message("選擇的頻道無效或不是文字/論壇頻道，請重試。", ephemeral=True)
+                await safe_send_interaction_message(interaction, "選擇的頻道無效或不是文字/論壇頻道，請重試。", ephemeral=True)
 
         current_page, channel_view = create_paginated_view(
             channel_options,
@@ -302,7 +319,7 @@ class UserCommands(commands.Cog):
                             ephemeral=True
                         )
                         return
-                await interaction.response.send_message("您未設定任何監控！", ephemeral=True)
+                await safe_send_interaction_message(interaction, "您未設定任何監控！", ephemeral=True)
 
         stop_all_view = discord.ui.View()
         stop_all_view.add_item(StopAllButton())
@@ -507,22 +524,7 @@ class UserCommands(commands.Cog):
         list_button = discord.ui.Button(label="顯示監控列表", style=discord.ButtonStyle.secondary, custom_id="list_monitored")
 
         async def monitor_button_callback(interaction: discord.Interaction):
-            # 創建關鍵字輸入框
-            modal = discord.ui.Modal(title="設定監控關鍵字")
-            keywords_input = discord.ui.TextInput(
-                label="監控關鍵字（用逗號分隔）",
-                placeholder="輸入要監控的關鍵字，例如：交易,出售,求購",
-                required=True,
-                style=discord.TextStyle.short
-            )
-            modal.add_item(keywords_input)
-
-            async def on_submit(interaction: discord.Interaction):
-                keywords = keywords_input.value
-                await self.monitor_channel_cmd(interaction, keywords, True)
-
-            modal.on_submit = on_submit
-            await interaction.response.send_modal(modal)
+            await interaction.response.send_modal(self.KeywordsModal(self, notify=True))
 
         async def stop_button_callback(interaction: discord.Interaction):
             await self.stop_monitoring_cmd(interaction)
@@ -590,11 +592,11 @@ class UserCommands(commands.Cog):
                     prices = json.load(f)
             except Exception as e:
                 logger.error(f"讀取價格檔案時發生錯誤: {str(e)}")
-                await interaction.response.send_message("無法讀取價格設定，請稍後再試。", ephemeral=True)
+                await safe_send_interaction_message(interaction, "無法讀取價格設定，請稍後再試。", ephemeral=True)
                 return
 
         if not prices:
-            await interaction.response.send_message("目前沒有設定任何物品價格。", ephemeral=True)
+            await safe_send_interaction_message(interaction, "目前沒有設定任何物品價格。", ephemeral=True)
             return
 
         seller_options = []
@@ -611,7 +613,7 @@ class UserCommands(commands.Cog):
             seller_options.append(discord.SelectOption(label=user_name, value=user_id))
 
         if not seller_options:
-            await interaction.response.send_message("目前沒有賣家設定價格。", ephemeral=True)
+            await safe_send_interaction_message(interaction, "目前沒有賣家設定價格。", ephemeral=True)
             return
 
         seller_select = discord.ui.Select(
