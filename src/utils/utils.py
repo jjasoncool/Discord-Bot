@@ -1,6 +1,7 @@
 import logging
 import json
 import os
+import asyncio
 import discord
 
 # 獲取 logger
@@ -12,16 +13,62 @@ async def safe_send_interaction_message(
     content: str = None,
     *,
     ephemeral: bool = True,
+    max_retries: int = 2,
+    retry_base_delay: float = 0.8,
     **kwargs
 ):
     """
-    安全回覆 Interaction：
+    安全回覆 Interaction（含基礎 retry/backoff）：
     - 若尚未回覆，使用 interaction.response.send_message
     - 若已回覆，改用 interaction.followup.send
+    - 對 Discord API 的 429 / 5xx 做有限次重試
     """
-    if interaction.response.is_done():
-        return await interaction.followup.send(content=content, ephemeral=ephemeral, **kwargs)
-    return await interaction.response.send_message(content=content, ephemeral=ephemeral, **kwargs)
+    data = interaction.data if isinstance(interaction.data, dict) else {}
+    custom_id = data.get("custom_id")
+    command_name = data.get("name")
+    guild_id = interaction.guild.id if interaction.guild else None
+    channel_id = interaction.channel.id if interaction.channel else None
+
+    for attempt in range(max_retries + 1):
+        try:
+            if interaction.response.is_done():
+                return await interaction.followup.send(content=content, ephemeral=ephemeral, **kwargs)
+            return await interaction.response.send_message(content=content, ephemeral=ephemeral, **kwargs)
+        except discord.HTTPException as e:
+            status = getattr(e, "status", None)
+            retryable = status == 429 or (isinstance(status, int) and 500 <= status < 600)
+            is_last_attempt = attempt >= max_retries
+
+            if not retryable or is_last_attempt:
+                logger.error(
+                    "safe_send_interaction_message 失敗: status=%s retryable=%s attempt=%s/%s user_id=%s guild_id=%s channel_id=%s command=%s custom_id=%s error=%s",
+                    status,
+                    retryable,
+                    attempt + 1,
+                    max_retries + 1,
+                    interaction.user.id if interaction.user else None,
+                    guild_id,
+                    channel_id,
+                    command_name,
+                    custom_id,
+                    str(e),
+                )
+                raise
+
+            delay = retry_base_delay * (2 ** attempt)
+            logger.warning(
+                "safe_send_interaction_message 遇到可重試錯誤，將重試: status=%s attempt=%s/%s delay=%.2fs user_id=%s guild_id=%s channel_id=%s command=%s custom_id=%s",
+                status,
+                attempt + 1,
+                max_retries + 1,
+                delay,
+                interaction.user.id if interaction.user else None,
+                guild_id,
+                channel_id,
+                command_name,
+                custom_id,
+            )
+            await asyncio.sleep(delay)
 
 class ChannelConfig:
     """管理從配置文件中讀取頻道 ID 的類別"""
@@ -158,7 +205,15 @@ def get_paginated_options(options, page, items_per_page=25):
 
 ITEMS_PER_PAGE = 25
 
-def create_paginated_view(options, placeholder_text, embed_title, embed_description, embed_color, on_select_callback):
+def create_paginated_view(
+    options,
+    placeholder_text,
+    embed_title,
+    embed_description,
+    embed_color,
+    on_select_callback,
+    custom_id_prefix: str = "paginated",
+):
     """
     創建分頁視圖
 
@@ -176,6 +231,7 @@ def create_paginated_view(options, placeholder_text, embed_title, embed_descript
     current_page = 0
 
     def update_view(page):
+        safe_prefix = (custom_id_prefix or "paginated").replace(" ", "_")
         if callable(placeholder_text):
             placeholder = placeholder_text(page)
         else:
@@ -183,12 +239,32 @@ def create_paginated_view(options, placeholder_text, embed_title, embed_descript
 
         channel_select = discord.ui.Select(
             placeholder=placeholder,
+            custom_id=f"{safe_prefix}_select_{page}",
             options=get_paginated_options(options, page, ITEMS_PER_PAGE)
         )
 
         async def channel_select_callback(interaction: discord.Interaction):
-            selected_value = channel_select.values[0]
-            await on_select_callback(interaction, selected_value)
+            try:
+                logger.info(
+                    "interaction_start source=paginated_select custom_id=%s user_id=%s guild_id=%s channel_id=%s",
+                    getattr(channel_select, "custom_id", None),
+                    interaction.user.id if interaction.user else None,
+                    interaction.guild.id if interaction.guild else None,
+                    interaction.channel.id if interaction.channel else None,
+                )
+                selected_value = channel_select.values[0]
+                await on_select_callback(interaction, selected_value)
+            except Exception as e:
+                logger.error(
+                    "interaction_error source=paginated_select custom_id=%s user_id=%s guild_id=%s channel_id=%s error=%s",
+                    getattr(channel_select, "custom_id", None),
+                    interaction.user.id if interaction.user else None,
+                    interaction.guild.id if interaction.guild else None,
+                    interaction.channel.id if interaction.channel else None,
+                    str(e),
+                    exc_info=True,
+                )
+                await safe_send_interaction_message(interaction, "操作時發生錯誤，請稍後再試。", ephemeral=True)
 
         channel_select.callback = channel_select_callback
 
@@ -196,38 +272,86 @@ def create_paginated_view(options, placeholder_text, embed_title, embed_descript
         view.add_item(channel_select)
 
         if len(options) > ITEMS_PER_PAGE:
-            prev_button = discord.ui.Button(label="上一頁", style=discord.ButtonStyle.primary, disabled=page <= 0)
-            next_button = discord.ui.Button(label="下一頁", style=discord.ButtonStyle.primary, disabled=(page + 1) * ITEMS_PER_PAGE >= len(options))
+            prev_button = discord.ui.Button(
+                label="上一頁",
+                style=discord.ButtonStyle.primary,
+                disabled=page <= 0,
+                custom_id=f"{safe_prefix}_prev_{page}",
+            )
+            next_button = discord.ui.Button(
+                label="下一頁",
+                style=discord.ButtonStyle.primary,
+                disabled=(page + 1) * ITEMS_PER_PAGE >= len(options),
+                custom_id=f"{safe_prefix}_next_{page}",
+            )
 
             async def prev_button_callback(interaction: discord.Interaction):
-                nonlocal current_page
-                current_page -= 1
-                new_view = update_view(current_page)
-                if callable(embed_description):
-                    desc = embed_description(current_page)
-                else:
-                    desc = embed_description + (f" (第 {current_page + 1} 頁)" if len(options) > ITEMS_PER_PAGE else "")
-                embed = discord.Embed(
-                    title=embed_title,
-                    description=desc,
-                    color=embed_color
-                )
-                await interaction.response.edit_message(embed=embed, view=new_view)
+                try:
+                    logger.info(
+                        "interaction_start source=paginated_prev custom_id=%s user_id=%s guild_id=%s channel_id=%s",
+                        getattr(prev_button, "custom_id", None),
+                        interaction.user.id if interaction.user else None,
+                        interaction.guild.id if interaction.guild else None,
+                        interaction.channel.id if interaction.channel else None,
+                    )
+                    nonlocal current_page
+                    current_page -= 1
+                    new_view = update_view(current_page)
+                    if callable(embed_description):
+                        desc = embed_description(current_page)
+                    else:
+                        desc = embed_description + (f" (第 {current_page + 1} 頁)" if len(options) > ITEMS_PER_PAGE else "")
+                    embed = discord.Embed(
+                        title=embed_title,
+                        description=desc,
+                        color=embed_color
+                    )
+                    await interaction.response.edit_message(embed=embed, view=new_view)
+                except Exception as e:
+                    logger.error(
+                        "interaction_error source=paginated_prev custom_id=%s user_id=%s guild_id=%s channel_id=%s error=%s",
+                        getattr(prev_button, "custom_id", None),
+                        interaction.user.id if interaction.user else None,
+                        interaction.guild.id if interaction.guild else None,
+                        interaction.channel.id if interaction.channel else None,
+                        str(e),
+                        exc_info=True,
+                    )
+                    await safe_send_interaction_message(interaction, "切換頁面時發生錯誤，請稍後再試。", ephemeral=True)
 
             async def next_button_callback(interaction: discord.Interaction):
-                nonlocal current_page
-                current_page += 1
-                new_view = update_view(current_page)
-                if callable(embed_description):
-                    desc = embed_description(current_page)
-                else:
-                    desc = embed_description + (f" (第 {current_page + 1} 頁)" if len(options) > ITEMS_PER_PAGE else "")
-                embed = discord.Embed(
-                    title=embed_title,
-                    description=desc,
-                    color=embed_color
-                )
-                await interaction.response.edit_message(embed=embed, view=new_view)
+                try:
+                    logger.info(
+                        "interaction_start source=paginated_next custom_id=%s user_id=%s guild_id=%s channel_id=%s",
+                        getattr(next_button, "custom_id", None),
+                        interaction.user.id if interaction.user else None,
+                        interaction.guild.id if interaction.guild else None,
+                        interaction.channel.id if interaction.channel else None,
+                    )
+                    nonlocal current_page
+                    current_page += 1
+                    new_view = update_view(current_page)
+                    if callable(embed_description):
+                        desc = embed_description(current_page)
+                    else:
+                        desc = embed_description + (f" (第 {current_page + 1} 頁)" if len(options) > ITEMS_PER_PAGE else "")
+                    embed = discord.Embed(
+                        title=embed_title,
+                        description=desc,
+                        color=embed_color
+                    )
+                    await interaction.response.edit_message(embed=embed, view=new_view)
+                except Exception as e:
+                    logger.error(
+                        "interaction_error source=paginated_next custom_id=%s user_id=%s guild_id=%s channel_id=%s error=%s",
+                        getattr(next_button, "custom_id", None),
+                        interaction.user.id if interaction.user else None,
+                        interaction.guild.id if interaction.guild else None,
+                        interaction.channel.id if interaction.channel else None,
+                        str(e),
+                        exc_info=True,
+                    )
+                    await safe_send_interaction_message(interaction, "切換頁面時發生錯誤，請稍後再試。", ephemeral=True)
 
             prev_button.callback = prev_button_callback
             next_button.callback = next_button_callback

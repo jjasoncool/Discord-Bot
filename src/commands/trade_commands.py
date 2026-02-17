@@ -57,7 +57,7 @@ class TradeCommands(commands.Cog):
             await interaction.response.defer(ephemeral=True)
 
         if interaction.channel.type != discord.ChannelType.private_thread:
-            await interaction.followup.send("此命令只能在私人 thread 中使用。", ephemeral=True)
+            await safe_send_interaction_message(interaction, "此命令只能在私人 thread 中使用。", ephemeral=True)
             return
 
         thread = interaction.channel
@@ -91,7 +91,7 @@ class TradeCommands(commands.Cog):
 
         if not source_post_id or not reacting_user:
             logger.error("無法從訊息中提取來源貼文 ID 或反應使用者")
-            await interaction.followup.send("無法識別此交易 thread 的來源貼文或相關使用者，請手動處理。", ephemeral=True)
+            await safe_send_interaction_message(interaction, "無法識別此交易 thread 的來源貼文或相關使用者，請手動處理。", ephemeral=True)
             return
 
         # 鎖定當前 thread
@@ -149,7 +149,7 @@ class TradeCommands(commands.Cog):
                         logger.info(f"已清除使用者 {reacting_user.name} 在來源貼文 {source_post_id} 上的反應 {reaction.emoji}")
                         break
 
-        await interaction.followup.send("交易已取消，此 thread 已鎖定，來源貼文的反應已清除。", ephemeral=True)
+        await safe_send_interaction_message(interaction, "交易已取消，此 thread 已鎖定，來源貼文的反應已清除。", ephemeral=True)
         await thread.send(f"交易已被 {interaction.user.mention} 取消。此 thread 已鎖定，來源貼文的反應已清除。")
 
 
@@ -460,9 +460,9 @@ class TradeCommands(commands.Cog):
 
         async def finish_editing(interaction: discord.Interaction):
             await interaction.response.edit_message(view=None)
-            await interaction.followup.send("價格設定已完成。", ephemeral=True)
+            await safe_send_interaction_message(interaction, "價格設定已完成。", ephemeral=True)
 
-        await interaction.response.send_message(embed=create_embed(current_page), view=create_view(current_page), ephemeral=True)
+        await safe_send_interaction_message(interaction, embed=create_embed(current_page), view=create_view(current_page), ephemeral=True)
 
     @app_commands.command(name="select_item", description="選擇一或多樣物品進行購買")
     async def select_item_cmd(self, interaction: discord.Interaction):
@@ -494,7 +494,7 @@ class TradeCommands(commands.Cog):
         async def handle_cancel(interaction: discord.Interaction, operation: str, message: str, additional_log: str = ""):
             """處理取消操作"""
             await interaction.response.edit_message(view=None)
-            await interaction.followup.send(message, ephemeral=True)
+            await safe_send_interaction_message(interaction, message, ephemeral=True)
             logger.info(f'用戶 {interaction.user} 已取消{operation}操作。{additional_log}')
 
 
@@ -658,7 +658,7 @@ class TradeCommands(commands.Cog):
 
                         async def confirm_callback(interaction: discord.Interaction):
                             await interaction.response.edit_message(view=None)
-                            await interaction.followup.send(f"您已確認購買：\n" + "\n".join(purchase_summary), ephemeral=True)
+                            await safe_send_interaction_message(interaction, f"您已確認購買：\n" + "\n".join(purchase_summary), ephemeral=True)
                             logger.info(f'用戶已確認購買: {selected_items}')
 
                             # 檢查是否已設定交易論壇頻道
@@ -667,7 +667,8 @@ class TradeCommands(commands.Cog):
                             forum_channel_id = await get_trade_forum_channel_id(config_file="config.json", caller="TradeCommands")
                             logger.debug(f"從 get_trade_forum_channel_id 函數返回的 forum_channel_id: {forum_channel_id} (調用者: TradeCommands)")
                             if forum_channel_id == 1234567890:
-                                await interaction.followup.send(
+                                await safe_send_interaction_message(
+                                    interaction,
                                     "交易論壇頻道尚未設定，請通知管理員。",
                                     ephemeral=True
                                 )
@@ -702,20 +703,22 @@ class TradeCommands(commands.Cog):
                                     logger.info(f"在論壇頻道 {forum_channel_id} 新增貼文: {thread_title}，使用標籤: {applied_tags if applied_tags else '無'}")
                                 else:
                                     logger.error(f"無法找到論壇頻道 {forum_channel_id} 或該頻道不是論壇類型")
-                                    await interaction.followup.send(
+                                    await safe_send_interaction_message(
+                                        interaction,
                                         "無法找到設定的論壇頻道，請確認設定或重新使用 `/set_trade_forum_channel` 命令設定。",
                                         ephemeral=True
                                     )
                             except Exception as e:
                                 logger.error(f"處理論壇頻道 {forum_channel_id} 時發生錯誤: {str(e)}")
-                                await interaction.followup.send(
+                                await safe_send_interaction_message(
+                                    interaction,
                                     "無法處理論壇頻道操作，請確認機器人有相關權限或聯繫管理員。",
                                     ephemeral=True
                                 )
 
                         async def cancel_callback(interaction: discord.Interaction):
                             await interaction.response.edit_message(view=None)
-                            await interaction.followup.send("您已取消購買。", ephemeral=True)
+                            await safe_send_interaction_message(interaction, "您已取消購買。", ephemeral=True)
                             logger.info(f'用戶已取消購買: {selected_items}')
 
                         confirm_button.callback = confirm_callback
@@ -726,7 +729,7 @@ class TradeCommands(commands.Cog):
 
                     await interaction.response.edit_message(embed=summary_embed, view=create_confirm_view())
 
-                await interaction.response.send_message(embed=create_embed(current_page), view=create_view(current_page), ephemeral=True)
+                await safe_send_interaction_message(interaction, embed=create_embed(current_page), view=create_view(current_page), ephemeral=True)
             except Exception as e:
                 error_details = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
                 logger.error(f'select_item select_callback 錯誤: {str(e)}\n詳細錯誤信息:\n{error_details}')
@@ -736,7 +739,7 @@ class TradeCommands(commands.Cog):
         view = discord.ui.View()
         view.add_item(select)
 
-        await interaction.response.send_message(embed=embed, view=view, file=file, ephemeral=True)
+        await safe_send_interaction_message(interaction, embed=embed, view=view, file=file, ephemeral=True)
 
 
 async def setup(bot):

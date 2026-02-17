@@ -163,7 +163,8 @@ class UserCommands(commands.Cog):
                 save_monitored_channels()
 
                 await interaction.response.edit_message(view=None)
-                await interaction.followup.send(
+                await safe_send_interaction_message(
+                    interaction,
                     f"✅ 已開始監控頻道 **{channel.name}**！\n"
                     f"監控關鍵字: {', '.join(f'`{kw}`' for kw in keyword_list)}\n"
                     f"通知設定: {'開啟' if notify else '關閉'}",
@@ -178,7 +179,8 @@ class UserCommands(commands.Cog):
             "選擇監控頻道",
             "請從以下選項中選擇一個文字或論壇頻道進行監控。",
             discord.Color.blue(),
-            on_select_callback
+            on_select_callback,
+            custom_id_prefix="user_watch_keywords_channel"
         )
 
         embed = discord.Embed(
@@ -186,7 +188,7 @@ class UserCommands(commands.Cog):
             description="請從以下選項中選擇一個文字或論壇頻道進行監控。",
             color=discord.Color.blue()
         )
-        await interaction.response.send_message(embed=embed, view=channel_view, ephemeral=True)
+        await safe_send_interaction_message(interaction, embed=embed, view=channel_view, ephemeral=True)
 
     async def stop_monitoring_cmd(self, interaction: discord.Interaction):
         """停止監控指定頻道"""
@@ -258,7 +260,8 @@ class UserCommands(commands.Cog):
                         keywords_info.append(keywords)
 
                     await interaction.response.edit_message(view=None)
-                    await interaction.followup.send(
+                    await safe_send_interaction_message(
+                        interaction,
                         f"✅ 已停止監控頻道 **{channel.name}**！\n"
                         f"停止的監控關鍵字: {', '.join(keywords_info)}",
                         ephemeral=True
@@ -274,7 +277,8 @@ class UserCommands(commands.Cog):
             "選擇要停止監控的頻道",
             lambda page: f"請從以下選項中選擇一個要停止監控的頻道。(第 {page + 1} 頁)" if len(channel_options) > ITEMS_PER_PAGE else "請從以下選項中選擇一個要停止監控的頻道。",
             discord.Color.red(),
-            on_select_callback
+            on_select_callback,
+            custom_id_prefix="user_stop_monitoring_channel"
         )
 
         description_text = f"請從以下選項中選擇一個要停止監控的頻道。" if len(channel_options) <= ITEMS_PER_PAGE else f"請從以下選項中選擇一個要停止監控的頻道。(第 {current_page + 1} 頁)"
@@ -285,7 +289,7 @@ class UserCommands(commands.Cog):
         )
 
         # 第一個訊息：嵌入 + 選擇框
-        await interaction.response.send_message(embed=embed, view=channel_view, ephemeral=True)
+        await safe_send_interaction_message(interaction, embed=embed, view=channel_view, ephemeral=True)
 
         # 新增「停止所有監控」按鈕
         class StopAllButton(discord.ui.Button):
@@ -314,7 +318,8 @@ class UserCommands(commands.Cog):
                     if removed_channels:
                         save_monitored_channels()
                         await interaction.response.edit_message(view=None)
-                        await interaction.followup.send(
+                        await safe_send_interaction_message(
+                            interaction,
                             f"✅ 已停止監控以下所有頻道：\n" + "\n".join(f"- **{name}**" for name in removed_channels),
                             ephemeral=True
                         )
@@ -325,7 +330,7 @@ class UserCommands(commands.Cog):
         stop_all_view.add_item(StopAllButton())
 
         # 第二個訊息：文字 + 按鈕
-        await interaction.followup.send("如果要取消所有頻道的監控，請點選下方按鈕：", view=stop_all_view, ephemeral=True)
+        await safe_send_interaction_message(interaction, "如果要取消所有頻道的監控，請點選下方按鈕：", view=stop_all_view, ephemeral=True)
 
     async def list_monitored_cmd(self, interaction: discord.Interaction):
         """列出目前監控的所有頻道"""
@@ -381,7 +386,7 @@ class UserCommands(commands.Cog):
                     inline=False
                 )
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await safe_send_interaction_message(interaction, embed=embed, ephemeral=True)
 
     # 處理所有訊息以實現監控功能
     @commands.Cog.listener()
@@ -546,7 +551,7 @@ class UserCommands(commands.Cog):
             description="請選擇您要執行的操作：\n- **監控頻道關鍵字**：設定要在頻道中監控的關鍵字，當訊息包含這些關鍵字時您會收到通知。\n- **停止監控**：停止對特定頻道的關鍵字監控。\n- **顯示監控列表**：查看所有人設定的監控項目。",
             color=discord.Color.greyple()
         )
-        await interaction.response.send_message(embed=embed, view=action_view, ephemeral=True)
+        await safe_send_interaction_message(interaction, embed=embed, view=action_view, ephemeral=True)
 
     async def get_user_item_prices(self, user_id: int, guild: discord.Guild = None) -> dict:
         """根據用戶 ID 獲取物品價格資訊"""
@@ -618,6 +623,7 @@ class UserCommands(commands.Cog):
 
         seller_select = discord.ui.Select(
             placeholder="選擇一位賣家...",
+            custom_id="user_list_item_price_seller_select",
             options=seller_options
         )
 
@@ -648,7 +654,7 @@ class UserCommands(commands.Cog):
                     )
             else:
                 embed.description = "此用戶未設定任何物品價格。"
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await safe_send_interaction_message(interaction, embed=embed, ephemeral=True)
 
         seller_select.callback = seller_select_callback
         seller_view = discord.ui.View()
@@ -659,7 +665,7 @@ class UserCommands(commands.Cog):
             description="請從以下選項中選擇一位賣家來查看其設定的價格。",
             color=discord.Color.blue()
         )
-        await interaction.response.send_message(embed=embed, view=seller_view, ephemeral=True)
+        await safe_send_interaction_message(interaction, embed=embed, view=seller_view, ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(UserCommands(bot))

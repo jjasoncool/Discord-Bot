@@ -4,6 +4,7 @@ import discord
 import traceback
 from discord import app_commands
 from discord.ext import commands
+from utils.utils import safe_send_interaction_message
 
 # 獲取 logger
 logger = logging.getLogger('discord_bot')
@@ -21,7 +22,8 @@ class TestCommands(commands.Cog):
     async def echo_cmd(self, interaction: discord.Interaction, message: str, private: bool = False):
         """斜線命令：回傳使用者輸入的訊息"""
         logger.info(f'收到來自 {interaction.user} 的 /echo 斜線命令，參數: message="{message}", private={private}')
-        await interaction.response.send_message(
+        await safe_send_interaction_message(
+            interaction,
             f'📣 {interaction.user.mention} 說: {message}',
             ephemeral=private
         )    # list_channels 命令已移至 management_commands.py
@@ -33,25 +35,25 @@ class TestCommands(commands.Cog):
         logger.info(f'收到來自 {interaction.user} 的 /anonymous 斜線命令，訊息: "{message}"')
 
         if not interaction.guild:
-            await interaction.response.send_message("此命令只能在伺服器中使用！", ephemeral=True)
+            await safe_send_interaction_message(interaction, "此命令只能在伺服器中使用！", ephemeral=True)
             return
 
         target_channel = interaction.channel
         if not isinstance(target_channel, (discord.TextChannel, discord.Thread)):
-            await interaction.response.send_message("目標頻道必須是文字頻道或討論串！", ephemeral=True)
+            await safe_send_interaction_message(interaction, "目標頻道必須是文字頻道或討論串！", ephemeral=True)
             return
 
         if not target_channel.permissions_for(interaction.guild.me).send_messages:
-            await interaction.response.send_message(f"我沒有權限在 {target_channel.mention} 發送訊息！", ephemeral=True)
+            await safe_send_interaction_message(interaction, f"我沒有權限在 {target_channel.mention} 發送訊息！", ephemeral=True)
             return
 
         try:
             await target_channel.send(f"匿名訊息: {message}")
-            await interaction.response.send_message("您的匿名訊息已成功發送。", ephemeral=True)
+            await safe_send_interaction_message(interaction, "您的匿名訊息已成功發送。", ephemeral=True)
             logger.info(f"匿名訊息已發送到 {target_channel.name}")
         except Exception as e:
             logger.error(f"發送匿名訊息時發生錯誤: {str(e)}")
-            await interaction.response.send_message("發送訊息時發生錯誤，請稍後再試。", ephemeral=True)
+            await safe_send_interaction_message(interaction, "發送訊息時發生錯誤，請稍後再試。", ephemeral=True)
 
     @app_commands.command(name="list_forum_posts", description="列出特定論壇頻道的前20則貼文")
     async def list_forum_posts_cmd(self, interaction: discord.Interaction):
@@ -60,7 +62,7 @@ class TestCommands(commands.Cog):
 
         # 檢查是否在伺服器中
         if not interaction.guild:
-            await interaction.response.send_message("此命令只能在伺服器中使用！", ephemeral=True)
+            await safe_send_interaction_message(interaction, "此命令只能在伺服器中使用！", ephemeral=True)
             return
 
         # 獲取可見的論壇頻道
@@ -69,7 +71,7 @@ class TestCommands(commands.Cog):
             if isinstance(ch, discord.ForumChannel) and ch.permissions_for(interaction.user).view_channel
         ]
         if not forum_channels:
-            await interaction.response.send_message("您沒有權限查看此伺服器中的任何論壇頻道。", ephemeral=True)
+            await safe_send_interaction_message(interaction, "您沒有權限查看此伺服器中的任何論壇頻道。", ephemeral=True)
             return
 
         # 創建選擇頻道的嵌入訊息
@@ -84,6 +86,7 @@ class TestCommands(commands.Cog):
         # 創建下拉選單
         select = discord.ui.Select(
             placeholder="選擇一個論壇頻道...",
+            custom_id="test_list_forum_posts_channel_select",
             options=[
                 discord.SelectOption(label=channel.name, value=str(channel.id), description=f"ID: {channel.id}")
                 for channel in forum_channels
@@ -97,13 +100,13 @@ class TestCommands(commands.Cog):
                 channel_id = int(select.values[0])
                 channel = interaction.guild.get_channel(channel_id)
                 if not isinstance(channel, discord.ForumChannel):
-                    await interaction.response.send_message("無效的論壇頻道，請重試。", ephemeral=True)
+                    await safe_send_interaction_message(interaction, "無效的論壇頻道，請重試。", ephemeral=True)
                     return
 
                 # 檢查機器人權限
                 if not channel.permissions_for(interaction.guild.me).read_message_history:
                     logger.error(f"機器人缺少讀取訊息歷史權限，頻道: {channel.name}")
-                    await interaction.response.send_message("機器人缺少讀取訊息歷史的權限！", ephemeral=True)
+                    await safe_send_interaction_message(interaction, "機器人缺少讀取訊息歷史的權限！", ephemeral=True)
                     return
 
                 # 獲取活躍和歸檔貼文
@@ -125,11 +128,11 @@ class TestCommands(commands.Cog):
                         threads.extend(archived_threads)
                     else:
                         logger.error(f"獲取歸檔貼文失敗: {str(e)}")
-                        await interaction.response.send_message("無法獲取歸檔貼文，請稍後再試。", ephemeral=True)
+                        await safe_send_interaction_message(interaction, "無法獲取歸檔貼文，請稍後再試。", ephemeral=True)
                         return
 
                 if not threads:
-                    await interaction.response.send_message("此論壇頻道中沒有任何貼文。", ephemeral=True)
+                    await safe_send_interaction_message(interaction, "此論壇頻道中沒有任何貼文。", ephemeral=True)
                     return
 
                 # 記錄所有貼文詳細資訊
@@ -162,18 +165,18 @@ class TestCommands(commands.Cog):
                         inline=False
                     )
 
-                await interaction.response.send_message(embed=embed, ephemeral=True)
+                await safe_send_interaction_message(interaction, embed=embed, ephemeral=True)
                 logger.info(f'成功列出貼文，頻道: {channel.name}')
             except Exception as e:
                 error_details = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
                 logger.error(f'select_callback 錯誤: {str(e)}\n詳細錯誤信息:\n{error_details}')
-                await interaction.response.send_message("發生錯誤，請稍後再試。", ephemeral=True)
+                await safe_send_interaction_message(interaction, "發生錯誤，請稍後再試。", ephemeral=True)
 
         select.callback = select_callback
         view = discord.ui.View()
         view.add_item(select)
 
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await safe_send_interaction_message(interaction, embed=embed, view=view, ephemeral=True)
 
     # 傳統前綴命令
     @commands.command(name='ping')
@@ -218,6 +221,7 @@ class TestCommands(commands.Cog):
             placeholder="選擇多個選項...",
             min_values=1,
             max_values=len(OPTIONS),
+            custom_id="test_multi_select_demo_main",
             options=[discord.SelectOption(**opt) for opt in OPTIONS]
         )
 
@@ -226,7 +230,7 @@ class TestCommands(commands.Cog):
             logger.info(f'開始執行 multi_select_demo select_callback，選擇的選項: {select.values}')
             try:
                 if not select.values:
-                    await interaction.response.send_message("您未選擇任何選項。", ephemeral=True)
+                    await safe_send_interaction_message(interaction, "您未選擇任何選項。", ephemeral=True)
                     return
 
                 selected_items = {value: 1 for value in select.values}
@@ -264,17 +268,17 @@ class TestCommands(commands.Cog):
                     view = discord.ui.View()
                     if total_pages > 1:
                         if page > 0:
-                            prev_button = discord.ui.Button(label="上一頁", style=discord.ButtonStyle.blurple)
+                            prev_button = discord.ui.Button(label="上一頁", style=discord.ButtonStyle.blurple, custom_id=f"test_multi_select_prev_{page}")
                             prev_button.callback = lambda inter: update_page(inter, page - 1)
                             view.add_item(prev_button)
                         if page < total_pages - 1:
-                            next_button = discord.ui.Button(label="下一頁", style=discord.ButtonStyle.blurple)
+                            next_button = discord.ui.Button(label="下一頁", style=discord.ButtonStyle.blurple, custom_id=f"test_multi_select_next_{page}")
                             next_button.callback = lambda inter: update_page(inter, page + 1)
                             view.add_item(next_button)
-                    edit_button = discord.ui.Button(label="編輯", style=discord.ButtonStyle.green)
+                    edit_button = discord.ui.Button(label="編輯", style=discord.ButtonStyle.green, custom_id=f"test_multi_select_edit_{page}")
                     edit_button.callback = lambda inter: edit_items(inter, page)
                     view.add_item(edit_button)
-                    finish_button = discord.ui.Button(label="完成", style=discord.ButtonStyle.red)
+                    finish_button = discord.ui.Button(label="完成", style=discord.ButtonStyle.red, custom_id="test_multi_select_finish")
                     finish_button.callback = lambda inter: finish_editing(inter)
                     view.add_item(finish_button)
                     return view
@@ -320,13 +324,13 @@ class TestCommands(commands.Cog):
                                     description="以下項目的數量輸入有誤，請修正後重新提交：\n" + "\n".join(error_fields),
                                     color=discord.Color.red()
                                 )
-                                await interaction.response.send_message(embed=error_embed, ephemeral=True)
+                                await safe_send_interaction_message(interaction, embed=error_embed, ephemeral=True)
                                 return
-                            await interaction.response.send_message(f"已更新第 {page + 1} 頁的數量。", ephemeral=True)
+                            await safe_send_interaction_message(interaction, f"已更新第 {page + 1} 頁的數量。", ephemeral=True)
                             await interaction.followup.edit_message(interaction.message.id, embed=create_embed(current_page), view=create_view(current_page))
                         except Exception as e:
                             logger.error(f"處理數量提交時發生錯誤: {str(e)}")
-                            await interaction.response.send_message("處理數量時發生錯誤，請重試。", ephemeral=True)
+                            await safe_send_interaction_message(interaction, "處理數量時發生錯誤，請重試。", ephemeral=True)
 
                     modal.on_submit = on_submit
                     await interaction.response.send_modal(modal)
@@ -343,17 +347,17 @@ class TestCommands(commands.Cog):
                     await interaction.response.edit_message(embed=summary_embed, view=None)
                     logger.info(f'用戶已完成選擇: {selected_items}')
 
-                await interaction.response.send_message(embed=create_embed(current_page), view=create_view(current_page), ephemeral=True)
+                await safe_send_interaction_message(interaction, embed=create_embed(current_page), view=create_view(current_page), ephemeral=True)
             except Exception as e:
                 error_details = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
                 logger.error(f'multi_select_demo select_callback 錯誤: {str(e)}\n詳細錯誤信息:\n{error_details}')
-                await interaction.response.send_message("發生錯誤，請稍後再試。", ephemeral=True)
+                await safe_send_interaction_message(interaction, "發生錯誤，請稍後再試。", ephemeral=True)
 
         select.callback = select_callback
         view = discord.ui.View()
         view.add_item(select)
 
-        await interaction.response.send_message("請從以下選項中選擇一個或多個：", view=view, ephemeral=True)
+        await safe_send_interaction_message(interaction, "請從以下選項中選擇一個或多個：", view=view, ephemeral=True)
 
 
 async def setup(bot):

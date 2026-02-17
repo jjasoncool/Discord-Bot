@@ -6,6 +6,7 @@ from discord import app_commands
 from discord.ext import commands
 import asyncio
 import logging
+from utils.utils import safe_send_interaction_message
 
 logger = logging.getLogger('discord_bot')
 
@@ -37,6 +38,7 @@ class ArticleCommands(commands.Cog):
         # 創建功能選擇選單
         select_menu = discord.ui.Select(
             placeholder="選擇要執行的功能...",
+            custom_id="article_manager_action_select",
             options=[
                 discord.SelectOption(
                     label="🚀 開始監控",
@@ -73,6 +75,14 @@ class ArticleCommands(commands.Cog):
 
         async def select_callback(select_interaction: discord.Interaction):
             action = select_menu.values[0]
+            logger.info(
+                "interaction_start source=article_manager_action custom_id=%s action=%s user_id=%s guild_id=%s channel_id=%s",
+                getattr(select_menu, "custom_id", None),
+                action,
+                select_interaction.user.id if select_interaction.user else None,
+                select_interaction.guild.id if select_interaction.guild else None,
+                select_interaction.channel.id if select_interaction.channel else None,
+            )
 
             if action == "start":
                 await self._handle_start_monitor(select_interaction)
@@ -121,13 +131,14 @@ class ArticleCommands(commands.Cog):
             inline=True
         )
 
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await safe_send_interaction_message(interaction, embed=embed, view=view, ephemeral=True)
 
     async def _handle_start_monitor(self, interaction: discord.Interaction):
         """處理開始監控功能"""
         # 創建間隔設定選單
         interval_select = discord.ui.Select(
             placeholder="選擇檢查間隔...",
+            custom_id="article_manager_interval_select",
             options=[
                 discord.SelectOption(label="1分鐘", value="60", description="快速檢查（測試用）"),
                 discord.SelectOption(label="3分鐘", value="180", description="預設間隔（推薦）"),
@@ -140,10 +151,19 @@ class ArticleCommands(commands.Cog):
         async def interval_callback(interval_interaction: discord.Interaction):
             interval = int(interval_select.values[0])
             channel_id = interaction.channel.id
+            logger.info(
+                "interaction_start source=article_manager_interval custom_id=%s interval=%s user_id=%s guild_id=%s channel_id=%s",
+                getattr(interval_select, "custom_id", None),
+                interval,
+                interval_interaction.user.id if interval_interaction.user else None,
+                interval_interaction.guild.id if interval_interaction.guild else None,
+                interval_interaction.channel.id if interval_interaction.channel else None,
+            )
 
             # 檢查是否已經在監控
             if self.monitoring_task and not self.monitoring_task.done():
-                await interval_interaction.response.send_message(
+                await safe_send_interaction_message(
+                    interval_interaction,
                     "❌ 官方文章更新已經在運行中！",
                     ephemeral=True
                 )
@@ -162,7 +182,8 @@ class ArticleCommands(commands.Cog):
                     )
                 )
 
-                await interval_interaction.response.send_message(
+                await safe_send_interaction_message(
+                    interval_interaction,
                     f"✅ 已開始官方文章更新！\n"
                     f"📍 更新頻道：<#{channel_id}>\n"
                     f"⏰ 檢查間隔：{interval} 秒\n"
@@ -174,7 +195,8 @@ class ArticleCommands(commands.Cog):
 
             except Exception as e:
                 logger.error(f"啟動官方文章更新失敗: {e}")
-                await interval_interaction.response.send_message(
+                await safe_send_interaction_message(
+                    interval_interaction,
                     f"❌ 啟動官方文章更新失敗：{str(e)}",
                     ephemeral=True
                 )
@@ -193,7 +215,8 @@ class ArticleCommands(commands.Cog):
     async def _handle_stop_monitor(self, interaction: discord.Interaction):
         """處理停止監控功能"""
         if not self.monitoring_task or self.monitoring_task.done():
-            await interaction.response.send_message(
+            await safe_send_interaction_message(
+                interaction,
                 "❌ 官方文章更新沒有在運行",
                 ephemeral=True
             )
@@ -204,7 +227,8 @@ class ArticleCommands(commands.Cog):
             self.monitoring_task.cancel()
             self.monitored_channels.clear()
 
-            await interaction.response.send_message(
+            await safe_send_interaction_message(
+                interaction,
                 "✅ 已停止官方文章更新！",
                 ephemeral=False
             )
@@ -213,7 +237,8 @@ class ArticleCommands(commands.Cog):
 
         except Exception as e:
             logger.error(f"停止官方文章更新失敗: {e}")
-            await interaction.response.send_message(
+            await safe_send_interaction_message(
+                interaction,
                 f"❌ 停止官方文章更新失敗：{str(e)}",
                 ephemeral=True
             )
@@ -254,7 +279,7 @@ class ArticleCommands(commands.Cog):
                 inline=True
             )
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await safe_send_interaction_message(interaction, embed=embed, ephemeral=True)
 
     async def _handle_test_fetch(self, interaction: discord.Interaction):
         """處理測試文章取得功能"""
@@ -262,7 +287,7 @@ class ArticleCommands(commands.Cog):
 
         try:
             if not self.article_monitor:
-                await interaction.followup.send("❌ 官方文章更新器未初始化", ephemeral=True)
+                await safe_send_interaction_message(interaction, "❌ 官方文章更新器未初始化", ephemeral=True)
                 return
 
             # 測試取得文章
@@ -295,7 +320,7 @@ class ArticleCommands(commands.Cog):
                     inline=False
                 )
 
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await safe_send_interaction_message(interaction, embed=embed, ephemeral=True)
 
         except Exception as e:
             logger.error(f"測試文章取得失敗: {e}")
@@ -304,7 +329,7 @@ class ArticleCommands(commands.Cog):
                 description=f"❌ 測試失敗：{str(e)}",
                 color=discord.Color.red()
             )
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await safe_send_interaction_message(interaction, embed=embed, ephemeral=True)
 
     async def _handle_test_parse(self, interaction: discord.Interaction):
         """處理測試 HTML 解析功能"""
@@ -312,7 +337,7 @@ class ArticleCommands(commands.Cog):
 
         try:
             if not self.article_monitor:
-                await interaction.followup.send("❌ 官方文章更新器未初始化", ephemeral=True)
+                await safe_send_interaction_message(interaction, "❌ 官方文章更新器未初始化", ephemeral=True)
                 return
 
             # 測試 HTML 內容 - 包含多張圖片來測試圖片顯示邏輯
@@ -387,7 +412,7 @@ class ArticleCommands(commands.Cog):
                     color=discord.Color.red()
                 )
 
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await safe_send_interaction_message(interaction, embed=embed, ephemeral=True)
 
         except Exception as e:
             logger.error(f"測試 HTML 解析失敗: {e}")
@@ -396,7 +421,7 @@ class ArticleCommands(commands.Cog):
                 description=f"❌ 測試失敗：{str(e)}",
                 color=discord.Color.red()
             )
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await safe_send_interaction_message(interaction, embed=embed, ephemeral=True)
 
     @app_commands.command(name="resend_article", description="根據 ID 重新發送文章或 FB 貼文")
     @app_commands.describe(
@@ -415,17 +440,17 @@ class ArticleCommands(commands.Cog):
 
         try:
             if not self.article_monitor:
-                await interaction.followup.send("❌ 官方文章更新器未初始化", ephemeral=True)
+                await safe_send_interaction_message(interaction, "❌ 官方文章更新器未初始化", ephemeral=True)
                 return
 
             # 檢查是否有監控的頻道
             if not self.monitored_channels:
-                await interaction.followup.send("❌ 沒有設定監控頻道，請先使用 `/article_manager` 開始監控。", ephemeral=True)
+                await safe_send_interaction_message(interaction, "❌ 沒有設定監控頻道，請先使用 `/article_manager` 開始監控。", ephemeral=True)
                 return
 
             content_type = type.lower()
             if content_type not in ["article", "fb", "fb_post"]:
-                await interaction.followup.send("❌ 內容類型必須是 'article' 或 'fb'", ephemeral=True)
+                await safe_send_interaction_message(interaction, "❌ 內容類型必須是 'article' 或 'fb'", ephemeral=True)
                 return
 
             # 根據類型處理
@@ -434,7 +459,7 @@ class ArticleCommands(commands.Cog):
                 try:
                     article_id = int(id)
                 except ValueError:
-                    await interaction.followup.send("❌ 文章 ID 必須是數字", ephemeral=True)
+                    await safe_send_interaction_message(interaction, "❌ 文章 ID 必須是數字", ephemeral=True)
                     return
 
                 # 根據 ID 取得文章
@@ -447,7 +472,7 @@ class ArticleCommands(commands.Cog):
                 try:
                     fb_db_id = int(id)
                 except ValueError:
-                    await interaction.followup.send("❌ FB 貼文 ID 必須是數字（資料庫 ID）", ephemeral=True)
+                    await safe_send_interaction_message(interaction, "❌ FB 貼文 ID 必須是數字（資料庫 ID）", ephemeral=True)
                     return
 
                 # 從 API 根據資料庫 ID 獲取單篇 FB 貼文
@@ -460,21 +485,21 @@ class ArticleCommands(commands.Cog):
                                 if data.get('success') and data.get('post'):
                                     content = data['post']
                                 else:
-                                    await interaction.followup.send(f"❌ 找不到資料庫 ID 為 `{fb_db_id}` 的 FB 貼文。", ephemeral=True)
+                                    await safe_send_interaction_message(interaction, f"❌ 找不到資料庫 ID 為 `{fb_db_id}` 的 FB 貼文。", ephemeral=True)
                                     return
                             else:
-                                await interaction.followup.send(f"❌ API 請求失敗：{response.status}", ephemeral=True)
+                                await safe_send_interaction_message(interaction, f"❌ API 請求失敗：{response.status}", ephemeral=True)
                                 return
                 except Exception as e:
                     logger.error(f"獲取 FB 貼文資料庫 ID {fb_db_id} 失敗: {e}")
-                    await interaction.followup.send(f"❌ 獲取 FB 貼文時發生錯誤：{str(e)}", ephemeral=True)
+                    await safe_send_interaction_message(interaction, f"❌ 獲取 FB 貼文時發生錯誤：{str(e)}", ephemeral=True)
                     return
 
                 content_name = f"FB 貼文 `{fb_db_id}`"
                 send_method = self.article_monitor.send_fb_post_to_channel
 
             if not content:
-                await interaction.followup.send(f"❌ 找不到 {content_name}。", ephemeral=True)
+                await safe_send_interaction_message(interaction, f"❌ 找不到 {content_name}。", ephemeral=True)
                 return
 
             # 發送到所有監控的頻道
@@ -490,16 +515,17 @@ class ArticleCommands(commands.Cog):
                     channel = self.bot.get_channel(channel_id)
                     channel_names.append(f"#{channel.name}" if channel else f"<#{channel_id}>")
 
-                await interaction.followup.send(
+                await safe_send_interaction_message(
+                    interaction,
                     f"✅ 已成功將{content_name}重新發送到 {success_count} 個頻道：{', '.join(channel_names)}",
                     ephemeral=True
                 )
             else:
-                await interaction.followup.send(f"❌ 發送{content_name}到所有頻道都失敗，請查看日誌。", ephemeral=True)
+                await safe_send_interaction_message(interaction, f"❌ 發送{content_name}到所有頻道都失敗，請查看日誌。", ephemeral=True)
 
         except Exception as e:
             logger.error(f"重新發送內容 {id} 失敗: {e}")
-            await interaction.followup.send(f"❌ 重新發送內容時發生錯誤：{str(e)}", ephemeral=True)
+            await safe_send_interaction_message(interaction, f"❌ 重新發送內容時發生錯誤：{str(e)}", ephemeral=True)
 
 
 async def setup(bot):
