@@ -9,6 +9,7 @@ import logging
 import re
 import io
 import os
+import random
 import tempfile
 import discord
 from datetime import datetime, timedelta
@@ -33,6 +34,35 @@ class ArticleMonitor(BaseContentMonitor):
     def __init__(self, bot, scraper_api_url: str = "http://scraper:8000"):
         super().__init__(bot, scraper_api_url)
         logger.info(f"初始化官方文章更新器，目標網站: {self.WEBSITE_NAME}")
+
+    def _build_request_headers(self) -> Dict[str, str]:
+        """建立下載圖片用的請求標頭（優先使用 fake-useragent，否則使用內建隨機 UA 池）"""
+        # 注意：discord_bot 容器目前 requirements 未包含 fake-useragent，需容錯 fallback
+        user_agent = None
+
+        try:
+            # 若未安裝 fake-useragent 會觸發 ImportError，交由 fallback 處理
+            from fake_useragent import UserAgent  # type: ignore
+            user_agent = UserAgent().random
+        except Exception:
+            fallback_user_agents = [
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
+            ]
+            user_agent = random.choice(fallback_user_agents)
+
+        return {
+            "User-Agent": user_agent,
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        }
 
     # 已發送文章追蹤現在由 BaseContentMonitor 處理
 
@@ -283,6 +313,8 @@ class ArticleMonitor(BaseContentMonitor):
                 logger.error(f"找不到頻道 ID: {channel_id}")
                 return False
 
+            logger.info(f"[RESEND_ROUTE] 進入 send_article_to_channel: article_id={article.get('article_id')}, channel_id={channel_id}")
+
             embed = self.format_article_embed(article)
 
             # 獲取文章中的所有圖片
@@ -292,25 +324,61 @@ class ArticleMonitor(BaseContentMonitor):
             _, desc_images = self._parse_html_content(description)
             all_images = content_images + desc_images
 
-            # 先發送主要的 embed 消息
-            await channel.send(embed=embed)
-            logger.info("📤 發送文章 embed 完成")
+            # 主圖來源判定
+            main_image_url = article.get('article_cover') or article.get('content_cover') or article.get('suggest_cover')
+            if not main_image_url and all_images:
+                main_image_url = all_images[0]
 
-            # 處理附件圖片（從第二張開始）
-            if len(all_images) > 1:
-                attachment_images = all_images[1:]
-                logger.info(f"總共有 {len(attachment_images)} 張附件圖片需要發送。")
+            # 組裝附件順序：第 1 張為主圖，其餘維持正序
+            attachment_images: List[str] = []
+            if main_image_url:
+                attachment_images.append(main_image_url)
 
-                # 將附件圖片分塊，每塊最多 10 張
+            removed_main_once = False
+            for image_url in all_images:
+                if main_image_url and not removed_main_once and image_url == main_image_url:
+                    removed_main_once = True
+                    continue
+                attachment_images.append(image_url)
+
+            # 發送主文 + 第 1 張圖片（附件）
+            embed.set_image(url=None)  # 禁止以 URL 連結方式顯示圖片
+            if attachment_images:
+                first_image_url = attachment_images[0]
+                async with aiohttp.ClientSession() as session:
+                    logger.info(f"開始下載第 1 張圖片（主圖）: {first_image_url}")
+                    first_result = await self._download_image_as_file(first_image_url, session, max_retries=2)
+                    if first_result:
+                        image_data, detected_ext = first_result
+                        first_filename = self._get_image_filename_with_ext(first_image_url, 1, detected_ext)
+                        first_file = discord.File(image_data, filename=first_filename)
+                        embed.set_image(url=f"attachment://{first_filename}")
+                        await channel.send(embed=embed, files=[first_file])
+                        logger.info(f"📤 發送文章主文+第1張圖片完成: {first_filename}")
+                    else:
+                        await channel.send(embed=embed)
+                        logger.warning(f"❌ 第 1 張主圖下載失敗，僅發送主文: {first_image_url}")
+            else:
+                await channel.send(embed=embed)
+                logger.info("📤 發送文章主文完成（無圖片）")
+
+            logger.info("🧭 進入其餘圖片發送流程（正序）")
+
+            if attachment_images:
+                logger.info(f"總共有 {len(attachment_images)} 張附件圖片需要發送（正序）。")
+                logger.debug(f"附件發送順序預覽: {attachment_images[:5]}")
+
+                # 將其餘附件圖片分塊，每塊最多 10 張
                 chunk_size = 10
-                image_chunks = [attachment_images[i:i + chunk_size] for i in range(0, len(attachment_images), chunk_size)]
+                rest_images = attachment_images[1:]
+                image_chunks = [rest_images[i:i + chunk_size] for i in range(0, len(rest_images), chunk_size)]
 
                 for i, chunk in enumerate(image_chunks):
                     logger.info(f"準備發送第 {i+1} 批附件，共 {len(chunk)} 張圖片。")
                     files = []
                     async with aiohttp.ClientSession() as session:
                         for j, image_url in enumerate(chunk):
-                            # 計算原始圖片索引
+                            # 原始索引：第 2 張起
                             original_index = sum(len(c) for c in image_chunks[:i]) + j + 2
                             logger.info(f"開始下載第 {original_index} 張圖片（批次 {i+1}，圖片 {j+1}）: {image_url}")
                             download_result = await self._download_image_as_file(image_url, session)
@@ -411,7 +479,13 @@ class ArticleMonitor(BaseContentMonitor):
                 logger.error(f"[FB]監控循環發生錯誤: {e}")
                 await asyncio.sleep(300)  # 發生錯誤時5分鐘後重試
 
-    async def _download_image_as_file(self, image_url: str, session: aiohttp.ClientSession) -> Optional[tuple]:
+    async def _download_image_as_file(
+        self,
+        image_url: str,
+        session: aiohttp.ClientSession,
+        max_retries: int = 2,
+        retry_delay: float = 1.0
+    ) -> Optional[tuple]:
         """
         下載圖片並返回 BytesIO 物件和檔案副檔名
 
@@ -422,12 +496,34 @@ class ArticleMonitor(BaseContentMonitor):
         Returns:
             (BytesIO 物件, 副檔名) 或 None（如果下載失敗）
         """
-        try:
-            logger.info(f"🔄 開始下載圖片: {image_url}")
-            async with session.get(image_url, timeout=10) as response:
-                logger.info(f"📡 HTTP 回應狀態: {response.status} for {image_url}")
-                if response.status == 200:
+        request_headers = self._build_request_headers()
+
+        for attempt in range(max_retries + 1):
+            try:
+                logger.info(f"🔄 開始下載圖片 (attempt={attempt + 1}/{max_retries + 1}): {image_url}")
+                async with session.get(image_url, timeout=10, headers=request_headers) as response:
+                    logger.info(f"📡 HTTP 回應狀態: {response.status} for {image_url}")
+
+                    # 可重試的狀態碼
+                    if response.status in {429, 500, 502, 503, 504}:
+                        if attempt < max_retries:
+                            wait_seconds = retry_delay * (attempt + 1)
+                            logger.warning(
+                                f"⚠️ 圖片下載暫時失敗 (status={response.status})，"
+                                f"{wait_seconds:.1f}s 後重試: {image_url}"
+                            )
+                            await asyncio.sleep(wait_seconds)
+                            continue
+
+                        logger.warning(f"❌ 圖片下載重試耗盡 (status={response.status}): {image_url}")
+                        return None
+
+                    if response.status != 200:
+                        logger.warning(f"❌ 下載圖片失敗，狀態碼 {response.status}: {image_url}")
+                        return None
+
                     content = await response.read()
+
                     # 檢查內容大小（Discord 限制 25MB）
                     if len(content) > 25 * 1024 * 1024:  # 25MB 限制
                         logger.warning(f"⚠️ 圖片過大，超過 Discord 上限，跳過: {image_url} ({len(content)} bytes)")
@@ -448,18 +544,33 @@ class ArticleMonitor(BaseContentMonitor):
                         ext = '.jpg'
 
                     image_data = io.BytesIO(content)
-                    logger.info(f"✅ 成功下載圖片: {image_url} ({len(content)} bytes), Content-Type: {content_type}, 推斷副檔名: {ext}")
+                    image_data.seek(0)
+                    logger.info(
+                        f"✅ 成功下載圖片: {image_url} ({len(content)} bytes), "
+                        f"Content-Type: {content_type}, 推斷副檔名: {ext}"
+                    )
                     return (image_data, ext)
-                else:
-                    logger.warning(f"❌ 下載圖片失敗，狀態碼 {response.status}: {image_url}")
-                    return None
 
-        except asyncio.TimeoutError:
-            logger.warning(f"下載圖片逾時: {image_url}")
-            return None
-        except Exception as e:
-            logger.error(f"下載圖片時發生錯誤 {image_url}: {e}")
-            return None
+            except asyncio.TimeoutError:
+                if attempt < max_retries:
+                    wait_seconds = retry_delay * (attempt + 1)
+                    logger.warning(f"下載圖片逾時，{wait_seconds:.1f}s 後重試: {image_url}")
+                    await asyncio.sleep(wait_seconds)
+                    continue
+
+                logger.warning(f"下載圖片逾時（重試耗盡）: {image_url}")
+                return None
+            except Exception as e:
+                if attempt < max_retries:
+                    wait_seconds = retry_delay * (attempt + 1)
+                    logger.warning(f"下載圖片發生錯誤，{wait_seconds:.1f}s 後重試: {image_url}, err={e}")
+                    await asyncio.sleep(wait_seconds)
+                    continue
+
+                logger.error(f"下載圖片時發生錯誤（重試耗盡） {image_url}: {e}")
+                return None
+
+        return None
 
     def _get_image_filename_with_ext(self, image_url: str, index: int, detected_ext: str) -> str:
         """
@@ -623,31 +734,75 @@ class ArticleMonitor(BaseContentMonitor):
     async def send_fb_post_to_channel(self, channel_id: int, fb_post: Dict) -> bool:
         """發送 FB 貼文到指定頻道"""
         try:
+            channel = self.bot.get_channel(channel_id)
+            if not channel:
+                logger.error(f"找不到頻道 ID: {channel_id}")
+                return False
+
+            logger.info(f"[RESEND_ROUTE] 進入 send_fb_post_to_channel: fb_id={fb_post.get('id')}, channel_id={channel_id}")
+
             embed = self.format_fb_embed(fb_post)
 
-            # 處理圖片附件
+            # FB 分支改為：主文 + 第1張圖片（附件）同次發送，再發其餘圖片（正序）
             images = fb_post.get('images', [])
-            files = []
 
-            if len(images) > 1:
-                # 第一張圖片用於 embed，其餘作為附件
-                attachment_images = images[1:]
+            # 1) 先送主文 + 第1張圖片（附件）
+            embed.set_image(url=None)  # 禁止以 URL 連結方式顯示圖片
+            if images:
+                first_image_url = images[0]
                 async with aiohttp.ClientSession() as session:
-                    for i, image_url in enumerate(attachment_images[:9]):  # 最多9張附件
-                        try:
-                            async with session.get(image_url, timeout=10) as response:
-                                if response.status == 200:
-                                    content = await response.read()
-                                    if len(content) <= 25 * 1024 * 1024:  # 25MB 限制
-                                        image_data = io.BytesIO(content)
-                                        filename = f"fb_image_{i+2}.jpg"
-                                        discord_file = discord.File(image_data, filename=filename)
-                                        files.append(discord_file)
-                        except Exception as e:
-                            logger.warning(f"下載 FB 圖片失敗: {image_url}, {e}")
+                    logger.info(f"[FB_FLOW] 開始下載第 1 張圖片（主圖）: {first_image_url}")
+                    main_result = await self._download_image_as_file(first_image_url, session, max_retries=2)
+                    if main_result:
+                        image_data, detected_ext = main_result
+                        main_filename = self._get_image_filename_with_ext(first_image_url, 1, detected_ext)
+                        main_file = discord.File(image_data, filename=main_filename)
+                        embed.set_image(url=f"attachment://{main_filename}")
+                        await channel.send(embed=embed, files=[main_file])
+                        logger.info(f"[FB_FLOW] 📤 主文+第1張圖片發送完成: {main_filename}")
+                    else:
+                        await channel.send(embed=embed)
+                        logger.warning(f"[FB_FLOW] ❌ 第 1 張主圖下載失敗，僅發送主文: {first_image_url}")
+            else:
+                await channel.send(embed=embed)
+                logger.info("[FB_FLOW] 📤 發送 FB 主文完成（無圖片）")
 
-            # 發送到頻道
-            success = await self.send_embed_to_channels(embed, [channel_id], files)
+            if images:
+                logger.info(f"[FB_FLOW] 總共有 {len(images)} 張圖片，將以正序分段發送")
+
+                # 2) 再送其餘圖片（第 2 張起，正序；每批最多 10）
+                rest_images = images[1:]
+                if rest_images:
+                    chunk_size = 10
+                    image_chunks = [rest_images[i:i + chunk_size] for i in range(0, len(rest_images), chunk_size)]
+
+                    for i, chunk in enumerate(image_chunks):
+                        logger.info(f"[FB_FLOW] 準備發送第 {i+1} 批其餘圖片，共 {len(chunk)} 張")
+                        files = []
+                        async with aiohttp.ClientSession() as session:
+                            for j, image_url in enumerate(chunk):
+                                original_index = sum(len(c) for c in image_chunks[:i]) + j + 2
+                                logger.info(f"[FB_FLOW] 開始下載第 {original_index} 張圖片: {image_url}")
+
+                                download_result = await self._download_image_as_file(image_url, session, max_retries=2)
+                                if not download_result:
+                                    logger.warning(f"[FB_FLOW] ❌ 跳過無法下載圖片: {image_url}")
+                                    continue
+
+                                image_data, detected_ext = download_result
+                                filename = self._get_image_filename_with_ext(image_url, original_index, detected_ext)
+                                files.append(discord.File(image_data, filename=filename))
+
+                        if files:
+                            await asyncio.sleep(0.5)
+                            await channel.send(files=files)
+                            logger.info(f"[FB_FLOW] ✅ 第 {i+1} 批已發送 {len(files)} 張")
+                        else:
+                            logger.warning(f"[FB_FLOW] 第 {i+1} 批沒有可發送圖片")
+            else:
+                logger.info("[FB_FLOW] 無圖片可發送")
+
+            success = True
 
             if success:
                 self.mark_content_as_sent('fbpost', fb_post['id'])

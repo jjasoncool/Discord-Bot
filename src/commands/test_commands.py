@@ -9,9 +9,91 @@ from utils.utils import safe_send_interaction_message
 # 獲取 logger
 logger = logging.getLogger('discord_bot')
 
+
+class TestSessionRecoveryView(discord.ui.View):
+    """測試互動流程重啟後的 recovery view"""
+
+    def __init__(self, cog: "TestCommands"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(label="完成", style=discord.ButtonStyle.secondary, custom_id="test_multi_select_finish")
+    async def multi_select_finish(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 重啟後點到舊流程，直接重開流程以保持 smooth 體驗
+        await self.cog.multi_select_demo_cmd.callback(self.cog, interaction)
+
+
+class TestExpiredButtonView(discord.ui.View):
+    """註冊動態頁碼 custom_id 的回收按鈕"""
+
+    def __init__(self, cog: "TestCommands", custom_id: str):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+        btn = discord.ui.Button(
+            label="繼續",
+            style=discord.ButtonStyle.secondary,
+            custom_id=custom_id,
+        )
+
+        async def _callback(interaction: discord.Interaction):
+            await self.cog.multi_select_demo_cmd.callback(self.cog, interaction)
+
+        btn.callback = _callback
+        self.add_item(btn)
+
+
+class TestSelectRecoveryView(discord.ui.View):
+    """註冊 select custom_id 的 recovery（舊選單被點擊時自動重開流程）"""
+
+    def __init__(self, cog: "TestCommands", custom_id: str, flow: str):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.flow = flow
+
+        select = discord.ui.Select(
+            placeholder="繼續",
+            custom_id=custom_id,
+            min_values=1,
+            max_values=1,
+            options=[discord.SelectOption(label="繼續", value="continue")],
+        )
+
+        async def _callback(interaction: discord.Interaction):
+            if self.flow == "forum_posts":
+                await self.cog.list_forum_posts_cmd.callback(self.cog, interaction)
+            else:
+                await self.cog.multi_select_demo_cmd.callback(self.cog, interaction)
+
+        select.callback = _callback
+        self.add_item(select)
+
 class TestCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+
+    async def cog_load(self):
+        # 註冊 persistent recovery views，避免 test 互動在 bot 重啟後失效
+        self.bot.add_view(TestSessionRecoveryView(self))
+
+        self._recovery_views = []
+        for page in range(0, 10):
+            for custom_id in (
+                f"test_multi_select_prev_{page}",
+                f"test_multi_select_next_{page}",
+                f"test_multi_select_edit_{page}",
+            ):
+                view = TestExpiredButtonView(self, custom_id)
+                self.bot.add_view(view)
+                self._recovery_views.append(view)
+
+        # select 類元件 recovery
+        forum_recovery = TestSelectRecoveryView(self, "test_list_forum_posts_channel_select", "forum_posts")
+        multi_recovery = TestSelectRecoveryView(self, "test_multi_select_demo_main", "multi_select")
+        self.bot.add_view(forum_recovery)
+        self.bot.add_view(multi_recovery)
+        self._recovery_views.extend([forum_recovery, multi_recovery])
+        logger.info("已註冊 TestCommands recovery views")
 
     # 斜線命令
     @app_commands.command(name="echo", description="讓機器人回傳一段訊息")

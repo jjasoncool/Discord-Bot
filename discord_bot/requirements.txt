@@ -6,3 +6,4 @@ beautifulsoup4
 lxml
 aiohttp
 html2text
+fake-useragent

@@ -10,6 +10,72 @@ from utils.utils import safe_send_interaction_message
 
 logger = logging.getLogger('discord_bot')
 
+
+class ArticleManagerView(discord.ui.View):
+    """/article_manager 主入口 persistent view"""
+
+    def __init__(self, cog: "ArticleCommands"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.select(
+        placeholder="選擇要執行的功能...",
+        custom_id="article_manager_action_select",
+        options=[
+            discord.SelectOption(
+                label="🚀 開始監控",
+                value="start",
+                description="開始官方文章更新並自動發送到此頻道",
+                emoji="🚀"
+            ),
+            discord.SelectOption(
+                label="⏹️ 停止監控",
+                value="stop",
+                description="停止官方文章更新",
+                emoji="⏹️"
+            ),
+            discord.SelectOption(
+                label="📊 監控狀態",
+                value="status",
+                description="查看官方文章更新狀態",
+                emoji="📊"
+            ),
+            discord.SelectOption(
+                label="🧪 測試 API",
+                value="test",
+                description="測試從爬蟲 API 取得文章",
+                emoji="🧪"
+            ),
+            discord.SelectOption(
+                label="🔧 測試解析",
+                value="test_parse",
+                description="測試 HTML 內容解析功能",
+                emoji="🔧"
+            )
+        ]
+    )
+    async def article_manager_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        action = select.values[0]
+        logger.info(
+            "interaction_start source=article_manager_action custom_id=%s action=%s user_id=%s guild_id=%s channel_id=%s",
+            getattr(select, "custom_id", None),
+            action,
+            interaction.user.id if interaction.user else None,
+            interaction.guild.id if interaction.guild else None,
+            interaction.channel.id if interaction.channel else None,
+        )
+
+        if action == "start":
+            await self.cog._handle_start_monitor(interaction)
+        elif action == "stop":
+            await self.cog._handle_stop_monitor(interaction)
+        elif action == "status":
+            await self.cog._handle_monitor_status(interaction)
+        elif action == "test":
+            await self.cog._handle_test_fetch(interaction)
+        elif action == "test_parse":
+            await self.cog._handle_test_parse(interaction)
+
 class ArticleCommands(commands.Cog):
     """官方文章更新相關命令"""
 
@@ -24,6 +90,8 @@ class ArticleCommands(commands.Cog):
         """Cog 載入時初始化官方文章更新器"""
         from services.article_monitor import ArticleMonitor
         self.article_monitor = ArticleMonitor(self.bot)
+        self.bot.add_view(ArticleManagerView(self))
+        logger.info("已註冊 ArticleManagerView persistent view")
         logger.info("官方文章更新器已初始化")
 
     @app_commands.command(name="article_manager", description="官方文章更新管理中心")
@@ -35,70 +103,7 @@ class ArticleCommands(commands.Cog):
         if not await check_guild(interaction, admin_only=True):
             return
 
-        # 創建功能選擇選單
-        select_menu = discord.ui.Select(
-            placeholder="選擇要執行的功能...",
-            custom_id="article_manager_action_select",
-            options=[
-                discord.SelectOption(
-                    label="🚀 開始監控",
-                    value="start",
-                    description="開始官方文章更新並自動發送到此頻道",
-                    emoji="🚀"
-                ),
-                discord.SelectOption(
-                    label="⏹️ 停止監控",
-                    value="stop",
-                    description="停止官方文章更新",
-                    emoji="⏹️"
-                ),
-                discord.SelectOption(
-                    label="📊 監控狀態",
-                    value="status",
-                    description="查看官方文章更新狀態",
-                    emoji="📊"
-                ),
-                discord.SelectOption(
-                    label="🧪 測試 API",
-                    value="test",
-                    description="測試從爬蟲 API 取得文章",
-                    emoji="🧪"
-                ),
-                discord.SelectOption(
-                    label="🔧 測試解析",
-                    value="test_parse",
-                    description="測試 HTML 內容解析功能",
-                    emoji="🔧"
-                )
-            ]
-        )
-
-        async def select_callback(select_interaction: discord.Interaction):
-            action = select_menu.values[0]
-            logger.info(
-                "interaction_start source=article_manager_action custom_id=%s action=%s user_id=%s guild_id=%s channel_id=%s",
-                getattr(select_menu, "custom_id", None),
-                action,
-                select_interaction.user.id if select_interaction.user else None,
-                select_interaction.guild.id if select_interaction.guild else None,
-                select_interaction.channel.id if select_interaction.channel else None,
-            )
-
-            if action == "start":
-                await self._handle_start_monitor(select_interaction)
-            elif action == "stop":
-                await self._handle_stop_monitor(select_interaction)
-            elif action == "status":
-                await self._handle_monitor_status(select_interaction)
-            elif action == "test":
-                await self._handle_test_fetch(select_interaction)
-            elif action == "test_parse":
-                await self._handle_test_parse(select_interaction)
-
-        select_menu.callback = select_callback
-
-        view = discord.ui.View()
-        view.add_item(select_menu)
+        view = ArticleManagerView(self)
 
         embed = discord.Embed(
             title="📰 官方文章更新管理中心",
@@ -449,6 +454,7 @@ class ArticleCommands(commands.Cog):
                 return
 
             content_type = type.lower()
+            logger.info(f"[RESEND_ROUTE] 收到 /resend_article 請求: id={id}, type={content_type}")
             if content_type not in ["article", "fb", "fb_post"]:
                 await safe_send_interaction_message(interaction, "❌ 內容類型必須是 'article' 或 'fb'", ephemeral=True)
                 return
@@ -466,6 +472,7 @@ class ArticleCommands(commands.Cog):
                 content = await self.article_monitor.fetch_article_by_id(article_id)
                 content_name = f"文章 `{article_id}`"
                 send_method = self.article_monitor.send_article_to_channel
+                logger.info(f"[RESEND_ROUTE] 路由到文章流程: article_id={article_id}")
 
             else:  # fb or fb_post
                 # 處理 FB 貼文
@@ -497,6 +504,7 @@ class ArticleCommands(commands.Cog):
 
                 content_name = f"FB 貼文 `{fb_db_id}`"
                 send_method = self.article_monitor.send_fb_post_to_channel
+                logger.info(f"[RESEND_ROUTE] 路由到 FB 流程: fb_db_id={fb_db_id}")
 
             if not content:
                 await safe_send_interaction_message(interaction, f"❌ 找不到 {content_name}。", ephemeral=True)
@@ -505,6 +513,7 @@ class ArticleCommands(commands.Cog):
             # 發送到所有監控的頻道
             success_count = 0
             for channel_id in self.monitored_channels:
+                logger.info(f"[RESEND_ROUTE] 準備發送到頻道: channel_id={channel_id}, type={content_type}, id={id}")
                 success = await send_method(channel_id, content)
                 if success:
                     success_count += 1

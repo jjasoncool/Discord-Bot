@@ -18,6 +18,65 @@ import json
 import os
 from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message
 
+
+class WatchKeywordsView(discord.ui.View):
+    """/watch_keywords 主入口 persistent view"""
+
+    def __init__(self, cog: "UserCommands"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(label="監控頻道關鍵字", style=discord.ButtonStyle.primary, custom_id="monitor_channel")
+    async def monitor_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(self.cog.KeywordsModal(self.cog, notify=True))
+
+    @discord.ui.button(label="停止監控", style=discord.ButtonStyle.danger, custom_id="stop_monitoring")
+    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.stop_monitoring_cmd(interaction)
+
+    @discord.ui.button(label="顯示監控列表", style=discord.ButtonStyle.secondary, custom_id="list_monitored")
+    async def list_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.list_monitored_cmd(interaction)
+
+
+class StopAllMonitoringView(discord.ui.View):
+    """停止所有監控按鈕 persistent view"""
+
+    def __init__(self, cog: "UserCommands"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(label="🛑 停止所有監控", style=discord.ButtonStyle.danger, custom_id="stop_all_monitoring")
+    async def stop_all_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = interaction.guild.id
+        user_id = interaction.user.id
+        removed_channels = []
+        if guild_id in monitored_channels:
+            for channel_id in list(monitored_channels[guild_id].keys()):
+                settings_list = monitored_channels[guild_id][channel_id]
+                original_length = len(settings_list)
+                settings_list = [setting for setting in settings_list if setting['user_id'] != user_id]
+                if len(settings_list) < original_length:
+                    channel = interaction.guild.get_channel(channel_id)
+                    channel_name = channel.name if channel else f"ID: {channel_id}"
+                    removed_channels.append(channel_name)
+                if settings_list:
+                    monitored_channels[guild_id][channel_id] = settings_list
+                else:
+                    del monitored_channels[guild_id][channel_id]
+            if not monitored_channels[guild_id]:
+                del monitored_channels[guild_id]
+            if removed_channels:
+                save_monitored_channels()
+                await interaction.response.edit_message(view=None)
+                await safe_send_interaction_message(
+                    interaction,
+                    f"✅ 已停止監控以下所有頻道：\n" + "\n".join(f"- **{name}**" for name in removed_channels),
+                    ephemeral=True
+                )
+                return
+        await safe_send_interaction_message(interaction, "您未設定任何監控！", ephemeral=True)
+
 def load_monitored_channels():
     """從檔案中讀取監控設定"""
     global monitored_channels
@@ -61,6 +120,13 @@ class UserCommands(commands.Cog):
         self.bot = bot
         load_monitored_channels()
         logger.info("監控設定已從檔案中讀取")
+
+    async def cog_load(self):
+        # 註冊 persistent view，避免 bot 重啟後 /watch_keywords 主入口按鈕失效
+        self.bot.add_view(WatchKeywordsView(self))
+        self.bot.add_view(StopAllMonitoringView(self))
+        logger.info("已註冊 WatchKeywordsView persistent view")
+        logger.info("已註冊 StopAllMonitoringView")
 
     async def _check_guild_and_owner(self, interaction: discord.Interaction, owner_only: bool = False) -> bool:
         """檢查命令是否在伺服器中使用且使用者是否為伺服器擁有者（如果啟用了限制）"""
@@ -291,43 +357,7 @@ class UserCommands(commands.Cog):
         # 第一個訊息：嵌入 + 選擇框
         await safe_send_interaction_message(interaction, embed=embed, view=channel_view, ephemeral=True)
 
-        # 新增「停止所有監控」按鈕
-        class StopAllButton(discord.ui.Button):
-            def __init__(self):
-                super().__init__(label="🛑 停止所有監控", style=discord.ButtonStyle.danger, custom_id="stop_all_monitoring")
-
-            async def callback(self, interaction: discord.Interaction):
-                guild_id = interaction.guild.id
-                user_id = interaction.user.id
-                removed_channels = []
-                if guild_id in monitored_channels:
-                    for channel_id in list(monitored_channels[guild_id].keys()):
-                        settings_list = monitored_channels[guild_id][channel_id]
-                        original_length = len(settings_list)
-                        settings_list = [setting for setting in settings_list if setting['user_id'] != user_id]
-                        if len(settings_list) < original_length:
-                            channel = interaction.guild.get_channel(channel_id)
-                            channel_name = channel.name if channel else f"ID: {channel_id}"
-                            removed_channels.append(channel_name)
-                        if settings_list:
-                            monitored_channels[guild_id][channel_id] = settings_list
-                        else:
-                            del monitored_channels[guild_id][channel_id]
-                    if not monitored_channels[guild_id]:
-                        del monitored_channels[guild_id]
-                    if removed_channels:
-                        save_monitored_channels()
-                        await interaction.response.edit_message(view=None)
-                        await safe_send_interaction_message(
-                            interaction,
-                            f"✅ 已停止監控以下所有頻道：\n" + "\n".join(f"- **{name}**" for name in removed_channels),
-                            ephemeral=True
-                        )
-                        return
-                await safe_send_interaction_message(interaction, "您未設定任何監控！", ephemeral=True)
-
-        stop_all_view = discord.ui.View()
-        stop_all_view.add_item(StopAllButton())
+        stop_all_view = StopAllMonitoringView(self)
 
         # 第二個訊息：文字 + 按鈕
         await safe_send_interaction_message(interaction, "如果要取消所有頻道的監控，請點選下方按鈕：", view=stop_all_view, ephemeral=True)
@@ -523,28 +553,7 @@ class UserCommands(commands.Cog):
         if not await self._check_guild_and_owner(interaction, owner_only=False):
             return
 
-        # 創建操作按鈕
-        monitor_button = discord.ui.Button(label="監控頻道關鍵字", style=discord.ButtonStyle.primary, custom_id="monitor_channel")
-        stop_button = discord.ui.Button(label="停止監控", style=discord.ButtonStyle.danger, custom_id="stop_monitoring")
-        list_button = discord.ui.Button(label="顯示監控列表", style=discord.ButtonStyle.secondary, custom_id="list_monitored")
-
-        async def monitor_button_callback(interaction: discord.Interaction):
-            await interaction.response.send_modal(self.KeywordsModal(self, notify=True))
-
-        async def stop_button_callback(interaction: discord.Interaction):
-            await self.stop_monitoring_cmd(interaction)
-
-        async def list_button_callback(interaction: discord.Interaction):
-            await self.list_monitored_cmd(interaction)
-
-        monitor_button.callback = monitor_button_callback
-        stop_button.callback = stop_button_callback
-        list_button.callback = list_button_callback
-
-        action_view = discord.ui.View()
-        action_view.add_item(monitor_button)
-        action_view.add_item(list_button)
-        action_view.add_item(stop_button)
+        action_view = WatchKeywordsView(self)
 
         embed = discord.Embed(
             title="頻道關鍵字監控",

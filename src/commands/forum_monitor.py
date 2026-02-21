@@ -6,10 +6,118 @@ from utils.utils import safe_send_interaction_message
 # 獲取 logger
 logger = logging.getLogger('discord_bot')
 
+
+class TransactionView(discord.ui.View):
+    """交易確認 persistent view（重啟後仍可處理按鈕互動）"""
+
+    def __init__(self, bot):
+        super().__init__(timeout=None)
+        self.bot = bot
+
+    async def extract_info_from_message(self, message_content):
+        """從訊息內容中提取 reacting_user_id 和 source_post_id"""
+        reacting_user_id = None
+        source_post_id = None
+
+        # 提取 reacting_user_id
+        try:
+            reacting_user_mention = message_content.split("使用者 ")[1].split(" 對交易貼文")[0]
+            reacting_user_id = int(reacting_user_mention.split("<@")[1].split(">")[0])
+        except (IndexError, ValueError) as e:
+            logger.error(f"無法從訊息中提取 reacting_user_id: {str(e)}")
+
+        # 提取 source_post_id
+        try:
+            source_post_id = message_content.split("來源貼文 ID:")[1].strip().split('\n')[0]
+            logger.info(f"提取來源貼文 ID: {source_post_id}")
+        except IndexError:
+            logger.error(f"無法從訊息中提取來源貼文 ID: {message_content}")
+
+        return reacting_user_id, source_post_id
+
+    @discord.ui.button(label="買家領收", style=discord.ButtonStyle.green, custom_id="forum_trade_confirm")
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        logger.info(
+            "interaction_start source=forum_trade_confirm custom_id=%s user_id=%s guild_id=%s channel_id=%s",
+            getattr(button, "custom_id", None),
+            interaction.user.id if interaction.user else None,
+            interaction.guild.id if interaction.guild else None,
+            interaction.channel.id if interaction.channel else None,
+        )
+        message_content = interaction.message.content
+        reacting_user_id, source_post_id = await self.extract_info_from_message(message_content)
+
+        if reacting_user_id is None:
+            await safe_send_interaction_message(interaction, "無法識別使用者身份，請手動確認交易狀態。", ephemeral=True)
+            logger.error("無法識別使用者身份")
+            return
+
+        if interaction.user.id == reacting_user_id:
+            await safe_send_interaction_message(interaction, f"{interaction.user.mention} 通知買家領收。", ephemeral=False)
+            try:
+                trade_cog = self.bot.get_cog('TradeCommands')
+                if trade_cog:
+                    if source_post_id:
+                        await trade_cog.handle_trade_confirmation(interaction.message, source_post_id)
+                    else:
+                        await safe_send_interaction_message(interaction, "無法從訊息中提取來源貼文 ID，請手動確認交易狀態。", ephemeral=True)
+                        logger.error("無法從訊息中提取來源貼文 ID")
+                else:
+                    await safe_send_interaction_message(interaction, "無法找到交易命令模組，請稍後再試。", ephemeral=True)
+                    logger.error("無法找到交易命令模組 'TradeCommands'")
+            except Exception as e:
+                error_message = f"調用交易確認流程時發生錯誤: {str(e)}，請截圖通知管理員。"
+                await safe_send_interaction_message(interaction, error_message, ephemeral=True)
+                logger.error(error_message, exc_info=True)
+        else:
+            await safe_send_interaction_message(interaction, "只有賣家可以進行此操作。", ephemeral=True)
+
+    @discord.ui.button(label="取消交易", style=discord.ButtonStyle.red, custom_id="forum_trade_cancel")
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        logger.info(
+            "interaction_start source=forum_trade_cancel custom_id=%s user_id=%s guild_id=%s channel_id=%s",
+            getattr(button, "custom_id", None),
+            interaction.user.id if interaction.user else None,
+            interaction.guild.id if interaction.guild else None,
+            interaction.channel.id if interaction.channel else None,
+        )
+        message_content = interaction.message.content
+        reacting_user_id, _ = await self.extract_info_from_message(message_content)
+
+        if reacting_user_id is None:
+            await safe_send_interaction_message(interaction, "無法識別使用者身份，請手動確認交易狀態。", ephemeral=True)
+            logger.error("無法識別使用者身份")
+            return
+
+        if interaction.user.id == reacting_user_id:
+            for item in self.children:
+                item.disabled = True
+            await interaction.message.edit(view=self)
+
+            try:
+                trade_cog = self.bot.get_cog('TradeCommands')
+                if trade_cog:
+                    await safe_send_interaction_message(interaction, f"{interaction.user.mention} 已取消交易。", ephemeral=False)
+                    await trade_cog.cancel_trade_cmd(interaction)
+                else:
+                    await safe_send_interaction_message(interaction, "無法找到交易命令模組，請稍後再試。", ephemeral=True)
+                    logger.error("無法找到交易命令模組 'TradeCommands'")
+            except Exception as e:
+                error_message = f"調用取消交易流程時發生錯誤: {str(e)}，請截圖通知管理員。"
+                await safe_send_interaction_message(interaction, error_message, ephemeral=True)
+                logger.error(error_message, exc_info=True)
+        else:
+            await safe_send_interaction_message(interaction, "只有賣家可以進行此操作。", ephemeral=True)
+
 class ForumMonitor(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.target_emojis = ["✅", "🤝", "💰"]  # 監控的表情符號列表
+
+    async def cog_load(self):
+        # 註冊 persistent view，確保 bot 重啟後舊訊息上的按鈕仍可互動
+        self.bot.add_view(TransactionView(self.bot))
+        logger.info("已註冊 TransactionView persistent view")
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload):
@@ -189,112 +297,6 @@ class ForumMonitor(commands.Cog):
                 if str(source_thread_id) in thread.name and not thread.locked and not thread.archived:
                     existing_thread = thread
                     break
-
-            class TransactionView(discord.ui.View):
-                def __init__(self, bot):
-                    super().__init__(timeout=None)  # 設置為 None 以永久有效
-                    self.bot = bot
-
-                async def extract_info_from_message(self, message_content):
-                    """從訊息內容中提取 reacting_user_id 和 source_post_id"""
-                    reacting_user_id = None
-                    source_post_id = None
-
-                    # 提取 reacting_user_id
-                    try:
-                        reacting_user_mention = message_content.split("使用者 ")[1].split(" 對交易貼文")[0]
-                        reacting_user_id = int(reacting_user_mention.split("<@")[1].split(">")[0])
-                    except (IndexError, ValueError) as e:
-                        logger.error(f"無法從訊息中提取 reacting_user_id: {str(e)}")
-
-                    # 提取 source_post_id
-                    try:
-                        source_post_id = message_content.split("來源貼文 ID:")[1].strip().split('\n')[0]
-                        logger.info(f"提取來源貼文 ID: {source_post_id}")
-                    except IndexError:
-                        logger.error(f"無法從訊息中提取來源貼文 ID: {message_content}")
-
-                    return reacting_user_id, source_post_id
-
-                @discord.ui.button(label="買家領收", style=discord.ButtonStyle.green, custom_id="forum_trade_confirm")
-                async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-                    logger.info(
-                        "interaction_start source=forum_trade_confirm custom_id=%s user_id=%s guild_id=%s channel_id=%s",
-                        getattr(button, "custom_id", None),
-                        interaction.user.id if interaction.user else None,
-                        interaction.guild.id if interaction.guild else None,
-                        interaction.channel.id if interaction.channel else None,
-                    )
-                    message_content = interaction.message.content
-                    reacting_user_id, source_post_id = await self.extract_info_from_message(message_content)
-
-                    if reacting_user_id is None:
-                        await safe_send_interaction_message(interaction, "無法識別使用者身份，請手動確認交易狀態。", ephemeral=True)
-                        logger.error("無法識別使用者身份")
-                        return
-
-                    if interaction.user.id == reacting_user_id:
-                        await safe_send_interaction_message(interaction, f"{interaction.user.mention} 通知買家領收。", ephemeral=False)
-                        # 調用 handle_trade_confirmation 流程
-                        try:
-                            from commands.trade_commands import TradeCommands
-                            trade_cog = self.bot.get_cog('TradeCommands')
-                            if trade_cog:
-                                # 由於 handle_trade_confirmation 期望接收 message 對象而非 interaction
-                                # 我們需要將 interaction.message 作為參數傳遞
-                                if source_post_id:
-                                    await trade_cog.handle_trade_confirmation(interaction.message, source_post_id)
-                                else:
-                                    await safe_send_interaction_message(interaction, "無法從訊息中提取來源貼文 ID，請手動確認交易狀態。", ephemeral=True)
-                                    logger.error("無法從訊息中提取來源貼文 ID")
-                            else:
-                                await safe_send_interaction_message(interaction, "無法找到交易命令模組，請稍後再試。", ephemeral=True)
-                                logger.error("無法找到交易命令模組 'TradeCommands'")
-                        except Exception as e:
-                            error_message = f"調用交易確認流程時發生錯誤: {str(e)}，請截圖通知管理員。"
-                            await safe_send_interaction_message(interaction, error_message, ephemeral=True)
-                            logger.error(error_message, exc_info=True)
-                    else:
-                        await safe_send_interaction_message(interaction, "只有賣家可以進行此操作。", ephemeral=True)
-
-                @discord.ui.button(label="取消交易", style=discord.ButtonStyle.red, custom_id="forum_trade_cancel")
-                async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-                    logger.info(
-                        "interaction_start source=forum_trade_cancel custom_id=%s user_id=%s guild_id=%s channel_id=%s",
-                        getattr(button, "custom_id", None),
-                        interaction.user.id if interaction.user else None,
-                        interaction.guild.id if interaction.guild else None,
-                        interaction.channel.id if interaction.channel else None,
-                    )
-                    message_content = interaction.message.content
-                    reacting_user_id, source_post_id = await self.extract_info_from_message(message_content)
-
-                    if reacting_user_id is None:
-                        await safe_send_interaction_message(interaction, "無法識別使用者身份，請手動確認交易狀態。", ephemeral=True)
-                        logger.error("無法識別使用者身份")
-                        return
-
-                    if interaction.user.id == reacting_user_id:
-                        for item in self.children:
-                            item.disabled = True
-                        await interaction.message.edit(view=self)
-
-                        # 調用 cancel_trade_cmd 流程
-                        try:
-                            from commands.trade_commands import TradeCommands
-                            trade_cog = self.bot.get_cog('TradeCommands')
-                            if trade_cog:
-                                await safe_send_interaction_message(interaction, f"{interaction.user.mention} 已取消交易。", ephemeral=False)
-                                await trade_cog.cancel_trade_cmd(interaction)
-                            else:
-                                await safe_send_interaction_message(interaction, "無法找到交易命令模組，請稍後再試。", ephemeral=True)
-                                logger.error("無法找到交易命令模組 'TradeCommands'")
-                        except Exception as e:
-                            error_message = f"調用取消交易流程時發生錯誤: {str(e)}，請截圖通知管理員。"
-                            await safe_send_interaction_message(interaction, error_message, ephemeral=True)
-                            logger.error(error_message, exc_info=True)
-                    else:
-                        await safe_send_interaction_message(interaction, "只有賣家可以進行此操作。", ephemeral=True)
 
             if existing_thread:
                 await existing_thread.send(

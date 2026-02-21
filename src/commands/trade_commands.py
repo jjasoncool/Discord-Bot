@@ -11,9 +11,186 @@ from utils.utils import safe_send_interaction_message
 # 獲取 logger
 logger = logging.getLogger('discord_bot')
 
+
+class SelectItemFinalConfirmView(discord.ui.View):
+    """/select_item 最終確認 persistent view（支援重啟後確認/取消）"""
+
+    def __init__(self, cog: "TradeCommands"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    def _extract_purchase_summary(self, interaction: discord.Interaction) -> list[str]:
+        """從最終確認 embed 還原購買摘要（格式：`N 個 XXX`）"""
+        summary: list[str] = []
+        if not interaction.message or not interaction.message.embeds:
+            return summary
+
+        embed = interaction.message.embeds[0]
+        for field in embed.fields:
+            # value 預期格式："數量: X"
+            qty = 1
+            try:
+                raw = (field.value or "").replace("數量:", "").strip()
+                qty = int(raw)
+            except Exception:
+                qty = 1
+            summary.append(f"{qty} 個 {field.name}")
+        return summary
+
+    @discord.ui.button(label="確定購買", style=discord.ButtonStyle.green, custom_id="select_item_confirm_purchase")
+    async def confirm_purchase(self, interaction: discord.Interaction, button: discord.ui.Button):
+        purchase_summary = self._extract_purchase_summary(interaction)
+        if not purchase_summary:
+            await safe_send_interaction_message(interaction, "無法還原購買內容，請重新執行 `/select_item`。", ephemeral=True)
+            return
+
+        await interaction.response.edit_message(view=None)
+        await safe_send_interaction_message(interaction, f"您已確認購買：\n" + "\n".join(purchase_summary), ephemeral=True)
+        logger.info(f'用戶已確認購買: {purchase_summary}')
+
+        # 檢查是否已設定交易論壇頻道
+        from utils.utils import get_trade_forum_channel_id
+        logger.debug("準備調用 get_trade_forum_channel_id 函數 (調用者: TradeCommands)")
+        forum_channel_id = await get_trade_forum_channel_id(config_file="config.json", caller="TradeCommands")
+        logger.debug(f"從 get_trade_forum_channel_id 函數返回的 forum_channel_id: {forum_channel_id} (調用者: TradeCommands)")
+        if forum_channel_id == 1234567890:
+            await safe_send_interaction_message(
+                interaction,
+                "交易論壇頻道尚未設定，請通知管理員。",
+                ephemeral=True
+            )
+            logger.warning("交易論壇頻道未設定，使用預設佔位符 ID")
+            return
+
+        try:
+            forum_channel = interaction.guild.get_channel(forum_channel_id)
+            if forum_channel and forum_channel.type == discord.ChannelType.forum:
+                if len(purchase_summary) == 1:
+                    thread_title = f"{interaction.user.display_name} - 需要購買 {purchase_summary[0]}"
+                else:
+                    thread_title = f"{interaction.user.display_name} - 需要購買多件物品"
+                thread_content = f"群友 {interaction.user.mention} ({interaction.user.name}) 需要購買：\n" + "\n".join(purchase_summary)
+
+                # 嘗試找到名為「代儲」的標籤，如果找不到則嘗試創建
+                applied_tags = []
+                for tag in forum_channel.available_tags:
+                    if tag.name == "代儲":
+                        applied_tags.append(tag)
+                        break
+                if not applied_tags:
+                    try:
+                        new_tag = await forum_channel.create_tag(name="代儲")
+                        applied_tags.append(new_tag)
+                        logger.info("已創建新標籤「代儲」並應用到貼文")
+                    except Exception as tag_error:
+                        logger.error(f"創建新標籤「代儲」時發生錯誤: {str(tag_error)}")
+
+                await forum_channel.create_thread(name=thread_title, content=thread_content, applied_tags=applied_tags)
+                logger.info(f"在論壇頻道 {forum_channel_id} 新增貼文: {thread_title}，使用標籤: {applied_tags if applied_tags else '無'}")
+            else:
+                logger.error(f"無法找到論壇頻道 {forum_channel_id} 或該頻道不是論壇類型")
+                await safe_send_interaction_message(
+                    interaction,
+                    "無法找到設定的論壇頻道，請確認設定或重新使用 `/set_trade_forum_channel` 命令設定。",
+                    ephemeral=True
+                )
+        except Exception as e:
+            logger.error(f"處理論壇頻道 {forum_channel_id} 時發生錯誤: {str(e)}")
+            await safe_send_interaction_message(
+                interaction,
+                "無法處理論壇頻道操作，請確認機器人有相關權限或聯繫管理員。",
+                ephemeral=True
+            )
+
+    @discord.ui.button(label="取消購買", style=discord.ButtonStyle.red, custom_id="select_item_cancel_purchase")
+    async def cancel_purchase(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(view=None)
+        await safe_send_interaction_message(interaction, "您已取消購買。", ephemeral=True)
+        logger.info(f'用戶已取消購買 user_id={interaction.user.id}')
+
+
+class TradeSessionRecoveryView(discord.ui.View):
+    """重啟後接住舊的動態流程按鈕，提示使用者重新開流程"""
+
+    def __init__(self, cog: "TradeCommands"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    async def _restart_select_item(self, interaction: discord.Interaction):
+        # 不中斷使用者體驗：直接重新開啟 /select_item 流程
+        await self.cog.select_item_cmd.callback(self.cog, interaction)
+
+    async def _restart_set_item_prices(self, interaction: discord.Interaction):
+        # 不中斷使用者體驗：直接重新開啟 /set_item_prices 流程
+        await self.cog.set_item_prices_cmd.callback(self.cog, interaction)
+
+    @discord.ui.button(label="完成", style=discord.ButtonStyle.secondary, custom_id="set_prices_finish")
+    async def set_prices_finish(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._restart_set_item_prices(interaction)
+
+    @discord.ui.button(label="取消", style=discord.ButtonStyle.secondary, custom_id="set_prices_cancel")
+    async def set_prices_cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._restart_set_item_prices(interaction)
+
+    @discord.ui.button(label="完成", style=discord.ButtonStyle.secondary, custom_id="select_item_finish")
+    async def select_item_finish(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._restart_select_item(interaction)
+
+    @discord.ui.button(label="取消", style=discord.ButtonStyle.secondary, custom_id="select_item_cancel")
+    async def select_item_cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._restart_select_item(interaction)
+
+
+class TradeExpiredButtonView(discord.ui.View):
+    """用於註冊單一 custom_id 的過期提示按鈕（支援動態頁碼 id）"""
+
+    def __init__(self, cog: "TradeCommands", custom_id: str, flow: str):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.custom_id_value = custom_id
+        self.flow = flow
+        btn = discord.ui.Button(
+            label="繼續",
+            style=discord.ButtonStyle.secondary,
+            custom_id=custom_id,
+        )
+
+        async def _callback(interaction: discord.Interaction):
+            # 不中斷使用者體驗：依流程自動重開
+            if self.flow == "set_item_prices":
+                await self.cog.set_item_prices_cmd.callback(self.cog, interaction)
+            else:
+                await self.cog.select_item_cmd.callback(self.cog, interaction)
+
+        btn.callback = _callback
+        self.add_item(btn)
+
 class TradeCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+
+    async def cog_load(self):
+        # 註冊 persistent view，確保最終確認按鈕在重啟後仍可互動
+        self.bot.add_view(SelectItemFinalConfirmView(self))
+        self.bot.add_view(TradeSessionRecoveryView(self))
+        # 預先註冊常見的動態分頁 custom_id（重啟後至少能友善提示）
+        self._recovery_views = []
+        for page in range(0, 10):
+            for custom_id in (
+                f"set_prices_prev_{page}",
+                f"set_prices_next_{page}",
+                f"set_prices_edit_{page}",
+                f"select_item_prev_{page}",
+                f"select_item_next_{page}",
+                f"select_item_edit_{page}",
+            ):
+                flow = "set_item_prices" if custom_id.startswith("set_prices_") else "select_item"
+                view = TradeExpiredButtonView(self, custom_id, flow)
+                self.bot.add_view(view)
+                self._recovery_views.append(view)
+        logger.info("已註冊 SelectItemFinalConfirmView persistent view")
+        logger.info("已註冊 TradeSessionRecoveryView")
+        logger.info("已註冊 trade dynamic custom_id recovery views (page=0..9)")
 
 
     @app_commands.command(name="trade_info", description="查詢交易相關資訊")
@@ -645,89 +822,11 @@ class TradeCommands(commands.Cog):
                         description="您的選擇如下：",
                         color=discord.Color.green()
                     )
-                    purchase_summary = []
                     for value in selected_items:
                         label = next(opt.label for opt in select.options if opt.value == value)
                         summary_embed.add_field(name=label, value=f"數量: {selected_items[value]}", inline=False)
-                        purchase_summary.append(f"{selected_items[value]} 個 {label}")
 
-                    def create_confirm_view():
-                        view = discord.ui.View()
-                        confirm_button = discord.ui.Button(label="確定購買", style=discord.ButtonStyle.green, custom_id="select_item_confirm_purchase")
-                        cancel_button = discord.ui.Button(label="取消購買", style=discord.ButtonStyle.red, custom_id="select_item_cancel_purchase")
-
-                        async def confirm_callback(interaction: discord.Interaction):
-                            await interaction.response.edit_message(view=None)
-                            await safe_send_interaction_message(interaction, f"您已確認購買：\n" + "\n".join(purchase_summary), ephemeral=True)
-                            logger.info(f'用戶已確認購買: {selected_items}')
-
-                            # 檢查是否已設定交易論壇頻道
-                            from utils.utils import get_trade_forum_channel_id
-                            logger.debug("準備調用 get_trade_forum_channel_id 函數 (調用者: TradeCommands)")
-                            forum_channel_id = await get_trade_forum_channel_id(config_file="config.json", caller="TradeCommands")
-                            logger.debug(f"從 get_trade_forum_channel_id 函數返回的 forum_channel_id: {forum_channel_id} (調用者: TradeCommands)")
-                            if forum_channel_id == 1234567890:
-                                await safe_send_interaction_message(
-                                    interaction,
-                                    "交易論壇頻道尚未設定，請通知管理員。",
-                                    ephemeral=True
-                                )
-                                logger.warning("交易論壇頻道未設定，使用預設佔位符 ID")
-                                return
-
-                            try:
-                                forum_channel = interaction.guild.get_channel(forum_channel_id)
-                                if forum_channel and forum_channel.type == discord.ChannelType.forum:
-                                    if len(purchase_summary) == 1:
-                                        thread_title = f"{interaction.user.display_name} - 需要購買 {purchase_summary[0]}"
-                                    else:
-                                        thread_title = f"{interaction.user.display_name} - 需要購買多件物品"
-                                    thread_content = f"群友 {interaction.user.mention} ({interaction.user.name}) 需要購買：\n" + "\n".join(purchase_summary)
-                                    # 嘗試找到名為「代儲」的標籤，如果找不到則嘗試創建一個新標籤
-                                    applied_tags = []
-                                    for tag in forum_channel.available_tags:
-                                        if tag.name == "代儲":
-                                            applied_tags.append(tag)
-                                            break
-                                    if not applied_tags:
-                                        try:
-                                            # 嘗試創建新標籤
-                                            new_tag = await forum_channel.create_tag(name="代儲")
-                                            applied_tags.append(new_tag)
-                                            logger.info(f"已創建新標籤「代儲」並應用到貼文")
-                                        except Exception as tag_error:
-                                            logger.error(f"創建新標籤「代儲」時發生錯誤: {str(tag_error)}")
-                                            # 如果創建標籤失敗，則不使用標籤繼續創建貼文
-
-                                    await forum_channel.create_thread(name=thread_title, content=thread_content, applied_tags=applied_tags)
-                                    logger.info(f"在論壇頻道 {forum_channel_id} 新增貼文: {thread_title}，使用標籤: {applied_tags if applied_tags else '無'}")
-                                else:
-                                    logger.error(f"無法找到論壇頻道 {forum_channel_id} 或該頻道不是論壇類型")
-                                    await safe_send_interaction_message(
-                                        interaction,
-                                        "無法找到設定的論壇頻道，請確認設定或重新使用 `/set_trade_forum_channel` 命令設定。",
-                                        ephemeral=True
-                                    )
-                            except Exception as e:
-                                logger.error(f"處理論壇頻道 {forum_channel_id} 時發生錯誤: {str(e)}")
-                                await safe_send_interaction_message(
-                                    interaction,
-                                    "無法處理論壇頻道操作，請確認機器人有相關權限或聯繫管理員。",
-                                    ephemeral=True
-                                )
-
-                        async def cancel_callback(interaction: discord.Interaction):
-                            await interaction.response.edit_message(view=None)
-                            await safe_send_interaction_message(interaction, "您已取消購買。", ephemeral=True)
-                            logger.info(f'用戶已取消購買: {selected_items}')
-
-                        confirm_button.callback = confirm_callback
-                        cancel_button.callback = cancel_callback
-                        view.add_item(confirm_button)
-                        view.add_item(cancel_button)
-                        return view
-
-                    await interaction.response.edit_message(embed=summary_embed, view=create_confirm_view())
+                    await interaction.response.edit_message(embed=summary_embed, view=SelectItemFinalConfirmView(self))
 
                 await safe_send_interaction_message(interaction, embed=create_embed(current_page), view=create_view(current_page), ephemeral=True)
             except Exception as e:

@@ -9,9 +9,72 @@ logger = logging.getLogger('discord_bot')
 
 # 監控頻道的字典已移動到 user_commands.py
 
+
+class ServerInfoView(discord.ui.View):
+    """/server_info 主入口 persistent view"""
+
+    def __init__(self, cog: "ManagementCommands"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(label="列出頻道", style=discord.ButtonStyle.primary, custom_id="list_channels")
+    async def list_channels_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self.cog._check_guild_and_owner(interaction, owner_only=True):
+            return
+        await self.cog._list_channels(interaction)
+
+    @discord.ui.button(label="列出身份組", style=discord.ButtonStyle.secondary, custom_id="list_roles")
+    async def list_roles_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self.cog._check_guild_and_owner(interaction, owner_only=True):
+            return
+        await self.cog._list_roles(interaction)
+
+
+class RoleManagerView(discord.ui.View):
+    """/role_manager 主入口 persistent view"""
+
+    def __init__(self, cog: "ManagementCommands"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(label="設定角色權限", style=discord.ButtonStyle.primary, custom_id="set_role_permissions")
+    async def set_role_permissions_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.set_role_permissions_cmd(interaction)
+
+    @discord.ui.button(label="列出角色權限", style=discord.ButtonStyle.secondary, custom_id="list_role_permissions")
+    async def list_role_permissions_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.list_role_permissions_cmd(interaction)
+
+    @discord.ui.button(label="移除角色權限", style=discord.ButtonStyle.danger, custom_id="remove_role_permissions")
+    async def remove_role_permissions_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.remove_role_permissions_cmd(interaction)
+
+
+class ServerManagerView(discord.ui.View):
+    """/server_manager 主入口 persistent view"""
+
+    def __init__(self, cog: "ManagementCommands"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(label="角色管理", style=discord.ButtonStyle.primary, custom_id="role_manager")
+    async def role_manager_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.role_manager_cmd(interaction)
+
+    @discord.ui.button(label="頻道設定", style=discord.ButtonStyle.secondary, custom_id="set_channel")
+    async def set_channel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.set_channel_cmd(interaction)
+
 class ManagementCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+
+    async def cog_load(self):
+        # 註冊 persistent views，避免機器人重啟後主入口按鈕失效
+        self.bot.add_view(ServerInfoView(self))
+        self.bot.add_view(RoleManagerView(self))
+        self.bot.add_view(ServerManagerView(self))
+        logger.info("已註冊 ManagementCommands persistent views")
 
     async def _check_guild_and_owner(self, interaction: discord.Interaction, owner_only: bool = True, admin_only: bool = False) -> bool:
         """檢查命令是否在伺服器中使用且使用者是否有相應權限"""
@@ -96,16 +159,7 @@ class ManagementCommands(commands.Cog):
         if not await self._check_guild_and_owner(interaction, owner_only=True):
             return
 
-        # 創建操作按鈕
-        channels_button = discord.ui.Button(label="列出頻道", style=discord.ButtonStyle.primary, custom_id="list_channels")
-        roles_button = discord.ui.Button(label="列出身份組", style=discord.ButtonStyle.secondary, custom_id="list_roles")
-
-        channels_button.callback = self._list_channels
-        roles_button.callback = self._list_roles
-
-        action_view = discord.ui.View()
-        action_view.add_item(channels_button)
-        action_view.add_item(roles_button)
+        action_view = ServerInfoView(self)
 
         embed = discord.Embed(
             title="檢視伺服器資訊",
@@ -517,28 +571,7 @@ class ManagementCommands(commands.Cog):
         if not await self._check_guild_and_owner(interaction, owner_only=True):
             return
 
-        # 創建操作按鈕
-        set_button = discord.ui.Button(label="設定角色權限", style=discord.ButtonStyle.primary, custom_id="set_role_permissions")
-        list_button = discord.ui.Button(label="列出角色權限", style=discord.ButtonStyle.secondary, custom_id="list_role_permissions")
-        remove_button = discord.ui.Button(label="移除角色權限", style=discord.ButtonStyle.danger, custom_id="remove_role_permissions")
-
-        async def set_button_callback(interaction: discord.Interaction):
-            await self.set_role_permissions_cmd(interaction)
-
-        async def list_button_callback(interaction: discord.Interaction):
-            await self.list_role_permissions_cmd(interaction)
-
-        async def remove_button_callback(interaction: discord.Interaction):
-            await self.remove_role_permissions_cmd(interaction)
-
-        set_button.callback = set_button_callback
-        list_button.callback = list_button_callback
-        remove_button.callback = remove_button_callback
-
-        action_view = discord.ui.View()
-        action_view.add_item(set_button)
-        action_view.add_item(list_button)
-        action_view.add_item(remove_button)
+        action_view = RoleManagerView(self)
 
         embed = discord.Embed(
             title="管理角色權限",
@@ -555,22 +588,7 @@ class ManagementCommands(commands.Cog):
         if not await self._check_guild_and_owner(interaction, owner_only=True):
             return
 
-        # 創建操作按鈕
-        role_button = discord.ui.Button(label="角色管理", style=discord.ButtonStyle.primary, custom_id="role_manager")
-        channel_button = discord.ui.Button(label="頻道設定", style=discord.ButtonStyle.secondary, custom_id="set_channel")
-
-        async def role_button_callback(interaction: discord.Interaction):
-            await self.role_manager_cmd(interaction)
-
-        async def channel_button_callback(interaction: discord.Interaction):
-            await self.set_channel_cmd(interaction)
-
-        role_button.callback = role_button_callback
-        channel_button.callback = channel_button_callback
-
-        action_view = discord.ui.View()
-        action_view.add_item(role_button)
-        action_view.add_item(channel_button)
+        action_view = ServerManagerView(self)
 
         embed = discord.Embed(
             title="伺服器管理",
