@@ -62,6 +62,7 @@ try:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.common.action_chains import ActionChains
+    from selenium.webdriver.common.keys import Keys
     from selenium.webdriver.support import expected_conditions as EC
     from selenium.common.exceptions import (
         TimeoutException, NoSuchElementException, StaleElementReferenceException,
@@ -111,6 +112,9 @@ try:
 except Exception as _e:
     raise ImportError("本版需要 python-dateutil，請先安裝：pip install python-dateutil") from _e
 
+# ==================== 全域可調整常數 ====================
+IMAGE_LIMIT = 20          # ← 這裡改數字即可！建議 20~30
+# =========================================================
 
 class FBScraperService:
     """
@@ -158,6 +162,7 @@ class FBScraperService:
             r"^(所有心情|讚|留言|回覆|分享|最相關|追蹤|傳送|See translation|查看翻譯|收合翻譯|See less|顯示較少|全部留言|新增留言|\d+\s*(則)?(留言|回覆|分享))$"
         )
         self.TEXT_MAX_LEN = 8000
+        self.config["image_limit"] = IMAGE_LIMIT
 
         # 主分頁 handle（啟動後會記錄）
         self.main_handle: Optional[str] = None
@@ -618,6 +623,49 @@ class FBScraperService:
         except Exception:
             return u
 
+    def _get_image_dedup_key(self, u: str) -> str:
+        """專門用於去重比較的 Key（強力移除 tracking）"""
+        try:
+            # 先用 canonical_image 做基礎正規化
+            base = self._canonical_image(u)
+            p = urlparse(base)
+            if 'fbcdn.net' in p.netloc or 'scontent' in p.netloc:
+                q = parse_qs(p.query)
+                # 只保留真正重要的參數
+                keep = {k: v for k, v in q.items() if k in ("fbid", "set", "type", "id", "eid", "pid")}
+                query = urlencode(keep, doseq=True)
+                return urlunparse((p.scheme, p.netloc, p.path.rstrip("/"), "", query, "")).lower()
+            return base.lower()
+        except Exception:
+            return u.lower()
+
+    def _get_photo_overlay_count(self, root) -> int:
+        """從畫面上抓取 +XX 的實際數字（例如 +13 → 回傳 13）"""
+        try:
+            elems = root.find_elements(By.CSS_SELECTOR, "span, div")
+            for e in elems:
+                t = (e.text or "").strip()
+                if match := re.fullmatch(r"\+(\d+)", t):
+                    return int(match.group(1))
+        except Exception:
+            pass
+        return 0   # 沒有找到就回 0
+
+    def _dedup_image_list(self, images: List[str]) -> List[str]:
+        """最簡單統一的圖片去重方法 - 保證最終輸出的 images 絕對無重複"""
+        if not images:
+            return []
+        deduped = []
+        seen = set()
+        for img in images:
+            if not img:
+                continue
+            key = self._get_image_dedup_key(img)
+            if key not in seen:
+                seen.add(key)
+                deduped.append(self._canonical_image(img))  # 存完整可顯示 URL
+        return deduped
+
     def _normalize_for_hash(self, s: str) -> str:
         if not s:
             return ""
@@ -890,10 +938,18 @@ class FBScraperService:
 
     def _get_og_image_from_page(self, driver, url: str) -> Optional[str]:
         """在「新分頁」開啟照片頁，取 og:image；完畢立即關閉該分頁。"""
+        parent_handle = None
+        try:
+            parent_handle = driver.current_window_handle
+        except Exception:
+            parent_handle = None
+
         photo_handle = self.open_in_new_tab(driver, url)
         if not photo_handle:
             return None
         try:
+            # 圖片頁也可能跳出登入牆/彈窗，沿用同一套關閉機制
+            self.close_login_wall(driver)
             html = driver.page_source or ""
             if BS4_AVAILABLE and html:
                 soup = BeautifulSoup(html, "html.parser")
@@ -915,27 +971,254 @@ class FBScraperService:
             except Exception:
                 pass
             try:
-                driver.switch_to.window(self.main_handle or driver.window_handles[0])
+                # 回到原分頁（不要猜 main_handle / window_handles[0]，避免 session 被玩壞）
+                if parent_handle and parent_handle in driver.window_handles:
+                    driver.switch_to.window(parent_handle)
+                elif self.main_handle and self.main_handle in driver.window_handles:
+                    driver.switch_to.window(self.main_handle)
+                else:
+                    driver.switch_to.window(driver.window_handles[0])
             except Exception:
                 pass
 
-    def extract_images_from_root(self, driver, root, limit=8) -> List[str]:
-        """從根元素提取圖片（嘗試照片頁 og:image；否則退回縮圖）"""
+    def _has_more_photo_overlay(self, root) -> bool:
+        """偵測多圖貼文的「+13 / +5」覆蓋文字（僅限貼文本體區塊）。"""
+        try:
+            elems = root.find_elements(By.CSS_SELECTOR, "span, div")
+        except Exception:
+            return False
+        for e in elems:
+            try:
+                t = (e.text or "").strip()
+                if re.fullmatch(r"\+\d+", t):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _collect_images_from_photo_viewer(self, driver, start_url: str, overlay_num: int = 0, hard_cap: int = 35) -> List[str]:
+        """副流程：viewer 翻頁抓圖（完全按照你最終確認的流程）
+        - 把副流程第一張圖記錄為 start_key
+        - 之後連續回到這張第一張圖 N 次才結束（處理 FB 亂序）
+        - overlay_num > 0 時同時檢查去重後數量 >= (XX + 4)
+        """
+        if not start_url:
+            return []
+
+        self.logger.info(f"🔄 啟動副流程 viewer 翻頁 - {start_url} (overlay_num={overlay_num})")
+
+        parent_handle = driver.current_window_handle
+        photo_handle = self.open_in_new_tab(driver, start_url)
+        if not photo_handle:
+            return []
+
+        try:
+            self.close_login_wall(driver)
+            self.wait_page_loaded(driver, timeout=12)
+            self.human_sleep(1.2, 2.5)
+
+            start_key = None          # 副流程自己抓到的第一張圖作為起點基準
+            seen_keys = set()
+            images: List[str] = []
+            consecutive_start_repeat = 0
+            max_start_repeat = 3      # 連續回到起點幾次才結束（可調整）
+
+            for flip in range(1, hard_cap + 1):
+                self.logger.info(f"  └─ 第 {flip} 次翻頁")
+
+                # ==================== 登入牆恢復 ====================
+                if self._is_login_wall_blocking(driver):
+                    self.logger.warning(f"     ⚠️  偵測到關不掉的登入牆！開始恢復流程 (第 {flip} 輪)")
+                    resume_url = driver.current_url or start_url
+                    recovered = False
+                    for attempt in range(2):
+                        try:
+                            driver.close()
+                            if parent_handle in driver.window_handles:
+                                driver.switch_to.window(parent_handle)
+                            else:
+                                driver.switch_to.window(driver.window_handles[0])
+
+                            new_handle = self.open_in_new_tab(driver, resume_url)
+                            if new_handle:
+                                self.close_login_wall(driver)
+                                self.wait_page_loaded(driver, timeout=12)
+                                self.human_sleep(1.0, 2.5)
+                                if not self._is_login_wall_blocking(driver):
+                                    recovered = True
+                                    self.logger.info(f"     ✅ 登入牆恢復成功 (第 {attempt+1} 次)")
+                                    break
+                        except Exception as e:
+                            self.logger.error(f"     重開分頁失敗: {e}")
+                    if not recovered:
+                        self.logger.error("     ❌ 登入牆恢復失敗，結束 viewer 循環")
+                        break
+
+                # ==================== 抓圖 ====================
+                full_url = self._get_current_viewer_large_image(driver)
+                if full_url:
+                    dedup_key = self._get_image_dedup_key(full_url)
+
+                    # 第一張圖：記錄為起點基準
+                    if start_key is None:
+                        start_key = dedup_key
+                        seen_keys.add(dedup_key)
+                        images.append(full_url)
+                        self.logger.info(f"     → 已記錄副流程第一張圖作為起點基準")
+                        self.logger.info(f"     ★ 新增第 {len(images)} 張（起點）")
+                        consecutive_start_repeat = 0
+
+                    # 回到起點（亂序處理）
+                    elif dedup_key == start_key:
+                        consecutive_start_repeat += 1
+                        self.logger.info(f"     → 回到起點圖片（連續 {consecutive_start_repeat} 次）")
+                        if consecutive_start_repeat >= max_start_repeat:
+                            self.logger.info(f"     → 連續 {max_start_repeat} 次回到起點，結束副流程")
+                            break
+
+                    # 一般新圖
+                    else:
+                        if dedup_key not in seen_keys:
+                            seen_keys.add(dedup_key)
+                            images.append(full_url)
+                            self.logger.info(f"     ★ 新增第 {len(images)} 張 viewer 圖片")
+                            consecutive_start_repeat = 0   # 重置計數器
+
+                    # overlay_num > 0 的結束條件（去重後數量）
+                    if overlay_num > 0 and len(seen_keys) >= (overlay_num + 4):
+                        self.logger.info(f"     → 已達到 +{overlay_num} 的預期獨特張數 ({overlay_num + 4} 張)，結束副流程")
+                        break
+
+                # 翻下一張 + 加強延遲
+                clicked = False
+                for sel in [
+                    'div[role="button"][aria-label*="下一張" i]',
+                    'div[role="button"][aria-label*="Next" i]',
+                    'a[role="link"][aria-label*="next" i]'
+                ]:
+                    try:
+                        btns = driver.find_elements(By.CSS_SELECTOR, sel)
+                        for btn in btns:
+                            if btn.is_displayed() and self.safe_click(driver, btn):
+                                clicked = True
+                                break
+                        if clicked: break
+                    except Exception:
+                        continue
+
+                if not clicked:
+                    try:
+                        ActionChains(driver).send_keys(Keys.ARROW_RIGHT).perform()
+                    except Exception:
+                        pass
+
+                self.human_sleep(1.5, 3.5)
+                self.wait_page_loaded(driver, timeout=5)
+
+                if flip >= 35:
+                    self.logger.warning("     ⚠️ 已達 35 次安全上限，強制結束副流程")
+                    break
+
+            self.logger.info(f"✅ viewer 循環結束，共收集 {len(images)} 張新圖（去重後 {len(seen_keys)} 張）")
+            return images
+
+        finally:
+            try:
+                driver.close()
+            except Exception:
+                pass
+            try:
+                driver.switch_to.window(parent_handle)
+            except Exception:
+                pass
+
+    def _get_current_viewer_large_image(self, driver) -> Optional[str]:
+        """專門給 viewer 用的抓大圖函式 - 比 og:image 更穩定"""
+        # 方法1：JS 直接抓 og:image（最快）
+        try:
+            url = driver.execute_script('''
+                return document.querySelector('meta[property="og:image"]')?.getAttribute("content") ||
+                    document.querySelector('img[role="presentation"]')?.getAttribute("src");
+            ''')
+            if url and ("fbcdn.net" in url or "scontent" in url):
+                return ihtml.unescape(url.strip())
+        except Exception:
+            pass
+
+        # 方法2：找最大的顯示中圖片
+        try:
+            imgs = driver.find_elements(By.CSS_SELECTOR, "img[src*='scontent'], img[role='presentation']")
+            for img in imgs:
+                src = img.get_attribute("src") or ""
+                if src and not src.startswith("data:"):
+                    return src
+        except Exception:
+            pass
+
+        return None
+
+    def _is_login_wall_blocking(self, driver) -> bool:
+        """判斷是否真的被登入牆擋住（比原本更精準）"""
+        try:
+            cu = driver.current_url or ""
+            if "/login" in cu or "checkpoint" in cu:
+                return True
+
+            dialogs = driver.find_elements(By.CSS_SELECTOR, 'div[role="dialog"]')
+            for d in dialogs:
+                if not d.is_displayed(): continue
+                txt = (d.text or "").lower()
+                if any(k in txt for k in ["登入", "log in", "password", "密碼"]):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def extract_images_from_root(self, driver, root) -> List[str]:
+        """從根元素提取圖片 - 一進來就先判斷是否有 +XX 多圖覆蓋
+        有 +XX → 直接走副流程（viewer 翻頁），完全不跑主流程
+        沒有 +XX → 才走主流程
+        """
         self.logger.info("摘取圖片中...")
+
+        # Step 1: 先判斷是否有 +XX 多圖覆蓋（你的核心需求）
+        if self._has_more_photo_overlay(root):
+            self.logger.info("偵測到 +XX 多圖覆蓋 → 直接啟動副流程（不跑主流程）")
+
+            # 找第一個可點的照片連結來開 viewer
+            photo_links = []
+            try:
+                nodes = root.find_elements(By.CSS_SELECTOR, "img[src]")
+                for im in nodes:
+                    href = self._nearest_anchor_href(driver, im)
+                    if href and self._is_photo_link(href):
+                        photo_nav = self.normalize_fb_url_for_nav(href)
+                        photo_links.append(photo_nav)
+                        break
+            except Exception:
+                pass
+
+            if photo_links:
+                # 新增：抓 +XX 數字並記錄 log
+                overlay_num = self._get_photo_overlay_count(root)
+                self.logger.info(f"偵測到 +{overlay_num} 多圖覆蓋，預期至少抓 {overlay_num + 4} 張")
+
+                viewer_imgs = self._collect_images_from_photo_viewer(
+                    driver, photo_links[0], overlay_num=overlay_num
+                )
+                self.logger.info(f"副流程結束 → 最終圖片數: {len(viewer_imgs)}")
+                self.logger.info("最終返回的 images 連結：\n" + "\n".join(viewer_imgs))
+                return viewer_imgs[:self.config.get("image_limit", 20)]
+
+        # Step 2: 沒有 +XX → 走原本的主流程
+        self.logger.info("無多圖覆蓋 → 執行主流程")
+
         thumbs: List[Tuple[int, str, Optional[str]]] = []
         try:
             nodes = root.find_elements(By.CSS_SELECTOR, "img[src]")
-        except Exception:
-            nodes = []
-
-        for im in nodes:
-            try:
+            for im in nodes:
                 src = im.get_attribute("src") or ""
-                if not src:
-                    continue
-                if src.startswith("data:image") or "svg+xml" in src:
-                    continue
-                if any(k in src for k in ["emoji", "static.xx.fbcdn.net", "assets"]):
+                if src.startswith("data:image") or "svg" in src or any(k in src for k in ["emoji", "static.xx.fbcdn.net", "assets"]):
                     continue
                 if self.node_in_comments(driver, im):
                     continue
@@ -943,39 +1226,40 @@ class FBScraperService:
                 href_resolved = self._resolve_href(href, driver.current_url) if href else ""
                 score = 1 + (2 if "scontent" in src else 0)
                 thumbs.append((score, src, href_resolved))
-            except Exception:
-                continue
+        except Exception:
+            pass
 
         if not thumbs:
             return []
 
-        unique_thumbs, seen = [], set()
-        for score, src, href in sorted(thumbs, key=lambda x: x[0], reverse=True):
-            if src in seen:
-                continue
+        image_limit = self.config.get("image_limit", 20)
+        unique_thumbs = []
+        seen = set()
+        for _, src, href in sorted(thumbs, key=lambda x: x[0], reverse=True):
+            if src in seen: continue
             seen.add(src)
-            unique_thumbs.append((score, src, href))
-            if len(unique_thumbs) >= limit:
-                break
+            unique_thumbs.append((src, href))
+            if len(unique_thumbs) >= image_limit: break
 
         fulls: List[str] = []
-        seen_full = set()
-        for _, thumb_src, href in unique_thumbs:
-            full_url = None
+        for thumb_src, href in unique_thumbs:
+            full_url = thumb_src
             if href and self._is_photo_link(href):
                 photo_nav = self.normalize_fb_url_for_nav(href)
-                full_url = self._get_og_image_from_page(driver, photo_nav)
-            if not full_url:
-                full_url = thumb_src
-            canon_full = self._canonical_image(full_url)
-            if canon_full and canon_full not in seen_full:
-                seen_full.add(canon_full)
-                fulls.append(canon_full)
-                self.logger.info(f"抓取圖片 URL: {canon_full}")
-            if len(fulls) >= limit:
-                break
+                full_url = self._get_og_image_from_page(driver, photo_nav) or thumb_src
 
-        return fulls
+            canon = self._canonical_image(full_url)
+            if canon and canon not in fulls:
+                fulls.append(canon)
+                self.logger.info(f"抓取圖片 URL: {canon}")
+
+            self.human_sleep(1.2, 2.0)
+
+        # ★★★ 最簡單去重 ★★★
+        final_images = self._dedup_image_list(fulls)
+        self.logger.info(f"主流程結束 → 最終圖片數: {len(final_images)}")
+        self.logger.info("最終返回的 images 連結：\n" + "\n".join(final_images))
+        return final_images[:image_limit]
 
     # ---------- URL 取得：數字型 vs pfbid ----------
     def _extract_canonical_www_url(self, driver) -> str:
@@ -1418,7 +1702,7 @@ class FBScraperService:
                 pass
 
             text, text_md = self.extract_text_from_root(driver, root)
-            images = self.extract_images_from_root(driver, root, limit=8)
+            images = self.extract_images_from_root(driver, root)
             ts     = self.extract_timestamp(driver, root)
 
             # ★ 修正：若在 m 站抓不到時間，改嘗試 www 站 canonical 重新抓一次（正確處理分頁返回）
@@ -1596,15 +1880,26 @@ class FBScraperService:
             changed = True
 
         # 圖片取較多（同時做 canonical 去重）
-        imgs_old = [self._canonical_image(x) for x in (base.get("images") or []) if x]
-        imgs_new = [self._canonical_image(x) for x in (incoming.get("images") or []) if x]
-        uniq_old = list(dict.fromkeys(imgs_old))
-        uniq_new = list(dict.fromkeys(imgs_new))
-        if len(uniq_new) > len(uniq_old):
-            base["images"] = uniq_new
+        imgs_old = [x for x in (base.get("images") or []) if x]
+        imgs_new = [x for x in (incoming.get("images") or []) if x]
+
+        combined = []
+        seen = set()
+        for img in imgs_new + imgs_old:   # 新圖優先
+            if not img: continue
+            key = self._get_image_dedup_key(img)
+            if key not in seen:
+                seen.add(key)
+                combined.append(img)      # ← 存原始完整 URL！
+
+        # 最終輸出前再輕度正規化一次（確保圖片可顯示）
+        combined = [self._canonical_image(x) for x in combined]
+
+        if len(combined) > len(imgs_old):
+            base["images"] = combined
             changed = True
         else:
-            base["images"] = uniq_old
+            base["images"] = [self._canonical_image(x) for x in imgs_old]
 
         # 時間戳：若 base 無而 incoming 有
         if (not base.get("timestamp")) and incoming.get("timestamp"):

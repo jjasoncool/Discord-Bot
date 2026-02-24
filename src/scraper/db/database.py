@@ -319,7 +319,11 @@ class DatabaseManager:
                     )
                     self.session.add(new_post)
                     self.session.flush()
+                    seen_images = set()
                     for img_url in (p.get("images") or []):
+                        if not img_url or img_url in seen_images:
+                            continue
+                        seen_images.add(img_url)
                         self.session.add(FBImage(fb_post_id=new_post.id, image_url=img_url))
 
                 elif action == "update":
@@ -342,6 +346,7 @@ class DatabaseManager:
                         continue
 
                     # 按 JSON 合併規則更新
+                    existing.images  # 觸發 lazy load，避免重複插入同圖造成 UNIQUE constraint
                     self._update_fb_post(existing, p)
 
                 else:
