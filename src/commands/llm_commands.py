@@ -1,12 +1,12 @@
 import logging
 from pathlib import Path
 import asyncio
-import re
 from datetime import timezone, timedelta
 import discord
 from discord import app_commands
 from discord.ext import commands
 
+import llm
 from services.llm_service import OllamaService
 from utils.utils import safe_send_interaction_message, check_guild
 
@@ -16,7 +16,12 @@ logger = logging.getLogger("discord_bot")
 MAX_CONTEXT_MESSAGES = 50
 MAX_CONTEXT_TO_SEND = 20
 MIN_RECENT_CONTEXT = 6
+MAX_RELEVANT_CONTEXT = 14
 TAIPEI_TZ = timezone(timedelta(hours=8))
+DISCORD_CONTEXT_BEGIN = "[context:discord_chat_begin]"
+DISCORD_CONTEXT_END = "[context:discord_chat_end]"
+RAG_CONTEXT_BEGIN = "[context:rag_begin]"
+RAG_CONTEXT_END = "[context:rag_end]"
 DEFAULT_SYSTEM_PROMPT = (
     "你是 Discord 群組中的一位群友，請用自然口吻聊天。"
     "回覆時只能使用繁體中文，避免使用英文或簡體中文。"
@@ -24,21 +29,6 @@ DEFAULT_SYSTEM_PROMPT = (
 PROMPT_FILE_PATH = Path("/app/settings/prompts/askai_system_prompt.txt")
 PROMPT_LOG_PATH = Path("/logs/askai_prompt.txt")
 ASKAI_QUEUE = asyncio.Queue()
-
-
-def _tokenize_for_relevance(text: str) -> set[str]:
-    """簡易分詞：中英數混合，供關聯度判斷使用。"""
-    tokens = set(re.findall(r"[\u4e00-\u9fff]{1,}|[a-zA-Z0-9_]{2,}", text.lower()))
-    # 過短 token 容易造成誤判
-    return {t for t in tokens if len(t) >= 2}
-
-
-def _is_context_relevant(question: str, context_text: str) -> bool:
-    q_tokens = _tokenize_for_relevance(question)
-    c_tokens = _tokenize_for_relevance(context_text)
-    if not q_tokens or not c_tokens:
-        return False
-    return len(q_tokens.intersection(c_tokens)) > 0
 
 
 def load_system_prompt() -> str:
@@ -119,38 +109,18 @@ class LLMCommands(commands.Cog):
             ephemeral=True
         )
 
-        context = []
-        try:
-            if isinstance(interaction.channel, (discord.TextChannel, discord.Thread)):
-                history_messages = [
-                    msg async for msg in interaction.channel.history(limit=MAX_CONTEXT_MESSAGES)
-                    if not msg.author.bot
-                ]
-
-                ordered_messages = list(reversed(history_messages))  # 轉為舊 -> 新
-                recent_start_index = max(0, len(ordered_messages) - MIN_RECENT_CONTEXT)
-
-                for idx, msg in enumerate(ordered_messages):
-                    if not msg.content or not msg.content.strip():
-                        continue
-
-                    is_recent = idx >= recent_start_index
-                    is_relevant = _is_context_relevant(question, msg.content)
-                    if not (is_recent or is_relevant):
-                        continue
-
-                    display_name = getattr(msg.author, "display_name", msg.author.name)
-                    timestamp = msg.created_at.astimezone(TAIPEI_TZ)
-                    context.append({
-                        "role": "user",
-                        "content": f"[{timestamp:%Y-%m-%d %H:%M:%S %z}] {display_name}: {msg.content}",
-                    })
-
-                # 避免 context 過大造成模型分心或回應不穩
-                if len(context) > MAX_CONTEXT_TO_SEND:
-                    context = context[-MAX_CONTEXT_TO_SEND:]
-        except Exception as exc:
-            logger.warning("讀取聊天上下文失敗: %s", exc)
+        discord_context, discord_meta = await llm.retrieve_discord_context(
+            interaction,
+            question,
+            max_context_messages=MAX_CONTEXT_MESSAGES,
+            min_recent_context=MIN_RECENT_CONTEXT,
+            max_relevant_context=MAX_RELEVANT_CONTEXT,
+            max_context_to_send=MAX_CONTEXT_TO_SEND,
+            taipei_tz=TAIPEI_TZ,
+            logger=logger,
+        )
+        rag_context, rag_meta = await llm.retrieve_rag_context(question)
+        context = [*discord_context, *rag_context]
 
         reply = await self.llm_service.generate_reply(
             question,
@@ -161,13 +131,20 @@ class LLMCommands(commands.Cog):
         )
 
         try:
-            prompt_parts = ["[system]", system_prompt]
-            if context:
-                prompt_parts.append("[context]")
-                for item in context:
-                    prompt_parts.append(item.get("content", ""))
-            prompt_parts.extend(["[question]", question])
-            PROMPT_LOG_PATH.write_text("\n".join(prompt_parts), encoding="utf-8")
+            prompt_log_text = llm.build_askai_prompt_log(
+                system_prompt=system_prompt,
+                question=question,
+                discord_context=discord_context,
+                rag_context=rag_context,
+                discord_meta=discord_meta,
+                rag_meta=rag_meta,
+                max_context_messages=MAX_CONTEXT_MESSAGES,
+                discord_context_begin=DISCORD_CONTEXT_BEGIN,
+                discord_context_end=DISCORD_CONTEXT_END,
+                rag_context_begin=RAG_CONTEXT_BEGIN,
+                rag_context_end=RAG_CONTEXT_END,
+            )
+            PROMPT_LOG_PATH.write_text(prompt_log_text, encoding="utf-8")
         except Exception as exc:
             logger.warning("寫入 askai prompt 失敗: %s", exc)
 
