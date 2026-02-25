@@ -177,8 +177,8 @@ class LLMCommands(commands.Cog):
             system=system_prompt,
             context=context if context else None,
             images=image_payload,
-            temperature=0.7,
-            top_p=0.8,
+            temperature=0.6,  # 平衡幽默度與穩定性，避免過度保守。數字越小越穩定
+            top_p=0.85,  # 保留多樣性但降低離題發散。數字越大越有創意
         )
 
         try:
