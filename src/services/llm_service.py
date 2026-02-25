@@ -37,6 +37,7 @@ class OllamaService:
         prompt: str,
         system: Optional[str] = None,
         context: Optional[List[Dict[str, str]]] = None,
+        images: Optional[List[str]] = None,
         temperature: float = 0.7,
         top_p: float = 0.9,
     ) -> str:
@@ -54,7 +55,10 @@ class OllamaService:
             messages.append({"role": "system", "content": system})
         if context:
             messages.extend(context)
-        messages.append({"role": "user", "content": prompt})
+        user_message = {"role": "user", "content": prompt}
+        if images:
+            user_message["images"] = images
+        messages.append(user_message)
 
         payload = {
             "model": self.model,

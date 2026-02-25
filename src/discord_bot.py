@@ -49,6 +49,7 @@ COMMAND_MODULES = [
 class MyBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix='!', intents=intents)
+        self.echo_tracker = {}
 
     async def setup_hook(self):
         logger.info("正在載入指令模組...")
@@ -138,6 +139,29 @@ async def on_message(message):
     # 記錄接收到的訊息
     if message.content:
         logger.debug(f'收到訊息: {message.content} (來自: {message.author}, 頻道: {message.channel.name} [ID: {message.channel.id}])')
+
+        normalized_content = message.content.strip()
+        if normalized_content:
+            channel_id = message.channel.id
+            tracker = bot.echo_tracker.get(channel_id)
+
+            if not tracker or tracker["content"] != normalized_content:
+                tracker = {"content": normalized_content, "user_ids": set()}
+                bot.echo_tracker[channel_id] = tracker
+
+            if message.author.id not in tracker["user_ids"]:
+                tracker["user_ids"].add(message.author.id)
+
+            if len(tracker["user_ids"]) >= 3:
+                await message.channel.send(normalized_content)
+                logger.info(
+                    "三位不同使用者重複相同訊息，機器人已回覆: %s (頻道: %s [ID: %s], 觸發使用者: %s)",
+                    normalized_content,
+                    message.channel.name,
+                    message.channel.id,
+                    message.author.id,
+                )
+                bot.echo_tracker[channel_id] = {"content": None, "user_ids": set()}
 
     # 記錄圖片附件
     if message.attachments:
