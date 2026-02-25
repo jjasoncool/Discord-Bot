@@ -41,7 +41,8 @@ COMMAND_MODULES = [
     'commands.management_commands',
     'commands.forum_monitor',
     'commands.user_commands',
-    'commands.article_commands'
+    'commands.article_commands',
+    'commands.llm_commands'
 ]
 
 # 建立機器人實例
