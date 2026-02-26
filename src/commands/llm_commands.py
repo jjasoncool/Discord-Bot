@@ -14,16 +14,16 @@ from utils.utils import safe_send_interaction_message, check_guild
 
 logger = logging.getLogger("discord_bot")
 
-
+# --- 常數設定區 (目前保留在此，未來可考慮重構至集中式的 config 檔案) ---
 MAX_CONTEXT_MESSAGES = 50
 MAX_CONTEXT_TO_SEND = 20
 MIN_RECENT_CONTEXT = 15
 MAX_RELEVANT_CONTEXT = 14
 TAIPEI_TZ = timezone(timedelta(hours=8))
-DISCORD_CONTEXT_BEGIN = "[context:discord_chat_begin]"
-DISCORD_CONTEXT_END = "[context:discord_chat_end]"
-RAG_CONTEXT_BEGIN = "[context:rag_begin]"
-RAG_CONTEXT_END = "[context:rag_end]"
+DISCORD_CONTEXT_BEGIN = "<context:discord_chat_begin>"
+DISCORD_CONTEXT_END = "</context:discord_chat_end>"
+RAG_CONTEXT_BEGIN = "<context:rag_begin>"
+RAG_CONTEXT_END = "</context:rag_end>"
 DEFAULT_SYSTEM_PROMPT = (
     "你是 Discord 群組中的一位群友，請用自然口吻聊天。"
     "回覆時只能使用繁體中文，避免使用英文或簡體中文。"
@@ -92,6 +92,7 @@ class LLMCommands(commands.Cog):
         self._askai_worker_task: asyncio.Task | None = None
 
     def _ensure_askai_worker(self) -> None:
+        """確保處理 AI 請求的背景任務正在運行。"""
         if self._askai_worker_task is None or self._askai_worker_task.done():
             self._askai_worker_task = asyncio.create_task(self._askai_worker())
 
@@ -115,6 +116,8 @@ class LLMCommands(commands.Cog):
         loop = asyncio.get_running_loop()
         completion = loop.create_future()
         queue_item = (interaction, question, image, completion)
+
+        # 將請求加入佇列以避免阻塞主執行緒
         await ASKAI_QUEUE.put(queue_item)
         queue_size = ASKAI_QUEUE.qsize()
         await safe_send_interaction_message(
@@ -126,6 +129,7 @@ class LLMCommands(commands.Cog):
         await completion
 
     async def _askai_worker(self) -> None:
+        """背景任務：依序從佇列中取出請求並處理"""
         while True:
             interaction, question, image, completion = await ASKAI_QUEUE.get()
             try:
@@ -153,6 +157,7 @@ class LLMCommands(commands.Cog):
             ephemeral=True
         )
 
+        # 取得歷史聊天上下文（統一契約：list[dict[str, str]]）
         discord_context, discord_meta = await llm.retrieve_discord_context(
             interaction,
             question,
@@ -164,7 +169,9 @@ class LLMCommands(commands.Cog):
             logger=logger,
         )
         rag_context, rag_meta = await llm.retrieve_rag_context(question)
-        context = [*discord_context, *rag_context]
+
+        # 統一把多來源 context 合併後交給 Service 層做安全序列化
+        context_items = [*discord_context, *rag_context] if (discord_context or rag_context) else None
 
         image_payload = None
         if image:
@@ -172,15 +179,19 @@ class LLMCommands(commands.Cog):
             if image_payload is None:
                 return
 
+        # === 呼叫 Service：各司其職，只傳遞乾淨的參數與字串 ===
         reply = await self.llm_service.generate_reply(
-            question,
-            system=system_prompt,
-            context=context if context else None,
+            prompt=question,              # 單純的使用者問題
+            system=system_prompt,         # 單純的系統規則
+            context_items=context_items,  # 結構化上下文（由 Service 層統一安全封裝）
             images=image_payload,
-            temperature=0.6,  # 平衡幽默度與穩定性，避免過度保守。數字越小越穩定
-            top_p=0.85,  # 保留多樣性但降低離題發散。數字越大越有創意
+            temperature=0.85,             # 針對 Gemma 3 調高溫度，增加對話活潑度
+            top_p=0.9,
+            repeat_penalty=1.15,          # 降低 AI 跳針或重複幹話的機率
+            num_ctx=8192                  # 確保大範圍 Discord 歷史紀錄不會被截斷
         )
 
+        # 記錄 prompt 日誌，供後續除錯與調優
         try:
             prompt_log_text = llm.build_askai_prompt_log(
                 system_prompt=system_prompt,
@@ -199,6 +210,7 @@ class LLMCommands(commands.Cog):
         except Exception as exc:
             logger.warning("寫入 askai prompt 失敗: %s", exc)
 
+        # 記錄回應歷史
         try:
             append_askai_response_log(
                 interaction=interaction,
@@ -210,7 +222,7 @@ class LLMCommands(commands.Cog):
         except Exception as exc:
             logger.warning("寫入 askai response history 失敗: %s", exc)
 
-        # 使用 followup 回覆以避免互動超時
+        # 使用 followup 回覆，避免互動超時，並組合最終排版
         response_lines = [
             f"{interaction.user.mention}",
             f"❓ **問題：** {question}",
@@ -242,7 +254,7 @@ class LLMCommands(commands.Cog):
 
         if image.size and image.size > MAX_IMAGE_SIZE_BYTES:
             await interaction.followup.send(
-                "⚠️ 圖片大小超過 10MB，請縮圖或換小一點的檔案。",
+                "⚠️ 圖片大小超過 5MB，請縮圖或換小一點的檔案。",
                 ephemeral=True,
             )
             return None

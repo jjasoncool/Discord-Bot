@@ -11,20 +11,23 @@ from llm import context_relevance_score
 
 
 def _build_discord_context_item(msg: discord.Message, tz: timezone) -> dict[str, str]:
+    """
+    回傳包含元資料的 dict，確保可觀測性與後續 Debug 能力。
+    同時將給 LLM 看的文字組合在 'content' 欄位中。
+    """
     display_name = getattr(msg.author, "display_name", msg.author.name)
-    timestamp = msg.created_at.astimezone(tz)
+    time_str = msg.created_at.astimezone(tz).strftime("%Y-%m-%d %H:%M")
     compact_content = " ".join(msg.content.split())
+
+    # 產出格式範例：[2026-02-26 14:30] 老哥(98765432): 昨天抽卡又保底了
+    formatted_text = f"[{time_str}] {display_name}({msg.author.id}): {compact_content}"
+
     return {
         "role": "user",
-        "content": (
-            f"[source=discord]"
-            f"[user_id={msg.author.id}]"
-            f"[username={display_name}]"
-            f"[message_id={msg.id}]"
-            f"[channel_id={msg.channel.id}]"
-            f"[time={timestamp:%Y-%m-%d %H:%M:%S %z}]"
-            f" {compact_content}"
-        ),
+        "content": formatted_text,
+        "message_id": str(msg.id),
+        "author_id": str(msg.author.id),
+        "channel_id": str(msg.channel.id)
     }
 
 
@@ -88,26 +91,34 @@ async def retrieve_discord_context(
         selected_indices.update(top_relevant_indices)
 
         selected_messages = [ordered_messages[idx] for idx in sorted(selected_indices)]
-        context.extend(
-            _build_discord_context_item(msg, taipei_tz) for msg in selected_messages
-        )
+
+        # 核心修改：以 dict 形式加入全域宣告，保持結構一致性
+        if selected_messages:
+            channel_id = interaction.channel.id
+            context.append({
+                "role": "system",
+                "content": f"--- 以下為 Discord (頻道ID: {channel_id}) 的聊天紀錄 ---",
+                "metadata": "header"
+            })
+
+            context.extend(
+                _build_discord_context_item(msg, taipei_tz) for msg in selected_messages
+            )
 
         meta["selected_count_before_trim"] = len(context)
-        if len(context) > max_context_to_send:
-            meta["trimmed_count"] = len(context) - max_context_to_send
-            context = context[-max_context_to_send:]
+
+        # 確保截斷時保留第一行的宣告 Header
+        if len(context) > max_context_to_send + 1:
+            meta["trimmed_count"] = len(context) - (max_context_to_send + 1)
+            # 保留第一行的宣告，然後接上後面截斷的訊息
+            context = [context[0]] + context[-(max_context_to_send):]
 
         meta["sent_count"] = len(context)
         logger.info(
-            "/askai discord context stats: fetched=%s recent=%s relevant=%s selected=%s trimmed=%s sent=%s (fetch_limit=%s send_limit=%s)",
-            meta["fetched_count"],
-            meta["recent_selected_count"],
-            meta["relevant_selected_count"],
-            meta["selected_count_before_trim"],
-            meta["trimmed_count"],
-            meta["sent_count"],
-            max_context_messages,
-            max_context_to_send,
+            "/askai discord context stats: fetched=%s recent=%s relevant=%s selected=%s trimmed=%s sent=%s",
+            meta["fetched_count"], meta["recent_selected_count"],
+            meta["relevant_selected_count"], meta["selected_count_before_trim"],
+            meta["trimmed_count"], meta["sent_count"]
         )
     except Exception as exc:
         logger.warning("讀取聊天上下文失敗: %s", exc)

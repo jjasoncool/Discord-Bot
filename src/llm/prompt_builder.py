@@ -18,11 +18,17 @@ def build_askai_prompt_log(
     rag_context_end: str,
 ) -> str:
     """組裝 askai prompt log 內容。"""
-    prompt_parts: list[str] = ["[system]", system_prompt]
+    prompt_parts: list[str] = ["<system>", system_prompt]
+
+    def _safe_extract_content(item: object) -> str:
+        """安全提取 context 內容，避免格式異常導致 log 寫入失敗。"""
+        if isinstance(item, dict):
+            return str(item.get("content", ""))
+        return str(item)
 
     if discord_context:
         prompt_parts.extend([
-            "[context_meta:discord]",
+            "<context_meta:discord>",
             f"fetch_limit={max_context_messages}",
             f"fetched_count={discord_meta.get('fetched_count', 0)}",
             f"recent_selected={discord_meta.get('recent_selected_count', 0)}",
@@ -33,19 +39,19 @@ def build_askai_prompt_log(
             discord_context_begin,
         ])
         for item in discord_context:
-            prompt_parts.append(item.get("content", ""))
+            prompt_parts.append(_safe_extract_content(item))
         prompt_parts.append(discord_context_end)
 
     prompt_parts.extend([
-        "[context_meta:rag]",
+        "<context_meta:rag>",
         f"enabled={rag_meta.get('enabled', False)}",
         f"sent_count={rag_meta.get('sent_count', 0)}",
     ])
     if rag_context:
         prompt_parts.append(rag_context_begin)
         for item in rag_context:
-            prompt_parts.append(item.get("content", ""))
+            prompt_parts.append(_safe_extract_content(item))
         prompt_parts.append(rag_context_end)
 
-    prompt_parts.extend(["[question]", question])
+    prompt_parts.extend(["<question>", question])
     return "\n".join(prompt_parts)
