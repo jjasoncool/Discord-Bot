@@ -10,29 +10,18 @@ from discord.ext import commands
 
 import llm
 from services.llm_service import OllamaService
+from sys_settings.llm_settings import AskAICommandSettings
 from utils.utils import safe_send_interaction_message, check_guild
 
 logger = logging.getLogger("discord_bot")
 
-# --- 常數設定區 (目前保留在此，未來可考慮重構至集中式的 config 檔案) ---
-MAX_CONTEXT_MESSAGES = 50
-MAX_CONTEXT_TO_SEND = 20
-MIN_RECENT_CONTEXT = 15
-MAX_RELEVANT_CONTEXT = 14
-TAIPEI_TZ = timezone(timedelta(hours=8))
-DISCORD_CONTEXT_BEGIN = "<context:discord_chat_begin>"
-DISCORD_CONTEXT_END = "</context:discord_chat_end>"
-RAG_CONTEXT_BEGIN = "<context:rag_begin>"
-RAG_CONTEXT_END = "</context:rag_end>"
-DEFAULT_SYSTEM_PROMPT = (
-    "你是 Discord 群組中的一位群友，請用自然口吻聊天。"
-    "回覆時只能使用繁體中文，避免使用英文或簡體中文。"
-)
-PROMPT_FILE_PATH = Path("/app/settings/prompts/askai_system_prompt.txt")
-PROMPT_LOG_PATH = Path("/logs/askai_prompt.txt")
-RESPONSE_LOG_PATH = Path("/logs/askai_response_history.jsonl")
+ASKAI_SETTINGS = AskAICommandSettings()
+TAIPEI_TZ = timezone(timedelta(hours=ASKAI_SETTINGS.taipei_utc_offset_hours))
+PROMPT_FILE_PATH = Path(ASKAI_SETTINGS.prompt_file_path)
+PROMPT_LOG_PATH = Path(ASKAI_SETTINGS.prompt_log_path)
+RESPONSE_LOG_PATH = Path(ASKAI_SETTINGS.response_log_path)
 ASKAI_QUEUE = asyncio.Queue()
-MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024
+MAX_IMAGE_SIZE_BYTES = ASKAI_SETTINGS.max_image_size_bytes
 
 
 def load_system_prompt() -> str:
@@ -45,14 +34,17 @@ def load_system_prompt() -> str:
         logger.warning("找不到或讀不到 prompt 檔案，改用預設 SYSTEM PROMPT: %s", PROMPT_FILE_PATH)
     except Exception as exc:
         logger.warning("載入 prompt 檔案失敗，改用預設 SYSTEM PROMPT: %s", exc)
-    return DEFAULT_SYSTEM_PROMPT
+    return ASKAI_SETTINGS.default_system_prompt
 
 
 def askai_cooldown(interaction: discord.Interaction):
     """管理員免冷卻、一般成員 5 分鐘一次"""
     if interaction.guild and interaction.user.guild_permissions.administrator:
         return None
-    return app_commands.Cooldown(1, 300.0)
+    return app_commands.Cooldown(
+        ASKAI_SETTINGS.askai_cooldown_count,
+        ASKAI_SETTINGS.askai_cooldown_seconds,
+    )
 
 
 def append_askai_response_log(
@@ -161,10 +153,10 @@ class LLMCommands(commands.Cog):
         discord_context, discord_meta = await llm.retrieve_discord_context(
             interaction,
             question,
-            max_context_messages=MAX_CONTEXT_MESSAGES,
-            min_recent_context=MIN_RECENT_CONTEXT,
-            max_relevant_context=MAX_RELEVANT_CONTEXT,
-            max_context_to_send=MAX_CONTEXT_TO_SEND,
+            max_context_messages=ASKAI_SETTINGS.max_context_messages,
+            min_recent_context=ASKAI_SETTINGS.min_recent_context,
+            max_relevant_context=ASKAI_SETTINGS.max_relevant_context,
+            max_context_to_send=ASKAI_SETTINGS.max_context_to_send,
             taipei_tz=TAIPEI_TZ,
             logger=logger,
         )
@@ -185,10 +177,6 @@ class LLMCommands(commands.Cog):
             system=system_prompt,         # 單純的系統規則
             context_items=context_items,  # 結構化上下文（由 Service 層統一安全封裝）
             images=image_payload,
-            temperature=0.85,             # 針對 Gemma 3 調高溫度，增加對話活潑度
-            top_p=0.9,
-            repeat_penalty=1.15,          # 降低 AI 跳針或重複幹話的機率
-            num_ctx=8192                  # 確保大範圍 Discord 歷史紀錄不會被截斷
         )
 
         # 記錄 prompt 日誌，供後續除錯與調優
@@ -200,11 +188,11 @@ class LLMCommands(commands.Cog):
                 rag_context=rag_context,
                 discord_meta=discord_meta,
                 rag_meta=rag_meta,
-                max_context_messages=MAX_CONTEXT_MESSAGES,
-                discord_context_begin=DISCORD_CONTEXT_BEGIN,
-                discord_context_end=DISCORD_CONTEXT_END,
-                rag_context_begin=RAG_CONTEXT_BEGIN,
-                rag_context_end=RAG_CONTEXT_END,
+                max_context_messages=ASKAI_SETTINGS.max_context_messages,
+                discord_context_begin=ASKAI_SETTINGS.discord_context_begin,
+                discord_context_end=ASKAI_SETTINGS.discord_context_end,
+                rag_context_begin=ASKAI_SETTINGS.rag_context_begin,
+                rag_context_end=ASKAI_SETTINGS.rag_context_end,
             )
             PROMPT_LOG_PATH.write_text(prompt_log_text, encoding="utf-8")
         except Exception as exc:

@@ -7,3 +7,5 @@ lxml
 aiohttp
 html2text
 fake-useragent
+pydantic>=2.7,<3
+pydantic-settings>=2.2,<3
