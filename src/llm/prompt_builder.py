@@ -11,6 +11,8 @@ def build_askai_prompt_log(
     rag_context: list[dict[str, str]],
     discord_meta: dict[str, int],
     rag_meta: dict[str, int | bool],
+    retrieval_debug: dict[str, object] | None,
+    image_meta: dict[str, str | int | bool] | None,
     max_context_messages: int,
     discord_context_begin: str,
     discord_context_end: str,
@@ -52,6 +54,35 @@ def build_askai_prompt_log(
         for item in rag_context:
             prompt_parts.append(_safe_extract_content(item))
         prompt_parts.append(rag_context_end)
+
+    prompt_parts.append("<retrieval_debug>")
+    if retrieval_debug:
+        question_tokens = retrieval_debug.get("question_tokens", [])
+        prompt_parts.append(f"question_tokens={question_tokens}")
+
+        prompt_parts.append("<retrieval_debug:bm25_ranked>")
+        for item in retrieval_debug.get("bm25_ranked", []):
+            prompt_parts.append(str(item))
+
+        prompt_parts.append("<retrieval_debug:vector_ranked>")
+        for item in retrieval_debug.get("vector_ranked", []):
+            prompt_parts.append(str(item))
+
+        prompt_parts.append("<retrieval_debug:fused_ranked>")
+        for item in retrieval_debug.get("fused_ranked", []):
+            prompt_parts.append(str(item))
+    else:
+        prompt_parts.append("enabled=False")
+
+    prompt_parts.append("<image_meta>")
+    if image_meta:
+        prompt_parts.append(f"attached={bool(image_meta.get('attached', False))}")
+        prompt_parts.append(f"count={int(image_meta.get('count', 0))}")
+        prompt_parts.append(f"filename={image_meta.get('filename', '')}")
+        prompt_parts.append(f"size_bytes={int(image_meta.get('size_bytes', 0))}")
+    else:
+        prompt_parts.append("attached=False")
+        prompt_parts.append("count=0")
 
     prompt_parts.extend(["<question>", question])
     return "\n".join(prompt_parts)

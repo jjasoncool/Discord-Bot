@@ -3,11 +3,347 @@
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from datetime import timezone
+from typing import Any
 
 import discord
 
-from llm import context_relevance_score
+from llm.tokenization import tokenize_for_retrieval, tokens_for_debug
+from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
+from sys_settings.llm_settings import (
+    LLMServiceSettings,
+    load_ollama_runtime_config,
+)
+
+try:
+    from rank_bm25 import BM25Okapi
+except Exception:  # pragma: no cover - 依賴可能在部份環境尚未安裝
+    BM25Okapi = None
+
+try:
+    from llama_index.core import Document, VectorStoreIndex
+    from llama_index.embeddings.ollama import OllamaEmbedding
+    from llama_index.vector_stores.postgres import PGVectorStore
+except Exception:  # pragma: no cover - 依賴可能在部份環境尚未安裝
+    Document = None
+    VectorStoreIndex = None
+    OllamaEmbedding = None
+    PGVectorStore = None
+
+
+LLM_SETTINGS = LLMServiceSettings()
+_EMBED_MODEL: Any | None = None
+_EMBED_MODEL_NAME: str | None = None
+_PERSISTED_MESSAGE_IDS: set[str] = set()
+
+# === Persist 過濾擴充介面（預設保守，不改現行行為） ===
+# 1) 最小長度門檻：設定 > 0 才啟用
+PERSIST_MIN_TEXT_LENGTH = 0
+# 2) 語言/垃圾內容過濾：目前僅保留 hook（未啟用）
+ENABLE_PERSIST_LOW_SIGNAL_FILTER = False
+# 3) 敏感資訊遮罩：目前僅保留 hook（未啟用）
+ENABLE_PERSIST_REDACTION = False
+
+
+def _load_embed_model_name() -> str:
+    """從 Ollama runtime 設定讀取 embedding model，失敗則回退預設。"""
+    runtime_config = load_ollama_runtime_config(LLM_SETTINGS.ollama_runtime_model_path)
+    return runtime_config.embed_model
+
+
+def _get_embed_model(logger: logging.Logger) -> Any | None:
+    """延遲初始化 Embedding 模型，避免啟動時阻塞。"""
+    global _EMBED_MODEL, _EMBED_MODEL_NAME
+    embed_model_name = _load_embed_model_name()
+    if _EMBED_MODEL is not None and _EMBED_MODEL_NAME == embed_model_name:
+        return _EMBED_MODEL
+
+    if OllamaEmbedding is None:
+        logger.warning("OllamaEmbedding 尚未可用，向量檢索將退化為 BM25。")
+        return None
+
+    try:
+        _EMBED_MODEL = OllamaEmbedding(
+            model_name=embed_model_name,
+            base_url=LLM_SETTINGS.ollama_base_url,
+            request_timeout=LLM_SETTINGS.ollama_timeout,
+        )
+        _EMBED_MODEL_NAME = embed_model_name
+    except Exception as exc:
+        logger.warning("初始化 OllamaEmbedding 失敗，改用 BM25: %s", exc)
+        _EMBED_MODEL = None
+        _EMBED_MODEL_NAME = None
+
+    return _EMBED_MODEL
+
+
+def _is_low_signal_text_for_persist(text: str) -> bool:
+    """低訊號內容過濾擴充點（未啟用時固定 False）。"""
+    if not ENABLE_PERSIST_LOW_SIGNAL_FILTER:
+        return False
+
+    # TODO: 可在這裡加入 URL-only、emoji-only、重複字元噪音等規則。
+    _ = text
+    return False
+
+
+def _redact_text_for_persist(text: str) -> str:
+    """敏感資訊遮罩擴充點（未啟用時原樣返回）。"""
+    if not ENABLE_PERSIST_REDACTION:
+        return text
+
+    # TODO: 可在這裡加入 email/phone/token 等遮罩規則。
+    return text
+
+
+def _should_skip_persist_message(*, message_id: str, text: str) -> tuple[bool, str]:
+    """統一判斷是否跳過寫入 pgvector，回傳 (should_skip, reason)。"""
+    if not text:
+        return True, "empty_text"
+
+    if message_id in _PERSISTED_MESSAGE_IDS:
+        return True, "duplicate_in_process"
+
+    if PERSIST_MIN_TEXT_LENGTH > 0 and len(text) < PERSIST_MIN_TEXT_LENGTH:
+        return True, "too_short"
+
+    if _is_low_signal_text_for_persist(text):
+        return True, "low_signal"
+
+    return False, ""
+
+
+def _rrf_score(rank: int, *, weight: float, rrf_k: int) -> float:
+    """Reciprocal Rank Fusion 分數。"""
+    # 計算原理（RRF）
+    # - 公式：weight / (rrf_k + rank)
+    # - rank 越前面（數字越小），分數越高
+    # - weight 用來控制來源重要性（BM25 vs Vector）
+    #
+    # 範例：rrf_k=60
+    # - rank=1, weight=0.45 -> 0.45/61
+    # - rank=2, weight=0.55 -> 0.55/62
+    # 兩路分數可直接相加，形成融合後的最終排序依據。
+    return weight / (rrf_k + rank)
+
+
+def _build_bm25_rank(
+    *,
+    question: str,
+    messages: list[discord.Message],
+) -> dict[str, int]:
+    """建立 BM25 排名（message_id -> rank）。"""
+    # 為什麼回傳 rank 而不是原始分數？
+    # - 因為後續 RRF 需要的是「排名」，不是各家檢索器的原始 score。
+    # - 這樣可以避免 BM25 與 Vector 的分數尺度不同，導致融合失真。
+    #
+    # 小範例（示意）
+    # question:「昨天楓谷活動有加倍掉寶嗎」
+    # m2:「昨天活動地圖真的有掉寶加倍」-> BM25 rank 1
+    # m4:「Maple 活動加倍時間到 12 點」 -> BM25 rank 2
+    # 輸出：{"m2": 1, "m4": 2, ...}
+    if BM25Okapi is None:
+        return {}
+
+    # `corpus_tokens` 與 `ordered_ids` 必須一一對齊：
+    # - corpus_tokens[i] 是第 i 筆文件的 token 清單
+    # - ordered_ids[i]   是同一筆文件的 message_id
+    # 這樣 BM25 回傳分數陣列後，才能正確 map 回 Discord 訊息。
+    corpus_tokens: list[list[str]] = []
+    ordered_ids: list[str] = []
+    for msg in messages:
+        # 1) 先做最小清洗：避免空白/None 進入索引，降低雜訊。
+        text = (msg.content or "").strip()
+        if not text:
+            continue
+
+        # 2) 將文字轉成檢索 token（中英數 + 中文 n-gram）。
+        #    BM25 是以 token 為單位算匹配，不是直接比原句字串。
+        tokens = list(tokenize_for_retrieval(text))
+
+        # 3) 若 token 為空，表示這筆內容對 BM25 無可用訊號，跳過。
+        if not tokens:
+            continue
+
+        # 4) 保持「token 與 message_id 同步 append」的對齊關係。
+        corpus_tokens.append(tokens)
+        ordered_ids.append(str(msg.id))
+
+    # 若語料全被過濾，直接回空，避免建立空 BM25 模型。
+    if not corpus_tokens:
+        return {}
+
+    # query 也要走同一套 tokenization，才能在同一向量空間匹配。
+    query_tokens = list(tokenize_for_retrieval(question))
+
+    # 問題本身若沒有任何可用 token（例如全符號），就無法做 BM25 匹配。
+    if not query_tokens:
+        return {}
+
+    # 5) 建立 BM25 模型並對 query 算每一筆文件分數。
+    #    回傳的 `scores` 與 `corpus_tokens` 是同索引順序。
+    bm25 = BM25Okapi(corpus_tokens)
+    scores = bm25.get_scores(query_tokens)
+
+    # 6) 依分數由高到低排序。
+    #    這裡先轉成 (message_id, score) 方便後續轉 rank map。
+    ranked = sorted(
+        zip(ordered_ids, scores),
+        key=lambda x: float(x[1]),
+        reverse=True,
+    )
+
+    # 7) 為了給 RRF 融合，最終輸出「排名」而不是 raw score：
+    #    - 不同檢索器（BM25/Vector）score 尺度不同
+    #    - rank 更容易跨檢索器融合，降低尺度不一致問題
+    bm25_rank: dict[str, int] = {}
+    current_rank = 1
+    for message_id, score in ranked:
+        # 分數 <= 0 代表幾乎無匹配訊號，排除噪音文件。
+        if float(score) <= 0:
+            continue
+        bm25_rank[message_id] = current_rank
+        current_rank += 1
+
+    # 範例（概念）：
+    # ranked = [(m2, 4.2), (m4, 3.8), (m1, 0.0)]
+    # -> bm25_rank = {"m2": 1, "m4": 2}
+    # m1 因 score<=0 被濾掉，不進入後續 RRF。
+    return bm25_rank
+
+
+def _build_vector_rank(
+    *,
+    question: str,
+    messages: list[discord.Message],
+    candidate_pool: int,
+    logger: logging.Logger,
+) -> dict[str, int]:
+    """建立向量檢索排名（message_id -> rank）。"""
+    # 設計意圖：BM25 負責字面，Vector 負責語意；兩路結果交給 RRF 融合。
+    # 這裡刻意用 in-memory index 跑「當輪訊息」語意排序，避免依賴外部索引同步延遲。
+    if Document is None or VectorStoreIndex is None:
+        return {}
+
+    embed_model = _get_embed_model(logger)
+    if embed_model is None:
+        return {}
+
+    try:
+        docs: list[Document] = []
+        for msg in messages:
+            # 與 BM25 一致：先排除空內容，避免把無訊號樣本送入向量檢索。
+            text = (msg.content or "").strip()
+            if not text:
+                continue
+            docs.append(
+                Document(
+                    text=text,
+                    doc_id=str(msg.id),
+                    metadata={
+                        "message_id": str(msg.id),
+                        "author_id": str(msg.author.id),
+                        "channel_id": str(msg.channel.id),
+                        "timestamp": msg.created_at.isoformat(),
+                        "doc_type": "discord_chat",
+                    },
+                )
+            )
+
+        # 沒有可索引文件時直接回空，保持降級可預期。
+        if not docs:
+            return {}
+
+        # similarity_top_k 上限受 candidate_pool 與 docs 數量共同約束，
+        # 避免請求超出資料集大小。
+        index = VectorStoreIndex.from_documents(docs, embed_model=embed_model)
+        retriever = index.as_retriever(similarity_top_k=max(1, min(candidate_pool, len(docs))))
+        nodes = retriever.retrieve(question)
+
+        vector_rank: dict[str, int] = {}
+        for rank, node in enumerate(nodes, start=1):
+            # 只接受可對映回原訊息的 node（有 message_id 才能進融合）。
+            node_message_id = str(node.metadata.get("message_id", "")).strip()
+            if not node_message_id:
+                continue
+            vector_rank[node_message_id] = rank
+        return vector_rank
+    except Exception as exc:
+        logger.warning("In-memory 向量檢索失敗，改用 BM25: %s", exc)
+        return {}
+
+
+def _persist_messages_to_pgvector(
+    *,
+    messages: list[discord.Message],
+    logger: logging.Logger,
+) -> None:
+    """將聊天訊息寫入 pgvector（最佳努力，不阻斷主流程）。"""
+    # 設計重點：best effort（最佳努力）
+    # - 寫入成功：可累積長期知識
+    # - 寫入失敗：不中斷問答主流程
+    #
+    # 理由：查詢回覆優先，儲存是附加價值，不能讓使用者等待或失敗。
+    if not HYBRID_RETRIEVAL_SETTINGS.persist_chat_to_pgvector:
+        return
+
+    if Document is None or VectorStoreIndex is None or PGVectorStore is None:
+        return
+
+    embed_model = _get_embed_model(logger)
+    if embed_model is None:
+        return
+
+    try:
+        vector_store = PGVectorStore.from_params(
+            database=LLM_SETTINGS.pgvector_db,
+            host=LLM_SETTINGS.pgvector_host,
+            password=LLM_SETTINGS.pgvector_password,
+            port=LLM_SETTINGS.pgvector_port,
+            user=LLM_SETTINGS.pgvector_user,
+            table_name=HYBRID_RETRIEVAL_SETTINGS.get_chat_table_name(),
+            embed_dim=HYBRID_RETRIEVAL_SETTINGS.pgvector_embed_dim,
+            hybrid_search=True,
+        )
+        index = VectorStoreIndex.from_vector_store(
+            vector_store=vector_store,
+            embed_model=embed_model,
+        )
+
+        for msg in messages:
+            raw_text = (msg.content or "").strip()
+            message_id = str(msg.id)
+
+            # 擴充接口：
+            # - _should_skip_persist_message: 長度/噪音/去重等過濾策略
+            # - _redact_text_for_persist: 敏感資訊遮罩策略
+            should_skip, skip_reason = _should_skip_persist_message(
+                message_id=message_id,
+                text=raw_text,
+            )
+            if should_skip:
+                if skip_reason != "duplicate_in_process":
+                    logger.debug("略過 pgvector 寫入: message_id=%s reason=%s", message_id, skip_reason)
+                continue
+
+            text = _redact_text_for_persist(raw_text)
+
+            doc = Document(
+                text=text,
+                doc_id=message_id,
+                metadata={
+                    "message_id": message_id,
+                    "author_id": str(msg.author.id),
+                    "channel_id": str(msg.channel.id),
+                    "timestamp": msg.created_at.isoformat(),
+                    "doc_type": "discord_chat",
+                },
+            )
+            index.insert(doc)
+            _PERSISTED_MESSAGE_IDS.add(message_id)
+    except Exception as exc:
+        logger.warning("寫入 pgvector 失敗（不中斷主流程）: %s", exc)
 
 
 def _build_discord_context_item(msg: discord.Message, tz: timezone) -> dict[str, str]:
@@ -42,7 +378,20 @@ async def retrieve_discord_context(
     taipei_tz: timezone,
     logger: logging.Logger,
 ) -> tuple[list[dict[str, str]], dict[str, int]]:
-    """從 Discord 歷史訊息檢索上下文：近期保底 + 問題關聯。"""
+    """從 Discord 歷史訊息檢索上下文：近期保底 + Hybrid 關聯檢索。"""
+    # === 核心流程導讀（學習/除錯用） ===
+    # 1) 抓歷史訊息（max_context_messages）
+    # 2) 先保底最近 N 則（min_recent_context）避免漏掉剛講完的上下文
+    # 3) BM25 rank（字面）+ Vector rank（語意）
+    # 4) 用 RRF 融合 + 分數門檻過濾（hybrid_min_fused_score）
+    # 5) 合併「recent 保底 + relevant 檢索」成最終 context
+    # 6) 輸出 meta 與 retrieval_debug，供 prompt log 完整追蹤
+    #
+    # 範例（示意）
+    # question:「昨天楓谷活動是不是有加倍掉寶？」
+    # - BM25 可能把「有加倍掉寶」字面最接近的訊息排前面
+    # - Vector 可能把「Maple 活動加倍時間」這類語意接近訊息排前面
+    # - RRF 融合後，兩者都高的訊息通常會浮到前面
     context: list[dict[str, str]] = []
     meta = {
         "fetched_count": 0,
@@ -51,6 +400,12 @@ async def retrieve_discord_context(
         "selected_count_before_trim": 0,
         "trimmed_count": 0,
         "sent_count": 0,
+    }
+    debug = {
+        "question_tokens": [],
+        "bm25_ranked": [],
+        "vector_ranked": [],
+        "fused_ranked": [],
     }
 
     try:
@@ -73,20 +428,88 @@ async def retrieve_discord_context(
         }
         meta["recent_selected_count"] = len(selected_indices)
 
-        relevant_candidates: list[tuple[int, int]] = []
-        for idx, msg in enumerate(ordered_messages):
-            if not msg.content or not msg.content.strip():
-                continue
+        debug["question_tokens"] = tokens_for_debug(question)
 
-            score = context_relevance_score(question, msg.content)
-            if score > 0:
-                # 先比關聯分數，再偏好較新的訊息
-                relevant_candidates.append((score, idx))
+        # 將最近聊天訊息寫入 pgvector（最佳努力，不影響主流程）
+        _persist_messages_to_pgvector(messages=ordered_messages, logger=logger)
 
-        relevant_candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
-        top_relevant_indices = {
-            idx for _, idx in relevant_candidates[:max_relevant_context]
+        bm25_rank = _build_bm25_rank(question=question, messages=ordered_messages)
+        vector_rank = _build_vector_rank(
+            question=question,
+            messages=ordered_messages,
+            candidate_pool=HYBRID_RETRIEVAL_SETTINGS.hybrid_candidate_pool,
+            logger=logger,
+        )
+        bm25_weight, vector_weight = HYBRID_RETRIEVAL_SETTINGS.resolve_fusion_weights()
+
+        # 為什麼先整理 message_text_map？
+        # - 後續 debug 區塊需要快速以 message_id 找回原文
+        # - 避免每次都重新掃描 ordered_messages（降低重複運算）
+
+        message_text_map = {
+            str(msg.id): " ".join((msg.content or "").split())
+            for msg in ordered_messages
+            if msg.content and msg.content.strip()
         }
+
+        debug["bm25_ranked"] = [
+            {
+                "message_id": message_id,
+                "rank": rank,
+                "content": message_text_map.get(message_id, ""),
+                "tokens": tokens_for_debug(message_text_map.get(message_id, "")),
+            }
+            for message_id, rank in sorted(bm25_rank.items(), key=lambda x: x[1])
+        ]
+
+        debug["vector_ranked"] = [
+            {
+                "message_id": message_id,
+                "rank": rank,
+                "content": message_text_map.get(message_id, ""),
+            }
+            for message_id, rank in sorted(vector_rank.items(), key=lambda x: x[1])
+        ]
+
+        # RRF 融合：message_id -> rrf score
+        fused_scores: dict[str, float] = defaultdict(float)
+        for message_id, rank in bm25_rank.items():
+            fused_scores[message_id] += _rrf_score(
+                rank,
+                weight=bm25_weight,
+                rrf_k=HYBRID_RETRIEVAL_SETTINGS.hybrid_rrf_k,
+            )
+        for message_id, rank in vector_rank.items():
+            fused_scores[message_id] += _rrf_score(
+                rank,
+                weight=vector_weight,
+                rrf_k=HYBRID_RETRIEVAL_SETTINGS.hybrid_rrf_k,
+            )
+
+        index_by_message_id = {str(msg.id): idx for idx, msg in enumerate(ordered_messages)}
+        fused_ranked = sorted(fused_scores.items(), key=lambda x: x[1], reverse=True)
+        debug["fused_ranked"] = [
+            {
+                "message_id": message_id,
+                "score": round(float(score), 8),
+                "content": message_text_map.get(message_id, ""),
+            }
+            for message_id, score in fused_ranked
+        ]
+        top_relevant_indices: set[int] = set()
+        for message_id, fused_score in fused_ranked:
+            # 分數門檻用途：
+            # - 避免低相關/噪音訊息被送進 prompt
+            # - relevant_selected=0 時可考慮調低 hybrid_min_fused_score
+            if fused_score < HYBRID_RETRIEVAL_SETTINGS.hybrid_min_fused_score:
+                continue
+            idx = index_by_message_id.get(message_id)
+            if idx is None:
+                continue
+            top_relevant_indices.add(idx)
+            if len(top_relevant_indices) >= max_relevant_context:
+                break
+
         meta["relevant_selected_count"] = len(top_relevant_indices)
         selected_indices.update(top_relevant_indices)
 
@@ -115,14 +538,16 @@ async def retrieve_discord_context(
 
         meta["sent_count"] = len(context)
         logger.info(
-            "/askai discord context stats: fetched=%s recent=%s relevant=%s selected=%s trimmed=%s sent=%s",
+            "/askai discord context stats: fetched=%s recent=%s relevant=%s selected=%s trimmed=%s sent=%s bm25_hits=%s vector_hits=%s fused_hits=%s",
             meta["fetched_count"], meta["recent_selected_count"],
             meta["relevant_selected_count"], meta["selected_count_before_trim"],
-            meta["trimmed_count"], meta["sent_count"]
+            meta["trimmed_count"], meta["sent_count"],
+            len(bm25_rank), len(vector_rank), len(fused_scores)
         )
     except Exception as exc:
         logger.warning("讀取聊天上下文失敗: %s", exc)
 
+    meta["retrieval_debug"] = debug
     return context, meta
 
 

@@ -4,6 +4,7 @@ import asyncio
 import json
 from datetime import datetime, timezone, timedelta
 import base64
+from logging.handlers import RotatingFileHandler
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -22,6 +23,7 @@ PROMPT_LOG_PATH = Path(ASKAI_SETTINGS.prompt_log_path)
 RESPONSE_LOG_PATH = Path(ASKAI_SETTINGS.response_log_path)
 ASKAI_QUEUE = asyncio.Queue()
 MAX_IMAGE_SIZE_BYTES = ASKAI_SETTINGS.max_image_size_bytes
+_ASKAI_PROMPT_TRACE_LOGGER: logging.Logger | None = None
 
 
 def load_system_prompt() -> str:
@@ -75,6 +77,31 @@ def append_askai_response_log(
     RESPONSE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with RESPONSE_LOG_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def get_askai_prompt_trace_logger() -> logging.Logger:
+    """建立並回傳 askai prompt trace 專用 logger（含檔案輪替）。"""
+    global _ASKAI_PROMPT_TRACE_LOGGER
+    if _ASKAI_PROMPT_TRACE_LOGGER is not None:
+        return _ASKAI_PROMPT_TRACE_LOGGER
+
+    PROMPT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    trace_logger = logging.getLogger("askai_prompt_trace")
+    trace_logger.setLevel(logging.INFO)
+    trace_logger.propagate = False
+
+    if not trace_logger.handlers:
+        file_handler = RotatingFileHandler(
+            PROMPT_LOG_PATH,
+            maxBytes=ASKAI_SETTINGS.prompt_log_max_bytes,
+            backupCount=ASKAI_SETTINGS.prompt_log_backup_count,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(logging.Formatter("%(message)s"))
+        trace_logger.addHandler(file_handler)
+
+    _ASKAI_PROMPT_TRACE_LOGGER = trace_logger
+    return _ASKAI_PROMPT_TRACE_LOGGER
 
 
 class LLMCommands(commands.Cog):
@@ -171,6 +198,15 @@ class LLMCommands(commands.Cog):
             if image_payload is None:
                 return
 
+        image_meta: dict[str, str | int | bool] | None = None
+        if image and image_payload:
+            image_meta = {
+                "attached": True,
+                "count": len(image_payload),
+                "filename": image.filename or "",
+                "size_bytes": image.size or 0,
+            }
+
         # === 呼叫 Service：各司其職，只傳遞乾淨的參數與字串 ===
         reply = await self.llm_service.generate_reply(
             prompt=question,              # 單純的使用者問題
@@ -181,6 +217,7 @@ class LLMCommands(commands.Cog):
 
         # 記錄 prompt 日誌，供後續除錯與調優
         try:
+            retrieval_debug = discord_meta.get("retrieval_debug")
             prompt_log_text = llm.build_askai_prompt_log(
                 system_prompt=system_prompt,
                 question=question,
@@ -188,13 +225,16 @@ class LLMCommands(commands.Cog):
                 rag_context=rag_context,
                 discord_meta=discord_meta,
                 rag_meta=rag_meta,
+                retrieval_debug=retrieval_debug if isinstance(retrieval_debug, dict) else None,
+                image_meta=image_meta,
                 max_context_messages=ASKAI_SETTINGS.max_context_messages,
                 discord_context_begin=ASKAI_SETTINGS.discord_context_begin,
                 discord_context_end=ASKAI_SETTINGS.discord_context_end,
                 rag_context_begin=ASKAI_SETTINGS.rag_context_begin,
                 rag_context_end=ASKAI_SETTINGS.rag_context_end,
             )
-            PROMPT_LOG_PATH.write_text(prompt_log_text, encoding="utf-8")
+            prompt_trace_logger = get_askai_prompt_trace_logger()
+            prompt_trace_logger.info(prompt_log_text)
         except Exception as exc:
             logger.warning("寫入 askai prompt 失敗: %s", exc)
 

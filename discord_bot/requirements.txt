@@ -27,3 +27,5 @@ llama-index-llms-ollama
 llama-index-embeddings-ollama
 # 讓 LlamaIndex 能夠讀寫 pgvector 資料庫
 llama-index-vector-stores-postgres
+# 關鍵字檢索
+rank-bm25

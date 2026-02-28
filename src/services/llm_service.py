@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import List, Optional
 
 import aiohttp
-from sys_settings.llm_settings import LLMServiceSettings, load_context_safety_rules
+from sys_settings.llm_settings import (
+    LLMServiceSettings,
+    load_context_safety_rules,
+    load_ollama_runtime_config,
+)
 
 logger = logging.getLogger("discord_bot")
 
@@ -56,11 +60,10 @@ class OllamaService:
             raw_content = runtime_config_path.read_text(encoding="utf-8").strip()
             runtime_model_from_file: Optional[str] = None
             if raw_content:
-                raw_data = json.loads(raw_content)
-                if isinstance(raw_data, dict):
-                    candidate = str(raw_data.get("model", "")).strip()
-                    if candidate:
-                        runtime_model_from_file = candidate
+                runtime_config = load_ollama_runtime_config(runtime_config_path)
+                candidate = runtime_config.model.strip()
+                if candidate:
+                    runtime_model_from_file = candidate
 
             self._runtime_model_cached_value = runtime_model_from_file
             self._runtime_model_cached_mtime_ns = current_mtime_ns
@@ -167,6 +170,13 @@ class OllamaService:
             )
 
         # 明確標示出最新使用者的問題
+        if images:
+            final_user_content += (
+                "<image_instruction>\n"
+                f"{self.context_safety_rules.image_instruction_prompt}\n"
+                "</image_instruction>\n"
+            )
+
         final_user_content += (
             f"{self.settings.latest_open_tag}\n"
             f"{prompt}\n"
