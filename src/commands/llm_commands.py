@@ -4,12 +4,12 @@ import asyncio
 import json
 from datetime import datetime, timezone, timedelta
 import base64
-from logging.handlers import RotatingFileHandler
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 import llm
+from llm.logger_factory import get_or_create_file_logger
 from services.llm_service import OllamaService
 from sys_settings.llm_settings import AskAICommandSettings
 from utils.utils import safe_send_interaction_message, check_guild
@@ -23,7 +23,18 @@ PROMPT_LOG_PATH = Path(ASKAI_SETTINGS.prompt_log_path)
 RESPONSE_LOG_PATH = Path(ASKAI_SETTINGS.response_log_path)
 ASKAI_QUEUE = asyncio.Queue()
 MAX_IMAGE_SIZE_BYTES = ASKAI_SETTINGS.max_image_size_bytes
-_ASKAI_PROMPT_TRACE_LOGGER: logging.Logger | None = None
+
+
+def _format_log_block(*, title: str, body: str) -> str:
+    """用明顯分隔符與時間戳包住每筆 log，便於人工閱讀。"""
+    ts = datetime.now(TAIPEI_TZ).strftime("%Y-%m-%d %H:%M:%S %z")
+    line = "=" * 28
+    return (
+        f"\n{line} {title} {line}\n"
+        f"time: {ts}\n"
+        f"{body}\n"
+        f"{line} END {title} {line}\n"
+    )
 
 
 def load_system_prompt() -> str:
@@ -74,34 +85,14 @@ def append_askai_response_log(
         "rag_context_meta": rag_meta,
     }
 
-    RESPONSE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with RESPONSE_LOG_PATH.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
-def get_askai_prompt_trace_logger() -> logging.Logger:
-    """建立並回傳 askai prompt trace 專用 logger（含檔案輪替）。"""
-    global _ASKAI_PROMPT_TRACE_LOGGER
-    if _ASKAI_PROMPT_TRACE_LOGGER is not None:
-        return _ASKAI_PROMPT_TRACE_LOGGER
-
-    PROMPT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    trace_logger = logging.getLogger("askai_prompt_trace")
-    trace_logger.setLevel(logging.INFO)
-    trace_logger.propagate = False
-
-    if not trace_logger.handlers:
-        file_handler = RotatingFileHandler(
-            PROMPT_LOG_PATH,
-            maxBytes=ASKAI_SETTINGS.prompt_log_max_bytes,
-            backupCount=ASKAI_SETTINGS.prompt_log_backup_count,
-            encoding="utf-8",
-        )
-        file_handler.setFormatter(logging.Formatter("%(message)s"))
-        trace_logger.addHandler(file_handler)
-
-    _ASKAI_PROMPT_TRACE_LOGGER = trace_logger
-    return _ASKAI_PROMPT_TRACE_LOGGER
+    response_logger = get_or_create_file_logger(
+        name="askai_response_trace",
+        log_path=RESPONSE_LOG_PATH,
+        mode="size",
+        max_bytes=ASKAI_SETTINGS.response_log_max_bytes,
+        backup_count=ASKAI_SETTINGS.response_log_backup_count,
+    )
+    response_logger.info(json.dumps(record, ensure_ascii=False))
 
 
 class LLMCommands(commands.Cog):
@@ -208,17 +199,36 @@ class LLMCommands(commands.Cog):
             }
 
         # === 呼叫 Service：各司其職，只傳遞乾淨的參數與字串 ===
-        reply = await self.llm_service.generate_reply(
+        reply, prompt_record_log = await self.llm_service.generate_reply(
             prompt=question,              # 單純的使用者問題
             system=system_prompt,         # 單純的系統規則
             context_items=context_items,  # 結構化上下文（由 Service 層統一安全封裝）
             images=image_payload,
         )
 
-        # 記錄 prompt 日誌，供後續除錯與調優
+        # askai_prompt.txt：只記錄「真正送給 Ollama 的文字」
+        try:
+            prompt_trace_logger = get_or_create_file_logger(
+                name="askai_prompt_trace",
+                log_path=PROMPT_LOG_PATH,
+                mode="time",
+                when=ASKAI_SETTINGS.prompt_log_when,
+                interval=ASKAI_SETTINGS.prompt_log_interval,
+                backup_count=ASKAI_SETTINGS.prompt_log_backup_count,
+            )
+            prompt_trace_logger.info(
+                _format_log_block(
+                    title="ASKAI_PROMPT",
+                    body=prompt_record_log,
+                )
+            )
+        except Exception as exc:
+            logger.warning("寫入 askai prompt 失敗: %s", exc)
+
+        # askai_prompt_debug.txt：記錄檢索/融合等 debug 細節
         try:
             retrieval_debug = discord_meta.get("retrieval_debug")
-            prompt_log_text = llm.build_askai_prompt_log(
+            prompt_debug_text = llm.build_askai_prompt_log(
                 system_prompt=system_prompt,
                 question=question,
                 discord_context=discord_context,
@@ -233,10 +243,24 @@ class LLMCommands(commands.Cog):
                 rag_context_begin=ASKAI_SETTINGS.rag_context_begin,
                 rag_context_end=ASKAI_SETTINGS.rag_context_end,
             )
-            prompt_trace_logger = get_askai_prompt_trace_logger()
-            prompt_trace_logger.info(prompt_log_text)
+            prompt_debug_logger = get_or_create_file_logger(
+                name="askai_prompt_debug",
+                log_path=Path(ASKAI_SETTINGS.prompt_debug_log_path),
+                mode="size",
+                max_bytes=ASKAI_SETTINGS.prompt_debug_log_max_bytes,
+                backup_count=ASKAI_SETTINGS.prompt_debug_log_backup_count,
+            )
+            prompt_debug_logger.info(
+                _format_log_block(
+                    title="ASKAI_PROMPT_DEBUG",
+                    body=(
+                        f"<prompt_record_log>\n{prompt_record_log}\n</prompt_record_log>\n"
+                        f"<debug>\n{prompt_debug_text}\n</debug>"
+                    ),
+                )
+            )
         except Exception as exc:
-            logger.warning("寫入 askai prompt 失敗: %s", exc)
+            logger.warning("寫入 askai prompt debug 失敗: %s", exc)
 
         # 記錄回應歷史
         try:

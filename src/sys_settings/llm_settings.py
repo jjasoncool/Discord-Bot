@@ -129,10 +129,20 @@ class AskAICommandSettings(BaseSettings):
 
     prompt_file_path: str = "/app/settings/prompts/askai_system_prompt.txt"
     prompt_log_path: str = "/logs/askai_prompt.txt"
-    prompt_log_max_bytes: int = 2 * 1024 * 1024
-    prompt_log_backup_count: int = 5
+    # askai_prompt：以時間輪替，並只保留固定份數
+    prompt_log_when: str = "midnight"
+    prompt_log_interval: int = 1
+    prompt_log_backup_count: int = 3
+    # debug 另存一份，避免混入真正送給 Ollama 的文字
+    prompt_debug_log_path: str = "/logs/askai_prompt_debug.txt"
+    prompt_debug_log_max_bytes: int = 5 * 1024 * 1024
+    prompt_debug_log_backup_count: int = 5
+
     # json line (多行格式)
     response_log_path: str = "/logs/askai_response_history.jsonl"
+    # response history：容量輪替
+    response_log_max_bytes: int = 20 * 1024 * 1024
+    response_log_backup_count: int = 10
 
     max_image_size_bytes: int = 5 * 1024 * 1024
     askai_cooldown_count: int = 1

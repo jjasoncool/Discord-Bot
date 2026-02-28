@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import json
 from pathlib import Path
+from dataclasses import dataclass
 from typing import List, Optional
 
 import aiohttp
@@ -19,6 +20,14 @@ from sys_settings.llm_settings import (
 logger = logging.getLogger("discord_bot")
 
 LLM_SERVICE_SETTINGS = LLMServiceSettings()
+
+
+@dataclass(frozen=True)
+class PromptBundle:
+    """同源 prompt 組裝結果：API payload 與可讀記錄。"""
+
+    messages: list[dict[str, object]]
+    prompt_record_log: str
 
 
 class OllamaService:
@@ -84,6 +93,85 @@ class OllamaService:
 
         return self.model_default
 
+    def _serialize_context_items(self, items: List[dict[str, str]]) -> str:
+        """將 context 安全序列化為 JSON 字串，避免標記邊界被輸入破壞。"""
+        safe_items: list[dict[str, object]] = []
+        for idx, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+
+            role = str(item.get("role", "user"))
+            content = str(item.get("content", "")).replace("\x00", "")
+            metadata = {
+                str(k): str(v)
+                for k, v in item.items()
+                if k not in {"role", "content"} and v is not None
+            }
+            safe_items.append(
+                {
+                    "index": idx,
+                    "role": role,
+                    "content": content,
+                    "metadata": metadata,
+                }
+            )
+        return json.dumps(safe_items, ensure_ascii=False)
+
+    def _build_prompt_bundle(
+        self,
+        *,
+        system: Optional[str],
+        user_query_text: str,
+        context_items: Optional[List[dict[str, str]]] = None,
+        images: Optional[List[str]] = None,
+    ) -> PromptBundle:
+        """建立同源 prompt bundle（給 Ollama 與給 log 共用）。"""
+        composed_user_prompt = ""
+        if context_items:
+            serialized_context = self._serialize_context_items(context_items)
+            composed_user_prompt += (
+                f"{self.context_safety_rules.untrusted_context_intro}\n"
+                f"{self.settings.context_open_tag}\n"
+                f"{serialized_context}\n"
+                f"{self.settings.context_close_tag}\n\n"
+            )
+
+        if images:
+            composed_user_prompt += (
+                "<image_instruction>\n"
+                f"{self.context_safety_rules.image_instruction_prompt}\n"
+                "</image_instruction>\n"
+            )
+
+        composed_user_prompt += (
+            f"{self.settings.latest_open_tag}\n"
+            f"{user_query_text}\n"
+            f"{self.settings.latest_close_tag}"
+        )
+
+        messages: list[dict[str, object]] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append(
+            {
+                "role": "system",
+                "content": self.context_safety_rules.system_safety_prompt,
+            }
+        )
+
+        user_message: dict[str, object] = {"role": "user", "content": composed_user_prompt}
+        if images:
+            user_message["images"] = images
+        messages.append(user_message)
+
+        parts: list[str] = []
+        if system:
+            parts.extend(["<system>", system])
+        parts.extend(["<system_safety>", self.context_safety_rules.system_safety_prompt])
+        parts.extend(["<user_message>", composed_user_prompt])
+        prompt_record_log = "\n".join(parts)
+        return PromptBundle(messages=messages, prompt_record_log=prompt_record_log)
+
     async def generate_reply(
         self,
         prompt: str,
@@ -95,20 +183,8 @@ class OllamaService:
         top_p: Optional[float] = None,
         repeat_penalty: Optional[float] = None,
         num_ctx: Optional[int] = None,
-    ) -> str:
-        """使用 Ollama 產生回覆
-
-        Args:
-            prompt: 使用者輸入
-            system: 系統提示詞
-            context_items: 結構化上下文（非可信資料）
-            images: 圖片 Base64 列表
-            model: 本次呼叫覆蓋模型（可選）
-            temperature: 取樣溫度（None 時使用系統設定預設值）
-            top_p: nucleus sampling（None 時使用系統設定預設值）
-            repeat_penalty: 重複懲罰參數（None 時使用系統設定預設值）
-            num_ctx: 上下文視窗大小（None 時使用系統設定預設值）
-        """
+    ) -> tuple[str, str]:
+        """呼叫 Ollama 並回傳 (reply, prompt_record_log)。"""
         temperature = (
             temperature
             if temperature is not None
@@ -122,77 +198,18 @@ class OllamaService:
         )
         num_ctx = num_ctx if num_ctx is not None else self.settings.default_num_ctx
 
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-
-        # 固定安全規則：要求模型把歷史資料視為非可信內容，不得覆寫系統規則
-        messages.append(
-            {
-                "role": "system",
-                "content": self.context_safety_rules.system_safety_prompt,
-            }
+        user_query_text = prompt
+        bundle = self._build_prompt_bundle(
+            system=system,
+            user_query_text=user_query_text,
+            context_items=context_items,
+            images=images,
         )
-
-        def _serialize_context(items: List[dict[str, str]]) -> str:
-            """將 context 安全序列化為 JSON 字串，避免標記邊界被使用者輸入破壞。"""
-            safe_items: list[dict[str, object]] = []
-            for idx, item in enumerate(items):
-                if not isinstance(item, dict):
-                    continue
-
-                role = str(item.get("role", "user"))
-                content = str(item.get("content", "")).replace("\x00", "")
-                metadata = {
-                    str(k): str(v)
-                    for k, v in item.items()
-                    if k not in {"role", "content"} and v is not None
-                }
-                safe_items.append(
-                    {
-                        "index": idx,
-                        "role": role,
-                        "content": content,
-                        "metadata": metadata,
-                    }
-                )
-            return json.dumps(safe_items, ensure_ascii=False)
-
-        # 在 Service 層負責把 context 與 prompt 安全地組裝起來
-        final_user_content = ""
-        if context_items:
-            serialized_context = _serialize_context(context_items)
-            final_user_content += (
-                f"{self.context_safety_rules.untrusted_context_intro}\n"
-                f"{self.settings.context_open_tag}\n"
-                f"{serialized_context}\n"
-                f"{self.settings.context_close_tag}\n\n"
-            )
-
-        # 明確標示出最新使用者的問題
-        if images:
-            final_user_content += (
-                "<image_instruction>\n"
-                f"{self.context_safety_rules.image_instruction_prompt}\n"
-                "</image_instruction>\n"
-            )
-
-        final_user_content += (
-            f"{self.settings.latest_open_tag}\n"
-            f"{prompt}\n"
-            f"{self.settings.latest_close_tag}"
-        )
-
-        user_message = {"role": "user", "content": final_user_content}
-        if images:
-            user_message["images"] = images
-
-        messages.append(user_message)
 
         target_model = self._resolve_runtime_model(model)
         payload = {
             "model": target_model,
-            "messages": messages,
+            "messages": bundle.messages,
             "options": {
                 "temperature": temperature,
                 "top_p": top_p,
@@ -210,25 +227,19 @@ class OllamaService:
                     if response.status != 200:
                         detail = await response.text()
                         logger.error("Ollama 回應失敗: %s - %s", response.status, detail)
-                        return "⚠️ LLM 回應失敗，請稍後再試。"
+                        return "⚠️ LLM 回應失敗，請稍後再試。", bundle.prompt_record_log
 
                     data = await response.json()
                     message = data.get("message", {})
                     content = message.get("content")
                     if not content:
                         logger.error("Ollama 回應格式異常: %s", data)
-                        return "⚠️ LLM 回應格式異常，請稍後再試。"
-                    return content
+                        return "⚠️ LLM 回應格式異常，請稍後再試。", bundle.prompt_record_log
+                    return content, bundle.prompt_record_log
 
         except aiohttp.ClientError as exc:
             logger.error("Ollama 連線失敗: %s", exc)
-            return "⚠️ 無法連線到 LLM 服務。"
+            return "⚠️ 無法連線到 LLM 服務。", bundle.prompt_record_log
         except Exception as exc:
             logger.error("Ollama 呼叫發生未預期錯誤: %s", exc, exc_info=True)
-            return "⚠️ LLM 發生未預期錯誤。"
-
-
-async def quick_reply(prompt: str) -> str:
-    """簡易單次呼叫（無上下文）"""
-    service = OllamaService()
-    return await service.generate_reply(prompt)
+            return "⚠️ LLM 發生未預期錯誤。", bundle.prompt_record_log
