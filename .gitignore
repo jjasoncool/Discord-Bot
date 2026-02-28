@@ -1,5 +1,6 @@
 .env
 logs/*
+vector_data/*
 __pycache__/
 monitored_channels.json
 src/scraper/data/*.json

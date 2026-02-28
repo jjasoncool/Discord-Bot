@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import json
+from pathlib import Path
 from typing import List, Optional
 
 import aiohttp
@@ -27,9 +28,58 @@ class OllamaService:
     ) -> None:
         self.settings = LLM_SERVICE_SETTINGS
         self.base_url = base_url or self.settings.ollama_base_url
-        self.model = model or self.settings.ollama_model
+        self.model_default = model or self.settings.ollama_model
         self.timeout = timeout if timeout is not None else self.settings.ollama_timeout
         self.context_safety_rules = load_context_safety_rules(self.settings.llm_context_safety_rules_path)
+        self._runtime_model_cached_value: Optional[str] = None
+        self._runtime_model_cached_mtime_ns: Optional[int] = None
+
+    def _load_runtime_model_from_file(self) -> Optional[str]:
+        """以 mtime 快取 runtime model，降低每次請求都讀檔的成本。"""
+        runtime_config_path = Path(self.settings.ollama_runtime_model_path)
+
+        try:
+            if not runtime_config_path.exists():
+                self._runtime_model_cached_value = None
+                self._runtime_model_cached_mtime_ns = None
+                return None
+
+            stat_result = runtime_config_path.stat()
+            current_mtime_ns = stat_result.st_mtime_ns
+
+            if (
+                self._runtime_model_cached_mtime_ns == current_mtime_ns
+                and self._runtime_model_cached_value
+            ):
+                return self._runtime_model_cached_value
+
+            raw_content = runtime_config_path.read_text(encoding="utf-8").strip()
+            runtime_model_from_file: Optional[str] = None
+            if raw_content:
+                raw_data = json.loads(raw_content)
+                if isinstance(raw_data, dict):
+                    candidate = str(raw_data.get("model", "")).strip()
+                    if candidate:
+                        runtime_model_from_file = candidate
+
+            self._runtime_model_cached_value = runtime_model_from_file
+            self._runtime_model_cached_mtime_ns = current_mtime_ns
+            return runtime_model_from_file
+        except Exception as exc:
+            logger.warning("讀取 runtime model 檔案失敗: %s", exc)
+            return None
+
+    def _resolve_runtime_model(self, override_model: Optional[str] = None) -> str:
+        """解析本次請求模型：call override > runtime file > 預設。"""
+        request_override = (override_model or "").strip()
+        if request_override:
+            return request_override
+
+        runtime_model = self._load_runtime_model_from_file()
+        if runtime_model:
+            return runtime_model
+
+        return self.model_default
 
     async def generate_reply(
         self,
@@ -37,6 +87,7 @@ class OllamaService:
         system: Optional[str] = None,
         context_items: Optional[List[dict[str, str]]] = None,
         images: Optional[List[str]] = None,
+        model: Optional[str] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         repeat_penalty: Optional[float] = None,
@@ -49,6 +100,7 @@ class OllamaService:
             system: 系統提示詞
             context_items: 結構化上下文（非可信資料）
             images: 圖片 Base64 列表
+            model: 本次呼叫覆蓋模型（可選）
             temperature: 取樣溫度（None 時使用系統設定預設值）
             top_p: nucleus sampling（None 時使用系統設定預設值）
             repeat_penalty: 重複懲罰參數（None 時使用系統設定預設值）
@@ -127,8 +179,9 @@ class OllamaService:
 
         messages.append(user_message)
 
+        target_model = self._resolve_runtime_model(model)
         payload = {
-            "model": self.model,
+            "model": target_model,
             "messages": messages,
             "options": {
                 "temperature": temperature,

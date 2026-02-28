@@ -17,7 +17,8 @@ RUN mkdir -p /logs && chown -R appuser:appuser /logs
 
 # Set non-root user
 USER appuser
-
+# [新增這一行] 將用戶級別的 bin 目錄加入環境變數
+ENV PATH="/home/appuser/.local/bin:${PATH}"
 # 複製 requirements.txt 的正確路徑
 COPY discord_bot/requirements.txt .
 # 以非 root 用戶身份安裝套件到用戶家目錄

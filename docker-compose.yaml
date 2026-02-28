@@ -16,8 +16,17 @@ services:
       - .env
     environment:
       - TZ=Asia/Taipei
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://192.168.56.1:11434}
+      - OLLAMA_TIMEOUT=${OLLAMA_TIMEOUT:-180}
+      - PGVECTOR_DB=${PGVECTOR_DB:-discord_data}
+      - PGVECTOR_USER=${PGVECTOR_USER:?PGVECTOR_USER_required}
+      - PGVECTOR_PASSWORD=${PGVECTOR_PASSWORD}
+      # LlamaIndex 將在此服務中以 Python 套件方式執行（非獨立容器）
     networks:
       - discord-net
+    depends_on:
+      pgvector:
+        condition: service_healthy
 
   scraper:
     build:
@@ -41,6 +50,36 @@ services:
     networks:
       - discord-net
 
+  pgvector:
+    image: pgvector/pgvector:pg18-trixie
+    container_name: pgvector
+    restart: always
+    expose:
+      - "5432"
+    volumes:
+      - vector_data:/var/lib/postgresql
+    environment:
+      - TZ=Asia/Taipei
+      - POSTGRES_DB=${PGVECTOR_DB:-discord_data}
+      - POSTGRES_USER=${PGVECTOR_USER:?PGVECTOR_USER_required}
+      - POSTGRES_PASSWORD=${PGVECTOR_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PGVECTOR_USER:?PGVECTOR_USER_required} -d ${PGVECTOR_DB:-discord_data}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - discord-net
+
 networks:
   discord-net:
     driver: bridge
+
+volumes:
+  vector_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/vector_data

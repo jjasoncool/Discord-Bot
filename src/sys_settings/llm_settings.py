@@ -6,6 +6,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Any, Tuple
+from urllib.parse import quote_plus
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -14,7 +15,7 @@ logger = logging.getLogger("discord_bot")
 
 
 class LLMServiceSettings(BaseSettings):
-    """Ollama 服務層設定（集中常數來源，不使用 env 覆寫）。"""
+    """Ollama 服務層設定（可由 env/dotenv 覆寫）。"""
 
     ollama_base_url: str = Field(
         default="http://192.168.56.1:11434",
@@ -28,8 +29,30 @@ class LLMServiceSettings(BaseSettings):
         default=180,
         validation_alias="OLLAMA_TIMEOUT",
     )
+    pgvector_host: str = Field(
+        default="pgvector",
+        validation_alias="PGVECTOR_HOST",
+    )
+    pgvector_port: int = Field(
+        default=5432,
+        validation_alias="PGVECTOR_PORT",
+    )
+    pgvector_db: str = Field(
+        default="discord_data",
+        validation_alias="PGVECTOR_DB",
+    )
+    pgvector_user: str = Field(
+        validation_alias="PGVECTOR_USER",
+    )
+    pgvector_password: str = Field(
+        validation_alias="PGVECTOR_PASSWORD",
+    )
     llm_context_safety_rules_path: str = Field(
         default="/app/settings/prompts/llm_context_safety_rules.json",
+    )
+    # 可熱更新模型設定：直接修改此 JSON 檔即可生效（無須重啟容器）
+    ollama_runtime_model_path: str = Field(
+        default="/app/sys_settings/ollama_runtime_config.json",
     )
 
     default_temperature: float = 0.85
@@ -45,6 +68,8 @@ class LLMServiceSettings(BaseSettings):
     model_config = SettingsConfigDict(
         extra="ignore",
         frozen=True,
+        env_file=".env",
+        env_file_encoding="utf-8",
     )
 
     @classmethod
@@ -56,8 +81,17 @@ class LLMServiceSettings(BaseSettings):
         dotenv_settings: Any,
         file_secret_settings: Any,
     ) -> Tuple[Any, ...]:
-        """停用 env/dotenv，僅接受初始化參數與 class 預設值。"""
-        return (init_settings,)
+        """允許 init > env > dotenv > file secrets 的覆寫順序。"""
+        return (init_settings, env_settings, dotenv_settings, file_secret_settings)
+
+    def build_pgvector_database_url(self) -> str:
+        """由 PGVECTOR_* 參數在程式內組裝 asyncpg 連線字串。"""
+        encoded_user = quote_plus(self.pgvector_user)
+        encoded_password = quote_plus(self.pgvector_password)
+        return (
+            f"postgresql+asyncpg://{encoded_user}:{encoded_password}"
+            f"@{self.pgvector_host}:{self.pgvector_port}/{self.pgvector_db}"
+        )
 
 class LLMContextSafetyRules(BaseModel):
     """LLM 對於不可信上下文的安全規則。"""

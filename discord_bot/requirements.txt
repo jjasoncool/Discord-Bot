@@ -9,3 +9,21 @@ html2text
 fake-useragent
 pydantic>=2.7,<3
 pydantic-settings>=2.2,<3
+# === DB & ORM ===
+# 用於精確定義資料表，確保歷史紀錄的可觀測性
+SQLAlchemy>=2.0.0
+# PostgreSQL 的同步與非同步驅動程式
+psycopg2-binary
+asyncpg
+# 讓 SQLAlchemy 支援 PostgreSQL 的向量擴充
+pgvector
+
+# === LlamaIndex ===
+# LlamaIndex 核心框架
+llama-index-core
+# 連接本地端 Ollama 進行對話生成
+llama-index-llms-ollama
+# 連接本地端 Ollama 進行向量化 (Embedding)
+llama-index-embeddings-ollama
+# 讓 LlamaIndex 能夠讀寫 pgvector 資料庫
+llama-index-vector-stores-postgres
