@@ -168,13 +168,27 @@ class LLMCommands(commands.Cog):
         )
 
         # 取得歷史聊天上下文（統一契約：list[dict[str, str]]）
+        # 視覺請求時縮短聊天上下文，降低 token 與 timeout 風險。
+        # 注意：max_context_to_send 在 retriever 內代表「聊天訊息數」，
+        # 另會保留 1 行 header，因此最終 sent_count 可能是 6（1 header + 5 聊天）。
+        max_context_messages = ASKAI_SETTINGS.max_context_messages
+        min_recent_context = ASKAI_SETTINGS.min_recent_context
+        max_relevant_context = ASKAI_SETTINGS.max_relevant_context
+        max_context_to_send = ASKAI_SETTINGS.max_context_to_send
+
+        if image is not None:
+            max_context_messages = min(max_context_messages, 20)
+            min_recent_context = min(min_recent_context, 5)
+            max_relevant_context = min(max_relevant_context, 5)
+            max_context_to_send = 5
+
         discord_context, discord_meta = await llm.retrieve_discord_context(
             interaction,
             question,
-            max_context_messages=ASKAI_SETTINGS.max_context_messages,
-            min_recent_context=ASKAI_SETTINGS.min_recent_context,
-            max_relevant_context=ASKAI_SETTINGS.max_relevant_context,
-            max_context_to_send=ASKAI_SETTINGS.max_context_to_send,
+            max_context_messages=max_context_messages,
+            min_recent_context=min_recent_context,
+            max_relevant_context=max_relevant_context,
+            max_context_to_send=max_context_to_send,
             taipei_tz=TAIPEI_TZ,
             logger=logger,
         )

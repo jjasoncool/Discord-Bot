@@ -1,4 +1,4 @@
 {
-  "model": "gemma3:12b",
+  "model": "ministral-3:14b",
   "embed_model": "bge-m3:latest"
 }
