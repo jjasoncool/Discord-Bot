@@ -1,13 +1,54 @@
+"""
+管理命令的模組 (可搭配服務介面與 Cogs 使用)
+"""
 import logging
+import json
+import os
 import discord
 from discord import app_commands
 from discord.ext import commands
-from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message
+from typing import Optional
+
+# 注意：需確保 utils 資料夾下的 utils.py 包含 create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, ChannelConfig 等定義
+from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, ChannelConfig
+# 注意：需確保 services 資料夾下的 intro_profile_service.py 包含 IntroProfilePayload, ImpressionPayload, IntroProfileServiceProtocol, IntroProfileService 等定義
+from services.intro_profile_service import (
+    IntroProfilePayload,
+    ImpressionPayload,
+    IntroProfileServiceProtocol,
+    IntroProfileService,
+)
 
 # 獲取 logger
 logger = logging.getLogger('discord_bot')
+INTRO_PANEL_RUNTIME_FILE = "settings/intro_panel_runtime.json"
 
-# 監控頻道的字典已移動到 user_commands.py
+
+def _load_intro_panel_runtime_config() -> dict:
+    """只讀取 message_id（不進版控）"""
+    if not os.path.exists(INTRO_PANEL_RUNTIME_FILE):
+        return {}
+    try:
+        with open(INTRO_PANEL_RUNTIME_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            # 強制只保留 message_id
+            return {"intro_panel_message_id": data.get("intro_panel_message_id")}
+    except Exception as e:
+        logger.error(f"讀取 {INTRO_PANEL_RUNTIME_FILE} 失敗: {e}", exc_info=True)
+        return {}
+
+
+def _save_intro_panel_runtime_config(message_id: int) -> None:
+    """只寫入 message_id（不存其他東西）"""
+    try:
+        os.makedirs(os.path.dirname(INTRO_PANEL_RUNTIME_FILE), exist_ok=True)
+        data = {"intro_panel_message_id": message_id}
+        with open(INTRO_PANEL_RUNTIME_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        logger.info(f"已更新 runtime.json → message_id={message_id}")
+    except Exception as e:
+        logger.error(f"寫入 {INTRO_PANEL_RUNTIME_FILE} 失敗: {e}", exc_info=True)
+        raise
 
 
 class ServerInfoView(discord.ui.View):
@@ -65,16 +106,271 @@ class ServerManagerView(discord.ui.View):
     async def set_channel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.set_channel_cmd(interaction)
 
+class IntroProfileModal(discord.ui.Modal):
+    """自我介紹 Modal - 已修正初始化與 defer"""
+    def __init__(self, intro_service: IntroProfileServiceProtocol, management_cog: "ManagementCommands"):
+        super().__init__(title="自我介紹", timeout=600)  # 必須明確傳 title + timeout
+
+        self.intro_service = intro_service
+        self.management_cog = management_cog
+
+        # 統一用 list + for 迴圈減少重複 add_item
+        self.alias = discord.ui.TextInput(
+            label="別人常常叫我什麼（暱稱/綽號）",
+            placeholder="例如：阿狗、紅狐...",
+            max_length=50,
+            required=True,
+        )
+        self.wuwa_uid = discord.ui.TextInput(
+            label="鳴潮 UID（選填）",
+            placeholder="例如：123456789",
+            max_length=50,
+            required=False,
+        )
+        self.bio = discord.ui.TextInput(
+            label="自我介紹",
+            placeholder="簡單介紹你自己、遊玩習慣、常上線時間...",
+            style=discord.TextStyle.paragraph,
+            max_length=600,
+            required=True,
+        )
+        self.message_to_all = discord.ui.TextInput(
+            label="想跟群裡的大家說什麼（選填）",
+            placeholder="例如：很高興認識大家！之後請多指教～",
+            style=discord.TextStyle.paragraph,
+            max_length=300,
+            required=False,
+        )
+
+        # 依序加入 Modal (注意：Modal 最多支援 5 個項目)
+        self.add_item(self.alias)
+        self.add_item(self.wuwa_uid)
+        self.add_item(self.bio)
+        self.add_item(self.message_to_all)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)  # 防止超時（最重要！）
+
+        # 以下你原本的程式碼完全保留不變（從 embed 開始）
+        embed = discord.Embed(
+            title="🙋 新的自我介紹",
+            color=discord.Color.blurple(),
+            timestamp=interaction.created_at,
+        )
+        embed.add_field(name="暱稱 / 綽號", value=self.alias.value, inline=False)
+
+        if self.wuwa_uid.value:
+            embed.add_field(name="鳴潮 UID", value=self.wuwa_uid.value, inline=False)
+
+        embed.add_field(name="自我介紹", value=self.bio.value, inline=False)
+
+        if self.message_to_all.value:
+            embed.add_field(name="想對大家說", value=self.message_to_all.value, inline=False)
+
+        embed.set_footer(text=f"提交者：{interaction.user.display_name}")
+
+        # 將 Embed 傳送到觸發指令的頻道
+        await interaction.channel.send(content=f"{interaction.user.mention}", embed=embed)
+
+        # 呼叫後端服務寫入資料 (將資料提供給 RAG 使用)
+        try:
+            # ⚠️ 這裡的 Payload 必須對應你實際的服務實作
+            await self.intro_service.on_intro_submitted(
+                IntroProfilePayload(
+                    guild_id=interaction.guild.id if interaction.guild else 0,
+                    channel_id=interaction.channel.id if interaction.channel else 0,
+                    author_id=interaction.user.id,
+                    alias=self.alias.value,                  # 新增的暱稱欄位
+                    wuwa_uid=self.wuwa_uid.value,            # 新增的鳴潮 UID 欄位
+                    bio=self.bio.value,                      # 原本的自我介紹
+                    message_to_all=self.message_to_all.value # 新增的想說的話
+                )
+            )
+        except Exception as e:
+            logger.error(f"自我介紹 RAG 介面呼叫失敗: {e}", exc_info=True)
+
+        # 直接發送成功訊息（不使用 interaction 回覆）
+        await interaction.channel.send(content=f"{interaction.user.mention} ✅ 已送出你的自我介紹！")
+
+        try:
+            await self.management_cog._auto_bump_intro_panel_after_submission(interaction)
+        except Exception as e:
+            logger.error(f"自我介紹送出後自動 bump 面板失敗: {e}", exc_info=True)
+
+class IntroImpressionModal(discord.ui.Modal):
+    """對他人印象 Modal - 2026 年 2.6.4 官方正確寫法（使用 Label 包裝）"""
+    def __init__(
+        self,
+        intro_service: IntroProfileServiceProtocol,
+        management_cog: "ManagementCommands",
+    ):
+        super().__init__(title="填寫對他人印象", timeout=600)
+
+        self.intro_service = intro_service
+        self.management_cog = management_cog
+
+        logger.info("intro_impression_modal_init: timeout=600, using Label-wrapped UserSelect (2.6.4 supported)")
+
+        # UserSelect 本體（不要給 custom_id，讓 library 自動產生）
+        self.target_select: discord.ui.UserSelect = discord.ui.UserSelect(
+            placeholder="請選擇你要填寫印象的對象...",
+            min_values=1,
+            max_values=1,
+            required=True,   # 2.6+ 在 Modal 內生效
+            row=0,
+        )
+
+        # 關鍵：一定要用 Label 包裝（官方唯一合法寫法）
+        select_label = discord.ui.Label(
+            text="👤 選擇目標使用者",   # 顯示在 Select 上方的文字
+            component=self.target_select,
+        )
+
+        # 其他欄位保持 TextInput（可省略 row，library 會自動排）
+        self.alias_text = discord.ui.TextInput(
+            label="你平常怎麼稱呼他？（綽號/梗名）",
+            placeholder="例如：阿狗、一野...（若無可留白）",
+            max_length=50,
+            required=False,
+        )
+        self.habit_text = discord.ui.TextInput(
+            label="他常常在群裡面做什麼？(請簡答)",
+            placeholder="例如：有錢人、常常搬石、死臭歐...",
+            style=discord.TextStyle.short,
+            max_length=100,
+            required=False,
+        )
+        self.impression = discord.ui.TextInput(
+            label="你對他的整體印象",
+            placeholder="請寫下你對他的印象（帥潮、男娘、手法帝...）",
+            style=discord.TextStyle.paragraph,
+            max_length=600,
+            required=True,
+        )
+
+        # 統一加入（減少重複 add_item）
+        for item in (select_label, self.alias_text, self.habit_text, self.impression):
+            self.add_item(item)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        if not self.target_select.values:
+            await safe_send_interaction_message(interaction, "請務必選擇一個對象！", ephemeral=True)
+            return
+
+        # 以下你原本的 on_submit 程式碼完全保留（從 selected_user 開始）
+        selected_user = self.target_select.values[0]
+        alias = self.alias_text.value.strip()
+        habit = self.habit_text.value.strip()
+
+        display_target = f"{selected_user.mention}"
+        if alias:
+            display_target += f" (大家都叫：**{alias}**)"
+
+        embed = discord.Embed(
+            title="💬 收到對他人的新印象",
+            color=discord.Color.teal(),
+            timestamp=interaction.created_at,
+        )
+        embed.add_field(name="對象", value=display_target, inline=False)
+        if habit:
+            embed.add_field(name="常做的事", value=habit, inline=False)
+        embed.add_field(name="整體印象", value=self.impression.value, inline=False)
+        embed.set_footer(text=f"填寫者：{interaction.user.display_name}")
+
+        await interaction.channel.send(content=f"{interaction.user.mention}", embed=embed)
+
+        try:
+            await self.intro_service.on_impression_submitted(
+                ImpressionPayload(
+                    guild_id=interaction.guild.id if interaction.guild else 0,
+                    channel_id=interaction.channel.id if interaction.channel else 0,
+                    author_id=interaction.user.id,
+                    target_user_id=selected_user.id,
+                    target_alias=alias,
+                    target_habit=habit,
+                    impression=self.impression.value,
+                )
+            )
+        except Exception as e:
+            logger.error(f"他人印象 RAG 介面呼叫失敗: {e}", exc_info=True)
+
+        # 直接發送成功訊息（不使用 interaction 回覆）
+        await interaction.channel.send(
+            content=f"✅ 已成功送出你對 {selected_user.mention} 的印象，謝謝分享！"
+        )
+
+        try:
+            await self.management_cog._auto_bump_intro_panel_after_submission(interaction)
+        except Exception as e:
+            logger.error(f"他人印象送出後自動 bump 面板失敗: {e}", exc_info=True)
+class IntroPanelView(discord.ui.View):
+    """自我介紹面板 persistent view"""
+
+    def __init__(self, intro_service: IntroProfileServiceProtocol, management_cog: "ManagementCommands"):
+        super().__init__(timeout=None)
+        self.intro_service = intro_service
+        self.management_cog = management_cog
+
+    @discord.ui.button(label="✍️ 填寫自我介紹", style=discord.ButtonStyle.primary, custom_id="intro_open_modal")
+    async def intro_open_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(IntroProfileModal(self.intro_service, self.management_cog))
+
+    @discord.ui.button(label="🗣️ 填寫對他人印象", style=discord.ButtonStyle.secondary, custom_id="intro_open_impression_modal")
+    async def intro_open_impression_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        logger.info(
+            "intro_impression_button_clicked user_id=%s guild_id=%s channel_id=%s custom_id=%s",
+            interaction.user.id if interaction.user else None,
+            interaction.guild.id if interaction.guild else None,
+            interaction.channel.id if interaction.channel else None,
+            button.custom_id,
+        )
+        await interaction.response.send_modal(IntroImpressionModal(self.intro_service, self.management_cog))
+
+
 class ManagementCommands(commands.Cog):
-    def __init__(self, bot):
+    def __init__(self, bot, intro_profile_service: Optional[IntroProfileServiceProtocol] = None):
         self.bot = bot
+        self.intro_profile_service: IntroProfileServiceProtocol = intro_profile_service or IntroProfileService()
 
     async def cog_load(self):
         # 註冊 persistent views，避免機器人重啟後主入口按鈕失效
         self.bot.add_view(ServerInfoView(self))
         self.bot.add_view(RoleManagerView(self))
         self.bot.add_view(ServerManagerView(self))
+        self.bot.add_view(IntroPanelView(self.intro_profile_service, self))
         logger.info("已註冊 ManagementCommands persistent views")
+
+    async def _auto_bump_intro_panel_after_submission(self, interaction: discord.Interaction):
+        """提交表單後，自動刪除舊面板並重發置底。"""
+        if not interaction.guild:
+            return
+
+        config_file = "config.json"
+        config = ChannelConfig.load_config(config_file, caller="ManagementCommands")
+        intro_channel_id = config.get("intro_channel_id", ChannelConfig.DEFAULT_ID)
+        if intro_channel_id == ChannelConfig.DEFAULT_ID:
+            logger.info("自動 bump 跳過：intro_channel_id 未設定。")
+            return
+
+        intro_channel = interaction.guild.get_channel(int(intro_channel_id))
+        if not isinstance(intro_channel, discord.TextChannel):
+            logger.warning("自動 bump 跳過：intro_channel_id 非有效文字頻道。id=%s", intro_channel_id)
+            return
+
+        message, deleted_old = await self._publish_intro_panel(
+            guild=interaction.guild,
+            intro_channel=intro_channel,
+            config=config,
+            config_file=config_file,
+        )
+        logger.info(
+            "自動 bump 完成：new_message_id=%s deleted_old=%s channel_id=%s",
+            message.id,
+            deleted_old,
+            intro_channel.id,
+        )
 
     async def _check_guild_and_owner(self, interaction: discord.Interaction, owner_only: bool = True, admin_only: bool = False) -> bool:
         """檢查命令是否在伺服器中使用且使用者是否有相應權限"""
@@ -176,10 +472,11 @@ class ManagementCommands(commands.Cog):
             return
 
         channel_types = {
-            "交易論壇": {"type": discord.ChannelType.forum, "key": "trade_forum_channel_id", "color": discord.Color.blue(), "desc": "交易記錄頻道"},
+            "交易頻道": {"type": discord.ChannelType.forum, "key": "trade_forum_channel_id", "color": discord.Color.blue(), "desc": "交易記錄頻道"},
             "交易紀錄封存": {"type": discord.ChannelType.forum, "key": "archive_channel_id", "color": discord.Color.dark_grey(), "desc": "交易紀錄封存頻道"},
             "購物車交付": {"type": discord.ChannelType.text, "key": "cart_delivery_channel_id", "color": discord.Color.green(), "desc": "購物車交付通知頻道"},
-            "官方文章更新": {"type": discord.ChannelType.text, "key": "article_monitor_channel_id", "color": discord.Color.orange(), "desc": "自動發送官方最新文章的頻道"}
+            "官方文章更新": {"type": discord.ChannelType.text, "key": "article_monitor_channel_id", "color": discord.Color.orange(), "desc": "自動發送官方最新文章的頻道"},
+            "自我介紹頻道": {"type": discord.ChannelType.text, "key": "intro_channel_id", "color": discord.Color.purple(), "desc": "使用者填寫自我介紹的頻道"}
         }
 
         # 創建頻道類型選單
@@ -224,25 +521,35 @@ class ManagementCommands(commands.Cog):
                 channel = interaction.guild.get_channel(selected_channel_id)
                 if channel and channel.type == channel_info["type"]:
                     # 儲存設定到 JSON 檔案
-                    import json
-                    import os
                     config_file = "config.json"
-                    config = {}
-                    if os.path.exists(config_file):
-                        try:
-                            with open(config_file, 'r') as f:
-                                config = json.load(f)
-                        except json.JSONDecodeError:
-                            logger.error(f"無法讀取 {config_file}，將創建新檔案")
+                    config = ChannelConfig.load_config(config_file, caller="ManagementCommands")
 
                     config[channel_info["key"]] = selected_channel_id
-                    with open(config_file, 'w') as f:
-                        json.dump(config, f, indent=2)
+
+                    auto_panel_note = ""
+                    if channel_info["key"] == "intro_channel_id" and isinstance(channel, discord.TextChannel):
+                        try:
+                            panel_message, deleted_old = await self._replace_intro_panel_message(
+                                interaction.guild,
+                                channel,
+                                config,
+                            )
+                            auto_panel_note = f"\n🤖 已自動發送填寫面板：{panel_message.jump_url}"
+                            if deleted_old:
+                                auto_panel_note += "\n🧹 舊頻道面板已刪除。"
+                        except Exception as e:
+                            logger.error(f"設定自我介紹頻道後自動發送面板失敗: {e}", exc_info=True)
+                            runtime_cfg = _load_intro_panel_runtime_config()
+                            runtime_cfg.pop("intro_panel_message_id", None)
+                            _save_intro_panel_runtime_config(ChannelConfig.DEFAULT_ID)
+                            auto_panel_note = "\n⚠️ 自動發送面板失敗，系統會在下一次有人送出表單時自動重新 bump。"
+
+                    ChannelConfig.save_config(config, config_file, caller="ManagementCommands")
 
                     await interaction.response.edit_message(view=None)
                     await safe_send_interaction_message(
                         interaction,
-                        f"✅ 已將{selected_type}頻道設定為 **{channel.name}** (ID: {selected_channel_id})！",
+                        f"✅ 已將{selected_type}頻道設定為 **{channel.name}** (ID: {selected_channel_id})！{auto_panel_note}",
                         ephemeral=True
                     )
                     logger.info(f"{selected_type}頻道已設定為 {channel.name} (ID: {selected_channel_id})")
@@ -597,7 +904,121 @@ class ManagementCommands(commands.Cog):
         )
         await safe_send_interaction_message(interaction, embed=embed, view=action_view, ephemeral=True)
 
-    # on_message 監聽器已移動到 user_commands.py
+    async def send_intro_panel_cmd(self, interaction: discord.Interaction):
+        """在設定好的自我介紹頻道發送/更新填寫面板（非斜線指令入口）。"""
+        logger.info(f'收到來自 {interaction.user} 的 intro_panel 請求')
+
+        if not await self._check_guild_and_owner(interaction, owner_only=True):
+            return
+
+        from utils.utils import get_intro_channel_id
+        intro_channel_id = await get_intro_channel_id(config_file="config.json", caller="ManagementCommands")
+
+        if intro_channel_id == ChannelConfig.DEFAULT_ID:
+            await safe_send_interaction_message(
+                interaction,
+                "❌ 尚未設定自我介紹頻道，請先到 `/server_manager` -> `頻道設定` 完成設定。",
+                ephemeral=True,
+            )
+            return
+
+        intro_channel = interaction.guild.get_channel(intro_channel_id)
+        if not isinstance(intro_channel, discord.TextChannel):
+            await safe_send_interaction_message(
+                interaction,
+                f"❌ 找不到有效的自我介紹文字頻道（ID: {intro_channel_id}）。",
+                ephemeral=True,
+            )
+            return
+
+        config_file = "config.json"
+        config = ChannelConfig.load_config(config_file, caller="ManagementCommands")
+
+        message, deleted_old = await self._publish_intro_panel(
+            guild=interaction.guild,
+            intro_channel=intro_channel,
+            config=config,
+            config_file=config_file,
+        )
+
+        deleted_note = "\n🧹 舊頻道面板已刪除。" if deleted_old else ""
+        await safe_send_interaction_message(
+            interaction,
+            f"✅ 已在 {intro_channel.mention} 發送填寫自我介紹面板。\n🔗 {message.jump_url}{deleted_note}",
+            ephemeral=True,
+        )
+
+    def _build_intro_panel_embed(self) -> discord.Embed:
+        """建立自我介紹面板的統一 Embed。"""
+        embed = discord.Embed(
+            title="👋 自我介紹區",
+            description="歡迎！請點擊下方按鈕填寫自我介紹，或填寫對他人的印象。",
+            color=discord.Color.purple(),
+        )
+        embed.add_field(
+            name="操作方式",
+            value="1)【✍️ 填寫自我介紹】\n2)【🗣️ 填寫對他人印象】\n點擊後會跳出表單（Modal）",
+            inline=False,
+        )
+        return embed
+
+    async def _send_intro_panel_to_channel(self, intro_channel: discord.TextChannel) -> discord.Message:
+        """在指定頻道發送自我介紹面板。"""
+        embed = self._build_intro_panel_embed()
+        return await intro_channel.send(embed=embed, view=IntroPanelView(self.intro_profile_service, self))
+
+    async def _publish_intro_panel(
+        self,
+        guild: discord.Guild,
+        intro_channel: discord.TextChannel,
+        config: dict,
+        config_file: str = "config.json",
+    ) -> tuple[discord.Message, bool]:
+        """統一發布流程：刪除舊面板、發送新面板、更新設定檔。"""
+        message, deleted_old = await self._replace_intro_panel_message(
+            guild,
+            intro_channel,
+            config,
+        )
+        # 其他設定仍維持寫回 config.json；面板訊息 ID 改由 runtime 檔管理
+        ChannelConfig.save_config(config, config_file, caller="ManagementCommands")
+        return message, deleted_old
+
+    async def _replace_intro_panel_message(
+        self,
+        guild: discord.Guild,
+        intro_channel: discord.TextChannel,
+        config: dict,
+    ) -> tuple[discord.Message, bool]:
+        """刪除舊面板並發新面板（runtime 只存 message_id）"""
+        deleted_old = False
+
+        runtime_cfg = _load_intro_panel_runtime_config()
+        old_channel_id = config.get("intro_panel_channel_id", ChannelConfig.DEFAULT_ID)
+        old_message_id = runtime_cfg.get("intro_panel_message_id", ChannelConfig.DEFAULT_ID)
+
+        if old_channel_id != ChannelConfig.DEFAULT_ID and old_message_id != ChannelConfig.DEFAULT_ID:
+            old_channel = guild.get_channel(int(old_channel_id))
+            if isinstance(old_channel, discord.TextChannel):
+                try:
+                    old_message = await old_channel.fetch_message(int(old_message_id))
+                    await old_message.delete()
+                    deleted_old = True
+                    logger.info(f"已刪除舊面板 message_id={old_message_id}")
+                except discord.NotFound:
+                    logger.info("舊面板不存在，略過刪除")
+                except discord.Forbidden:
+                    logger.warning("無權限刪除舊面板")
+
+        # 發送新面板
+        message = await self._send_intro_panel_to_channel(intro_channel)
+
+        # 更新 config.json（channel_id）
+        config["intro_panel_channel_id"] = intro_channel.id
+        # 更新 runtime.json（只存 message_id）
+        _save_intro_panel_runtime_config(message.id)
+
+        return message, deleted_old
 
 async def setup(bot):
     await bot.add_cog(ManagementCommands(bot))

@@ -102,6 +102,34 @@ class ChannelConfig:
     DEFAULT_ID = 1234567890  # 預設佔位符 ID
 
     @staticmethod
+    def load_config(config_file="config.json", caller="unknown") -> dict:
+        """讀取完整設定檔，讀取失敗時回傳空 dict。"""
+        logger.debug(f"開始讀取設定檔: {config_file} (調用者: {caller})")
+        config = {}
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, 'r') as f:
+                    config = json.load(f)
+            except json.JSONDecodeError as e:
+                logger.error(f"無法讀取 {config_file}，JSON 解碼錯誤: {str(e)} (調用者: {caller})")
+            except Exception as e:
+                logger.error(f"讀取 {config_file} 時發生未知錯誤: {str(e)} (調用者: {caller})")
+        else:
+            logger.warning(f"配置文件 {config_file} 不存在，回傳空設定 (調用者: {caller})")
+        return config
+
+    @staticmethod
+    def save_config(config: dict, config_file="config.json", caller="unknown") -> None:
+        """寫入完整設定檔。"""
+        try:
+            with open(config_file, 'w') as f:
+                json.dump(config, f, indent=2)
+            logger.debug(f"設定檔已寫入: {config_file} (調用者: {caller})")
+        except Exception as e:
+            logger.error(f"寫入 {config_file} 失敗: {str(e)} (調用者: {caller})")
+            raise
+
+    @staticmethod
     async def get_channel_id(config_key, config_file="config.json", caller="unknown"):
         """從配置文件中讀取指定鍵的頻道 ID"""
         logger.debug(f"開始讀取頻道 ID，鍵: {config_key}，配置文件: {config_file}，調用者: {caller}")
@@ -135,6 +163,10 @@ async def get_cart_delivery_channel_id(config_file="config.json", caller="unknow
 async def get_archive_channel_id(config_file="config.json", caller="unknown"):
     """從配置文件中讀取封存頻道 ID"""
     return await ChannelConfig.get_channel_id('archive_channel_id', config_file, caller)
+
+async def get_intro_channel_id(config_file="config.json", caller="unknown"):
+    """從配置文件中讀取自我介紹頻道 ID"""
+    return await ChannelConfig.get_channel_id('intro_channel_id', config_file, caller)
 
 async def check_role(user, required_role: str = None) -> bool:
     """
