@@ -66,7 +66,7 @@ def append_askai_response_log(
     question: str,
     reply: str,
     discord_meta: dict[str, int],
-    rag_meta: dict[str, int | bool],
+    rag_meta: dict[str, int | bool | str],
 ) -> None:
     """將每次 askai 的輸入/輸出與必要統計 append 到 jsonl，供後續觀察改善。"""
     guild_id = interaction.guild.id if interaction.guild else None
@@ -192,7 +192,22 @@ class LLMCommands(commands.Cog):
             taipei_tz=TAIPEI_TZ,
             logger=logger,
         )
-        rag_context, rag_meta = await llm.retrieve_rag_context(question)
+
+        participant_user_ids: list[int] = []
+        for item in discord_context:
+            author_id_raw = str(item.get("author_id", "")).strip()
+            if author_id_raw.isdigit():
+                participant_user_ids.append(int(author_id_raw))
+        participant_user_ids = list(dict.fromkeys(participant_user_ids))
+
+        rag_context, rag_meta = await llm.retrieve_rag_context(
+            question=question,
+            guild_id=interaction.guild.id if interaction.guild else None,
+            requester_user_id=interaction.user.id if interaction.user else None,
+            participant_user_ids=participant_user_ids,
+            logger=logger,
+            top_k=5,
+        )
 
         # 統一把多來源 context 合併後交給 Service 層做安全序列化
         context_items = [*discord_context, *rag_context] if (discord_context or rag_context) else None

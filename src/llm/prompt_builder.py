@@ -10,7 +10,7 @@ def build_askai_prompt_log(
     discord_context: list[dict[str, str]],
     rag_context: list[dict[str, str]],
     discord_meta: dict[str, int],
-    rag_meta: dict[str, int | bool],
+    rag_meta: dict[str, int | bool | str],
     retrieval_debug: dict[str, object] | None,
     image_meta: dict[str, str | int | bool] | None,
     max_context_messages: int,

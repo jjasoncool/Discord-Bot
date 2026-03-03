@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import json
+import re
 from collections import defaultdict
 from datetime import timezone
 from typing import Any
@@ -10,6 +12,16 @@ from typing import Any
 import discord
 
 from llm.tokenization import tokenize_for_retrieval, tokens_for_debug
+from llm.persona_card_builder import (
+    PERSONA_MAX_PARTICIPANTS,
+    PERSONA_MAX_CARDS,
+    classify_persona_intent,
+    expand_alias_candidates,
+    extract_mentioned_user_ids,
+    build_persona_cards,
+    format_persona_cards_for_context,
+    normalize_alias_text,
+)
 from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
 from sys_settings.llm_settings import (
     LLMServiceSettings,
@@ -30,6 +42,11 @@ except Exception:  # pragma: no cover - 依賴可能在部份環境尚未安裝
     VectorStoreIndex = None
     OllamaEmbedding = None
     PGVectorStore = None
+
+try:
+    import psycopg2
+except Exception:  # pragma: no cover - 依賴可能在部份環境尚未安裝
+    psycopg2 = None
 
 
 LLM_SETTINGS = LLMServiceSettings()
@@ -355,8 +372,9 @@ def _build_discord_context_item(msg: discord.Message, tz: timezone) -> dict[str,
     time_str = msg.created_at.astimezone(tz).strftime("%Y-%m-%d %H:%M")
     compact_content = " ".join(msg.content.split())
 
-    # 產出格式範例：[2026-02-26 14:30] 老哥(98765432): 昨天抽卡又保底了
-    formatted_text = f"[{time_str}] {display_name}({msg.author.id}): {compact_content}"
+    # 產出格式範例：[2026-02-26 14:30] 老哥: 昨天抽卡又保底了
+    # author_id 保留在 metadata，避免 content 重複佔用 token。
+    formatted_text = f"[{time_str}] {display_name}: {compact_content}"
 
     return {
         "role": "user",
@@ -552,11 +570,320 @@ async def retrieve_discord_context(
 
 
 async def retrieve_rag_context(
+    *,
     question: str,
-) -> tuple[list[dict[str, str]], dict[str, int | bool]]:
-    """RAG 檢索擴充點：目前先保留介面，尚未啟用資料來源。"""
-    _ = question
-    return [], {
-        "enabled": False,
+    guild_id: int | None,
+    requester_user_id: int | None,
+    participant_user_ids: list[int] | None,
+    logger: logging.Logger,
+    top_k: int = 5,
+) -> tuple[list[dict[str, str]], dict[str, int | bool | str]]:
+    """檢索 member_profile RAG（guild scoped + identity aware + persona cards）。"""
+
+    meta: dict[str, int | bool | str] = {
+        "enabled": True,
+        "intent": "general",
+        "sql_identity_hits": 0,
+        "sql_participant_hits": 0,
+        "sql_alias_hits": 0,
+        "vector_hits": 0,
+        "dedup_hits": 0,
+        "participant_count": 0,
+        "cards_generated": 0,
+        "cards_sent": 0,
+        "selected_count_before_trim": 0,
+        "trimmed_count": 0,
         "sent_count": 0,
+        "self_match_count": 0,
+        "target_match_count": 0,
+        "alias_match_count": 0,
     }
+
+    if not question.strip() or not guild_id:
+        logger.info("/askai member-profile RAG skipped: empty question or missing guild")
+        return [], meta
+
+    source = HYBRID_RETRIEVAL_SETTINGS.get_source("member_profile")
+    if source is None:
+        meta["enabled"] = False
+        logger.info("/askai member-profile RAG skipped: source disabled")
+        return [], meta
+
+    intent = classify_persona_intent(question)
+    meta["intent"] = intent
+
+    table_name = source.table_name
+    physical_table = f"data_{re.sub(r'[^a-zA-Z0-9_]', '', table_name)}"
+    alias_hints = expand_alias_candidates(question)
+    mentioned_user_ids = extract_mentioned_user_ids(question)
+    participant_ids = [str(uid) for uid in (participant_user_ids or []) if uid]
+    participant_ids = list(dict.fromkeys(participant_ids))[:PERSONA_MAX_PARTICIPANTS]
+    meta["participant_count"] = len(participant_ids)
+
+    collected: list[dict[str, Any]] = []
+
+    # Stage 1: 高精度 identity SQL
+    if psycopg2 is not None and requester_user_id is not None:
+        try:
+            with psycopg2.connect(
+                host=LLM_SETTINGS.pgvector_host,
+                port=LLM_SETTINGS.pgvector_port,
+                dbname=LLM_SETTINGS.pgvector_db,
+                user=LLM_SETTINGS.pgvector_user,
+                password=LLM_SETTINGS.pgvector_password,
+            ) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        SELECT id, text, metadata_
+                        FROM {physical_table}
+                        WHERE metadata_->>'doc_type' = 'member_profile'
+                          AND metadata_->>'guild_id' = %s
+                          AND (
+                                (metadata_->>'profile_kind' = 'intro_profile' AND metadata_->>'author_id' = %s)
+                             OR (metadata_->>'profile_kind' = 'impression' AND metadata_->>'target_user_id' = %s)
+                          )
+                        ORDER BY id DESC
+                        LIMIT %s
+                        """,
+                        (str(guild_id), str(requester_user_id), str(requester_user_id), max(3, top_k)),
+                    )
+                    for row_id, row_text, row_meta in cur.fetchall():
+                        parsed_meta = row_meta
+                        if isinstance(parsed_meta, str):
+                            parsed_meta = json.loads(parsed_meta)
+                        collected.append(
+                            {
+                                "db_id": row_id,
+                                "text": row_text or "",
+                                "metadata": parsed_meta if isinstance(parsed_meta, dict) else {},
+                                "source": "sql_identity",
+                            }
+                        )
+            meta["sql_identity_hits"] = len(collected)
+        except Exception as exc:
+            logger.warning("member-profile SQL identity retrieval 失敗，改走 vector: %s", exc)
+
+    # Stage 0: 聊天參與者關聯（除了 requester 以外的近期主角）
+    if psycopg2 is not None and participant_ids:
+        try:
+            with psycopg2.connect(
+                host=LLM_SETTINGS.pgvector_host,
+                port=LLM_SETTINGS.pgvector_port,
+                dbname=LLM_SETTINGS.pgvector_db,
+                user=LLM_SETTINGS.pgvector_user,
+                password=LLM_SETTINGS.pgvector_password,
+            ) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        SELECT id, text, metadata_
+                        FROM {physical_table}
+                        WHERE metadata_->>'doc_type' = 'member_profile'
+                          AND metadata_->>'guild_id' = %s
+                          AND (
+                                (metadata_->>'profile_kind' = 'intro_profile' AND metadata_->>'author_id' = ANY(%s))
+                             OR (metadata_->>'profile_kind' = 'impression' AND metadata_->>'target_user_id' = ANY(%s))
+                          )
+                        ORDER BY id DESC
+                        LIMIT %s
+                        """,
+                        (str(guild_id), participant_ids, participant_ids, max(8, top_k + 3)),
+                    )
+                    part_rows = cur.fetchall()
+                    for row_id, row_text, row_meta in part_rows:
+                        parsed_meta = row_meta
+                        if isinstance(parsed_meta, str):
+                            parsed_meta = json.loads(parsed_meta)
+                        collected.append(
+                            {
+                                "db_id": row_id,
+                                "text": row_text or "",
+                                "metadata": parsed_meta if isinstance(parsed_meta, dict) else {},
+                                "source": "sql_participant",
+                            }
+                        )
+            meta["sql_participant_hits"] = len(part_rows)
+        except Exception as exc:
+            logger.warning("member-profile SQL participant retrieval 失敗: %s", exc)
+
+    # Stage 2: alias SQL 輔助
+    if psycopg2 is not None and (alias_hints or mentioned_user_ids):
+        try:
+            with psycopg2.connect(
+                host=LLM_SETTINGS.pgvector_host,
+                port=LLM_SETTINGS.pgvector_port,
+                dbname=LLM_SETTINGS.pgvector_db,
+                user=LLM_SETTINGS.pgvector_user,
+                password=LLM_SETTINGS.pgvector_password,
+            ) as conn:
+                with conn.cursor() as cur:
+                    like_values = [f"%{hint}%" for hint in alias_hints] or ["%__never_match__%"]
+                    placeholders = ",".join(["%s"] * len(like_values))
+                    cur.execute(
+                        f"""
+                        SELECT id, text, metadata_
+                        FROM {physical_table}
+                        WHERE metadata_->>'doc_type' = 'member_profile'
+                          AND metadata_->>'guild_id' = %s
+                          AND (
+                                metadata_->>'alias' ILIKE ANY(ARRAY[{placeholders}])
+                             OR metadata_->>'target_alias' ILIKE ANY(ARRAY[{placeholders}])
+                             OR metadata_->>'author_id' = ANY(%s)
+                             OR metadata_->>'target_user_id' = ANY(%s)
+                          )
+                        ORDER BY id DESC
+                        LIMIT %s
+                        """,
+                        [
+                            str(guild_id),
+                            *like_values,
+                            *like_values,
+                            mentioned_user_ids or ["0"],
+                            mentioned_user_ids or ["0"],
+                            max(6, top_k + 2),
+                        ],
+                    )
+                    alias_rows = cur.fetchall()
+                    for row_id, row_text, row_meta in alias_rows:
+                        parsed_meta = row_meta
+                        if isinstance(parsed_meta, str):
+                            parsed_meta = json.loads(parsed_meta)
+                        collected.append(
+                            {
+                                "db_id": row_id,
+                                "text": row_text or "",
+                                "metadata": parsed_meta if isinstance(parsed_meta, dict) else {},
+                                "source": "sql_alias",
+                            }
+                        )
+            meta["sql_alias_hits"] = len(alias_rows)
+        except Exception as exc:
+            logger.warning("member-profile SQL alias retrieval 失敗: %s", exc)
+
+    # Stage 3: 語意檢索（LlamaIndex PGVectorStore）
+    vector_nodes: list[Any] = []
+    if VectorStoreIndex is not None and PGVectorStore is not None:
+        try:
+            embed_model = _get_embed_model(logger)
+            if embed_model is not None:
+                vector_store = PGVectorStore.from_params(
+                    database=LLM_SETTINGS.pgvector_db,
+                    host=LLM_SETTINGS.pgvector_host,
+                    password=LLM_SETTINGS.pgvector_password,
+                    port=LLM_SETTINGS.pgvector_port,
+                    user=LLM_SETTINGS.pgvector_user,
+                    table_name=table_name,
+                    embed_dim=HYBRID_RETRIEVAL_SETTINGS.pgvector_embed_dim,
+                    hybrid_search=True,
+                )
+                index = VectorStoreIndex.from_vector_store(
+                    vector_store=vector_store,
+                    embed_model=embed_model,
+                )
+                retriever = index.as_retriever(
+                    similarity_top_k=max(top_k * 2, HYBRID_RETRIEVAL_SETTINGS.hybrid_candidate_pool // 2)
+                )
+                vector_nodes = retriever.retrieve(question)
+                meta["vector_hits"] = len(vector_nodes)
+                for node in vector_nodes:
+                    md = node.metadata if isinstance(node.metadata, dict) else {}
+                    if str(md.get("guild_id", "")) != str(guild_id):
+                        continue
+                    collected.append(
+                        {
+                            "db_id": md.get("ref_doc_id") or md.get("doc_id") or md.get("document_id") or "",
+                            "text": node.text or "",
+                            "metadata": md,
+                            "source": "vector",
+                        }
+                    )
+        except Exception as exc:
+            logger.warning("member-profile vector retrieval 失敗（保留 SQL 結果）: %s", exc)
+
+    dedup: dict[str, dict[str, Any]] = {}
+    for item in collected:
+        md = item.get("metadata") or {}
+        dedup_key = str(
+            md.get("ref_doc_id")
+            or md.get("doc_id")
+            or md.get("document_id")
+            or item.get("db_id")
+            or hash(item.get("text", ""))
+        )
+        if dedup_key not in dedup:
+            dedup[dedup_key] = item
+            continue
+
+        # 保留更高精度來源
+        priority = {"sql_identity": 3, "sql_alias": 2, "vector": 1}
+        if priority.get(item.get("source", ""), 0) > priority.get(dedup[dedup_key].get("source", ""), 0):
+            dedup[dedup_key] = item
+
+    dedup_docs = list(dedup.values())
+    meta["dedup_hits"] = len(dedup_docs)
+
+    # 按優先度+新舊排序
+    source_priority = {"sql_identity": 0, "sql_alias": 1, "vector": 2}
+    dedup_docs.sort(key=lambda d: (source_priority.get(d.get("source", "vector"), 9), -int(d.get("db_id") or 0 if str(d.get("db_id") or "").isdigit() else 0)))
+
+    for doc in dedup_docs:
+        md = doc.get("metadata") or {}
+        author_id = str(md.get("author_id", ""))
+        target_user_id = str(md.get("target_user_id", ""))
+        alias = str(md.get("alias", "") or md.get("target_alias", "")).strip()
+
+        if requester_user_id is not None and author_id == str(requester_user_id):
+            meta["self_match_count"] += 1
+        if requester_user_id is not None and target_user_id == str(requester_user_id):
+            meta["target_match_count"] += 1
+        if alias and any(h in normalize_alias_text(alias) for h in alias_hints):
+            meta["alias_match_count"] += 1
+
+    persona_cards = build_persona_cards(
+        docs=dedup_docs,
+        requester_user_id=requester_user_id,
+        participant_user_ids=participant_ids,
+        intent=intent,
+        alias_hints=alias_hints,
+        max_cards=min(max(1, top_k), PERSONA_MAX_CARDS),
+    )
+    meta["cards_generated"] = len(persona_cards)
+
+    rag_context = format_persona_cards_for_context(persona_cards)
+    meta["cards_sent"] = max(0, len(rag_context) - 1 if rag_context else 0)
+
+    meta["selected_count_before_trim"] = len(rag_context)
+    card_budget = min(max(1, top_k), PERSONA_MAX_CARDS)
+    if len(rag_context) > card_budget + 1:
+        meta["trimmed_count"] = len(rag_context) - (card_budget + 1)
+        rag_context = [rag_context[0], *rag_context[-card_budget:]]
+
+    meta["sent_count"] = len(rag_context)
+    logger.info(
+        "/askai member-profile RAG stats: guild=%s requester=%s intent=%s participant=%s alias_hints=%s sql_identity=%s sql_participant=%s sql_alias=%s vector=%s dedup=%s cards=%s self=%s target=%s alias=%s sent=%s",
+        guild_id,
+        requester_user_id,
+        intent,
+        meta["participant_count"],
+        len(alias_hints),
+        meta["sql_identity_hits"],
+        meta["sql_participant_hits"],
+        meta["sql_alias_hits"],
+        meta["vector_hits"],
+        meta["dedup_hits"],
+        meta["cards_sent"],
+        meta["self_match_count"],
+        meta["target_match_count"],
+        meta["alias_match_count"],
+        meta["sent_count"],
+    )
+
+    if meta["sent_count"] == 0:
+        logger.info(
+            "/askai member-profile RAG miss: guild=%s requester=%s reason=no_docs_after_filter",
+            guild_id,
+            requester_user_id,
+        )
+
+    return rag_context, meta

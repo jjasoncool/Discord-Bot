@@ -6,10 +6,13 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Protocol, runtime_checkable
 
 from sys_settings.llm_settings import LLMServiceSettings, load_ollama_runtime_config
 from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
+
+import psycopg2
 
 try:
     from llama_index.core import Document, VectorStoreIndex
@@ -107,6 +110,107 @@ class PgVectorIntroRAGPort:
         self._embed_model = None
         self._embed_model_name: str | None = None
         self._index = None
+        self._schema_ready = False
+
+    def _get_physical_table_name(self) -> str:
+        """LlamaIndex PGVectorStore 的實體表名稱通常為 data_<table_name>。"""
+        # 僅允許英數與底線，避免 identifier 注入
+        safe = re.sub(r"[^a-zA-Z0-9_]", "", self.table_name)
+        return f"data_{safe}"
+
+    def _get_db_conn(self):
+        return psycopg2.connect(
+            host=self.settings.pgvector_host,
+            port=self.settings.pgvector_port,
+            dbname=self.settings.pgvector_db,
+            user=self.settings.pgvector_user,
+            password=self.settings.pgvector_password,
+        )
+
+    def _ensure_schema_constraints(self) -> None:
+        """建立跨環境可重現的約束（idempotent）。"""
+        if self._schema_ready:
+            return
+
+        table = self._get_physical_table_name()
+
+        try:
+            with self._get_db_conn() as conn:
+                with conn.cursor() as cur:
+                    # 1) 先去重：同 ref_doc_id 只保留最新一筆
+                    cur.execute(
+                        f"""
+                        WITH ranked AS (
+                            SELECT
+                                id,
+                                metadata_->>'ref_doc_id' AS ref_doc_id,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY metadata_->>'ref_doc_id'
+                                    ORDER BY id DESC
+                                ) AS rn
+                            FROM {table}
+                            WHERE metadata_->>'ref_doc_id' IS NOT NULL
+                        )
+                        DELETE FROM {table} t
+                        USING ranked r
+                        WHERE t.id = r.id
+                          AND r.rn > 1;
+                        """
+                    )
+
+                    # 2) 對 ref_doc_id 建立唯一索引，確保相同業務 key 不重複
+                    cur.execute(
+                        f"""
+                        CREATE UNIQUE INDEX IF NOT EXISTS {self.table_name}_uniq_ref_doc_id
+                        ON {table} ((metadata_->>'ref_doc_id'))
+                        WHERE metadata_->>'ref_doc_id' IS NOT NULL;
+                        """
+                    )
+
+                    # 3) 補常用查詢索引（guild + profile_kind + author/target）
+                    cur.execute(
+                        f"""
+                        CREATE INDEX IF NOT EXISTS {self.table_name}_idx_profile_author
+                        ON {table} (
+                            (metadata_->>'guild_id'),
+                            (metadata_->>'profile_kind'),
+                            (metadata_->>'author_id')
+                        );
+                        """
+                    )
+                    cur.execute(
+                        f"""
+                        CREATE INDEX IF NOT EXISTS {self.table_name}_idx_profile_target
+                        ON {table} (
+                            (metadata_->>'guild_id'),
+                            (metadata_->>'profile_kind'),
+                            (metadata_->>'target_user_id')
+                        );
+                        """
+                    )
+
+            self._schema_ready = True
+            logger.info("Intro RAG schema constraints ready: table=%s", table)
+        except Exception as exc:
+            logger.error("建立 Intro RAG schema constraints 失敗: %s", exc, exc_info=True)
+
+    def _delete_existing_doc(self, *, doc_id: str) -> None:
+        """應用層 replace：寫入前刪除相同 ref_doc_id/doc_id 舊資料。"""
+        table = self._get_physical_table_name()
+        try:
+            with self._get_db_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        DELETE FROM {table}
+                        WHERE metadata_->>'ref_doc_id' = %s
+                           OR metadata_->>'doc_id' = %s
+                           OR metadata_->>'document_id' = %s;
+                        """,
+                        (doc_id, doc_id, doc_id),
+                    )
+        except Exception as exc:
+            logger.error("刪除舊 Intro RAG 文件失敗: doc_id=%s err=%s", doc_id, exc, exc_info=True)
 
     def _dependencies_ready(self) -> bool:
         if any(dep is None for dep in (Document, VectorStoreIndex, OllamaEmbedding, PGVectorStore)):
@@ -148,10 +252,13 @@ class PgVectorIntroRAGPort:
             vector_store=vector_store,
             embed_model=embed_model,
         )
+        self._ensure_schema_constraints()
         return self._index
 
     def _insert(self, *, doc_id: str, text: str, metadata: dict[str, str]) -> None:
         index = self._get_index()
+        # 應用層 replace：同 business key 重送時更新為新版本
+        self._delete_existing_doc(doc_id=doc_id)
         doc = Document(
             text=text,
             doc_id=doc_id,
