@@ -13,6 +13,8 @@ async def safe_send_interaction_message(
     content: str = None,
     *,
     ephemeral: bool = True,
+    prefer_followup: bool = False,
+    defer_first: bool = False,
     max_retries: int = 2,
     retry_base_delay: float = 0.8,
     **kwargs
@@ -31,13 +33,38 @@ async def safe_send_interaction_message(
 
     for attempt in range(max_retries + 1):
         try:
+            # 長任務場景可先 defer，後續統一走 followup
+            if defer_first and not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=ephemeral)
+
+            if prefer_followup:
+                return await interaction.followup.send(content=content, ephemeral=ephemeral, **kwargs)
+
             if interaction.response.is_done():
                 return await interaction.followup.send(content=content, ephemeral=ephemeral, **kwargs)
             return await interaction.response.send_message(content=content, ephemeral=ephemeral, **kwargs)
+        except discord.InteractionResponded:
+            # 競態下 response 可能剛被其他流程回覆，改走 followup
+            return await interaction.followup.send(content=content, ephemeral=ephemeral, **kwargs)
         except discord.HTTPException as e:
             status = getattr(e, "status", None)
             retryable = status == 429 or (isinstance(status, int) and 500 <= status < 600)
             is_last_attempt = attempt >= max_retries
+
+            # 10062 Unknown interaction 多半是 token 已失效，直接停止重試
+            error_code = getattr(e, "code", None)
+            if status == 404 and error_code == 10062:
+                logger.error(
+                    "safe_send_interaction_message 互動已失效(10062): attempt=%s/%s user_id=%s guild_id=%s channel_id=%s command=%s custom_id=%s",
+                    attempt + 1,
+                    max_retries + 1,
+                    interaction.user.id if interaction.user else None,
+                    guild_id,
+                    channel_id,
+                    command_name,
+                    custom_id,
+                )
+                raise
 
             if not retryable or is_last_attempt:
                 logger.error(

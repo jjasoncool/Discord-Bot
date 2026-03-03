@@ -2,6 +2,7 @@ import logging
 import asyncio
 import discord
 import traceback
+from datetime import datetime, timezone
 from discord import app_commands
 from discord.ext import commands
 from utils.utils import safe_send_interaction_message
@@ -156,14 +157,26 @@ class TestCommands(commands.Cog):
             await safe_send_interaction_message(interaction, "您沒有權限查看此伺服器中的任何論壇頻道。", ephemeral=True)
             return
 
+        # Discord Select 最多只能放 25 個選項，這裡先限制為前 25 個可見論壇頻道
+        forum_channels.sort(key=lambda ch: ch.position)
+        selectable_forum_channels = forum_channels[:25]
+        truncated_count = max(0, len(forum_channels) - len(selectable_forum_channels))
+
         # 創建選擇頻道的嵌入訊息
         embed = discord.Embed(
             title="選擇一個論壇頻道",
             description="請從以下論壇頻道中選擇一個以查看前20則貼文：",
             color=discord.Color.blue()
         )
-        for i, channel in enumerate(forum_channels, 1):
+        for i, channel in enumerate(selectable_forum_channels, 1):
             embed.add_field(name=f"{i}. {channel.name}", value=f"ID: {channel.id}", inline=False)
+
+        if truncated_count > 0:
+            embed.add_field(
+                name="⚠️ 頻道過多",
+                value=f"此伺服器共有 {len(forum_channels)} 個可見論壇頻道，僅顯示前 25 個供選擇。",
+                inline=False,
+            )
 
         # 創建下拉選單
         select = discord.ui.Select(
@@ -171,50 +184,103 @@ class TestCommands(commands.Cog):
             custom_id="test_list_forum_posts_channel_select",
             options=[
                 discord.SelectOption(label=channel.name, value=str(channel.id), description=f"ID: {channel.id}")
-                for channel in forum_channels
+                for channel in selectable_forum_channels
             ]
         )
 
         async def select_callback(interaction: discord.Interaction):
             """處理下拉選單的回調，顯示選定頻道的前20則貼文"""
             logger.info(f'開始執行 select_callback，選擇的頻道ID: {select.values[0]}')
+
+            async def send_followup(*, content: str = None, embed: discord.Embed = None):
+                """此 callback 一律走 followup，避免 response 狀態不一致造成 Unknown interaction。"""
+                return await interaction.followup.send(content=content, embed=embed, ephemeral=True)
+
             try:
+                # 先回應互動，避免後續抓取 threads/archived 時超過 3 秒導致 Unknown interaction
+                if not interaction.response.is_done():
+                    try:
+                        await interaction.response.defer(ephemeral=True)
+                    except discord.NotFound:
+                        logger.warning("list_forum_posts select interaction 已過期（defer 時 token 無效）")
+                        return
+                    except Exception as e:
+                        logger.error(f"list_forum_posts select defer 失敗: {e}")
+                        return
+
                 channel_id = int(select.values[0])
                 channel = interaction.guild.get_channel(channel_id)
                 if not isinstance(channel, discord.ForumChannel):
-                    await safe_send_interaction_message(interaction, "無效的論壇頻道，請重試。", ephemeral=True)
+                    await send_followup(content="無效的論壇頻道，請重試。")
                     return
 
                 # 檢查機器人權限
                 if not channel.permissions_for(interaction.guild.me).read_message_history:
                     logger.error(f"機器人缺少讀取訊息歷史權限，頻道: {channel.name}")
-                    await safe_send_interaction_message(interaction, "機器人缺少讀取訊息歷史的權限！", ephemeral=True)
+                    await send_followup(content="機器人缺少讀取訊息歷史的權限！")
                     return
 
                 # 獲取活躍和歸檔貼文
-                threads = channel.threads[:]
-                logger.info(f"獲取活躍貼文數量: {len(threads)}，頻道: {channel.name}")
+                # 注意：channel.threads 主要來自快取，可能不完整；額外用 guild.active_threads() 補齊
+                threads: list[discord.Thread] = list(channel.threads)
+                thread_ids = {t.id for t in threads}
+                logger.info(f"從快取獲取活躍貼文數量: {len(threads)}，頻道: {channel.name}")
+
+                try:
+                    active_threads_payload = await interaction.guild.active_threads()
+                    active_threads = [
+                        t for t in active_threads_payload.threads
+                        if t.parent_id == channel.id
+                    ]
+
+                    added_active = 0
+                    for t in active_threads:
+                        if t.id not in thread_ids:
+                            threads.append(t)
+                            thread_ids.add(t.id)
+                            added_active += 1
+
+                    logger.info(
+                        f"透過 API 補齊活躍貼文: 新增 {added_active}，目前總數 {len(threads)}，頻道: {channel.name}"
+                    )
+                except Exception as e:
+                    logger.warning(f"透過 guild.active_threads() 取得活躍貼文失敗，改用快取資料: {e}")
+
                 try:
                     archived_threads = []
-                    async for thread in channel.archived_threads(limit=20):  # 符合 API 限制
+                    async for thread in channel.archived_threads(limit=50):
                         archived_threads.append(thread)
                     logger.info(f"獲取歸檔貼文數量: {len(archived_threads)}，頻道: {channel.name}")
-                    threads.extend(archived_threads)
+
+                    added_archived = 0
+                    for t in archived_threads:
+                        if t.id not in thread_ids:
+                            threads.append(t)
+                            thread_ids.add(t.id)
+                            added_archived += 1
+
+                    logger.info(
+                        f"合併歸檔貼文: 新增 {added_archived}，目前總數 {len(threads)}，頻道: {channel.name}"
+                    )
                 except discord.HTTPException as e:
                     if e.status == 429:  # 速率限制
                         retry_after = e.retry_after
                         logger.warning(f"觸發速率限制，將在 {retry_after} 秒後重試")
                         await asyncio.sleep(retry_after)
-                        async for thread in channel.archived_threads(limit=20):
+                        async for thread in channel.archived_threads(limit=50):
                             archived_threads.append(thread)
-                        threads.extend(archived_threads)
+
+                        for t in archived_threads:
+                            if t.id not in thread_ids:
+                                threads.append(t)
+                                thread_ids.add(t.id)
                     else:
                         logger.error(f"獲取歸檔貼文失敗: {str(e)}")
-                        await safe_send_interaction_message(interaction, "無法獲取歸檔貼文，請稍後再試。", ephemeral=True)
+                        await send_followup(content="無法獲取歸檔貼文，請稍後再試。")
                         return
 
                 if not threads:
-                    await safe_send_interaction_message(interaction, "此論壇頻道中沒有任何貼文。", ephemeral=True)
+                    await send_followup(content="此論壇頻道中沒有任何貼文。")
                     return
 
                 # 記錄所有貼文詳細資訊
@@ -222,7 +288,10 @@ class TestCommands(commands.Cog):
                     logger.info(f"貼文: {thread.name}, ID: {thread.id}, 創建時間: {thread.created_at}, 歸檔: {thread.archived}, 鎖定: {thread.locked}")
 
                 # 按創建時間排序，從新到舊
-                threads.sort(key=lambda t: t.created_at, reverse=True)
+                threads.sort(
+                    key=lambda t: t.created_at or datetime(1970, 1, 1, tzinfo=timezone.utc),
+                    reverse=True
+                )
 
                 # 創建貼文列表嵌入訊息
                 embed = discord.Embed(
@@ -234,25 +303,35 @@ class TestCommands(commands.Cog):
                     owner_mention = "未知使用者"
                     if thread.owner_id:
                         try:
-                            owner = await interaction.guild.fetch_member(thread.owner_id)
+                            owner = thread.owner or interaction.guild.get_member(thread.owner_id)
+                            if owner is None:
+                                owner = await interaction.guild.fetch_member(thread.owner_id)
                             owner_mention = owner.mention if owner else "未知使用者 (已離開群組)"
                         except discord.NotFound:
                             owner_mention = "未知使用者 (已離開群組)"
                         except Exception as e:
                             logger.error(f"獲取貼文擁有者失敗: {str(e)}")
                     tags = ", ".join(tag.name for tag in thread.applied_tags) if thread.applied_tags else "無標籤"
+                    created_at_text = thread.created_at.strftime('%Y-%m-%d %H:%M:%S') if thread.created_at else "未知時間"
                     embed.add_field(
                         name=f"貼文 {i}: {thread.name}",
-                        value=f"由 {owner_mention} 創建於 {thread.created_at.strftime('%Y-%m-%d %H:%M:%S')}\n標籤: {tags}",
+                        value=(
+                            f"由 {owner_mention} 創建於 {created_at_text}\n"
+                            f"標籤: {tags}\n"
+                            f"🔗 [快速開啟貼文]({thread.jump_url})"
+                        ),
                         inline=False
                     )
 
-                await safe_send_interaction_message(interaction, embed=embed, ephemeral=True)
+                await send_followup(embed=embed)
                 logger.info(f'成功列出貼文，頻道: {channel.name}')
             except Exception as e:
                 error_details = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
                 logger.error(f'select_callback 錯誤: {str(e)}\n詳細錯誤信息:\n{error_details}')
-                await safe_send_interaction_message(interaction, "發生錯誤，請稍後再試。", ephemeral=True)
+                try:
+                    await send_followup(content="發生錯誤，請稍後再試。")
+                except Exception as send_err:
+                    logger.error(f"select_callback 錯誤後回覆失敗: {send_err}")
 
         select.callback = select_callback
         view = discord.ui.View()
