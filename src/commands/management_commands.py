@@ -18,6 +18,7 @@ from services.intro_profile_service import (
     IntroProfileServiceProtocol,
     IntroProfileService,
 )
+from llm.intro_rag_port import PgVectorIntroRAGPort
 
 # 獲取 logger
 logger = logging.getLogger('discord_bot')
@@ -332,7 +333,9 @@ class IntroPanelView(discord.ui.View):
 class ManagementCommands(commands.Cog):
     def __init__(self, bot, intro_profile_service: Optional[IntroProfileServiceProtocol] = None):
         self.bot = bot
-        self.intro_profile_service: IntroProfileServiceProtocol = intro_profile_service or IntroProfileService()
+        self.intro_profile_service: IntroProfileServiceProtocol = (
+            intro_profile_service or IntroProfileService(rag_port=PgVectorIntroRAGPort())
+        )
 
     async def cog_load(self):
         # 註冊 persistent views，避免機器人重啟後主入口按鈕失效
