@@ -731,6 +731,45 @@ class ArticleMonitor(BaseContentMonitor):
         """從 scraper API 取得最近的 FB 貼文"""
         return await self.fetch_content_from_api("/api/fb_posts/recent", {"days": days, "limit": 20})
 
+    async def fetch_fb_post_by_id(self, fb_post_id: int) -> Optional[Dict]:
+        """從 scraper API 根據資料庫 ID 取得單篇 FB 貼文。"""
+        try:
+            url = f"{self.scraper_api_url}/api/fb_posts/{fb_post_id}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=15) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if data.get('success') and data.get('post'):
+                            logger.info(f"成功根據資料庫 ID {fb_post_id} 取得 FB 貼文")
+                            return data['post']
+
+                        logger.warning(
+                            "FB API 回應成功但內容無效（id=%s）: success=%s has_post=%s",
+                            fb_post_id,
+                            data.get('success'),
+                            bool(data.get('post')),
+                        )
+                        return None
+
+                    try:
+                        error_data = await response.json()
+                    except Exception:
+                        error_data = {}
+
+                    logger.error(
+                        "FB API 請求失敗（id=%s），狀態碼: %s, 細節: %s",
+                        fb_post_id,
+                        response.status,
+                        error_data.get('detail') or error_data.get('message')
+                    )
+                    return None
+        except asyncio.TimeoutError:
+            logger.error(f"根據資料庫 ID {fb_post_id} 取得 FB 貼文逾時")
+            return None
+        except Exception as e:
+            logger.error(f"根據資料庫 ID {fb_post_id} 取得 FB 貼文時發生錯誤: {e}")
+            return None
+
     async def send_fb_post_to_channel(self, channel_id: int, fb_post: Dict) -> bool:
         """發送 FB 貼文到指定頻道"""
         try:

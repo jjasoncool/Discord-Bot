@@ -6,6 +6,10 @@ from discord import app_commands
 from discord.ext import commands
 import asyncio
 import logging
+import aiohttp
+import json
+import io
+from typing import Optional
 from utils.utils import safe_send_interaction_message
 
 logger = logging.getLogger('discord_bot')
@@ -43,14 +47,8 @@ class ArticleManagerView(discord.ui.View):
             discord.SelectOption(
                 label="🧪 測試 API",
                 value="test",
-                description="測試從爬蟲 API 取得文章",
+                description="測試 src/scraper API 服務連線與回應",
                 emoji="🧪"
-            ),
-            discord.SelectOption(
-                label="🔧 測試解析",
-                value="test_parse",
-                description="測試 HTML 內容解析功能",
-                emoji="🔧"
             )
         ]
     )
@@ -73,8 +71,6 @@ class ArticleManagerView(discord.ui.View):
             await self.cog._handle_monitor_status(interaction)
         elif action == "test":
             await self.cog._handle_test_fetch(interaction)
-        elif action == "test_parse":
-            await self.cog._handle_test_parse(interaction)
 
 class ArticleCommands(commands.Cog):
     """官方文章更新相關命令"""
@@ -127,12 +123,7 @@ class ArticleCommands(commands.Cog):
         )
         embed.add_field(
             name="🧪 測試 API",
-            value="測試 API 連接和文章取得",
-            inline=True
-        )
-        embed.add_field(
-            name="🔧 測試解析",
-            value="測試 HTML 到 Markdown 轉換",
+            value="測試 src/scraper API 服務健康與資料端點",
             inline=True
         )
 
@@ -155,7 +146,14 @@ class ArticleCommands(commands.Cog):
 
         async def interval_callback(interval_interaction: discord.Interaction):
             interval = int(interval_select.values[0])
-            channel_id = interaction.channel.id
+            channel_id = interval_interaction.channel.id if interval_interaction.channel else None
+            if channel_id is None:
+                await safe_send_interaction_message(
+                    interval_interaction,
+                    "❌ 找不到目前頻道，請稍後再試。",
+                    ephemeral=True
+                )
+                return
             logger.info(
                 "interaction_start source=article_manager_interval custom_id=%s interval=%s user_id=%s guild_id=%s channel_id=%s",
                 getattr(interval_select, "custom_id", None),
@@ -287,7 +285,7 @@ class ArticleCommands(commands.Cog):
         await safe_send_interaction_message(interaction, embed=embed, ephemeral=True)
 
     async def _handle_test_fetch(self, interaction: discord.Interaction):
-        """處理測試文章取得功能"""
+        """處理測試 src/scraper API 服務功能"""
         await interaction.response.defer(ephemeral=True)
 
         try:
@@ -295,37 +293,107 @@ class ArticleCommands(commands.Cog):
                 await safe_send_interaction_message(interaction, "❌ 官方文章更新器未初始化", ephemeral=True)
                 return
 
-            # 測試取得文章
-            articles = await self.article_monitor.fetch_recent_articles(days=3)
+            base_url = self.article_monitor.scraper_api_url.rstrip("/")
+            endpoint_results: list[tuple[str, bool, str]] = []
+            latest_article_json_preview: str | None = None
+            latest_article_file: discord.File | None = None
 
-            if not articles:
-                embed = discord.Embed(
-                    title="🧪 API 測試結果",
-                    description="❌ 沒有取得任何文章",
-                    color=discord.Color.red()
-                )
-            else:
-                embed = discord.Embed(
-                    title="🧪 API 測試結果",
-                    description=f"✅ 成功取得 {len(articles)} 篇文章",
-                    color=discord.Color.green()
-                )
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                # 1) 先做健康檢查
+                health_ok = False
+                health_url = f"{base_url}/health"
+                try:
+                    async with session.get(health_url) as response:
+                        if response.status != 200:
+                            endpoint_results.append(("健康檢查", False, f"HTTP {response.status}"))
+                        else:
+                            health_data = await response.json(content_type=None)
+                            health_status = str(health_data.get("status", "unknown"))
+                            health_ok = health_status.lower() in {"healthy", "ok"}
+                            endpoint_results.append(("健康檢查", health_ok, f"status={health_status}"))
+                except Exception as exc:
+                    endpoint_results.append(("健康檢查", False, str(exc)))
 
-                # 顯示前3篇文章的標題
-                article_list = ""
-                for i, article in enumerate(articles[:3]):
-                    article_list += f"{i+1}. {article['article_title'][:50]}...\n"
+                # 2) 健康正常才測文章端點，並抓最後一筆
+                if health_ok:
+                    article_url = f"{base_url}/api/articles/discord"
+                    params = {"days": 30, "limit": 1, "order": "desc"}
+                    try:
+                        async with session.get(article_url, params=params) as response:
+                            if response.status != 200:
+                                endpoint_results.append(("Discord 文章端點", False, f"HTTP {response.status}"))
+                            else:
+                                data = await response.json(content_type=None)
+                                if not (isinstance(data, dict) and data.get("success")):
+                                    endpoint_results.append(("Discord 文章端點", False, "API success=false"))
+                                else:
+                                    articles = data.get("articles") or []
+                                    endpoint_results.append(("Discord 文章端點", True, f"articles={len(articles)}"))
 
-                if len(articles) > 3:
-                    article_list += f"... 還有 {len(articles) - 3} 篇文章"
+                                    if articles:
+                                        latest_article = articles[-1]
+                                        pretty_json = json.dumps(latest_article, ensure_ascii=False, indent=2)
 
+                                        json_bytes = pretty_json.encode("utf-8")
+                                        max_discord_file_bytes = 7_500_000
+                                        if len(json_bytes) <= max_discord_file_bytes:
+                                            latest_article_file = discord.File(
+                                                io.BytesIO(json_bytes),
+                                                filename="latest_article.json",
+                                            )
+
+                                        max_preview_chars = 900
+                                        latest_article_json_preview = (
+                                            pretty_json[:max_preview_chars] + "\n...（已截斷）"
+                                            if len(pretty_json) > max_preview_chars
+                                            else pretty_json
+                                        )
+                    except Exception as exc:
+                        endpoint_results.append(("Discord 文章端點", False, str(exc)))
+                else:
+                    endpoint_results.append(("Discord 文章端點", False, "略過（健康檢查未通過）"))
+
+            passed_count = sum(1 for _, ok, _ in endpoint_results if ok)
+            all_passed = passed_count == len(endpoint_results)
+
+            embed = discord.Embed(
+                title="🧪 src/scraper API 測試結果",
+                description=(
+                    f"✅ 全部通過（{passed_count}/{len(endpoint_results)}）"
+                    if all_passed
+                    else f"⚠️ 部分失敗（{passed_count}/{len(endpoint_results)}）"
+                ),
+                color=discord.Color.green() if all_passed else discord.Color.orange(),
+            )
+
+            for label, ok, detail in endpoint_results:
                 embed.add_field(
-                    name="📰 文章預覽",
-                    value=article_list if article_list else "無文章內容",
-                    inline=False
+                    name=f"{'✅' if ok else '❌'} {label}",
+                    value=detail[:1024],
+                    inline=False,
                 )
 
-            await safe_send_interaction_message(interaction, embed=embed, ephemeral=True)
+            if latest_article_json_preview:
+                embed.add_field(
+                    name="📰 最後一筆文章（JSON pretty）",
+                    value=f"```json\n{latest_article_json_preview}\n```",
+                    inline=False,
+                )
+
+            if latest_article_file is None and latest_article_json_preview:
+                embed.add_field(
+                    name="📎 JSON 檔案",
+                    value="⚠️ JSON 太大，已略過附件，請看上方預覽。",
+                    inline=False,
+                )
+
+            await safe_send_interaction_message(
+                interaction,
+                embed=embed,
+                ephemeral=True,
+                file=latest_article_file,
+            )
 
         except Exception as e:
             logger.error(f"測試文章取得失敗: {e}")
@@ -336,103 +404,24 @@ class ArticleCommands(commands.Cog):
             )
             await safe_send_interaction_message(interaction, embed=embed, ephemeral=True)
 
-    async def _handle_test_parse(self, interaction: discord.Interaction):
-        """處理測試 HTML 解析功能"""
-        await interaction.response.defer(ephemeral=True)
-
+    @staticmethod
+    def _parse_positive_int(raw_id: str) -> Optional[int]:
+        """將字串 ID 解析為正整數，失敗則回傳 None。"""
         try:
-            if not self.article_monitor:
-                await safe_send_interaction_message(interaction, "❌ 官方文章更新器未初始化", ephemeral=True)
-                return
-
-            # 測試 HTML 內容 - 包含多張圖片來測試圖片顯示邏輯
-            test_html = """
-            <h1>測試標題</h1>
-            <p>這是一個<strong>粗體文字</strong>和<em>斜體文字</em>的測試段落。</p>
-            <ul>
-                <li>列表項目 1</li>
-                <li>列表項目 2</li>
-            </ul>
-            <a href="https://example.com">這是一個連結</a>
-            <img src="https://example.com/image1.jpg" alt="測試圖片1">
-            <img src="https://example.com/image2.jpg" alt="測試圖片2">
-            <img src="https://example.com/image3.jpg" alt="測試圖片3">
-            <img src="https://example.com/image4.jpg" alt="測試圖片4">
-            <img src="https://example.com/image5.jpg" alt="測試圖片5">
-            <img src="https://example.com/image6.jpg" alt="測試圖片6">
-            <img src="https://example.com/image7.jpg" alt="測試圖片7">
-            <blockquote>這是引用文字</blockquote>
-            <code>inline code</code>
-            """
-
-            # 測試解析
-            result = await self.article_monitor.test_html_parsing(test_html)
-
-            if result['success']:
-                embed = discord.Embed(
-                    title="🔧 HTML 解析測試結果",
-                    description="✅ 解析成功",
-                    color=discord.Color.green()
-                )
-
-                embed.add_field(
-                    name="🔧 解析器",
-                    value="html2text + BeautifulSoup",
-                    inline=True
-                )
-
-                embed.add_field(
-                    name="📏 文字長度",
-                    value=str(result['text_length']),
-                    inline=True
-                )
-
-                embed.add_field(
-                    name="🖼️ 圖片數量",
-                    value=str(result['images_found']),
-                    inline=True
-                )
-
-                if result.get('markdown_features'):
-                    features = result['markdown_features']
-                    feature_text = f"標題: {features['headers']}, 粗體: {features['bold_text']}, 斜體: {features['italic_text']}, 連結: {features['links']}, 列表: {features['bullet_lists'] + features['numbered_lists']}"
-                    embed.add_field(
-                        name="📝 Markdown 特徵",
-                        value=feature_text,
-                        inline=False
-                    )
-
-                # 顯示解析後的內容（縮短版本）
-                parsed_preview = result['parsed_text'][:800] + "..." if len(result['parsed_text']) > 800 else result['parsed_text']
-                embed.add_field(
-                    name="📄 解析結果預覽",
-                    value=f"```\n{parsed_preview}\n```",
-                    inline=False
-                )
-
-            else:
-                embed = discord.Embed(
-                    title="🔧 HTML 解析測試結果",
-                    description=f"❌ 解析失敗：{result['error']}",
-                    color=discord.Color.red()
-                )
-
-            await safe_send_interaction_message(interaction, embed=embed, ephemeral=True)
-
-        except Exception as e:
-            logger.error(f"測試 HTML 解析失敗: {e}")
-            embed = discord.Embed(
-                title="🔧 HTML 解析測試結果",
-                description=f"❌ 測試失敗：{str(e)}",
-                color=discord.Color.red()
-            )
-            await safe_send_interaction_message(interaction, embed=embed, ephemeral=True)
+            parsed = int(raw_id)
+            return parsed if parsed > 0 else None
+        except (TypeError, ValueError):
+            return None
 
     @app_commands.command(name="resend_article", description="根據 ID 重新發送文章或 FB 貼文")
     @app_commands.describe(
         id="要重新發送的內容 ID",
         type="內容類型 (article 或 fb)"
     )
+    @app_commands.choices(type=[
+        app_commands.Choice(name="article", value="article"),
+        app_commands.Choice(name="fb", value="fb"),
+    ])
     async def resend_article(self, interaction: discord.Interaction, id: str, type: str = "article"):
         """根據 ID 重新發送文章或 FB 貼文到監控的頻道，用於測試"""
         from utils.utils import check_guild
@@ -462,9 +451,8 @@ class ArticleCommands(commands.Cog):
             # 根據類型處理
             if content_type == "article":
                 # 處理文章
-                try:
-                    article_id = int(id)
-                except ValueError:
+                article_id = self._parse_positive_int(id)
+                if article_id is None:
                     await safe_send_interaction_message(interaction, "❌ 文章 ID 必須是數字", ephemeral=True)
                     return
 
@@ -476,30 +464,16 @@ class ArticleCommands(commands.Cog):
 
             else:  # fb or fb_post
                 # 處理 FB 貼文
-                try:
-                    fb_db_id = int(id)
-                except ValueError:
+                fb_db_id = self._parse_positive_int(id)
+                if fb_db_id is None:
                     await safe_send_interaction_message(interaction, "❌ FB 貼文 ID 必須是數字（資料庫 ID）", ephemeral=True)
                     return
 
-                # 從 API 根據資料庫 ID 獲取單篇 FB 貼文
                 try:
-                    import aiohttp
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(f"http://scraper:8000/api/fb_posts/{fb_db_id}", timeout=10) as response:
-                            if response.status == 200:
-                                data = await response.json()
-                                if data.get('success') and data.get('post'):
-                                    content = data['post']
-                                else:
-                                    await safe_send_interaction_message(interaction, f"❌ 找不到資料庫 ID 為 `{fb_db_id}` 的 FB 貼文。", ephemeral=True)
-                                    return
-                            else:
-                                await safe_send_interaction_message(interaction, f"❌ API 請求失敗：{response.status}", ephemeral=True)
-                                return
+                    content = await self.article_monitor.fetch_fb_post_by_id(fb_db_id)
                 except Exception as e:
-                    logger.error(f"獲取 FB 貼文資料庫 ID {fb_db_id} 失敗: {e}")
-                    await safe_send_interaction_message(interaction, f"❌ 獲取 FB 貼文時發生錯誤：{str(e)}", ephemeral=True)
+                    logger.error(f"獲取 FB 貼文資料庫 ID {fb_db_id} 失敗: {e}", exc_info=True)
+                    await safe_send_interaction_message(interaction, "❌ 獲取 FB 貼文時發生錯誤，請稍後再試。", ephemeral=True)
                     return
 
                 content_name = f"FB 貼文 `{fb_db_id}`"
