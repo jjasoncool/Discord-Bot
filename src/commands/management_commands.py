@@ -18,6 +18,7 @@ from services.intro_profile_service import (
     IntroProfileServiceProtocol,
     IntroProfileService,
 )
+from services.impression_moderation_service import ImpressionModerationService
 from llm.intro_rag_port import PgVectorIntroRAGPort
 
 # 獲取 logger
@@ -209,6 +210,7 @@ class IntroImpressionModal(discord.ui.Modal):
 
         self.intro_service = intro_service
         self.management_cog = management_cog
+        self.moderation_service = ImpressionModerationService()
 
         logger.info("intro_impression_modal_init: timeout=600, using Label-wrapped UserSelect (2.6.4 supported)")
 
@@ -264,6 +266,41 @@ class IntroImpressionModal(discord.ui.Modal):
         selected_user = self.target_select.values[0]
         alias = self.alias_text.value.strip()
         habit = self.habit_text.value.strip()
+        impression_text = self.impression.value.strip()
+
+        moderation = await self.moderation_service.moderate(
+            target_display=f"{selected_user.display_name}({selected_user.id})",
+            text=impression_text,
+        )
+        if not moderation.approved:
+            logger.info(
+                (
+                    "intro_impression_moderation_blocked "
+                    "author_id=%s target_user_id=%s decision=%s reason=%s "
+                    "score_prompt_injection=%.4f score_meme_spam=%.4f "
+                    "score_fake_story=%.4f score_real_interaction=%.4f "
+                    "score_meaningfulness=%.4f"
+                ),
+                interaction.user.id if interaction.user else None,
+                selected_user.id,
+                moderation.decision,
+                moderation.reason,
+                moderation.score_prompt_injection,
+                moderation.score_meme_spam,
+                moderation.score_fake_story,
+                moderation.score_real_interaction,
+                moderation.score_meaningfulness,
+            )
+            await safe_send_interaction_message(
+                interaction,
+                (
+                    "⚠️ 這則他人印象暫時無法提交。\n"
+                    "請改寫為與對象相關、可理解且具體的社群印象後再送出。"
+                ),
+                ephemeral=True,
+                prefer_followup=True,
+            )
+            return
 
         display_target = f"{selected_user.mention}"
         if alias:
@@ -277,7 +314,7 @@ class IntroImpressionModal(discord.ui.Modal):
         embed.add_field(name="對象", value=display_target, inline=False)
         if habit:
             embed.add_field(name="常做的事", value=habit, inline=False)
-        embed.add_field(name="整體印象", value=self.impression.value, inline=False)
+        embed.add_field(name="整體印象", value=impression_text, inline=False)
         embed.set_footer(text=f"填寫者：{interaction.user.display_name}")
 
         await interaction.channel.send(content=f"{interaction.user.mention}", embed=embed)
@@ -291,7 +328,8 @@ class IntroImpressionModal(discord.ui.Modal):
                     target_user_id=selected_user.id,
                     target_alias=alias,
                     target_habit=habit,
-                    impression=self.impression.value,
+                    impression=impression_text,
+                    moderation_metadata=moderation.to_metadata(),
                 )
             )
         except Exception as e:

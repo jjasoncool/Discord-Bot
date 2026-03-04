@@ -53,6 +53,7 @@ class IntroRAGPort(Protocol):
         target_alias: str,
         target_habit: str,
         impression: str,
+        moderation_metadata: dict[str, str] | None = None,
     ) -> None:
         """將他人印象資料寫入 RAG/向量資料庫。"""
 
@@ -83,6 +84,7 @@ class NullIntroRAGPort:
         target_alias: str,
         target_habit: str,
         impression: str,
+        moderation_metadata: dict[str, str] | None = None,
     ) -> None:
         _ = (
             guild_id,
@@ -92,6 +94,7 @@ class NullIntroRAGPort:
             target_alias,
             target_habit,
             impression,
+            moderation_metadata,
         )
 
 
@@ -312,6 +315,7 @@ class PgVectorIntroRAGPort:
         target_alias: str,
         target_habit: str,
         impression: str,
+        moderation_metadata: dict[str, str] | None = None,
     ) -> None:
         if not self._dependencies_ready():
             return
@@ -333,6 +337,11 @@ class PgVectorIntroRAGPort:
                 "target_user_id": str(target_user_id),
                 "target_alias": target_alias or "",
             }
+            if moderation_metadata:
+                for key, value in moderation_metadata.items():
+                    if value is None:
+                        continue
+                    metadata[str(key)] = str(value)
             doc_id = f"impression:{guild_id}:{author_id}:{target_user_id}"
             self._insert(doc_id=doc_id, text=text, metadata=metadata)
         except Exception as exc:

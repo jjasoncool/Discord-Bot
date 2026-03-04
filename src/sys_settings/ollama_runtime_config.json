@@ -1,4 +1,5 @@
 {
   "model": "ministral-3:14b",
-  "embed_model": "bge-m3:latest"
+  "embed_model": "bge-m3:latest",
+  "moderation_model": "qwen2.5:7b"
 }

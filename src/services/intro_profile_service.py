@@ -32,6 +32,7 @@ class ImpressionPayload:
     target_alias: str
     target_habit: str
     impression: str
+    moderation_metadata: dict[str, str] | None = None
 
 
 @runtime_checkable
@@ -69,4 +70,5 @@ class IntroProfileService:
             target_alias=payload.target_alias,
             target_habit=payload.target_habit,
             impression=payload.impression,
+            moderation_metadata=payload.moderation_metadata,
         )
