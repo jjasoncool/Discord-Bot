@@ -130,7 +130,7 @@ class IntroProfileModal(discord.ui.Modal):
         )
         self.bio = discord.ui.TextInput(
             label="自我介紹",
-            placeholder="簡單介紹你自己、遊玩習慣、常上線時間...",
+            placeholder="簡單介紹你自己、喜歡玩的遊戲、個性...",
             style=discord.TextStyle.paragraph,
             max_length=600,
             required=True,
@@ -960,7 +960,7 @@ class ManagementCommands(commands.Cog):
         )
         embed.add_field(
             name="操作方式",
-            value="1)【✍️ 填寫自我介紹】\n2)【🗣️ 填寫對他人印象】\n點擊後會跳出表單（Modal）",
+            value="1)【✍️ 填寫自我介紹】\n2)【🗣️ 填寫對他人印象】\n點擊後會跳出表單",
             inline=False,
         )
         return embed
