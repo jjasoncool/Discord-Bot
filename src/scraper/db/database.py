@@ -2,6 +2,7 @@
 資料庫操作模組
 處理所有與資料庫相關的 CRUD 操作
 """
+import json
 from datetime import datetime
 from typing import Optional, List, Dict
 from sqlalchemy.orm import Session
@@ -408,12 +409,22 @@ class DatabaseManager:
                 existing.title = post_data.get("title") or existing.title
                 existing.author = post_data.get("author") or existing.author
                 existing.url = url
-                existing.content = post_data.get("content") or existing.content
+                new_content = post_data.get("content") or ""
+                old_content = existing.content or ""
+                if len(new_content) > len(old_content):
+                    existing.content = new_content
+
+                comments = post_data.get("comments") or []
+                existing.comments_json = json.dumps(comments, ensure_ascii=False)
+                existing.comments_count = post_data.get("comments_count", len(comments))
+                existing.comments_hash = post_data.get("comments_hash")
+                existing.last_comment_sync_at = datetime.utcnow()
                 existing.matched_keywords = post_data.get("matched_keywords") or existing.matched_keywords
                 existing.published_at = post_data.get("published_at") or existing.published_at
                 existing.updated_at = datetime.utcnow()
                 return existing
 
+            comments = post_data.get("comments") or []
             new_post = PTTPost(
                 board=board,
                 article_id=article_id,
@@ -421,6 +432,10 @@ class DatabaseManager:
                 author=post_data.get("author"),
                 url=url,
                 content=post_data.get("content"),
+                comments_json=json.dumps(comments, ensure_ascii=False),
+                comments_count=post_data.get("comments_count", len(comments)),
+                comments_hash=post_data.get("comments_hash"),
+                last_comment_sync_at=datetime.utcnow(),
                 matched_keywords=post_data.get("matched_keywords"),
                 published_at=post_data.get("published_at"),
             )

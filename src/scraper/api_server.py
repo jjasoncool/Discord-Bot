@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 from typing import List, Optional
 from pydantic import BaseModel
+import json
 
 from db.models import ArticleMenu, ArticleDetail, FBPost, FBImage, PTTPost, get_db_session
 from sqlalchemy.orm import joinedload
@@ -80,6 +81,13 @@ class SingleFBPostResponse(BaseModel):
     message: Optional[str] = None
 
 
+class PTTCommentResponse(BaseModel):
+    tag: Optional[str]
+    user: Optional[str]
+    content: Optional[str]
+    time: Optional[str]
+
+
 class PTTPostResponse(BaseModel):
     """PTT 貼文回應模型"""
     id: int
@@ -89,6 +97,9 @@ class PTTPostResponse(BaseModel):
     author: Optional[str]
     url: str
     content: Optional[str]
+    comments: List[PTTCommentResponse]
+    comments_count: int
+    comments_hash: Optional[str]
     matched_keywords: Optional[str]
     published_at: Optional[str]
     created_at: str
@@ -472,6 +483,9 @@ async def get_recent_ptt_posts(
                 author=post.author,
                 url=post.url,
                 content=post.content,
+                comments=[PTTCommentResponse(**item) for item in json.loads(post.comments_json or "[]")],
+                comments_count=post.comments_count or 0,
+                comments_hash=post.comments_hash,
                 matched_keywords=post.matched_keywords,
                 published_at=post.published_at.isoformat() if post.published_at else None,
                 created_at=post.created_at.isoformat() if post.created_at else "",
@@ -511,6 +525,9 @@ async def get_ptt_post_by_id(
             author=post.author,
             url=post.url,
             content=post.content,
+            comments=[PTTCommentResponse(**item) for item in json.loads(post.comments_json or "[]")],
+            comments_count=post.comments_count or 0,
+            comments_hash=post.comments_hash,
             matched_keywords=post.matched_keywords,
             published_at=post.published_at.isoformat() if post.published_at else None,
             created_at=post.created_at.isoformat() if post.created_at else "",

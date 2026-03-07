@@ -72,6 +72,28 @@ class ArticleManagerView(discord.ui.View):
         elif action == "test":
             await self.cog._handle_test_fetch(interaction)
 
+
+class ArticleApiTestView(discord.ui.View):
+    """API 測試選單 view"""
+
+    def __init__(self, cog: "ArticleCommands"):
+        super().__init__(timeout=180)
+        self.cog = cog
+
+    @discord.ui.select(
+        placeholder="選擇要測試的 API...",
+        custom_id="article_api_test_select",
+        options=[
+            discord.SelectOption(label="主要文章 API", value="article", description="測試 /api/articles/discord"),
+            discord.SelectOption(label="FB API", value="fb", description="測試 /api/fb_posts/recent"),
+            discord.SelectOption(label="PTT API", value="ptt", description="測試 /api/ptt_posts/recent"),
+            discord.SelectOption(label="全部 API", value="all", description="一次測試全部 API"),
+        ]
+    )
+    async def api_test_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        target = select.values[0]
+        await self.cog._run_api_test(interaction, target=target)
+
 class ArticleCommands(commands.Cog):
     """官方文章更新相關命令"""
 
@@ -287,6 +309,15 @@ class ArticleCommands(commands.Cog):
 
     async def _handle_test_fetch(self, interaction: discord.Interaction):
         """處理測試 src/scraper API 服務功能"""
+        embed = discord.Embed(
+            title="🧪 選擇要測試的 API",
+            description="請選擇單一 API 或全部 API 進行測試。",
+            color=discord.Color.blurple()
+        )
+        await interaction.response.edit_message(embed=embed, view=ArticleApiTestView(self))
+
+    async def _run_api_test(self, interaction: discord.Interaction, target: str = "all"):
+        """實際執行 API 測試"""
         await interaction.response.defer(ephemeral=True)
 
         try:
@@ -298,6 +329,26 @@ class ArticleCommands(commands.Cog):
             endpoint_results: list[tuple[str, bool, str]] = []
             latest_article_json_preview: str | None = None
             latest_article_file: discord.File | None = None
+            latest_fb_json_preview: str | None = None
+            latest_fb_file: discord.File | None = None
+            latest_ptt_json_preview: str | None = None
+            latest_ptt_file: discord.File | None = None
+
+            def _build_json_preview_and_file(payload: dict, filename: str):
+                pretty_json = json.dumps(payload, ensure_ascii=False, indent=2)
+                json_bytes = pretty_json.encode("utf-8")
+                max_discord_file_bytes = 7_500_000
+                file_obj = None
+                if len(json_bytes) <= max_discord_file_bytes:
+                    file_obj = discord.File(io.BytesIO(json_bytes), filename=filename)
+
+                max_preview_chars = 900
+                preview = (
+                    pretty_json[:max_preview_chars] + "\n...（已截斷）"
+                    if len(pretty_json) > max_preview_chars
+                    else pretty_json
+                )
+                return preview, file_obj
 
             timeout = aiohttp.ClientTimeout(total=10)
             async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -316,44 +367,56 @@ class ArticleCommands(commands.Cog):
                 except Exception as exc:
                     endpoint_results.append(("健康檢查", False, str(exc)))
 
-                # 2) 健康正常才測文章端點，並抓最後一筆
+                # 2) 健康正常才測主要文章 / FB / PTT 端點
                 if health_ok:
-                    article_url = f"{base_url}/api/articles/discord"
-                    params = {"days": 30, "limit": 1, "order": "desc"}
-                    try:
-                        async with session.get(article_url, params=params) as response:
-                            if response.status != 200:
-                                endpoint_results.append(("Discord 文章端點", False, f"HTTP {response.status}"))
-                            else:
+                    api_targets = [
+                        ("主要文章 API", "/api/articles/discord", {"days": 30, "limit": 1, "order": "desc"}, "articles", "latest_article.json"),
+                        ("FB API", "/api/fb_posts/recent", {"days": 30, "limit": 1}, "posts", "latest_fb_post.json"),
+                        ("PTT API", "/api/ptt_posts/recent", {"days": 30, "limit": 1, "order": "desc"}, "posts", "latest_ptt_post.json"),
+                    ]
+
+                    target_map = {
+                        "article": {"主要文章 API"},
+                        "fb": {"FB API"},
+                        "ptt": {"PTT API"},
+                        "all": {"主要文章 API", "FB API", "PTT API"},
+                    }
+                    selected_labels = target_map.get(target, target_map["all"])
+
+                    for label, endpoint, params, list_key, filename in api_targets:
+                        if label not in selected_labels:
+                            continue
+                        try:
+                            async with session.get(f"{base_url}{endpoint}", params=params) as response:
+                                if response.status != 200:
+                                    endpoint_results.append((label, False, f"HTTP {response.status}"))
+                                    continue
+
                                 data = await response.json(content_type=None)
                                 if not (isinstance(data, dict) and data.get("success")):
-                                    endpoint_results.append(("Discord 文章端點", False, "API success=false"))
-                                else:
-                                    articles = data.get("articles") or []
-                                    endpoint_results.append(("Discord 文章端點", True, f"articles={len(articles)}"))
+                                    endpoint_results.append((label, False, "API success=false"))
+                                    continue
 
-                                    if articles:
-                                        latest_article = articles[-1]
-                                        pretty_json = json.dumps(latest_article, ensure_ascii=False, indent=2)
+                                items = data.get(list_key) or []
+                                endpoint_results.append((label, True, f"{list_key}={len(items)}"))
 
-                                        json_bytes = pretty_json.encode("utf-8")
-                                        max_discord_file_bytes = 7_500_000
-                                        if len(json_bytes) <= max_discord_file_bytes:
-                                            latest_article_file = discord.File(
-                                                io.BytesIO(json_bytes),
-                                                filename="latest_article.json",
-                                            )
-
-                                        max_preview_chars = 900
-                                        latest_article_json_preview = (
-                                            pretty_json[:max_preview_chars] + "\n...（已截斷）"
-                                            if len(pretty_json) > max_preview_chars
-                                            else pretty_json
-                                        )
-                    except Exception as exc:
-                        endpoint_results.append(("Discord 文章端點", False, str(exc)))
+                                if items:
+                                    preview, file_obj = _build_json_preview_and_file(items[-1], filename)
+                                    if label == "主要文章 API":
+                                        latest_article_json_preview, latest_article_file = preview, file_obj
+                                    elif label == "FB API":
+                                        latest_fb_json_preview, latest_fb_file = preview, file_obj
+                                    elif label == "PTT API":
+                                        latest_ptt_json_preview, latest_ptt_file = preview, file_obj
+                        except Exception as exc:
+                            endpoint_results.append((label, False, str(exc)))
                 else:
-                    endpoint_results.append(("Discord 文章端點", False, "略過（健康檢查未通過）"))
+                    if target in ("article", "all"):
+                        endpoint_results.append(("主要文章 API", False, "略過（健康檢查未通過）"))
+                    if target in ("fb", "all"):
+                        endpoint_results.append(("FB API", False, "略過（健康檢查未通過）"))
+                    if target in ("ptt", "all"):
+                        endpoint_results.append(("PTT API", False, "略過（健康檢查未通過）"))
 
             passed_count = sum(1 for _, ok, _ in endpoint_results if ok)
             all_passed = passed_count == len(endpoint_results)
@@ -377,23 +440,52 @@ class ArticleCommands(commands.Cog):
 
             if latest_article_json_preview:
                 embed.add_field(
-                    name="📰 最後一筆文章（JSON pretty）",
+                    name="📰 主要文章 API 最後一筆",
                     value=f"```json\n{latest_article_json_preview}\n```",
+                    inline=False,
+                )
+
+            if latest_fb_json_preview:
+                embed.add_field(
+                    name="📘 FB API 最後一筆",
+                    value=f"```json\n{latest_fb_json_preview}\n```",
+                    inline=False,
+                )
+
+            if latest_ptt_json_preview:
+                embed.add_field(
+                    name="🧵 PTT API 最後一筆",
+                    value=f"```json\n{latest_ptt_json_preview}\n```",
                     inline=False,
                 )
 
             if latest_article_file is None and latest_article_json_preview:
                 embed.add_field(
-                    name="📎 JSON 檔案",
+                    name="📎 主要文章 API JSON 檔案",
                     value="⚠️ JSON 太大，已略過附件，請看上方預覽。",
                     inline=False,
                 )
 
+            if latest_fb_file is None and latest_fb_json_preview:
+                embed.add_field(
+                    name="📎 FB API JSON 檔案",
+                    value="⚠️ JSON 太大，已略過附件，請看上方預覽。",
+                    inline=False,
+                )
+
+            if latest_ptt_file is None and latest_ptt_json_preview:
+                embed.add_field(
+                    name="📎 PTT API JSON 檔案",
+                    value="⚠️ JSON 太大，已略過附件，請看上方預覽。",
+                    inline=False,
+                )
+
+            files = [f for f in [latest_article_file, latest_fb_file, latest_ptt_file] if f is not None]
             await safe_send_interaction_message(
                 interaction,
                 embed=embed,
                 ephemeral=True,
-                file=latest_article_file,
+                files=files if files else None,
             )
 
         except Exception as e:

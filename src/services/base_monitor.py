@@ -33,15 +33,18 @@ class BaseContentMonitor:
                 self.sent_article_ids = set(data.get('sent_article_ids', []))
                 self.sent_fbpost_ids = set(data.get('sent_fbpost_ids', []))
                 self.sent_article_keys = set(data.get('sent_article_keys', []))
+                self.sent_ptt_state = data.get('sent_ptt_state', {}) or {}
             else:
                 self.sent_article_ids = set()
                 self.sent_fbpost_ids = set()
                 self.sent_article_keys = set()
+                self.sent_ptt_state = {}
         except Exception as e:
             logger.error(f"載入已發送內容記錄失敗: {e}")
             self.sent_article_ids = set()
             self.sent_fbpost_ids = set()
             self.sent_article_keys = set()
+            self.sent_ptt_state = {}
 
     def _save_sent_content(self):
         """儲存已發送的內容記錄"""
@@ -51,6 +54,7 @@ class BaseContentMonitor:
                 'sent_article_ids': list(self.sent_article_ids),
                 'sent_fbpost_ids': list(self.sent_fbpost_ids),
                 'sent_article_keys': list(self.sent_article_keys),
+                'sent_ptt_state': self.sent_ptt_state,
                 'last_updated': datetime.now().isoformat()
             }
 
@@ -122,6 +126,16 @@ class BaseContentMonitor:
             self.sent_article_keys.add(str(content_id))
 
         self._save_sent_content()
+
+    def update_ptt_state(self, article_key: str, state: Dict):
+        """更新 PTT 發送狀態（thread/comment 增量用）"""
+        self.sent_article_keys.add(str(article_key))
+        self.sent_ptt_state[str(article_key)] = state
+        self._save_sent_content()
+
+    def get_ptt_state(self, article_key: str) -> Dict:
+        """取得 PTT 發送狀態"""
+        return self.sent_ptt_state.get(str(article_key), {})
 
     def is_content_sent(self, content_type: str, content_id) -> bool:
         """檢查內容是否已發送"""

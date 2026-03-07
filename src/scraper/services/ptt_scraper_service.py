@@ -6,6 +6,7 @@ import os
 import sys
 import json
 import argparse
+import hashlib
 from datetime import datetime
 from typing import Dict, Any, List
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, unquote_plus
@@ -162,6 +163,11 @@ class PTTScraperService:
 
         return content.strip()
 
+    @staticmethod
+    def _build_comments_hash(comments: List[Dict[str, Any]]) -> str:
+        serialized = json.dumps(comments, ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
     def _parse_article_list(self, html: str) -> List[Dict[str, Any]]:
         """解析第一頁文章列表"""
         soup = BeautifulSoup(html, "html.parser")
@@ -250,6 +256,24 @@ class PTTScraperService:
             elif tag_text == "時間":
                 published_at = value_text
 
+        comments: List[Dict[str, Any]] = []
+        for push in soup.select("#main-content div.push"):
+            tag_node = push.select_one("span.push-tag")
+            user_node = push.select_one("span.push-userid")
+            content_node = push.select_one("span.push-content")
+            time_node = push.select_one("span.push-ipdatetime")
+
+            content_text = content_node.get_text(strip=False) if content_node else ""
+            if content_text.startswith(":"):
+                content_text = content_text[1:]
+
+            comments.append({
+                "tag": (tag_node.get_text(strip=True) if tag_node else ""),
+                "user": (user_node.get_text(strip=True) if user_node else ""),
+                "content": content_text.strip(),
+                "time": (time_node.get_text(" ", strip=True) if time_node else ""),
+            })
+
         # 移除 metadata/push，保留正文
         content_soup = BeautifulSoup(str(main_content), "html.parser")
         for selector in [
@@ -272,6 +296,9 @@ class PTTScraperService:
             "published_at": published_at,
             "content": content,
             "content_length": len(content),
+            "comments": comments,
+            "comments_count": len(comments),
+            "comments_hash": self._build_comments_hash(comments),
         }
 
     def fetch_ptt_articles_with_content(self) -> Dict[str, Any]:
@@ -297,6 +324,9 @@ class PTTScraperService:
                 article["content"] = detail.get("content", "")
                 article["content_length"] = detail.get("content_length", 0)
                 article["published_at"] = detail.get("published_at", "")
+                article["comments"] = detail.get("comments", [])
+                article["comments_count"] = detail.get("comments_count", 0)
+                article["comments_hash"] = detail.get("comments_hash", "")
 
                 # 內文頁通常可取得較完整作者資訊
                 if detail.get("author"):
@@ -338,6 +368,9 @@ class PTTScraperService:
                     "author": article.get("author"),
                     "url": article.get("url"),
                     "content": article.get("content"),
+                    "comments": article.get("comments", []),
+                    "comments_count": article.get("comments_count", 0),
+                    "comments_hash": article.get("comments_hash", ""),
                     "matched_keywords": self._extract_matched_keywords(
                         article.get("title", ""),
                         article.get("content", ""),
