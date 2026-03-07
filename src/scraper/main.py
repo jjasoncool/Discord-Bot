@@ -62,6 +62,40 @@ def fb_scrape_task():
         logger.error(f"Facebook 爬蟲任務發生未預期錯誤: {str(e)}", exc_info=True)
 
 
+def ptt_scrape_task():
+    """PTT 爬蟲任務（抓搜尋第一頁文章列表）"""
+    container = ServiceContainer()
+    try:
+        logger.info("開始執行 PTT 爬蟲任務")
+
+        # 保險建立資料表
+        container.create_database_tables()
+
+        ptt_service = container.create_ptt_scraper_service()
+        result = ptt_service.fetch_ptt_articles_with_content()
+
+        saved_count = ptt_service.save_articles_to_db(result.get("articles", []))
+        ptt_service.db_manager.commit()
+
+        if result.get("ok"):
+            logger.info(
+                "PTT 爬蟲任務完成: status=%s, article_count=%s, detailed_count=%s, saved_count=%s, title=%s",
+                result.get("status_code"),
+                result.get("article_count"),
+                result.get("detailed_count", 0),
+                saved_count,
+                result.get("title"),
+            )
+        else:
+            logger.warning("PTT 爬蟲任務完成，但頁面驗證未通過")
+
+    except Exception as e:
+        logger.error(f"PTT 爬蟲任務發生未預期錯誤: {str(e)}", exc_info=True)
+    finally:
+        if 'ptt_service' in locals() and getattr(ptt_service, 'db_manager', None):
+            ptt_service.db_manager.close()
+
+
 def start_api_server():
     """啟動 API 服務器"""
     from api_server import app
@@ -90,6 +124,7 @@ def main():
     # 設定定時任務
     schedule.every(15).minutes.do(main_scrape_task)
     schedule.every(1).hours.do(fb_scrape_task)
+    schedule.every(1).hours.do(ptt_scrape_task)
 
     # 立即執行一次 Facebook 爬蟲
     logger.info("執行初始 Facebook 爬蟲任務")
@@ -99,8 +134,12 @@ def main():
     logger.info("執行初始爬蟲任務")
     main_scrape_task()
 
+    # 立即執行一次 PTT 爬蟲
+    logger.info("執行初始 PTT 爬蟲任務")
+    ptt_scrape_task()
+
     # 啟動定時任務循環
-    logger.info("定時任務已啟動：每15分鐘執行文章爬蟲，每1小時執行 Facebook 爬蟲")
+    logger.info("定時任務已啟動：每15分鐘執行文章爬蟲，每1小時執行 Facebook 爬蟲，每1小時執行 PTT 爬蟲")
     while True:
         try:
             schedule.run_pending()

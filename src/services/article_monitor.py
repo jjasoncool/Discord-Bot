@@ -674,58 +674,6 @@ class ArticleMonitor(BaseContentMonitor):
             # 發生錯誤時使用預設檔名
             return f"image_{index}.jpg"
 
-    async def test_html_parsing(self, html_content: str) -> dict:
-        """
-        測試 HTML 解析功能
-
-        Args:
-            html_content: 要測試的 HTML 內容
-
-        Returns:
-            測試結果字典
-        """
-        try:
-            logger.info("開始測試 HTML 解析功能")
-
-            # 使用現有的解析方法
-            parsed_text, images = self._parse_html_content(html_content)
-
-            # 分析 Markdown 特徵
-            markdown_features = {
-                'headers': parsed_text.count('#'),
-                'bold_text': parsed_text.count('**'),
-                'italic_text': parsed_text.count('*') - parsed_text.count('**') * 2,
-                'links': parsed_text.count('['),
-                'bullet_lists': parsed_text.count('* '),
-                'numbered_lists': len([line for line in parsed_text.split('\n') if line.strip() and line.strip()[0].isdigit() and '.' in line[:5]])
-            }
-
-            result = {
-                'success': True,
-                'parsed_text': parsed_text,
-                'text_length': len(parsed_text),
-                'images_found': len(images),
-                'image_urls': images[:5],  # 只顯示前5張圖片
-                'pypandoc_used': False,  # 現在固定為 False，因為已移除 pypandoc
-                'markdown_features': markdown_features
-            }
-
-            logger.info(f"HTML 解析測試成功 - 文字長度: {len(parsed_text)}, 圖片數量: {len(images)}")
-            return result
-
-        except Exception as e:
-            logger.error(f"HTML 解析測試失敗: {e}")
-            return {
-                'success': False,
-                'error': str(e),
-                'parsed_text': '',
-                'text_length': 0,
-                'images_found': 0,
-                'image_urls': [],
-                'pypandoc_used': False,
-                'markdown_features': {}
-            }
-
     # FB 貼文監控功能
     async def fetch_recent_fb_posts(self, days: int = 7) -> List[Dict]:
         """從 scraper API 取得最近的 FB 貼文"""

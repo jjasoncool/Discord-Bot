@@ -93,6 +93,10 @@ class OllamaService:
 
         return self.model_default
 
+    def resolve_request_model(self, override_model: Optional[str] = None) -> str:
+        """對外提供本次請求最終模型名稱（供記錄/觀測使用）。"""
+        return self._resolve_runtime_model(override_model)
+
     def _serialize_context_items(self, items: List[dict[str, str]]) -> str:
         """將 context 安全序列化為 JSON 字串，避免標記邊界被輸入破壞。"""
         safe_items: list[dict[str, object]] = []

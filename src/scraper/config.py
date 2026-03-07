@@ -43,3 +43,10 @@ FACEBOOK_CONFIG = {
     "data_dir": "./data",  # 資料檔案目錄
     "max_scraping_sessions": 3,  # 保留幾次擷取結果 (會根據 max_links 計算最大 HTML 檔案數)
 }
+
+# PTT 抓取設定（先做可連線與可抓頁面驗證）
+PTT_CONFIG = {
+    "target_search_url": "https://www.ptt.cc/bbs/C_Chat/search?page=2&q=%E9%B3%B4%E6%BD%AE",
+    "over18_cookie": {"over18": "1"},
+    "timeout": 20,
+}

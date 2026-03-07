@@ -145,6 +145,31 @@ class FBImage(Base):
     def __repr__(self):
         return f"<FBImage(fb_post_id={self.fb_post_id}, image_url='{self.image_url}')>"
 
+
+class PTTPost(Base):
+    """PTT 貼文主表（單看板/關鍵字抓取）"""
+    __tablename__ = 'ptt_posts'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    board = Column(String(100), nullable=False, index=True)
+    article_id = Column(String(100), nullable=False, index=True)
+    title = Column(String(500), nullable=False)
+    author = Column(String(100))
+    url = Column(String(1000), nullable=False)
+    content = Column(Text)
+    matched_keywords = Column(String(500))
+    published_at = Column(DateTime, index=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint('board', 'article_id', name='uq_ptt_board_article_id'),
+        UniqueConstraint('url', name='uq_ptt_url'),
+    )
+
+    def __repr__(self):
+        return f"<PTTPost(board='{self.board}', article_id='{self.article_id}', title='{self.title[:30]}...')>"
+
 # 建立資料庫引擎
 engine = create_engine(DATABASE_CONFIG["url"], echo=False)
 

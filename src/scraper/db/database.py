@@ -7,7 +7,7 @@ from typing import Optional, List, Dict
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 
-from .models import ArticleMenu, ArticleDetail, SystemState, FBPost, FBImage
+from .models import ArticleMenu, ArticleDetail, SystemState, FBPost, FBImage, PTTPost
 from utils.datetime_utils import parse_datetime
 from utils.logger import get_logger
 
@@ -383,3 +383,50 @@ class DatabaseManager:
             self.session.close()
         except Exception as e:
             self.logger.error(f"關閉 session 失敗: {str(e)}", exc_info=True)
+
+    # ---------------- PTT Post 區段 ----------------
+    def save_ptt_post(self, post_data: dict) -> Optional[PTTPost]:
+        """儲存單篇 PTT 貼文（upsert by board+article_id）"""
+        try:
+            board = post_data.get("board")
+            article_id = post_data.get("article_id")
+            url = post_data.get("url")
+
+            if not board or not article_id or not url:
+                self.logger.warning("略過 PTT 貼文：缺少必要欄位 board/article_id/url")
+                return None
+
+            existing = self.session.query(PTTPost).filter(
+                PTTPost.board == board,
+                PTTPost.article_id == article_id,
+            ).first()
+
+            if not existing:
+                existing = self.session.query(PTTPost).filter(PTTPost.url == url).first()
+
+            if existing:
+                existing.title = post_data.get("title") or existing.title
+                existing.author = post_data.get("author") or existing.author
+                existing.url = url
+                existing.content = post_data.get("content") or existing.content
+                existing.matched_keywords = post_data.get("matched_keywords") or existing.matched_keywords
+                existing.published_at = post_data.get("published_at") or existing.published_at
+                existing.updated_at = datetime.utcnow()
+                return existing
+
+            new_post = PTTPost(
+                board=board,
+                article_id=article_id,
+                title=post_data.get("title") or "",
+                author=post_data.get("author"),
+                url=url,
+                content=post_data.get("content"),
+                matched_keywords=post_data.get("matched_keywords"),
+                published_at=post_data.get("published_at"),
+            )
+            self.session.add(new_post)
+            return new_post
+
+        except Exception as e:
+            self.logger.error(f"儲存 PTT 貼文失敗: {str(e)}", exc_info=True)
+            return None

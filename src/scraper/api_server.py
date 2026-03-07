@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 from pydantic import BaseModel
 
-from db.models import ArticleMenu, ArticleDetail, FBPost, FBImage, get_db_session
+from db.models import ArticleMenu, ArticleDetail, FBPost, FBImage, PTTPost, get_db_session
 from sqlalchemy.orm import joinedload
 from utils.logger import get_logger
 
@@ -77,6 +77,38 @@ class SingleFBPostResponse(BaseModel):
     """單一 FB 貼文查詢回應模型"""
     success: bool
     post: Optional[FBPostResponse] = None
+    message: Optional[str] = None
+
+
+class PTTPostResponse(BaseModel):
+    """PTT 貼文回應模型"""
+    id: int
+    board: str
+    article_id: str
+    title: str
+    author: Optional[str]
+    url: str
+    content: Optional[str]
+    matched_keywords: Optional[str]
+    published_at: Optional[str]
+    created_at: str
+
+    class Config:
+        from_attributes = True
+
+
+class PTTPostsResponse(BaseModel):
+    """PTT 貼文列表回應模型"""
+    success: bool
+    message: str
+    posts: List[PTTPostResponse]
+    total_count: int
+
+
+class SinglePTTPostResponse(BaseModel):
+    """單一 PTT 貼文查詢回應模型"""
+    success: bool
+    post: Optional[PTTPostResponse] = None
     message: Optional[str] = None
 
 # 依賴注入：獲取資料庫 session
@@ -407,6 +439,89 @@ async def get_fb_post_by_id(
         logger.error(f"查詢 FB 貼文 {post_id} 時發生錯誤: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"查詢 FB 貼文失敗: {str(e)}")
 
+
+@app.get("/api/ptt_posts/recent", response_model=PTTPostsResponse)
+async def get_recent_ptt_posts(
+    days: int = 3,
+    limit: int = 50,
+    board: Optional[str] = None,
+    order: str = "desc",
+    db: Session = Depends(get_db)
+):
+    """獲取最近的 PTT 貼文"""
+    try:
+        start_date = datetime.now() - timedelta(days=days)
+
+        query = db.query(PTTPost).filter(PTTPost.created_at >= start_date)
+        if board:
+            query = query.filter(PTTPost.board == board)
+
+        if order.lower() == "asc":
+            query = query.order_by(PTTPost.created_at.asc())
+        else:
+            query = query.order_by(PTTPost.created_at.desc())
+
+        posts = query.limit(limit).all()
+
+        post_responses = [
+            PTTPostResponse(
+                id=post.id,
+                board=post.board,
+                article_id=post.article_id,
+                title=post.title,
+                author=post.author,
+                url=post.url,
+                content=post.content,
+                matched_keywords=post.matched_keywords,
+                published_at=post.published_at.isoformat() if post.published_at else None,
+                created_at=post.created_at.isoformat() if post.created_at else "",
+            )
+            for post in posts
+        ]
+
+        return PTTPostsResponse(
+            success=True,
+            message=f"成功獲取 {len(post_responses)} 篇 PTT 貼文",
+            posts=post_responses,
+            total_count=len(post_responses),
+        )
+
+    except Exception as e:
+        logger.error(f"查詢 PTT 貼文時發生錯誤: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"查詢 PTT 貼文失敗: {str(e)}")
+
+
+@app.get("/api/ptt_posts/{post_id}", response_model=SinglePTTPostResponse)
+async def get_ptt_post_by_id(
+    post_id: int,
+    db: Session = Depends(get_db)
+):
+    """根據資料庫 ID 取得單篇 PTT 貼文"""
+    try:
+        post = db.query(PTTPost).filter(PTTPost.id == post_id).first()
+
+        if not post:
+            return SinglePTTPostResponse(success=False, message=f"找不到 ID 為 {post_id} 的 PTT 貼文")
+
+        response_data = PTTPostResponse(
+            id=post.id,
+            board=post.board,
+            article_id=post.article_id,
+            title=post.title,
+            author=post.author,
+            url=post.url,
+            content=post.content,
+            matched_keywords=post.matched_keywords,
+            published_at=post.published_at.isoformat() if post.published_at else None,
+            created_at=post.created_at.isoformat() if post.created_at else "",
+        )
+
+        return SinglePTTPostResponse(success=True, post=response_data)
+
+    except Exception as e:
+        logger.error(f"查詢 PTT 貼文 {post_id} 時發生錯誤: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"查詢 PTT 貼文失敗: {str(e)}")
+
 @app.get("/api/debug/tables")
 async def debug_table_structure(db: Session = Depends(get_db)):
     """
@@ -418,6 +533,7 @@ async def debug_table_structure(db: Session = Depends(get_db)):
         detail_count = db.query(ArticleDetail).count()
         fb_post_count = db.query(FBPost).count()
         fb_image_count = db.query(FBImage).count()
+        ptt_post_count = db.query(PTTPost).count()
 
         # 檢查有關聯的資料數量
         joined_count = db.query(ArticleMenu).join(
@@ -435,6 +551,7 @@ async def debug_table_structure(db: Session = Depends(get_db)):
                 "article_details": detail_count,
                 "fb_posts": fb_post_count,
                 "fb_images": fb_image_count,
+                "ptt_posts": ptt_post_count,
                 "joined_records": joined_count
             },
             "latest_main_article": {
