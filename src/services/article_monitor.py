@@ -33,10 +33,28 @@ class ArticleMonitor(BaseContentMonitor):
     WEBSITE_NAME = "鳴潮官方網站"
     IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
     PTT_FORUM_TAG_NAME = "PTT"
+    ARTICLE_RUNTIME_CONFIG_PATH = Path("/app/settings/article_runtime.json")
 
     def __init__(self, bot, scraper_api_url: str = "http://scraper:8000"):
         super().__init__(bot, scraper_api_url)
+        self.article_runtime_config = self._load_article_runtime_config()
         logger.info(f"初始化官方文章更新器，目標網站: {self.WEBSITE_NAME}")
+
+    def _load_article_runtime_config(self) -> Dict:
+        """載入文章相關 runtime 設定。"""
+        with open(self.ARTICLE_RUNTIME_CONFIG_PATH, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+
+        if not isinstance(raw, dict):
+            raise ValueError("article_runtime.json 格式錯誤，根節點必須是 JSON object")
+
+        if "ptt_spoiler_keywords" not in raw:
+            raise ValueError("article_runtime.json 缺少必要欄位: ptt_spoiler_keywords")
+
+        if "ptt_comment_chunk_limit" not in raw:
+            raise ValueError("article_runtime.json 缺少必要欄位: ptt_comment_chunk_limit")
+
+        return raw
 
     def _build_request_headers(self) -> Dict[str, str]:
         """建立下載圖片用的請求標頭（優先使用 fake-useragent，否則使用內建隨機 UA 池）"""
@@ -736,6 +754,7 @@ class ArticleMonitor(BaseContentMonitor):
 
     def _format_ptt_comments_messages(self, comments: List[Dict], chunk_limit: int = 1800) -> List[str]:
         """將 PTT 留言分段成多則 Discord 訊息，避免超過長度限制。"""
+        chunk_limit = int(self.article_runtime_config.get("ptt_comment_chunk_limit", chunk_limit) or chunk_limit)
         if not comments:
             return ["目前沒有留言。"]
 
@@ -856,6 +875,8 @@ class ArticleMonitor(BaseContentMonitor):
 
             files: List[discord.File] = []
             image_urls = await self._resolve_ptt_image_targets(post.get('content') or '')
+            spoiler_keywords = self.article_runtime_config.get("ptt_spoiler_keywords") or []
+            spoiler_first_image = any(keyword in (post.get('title') or '') for keyword in spoiler_keywords)
             if image_urls:
                 logger.info(
                     "PTT 貼文偵測到 %s 張圖片，準備和首貼一起上傳: board=%s article_id=%s",
@@ -872,14 +893,19 @@ class ArticleMonitor(BaseContentMonitor):
 
                         image_data, detected_ext = download_result
                         filename = self._get_image_filename_with_ext(image_url, index, detected_ext)
+                        if spoiler_first_image and index == 1 and not filename.startswith("SPOILER_"):
+                            filename = f"SPOILER_{filename}"
                         files.append(discord.File(image_data, filename=filename))
 
-            created = await channel.create_thread(
-                name=thread_title,
-                content=thread_content,
-                applied_tags=applied_tags,
-                files=files if files else None,
-            )
+            create_thread_kwargs = {
+                "name": thread_title,
+                "content": thread_content,
+                "applied_tags": applied_tags,
+            }
+            if files:
+                create_thread_kwargs["files"] = files
+
+            created = await channel.create_thread(**create_thread_kwargs)
             thread = created.thread if hasattr(created, 'thread') else created
 
             comments = post.get('comments') or []

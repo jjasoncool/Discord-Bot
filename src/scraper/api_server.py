@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 from pydantic import BaseModel
 import json
+from sqlalchemy import case
 
 from db.models import ArticleMenu, ArticleDetail, FBPost, FBImage, PTTPost, get_db_session
 from sqlalchemy.orm import joinedload
@@ -463,14 +464,21 @@ async def get_recent_ptt_posts(
     try:
         start_date = datetime.now() - timedelta(days=days)
 
-        query = db.query(PTTPost).filter(PTTPost.created_at >= start_date)
+        query = db.query(PTTPost).filter(
+            (PTTPost.published_at >= start_date) | (PTTPost.created_at >= start_date)
+        )
         if board:
             query = query.filter(PTTPost.board == board)
 
+        published_sort = case(
+            (PTTPost.published_at.is_(None), PTTPost.created_at),
+            else_=PTTPost.published_at,
+        )
+
         if order.lower() == "asc":
-            query = query.order_by(PTTPost.created_at.asc())
+            query = query.order_by(published_sort.asc(), PTTPost.created_at.asc())
         else:
-            query = query.order_by(PTTPost.created_at.desc())
+            query = query.order_by(published_sort.desc(), PTTPost.created_at.desc())
 
         posts = query.limit(limit).all()
 
