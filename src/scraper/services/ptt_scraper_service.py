@@ -284,6 +284,16 @@ class PTTScraperService:
             try:
                 human_sleep(*self.human_delay_range)
                 detail = self.fetch_article_detail(article.get("url", ""))
+
+                if not detail.get("ok") or detail.get("content_length", 0) <= 0:
+                    self.logger.warning(
+                        "略過更新已失效/已刪除的 PTT 文章抓取結果: url=%s ok=%s content_length=%s",
+                        article.get("url"),
+                        detail.get("ok"),
+                        detail.get("content_length", 0),
+                    )
+                    continue
+
                 article["content"] = detail.get("content", "")
                 article["content_length"] = detail.get("content_length", 0)
                 article["published_at"] = detail.get("published_at", "")
@@ -295,9 +305,7 @@ class PTTScraperService:
                 detailed_count += 1
             except Exception as e:
                 self.logger.warning(f"抓取單篇文章內文失敗: url={article.get('url')}, error={e}")
-                article["content"] = ""
-                article["content_length"] = 0
-                article["published_at"] = ""
+                continue
 
         base_result["detailed_count"] = detailed_count
 
@@ -315,6 +323,14 @@ class PTTScraperService:
 
         for article in articles:
             try:
+                if article.get("content_length", 0) <= 0:
+                    self.logger.info(
+                        "略過未取得有效內文的 PTT 貼文，不更新 DB: article_id=%s url=%s",
+                        article.get("article_id"),
+                        article.get("url"),
+                    )
+                    continue
+
                 post_data = {
                     "board": self._parse_board_from_url(article.get("url", "")),
                     "article_id": article.get("article_id"),

@@ -168,6 +168,10 @@ async def get_intro_channel_id(config_file="config.json", caller="unknown"):
     """從配置文件中讀取自我介紹頻道 ID"""
     return await ChannelConfig.get_channel_id('intro_channel_id', config_file, caller)
 
+async def get_forum_article_channel_id(config_file="config.json", caller="unknown"):
+    """從配置文件中讀取論壇文章頻道 ID"""
+    return await ChannelConfig.get_channel_id('forum_article_channel_id', config_file, caller)
+
 async def check_role(user, required_role: str = None) -> bool:
     """
     檢查使用者是否具有特定角色

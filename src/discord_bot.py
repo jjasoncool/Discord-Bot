@@ -197,16 +197,7 @@ async def auto_start_article_monitor(bot):
             config = json.load(f)
 
         article_monitor_channel_id = config.get('article_monitor_channel_id')
-
-        if not article_monitor_channel_id:
-            logger.info("配置文件中沒有設定官方文章更新頻道 ID，跳過自動啟動")
-            return
-
-        # 檢查頻道是否存在
-        channel = bot.get_channel(article_monitor_channel_id)
-        if not channel:
-            logger.error(f"找不到官方文章更新頻道 ID: {article_monitor_channel_id}")
-            return
+        forum_article_channel_id = config.get('forum_article_channel_id')
 
         # 獲取 ArticleCommands Cog
         article_commands = bot.get_cog('ArticleCommands')
@@ -214,42 +205,116 @@ async def auto_start_article_monitor(bot):
             logger.error("找不到 ArticleCommands Cog，無法啟動官方文章更新")
             return
 
-        # 檢查是否已經在監控
-        if article_commands.monitoring_task and not article_commands.monitoring_task.done():
-            logger.info("官方文章更新已經在運行中")
-            return
-
-        # 設定監控頻道
-        if article_monitor_channel_id not in article_commands.monitored_channels:
-            article_commands.monitored_channels.append(article_monitor_channel_id)
-
-        # 啟動監控任務
-        article_commands.monitoring_task = asyncio.create_task(
-            article_commands.article_monitor.start_monitoring(
-                channel_ids=article_commands.monitored_channels,
-                check_interval=180  # 3分鐘檢查一次
-            )
-        )
-
-        logger.info(f"✅ 已自動啟動官方文章更新！更新頻道: {channel.name} (ID: {article_monitor_channel_id})")
-
-        # 同時啟動 FB 貼文監控（使用相同的頻道）
-        if channel:
-            # 檢查是否已經有 FB 監控任務
-            if not hasattr(article_commands, 'fb_monitoring_task') or not article_commands.fb_monitoring_task or article_commands.fb_monitoring_task.done():
-                # 啟動 FB 監控任務
-                article_commands.fb_monitoring_task = asyncio.create_task(
-                    article_commands.article_monitor.start_fb_monitoring(
-                        channel_ids=[article_monitor_channel_id],
-                        check_interval=600  # 10分鐘檢查一次 FB 貼文
-                    )
-                )
-                logger.info(f"✅ 已自動啟動 FB 貼文監控！更新頻道: {channel.name} (ID: {article_monitor_channel_id})")
-            else:
-                logger.info("FB 貼文監控已經在運行中")
+        await _auto_start_official_article_monitor(bot, article_commands, article_monitor_channel_id)
+        await _auto_start_fb_monitor(bot, article_commands, article_monitor_channel_id)
+        await _auto_start_ptt_forum_monitor(bot, article_commands, forum_article_channel_id)
 
     except Exception as e:
         logger.error(f"自動啟動官方文章更新時發生錯誤: {e}", exc_info=True)
+
+
+async def _auto_start_monitor_task(
+    *,
+    task_owner,
+    task_attr: str,
+    get_channel_fn,
+    channel_id,
+    missing_config_log: str,
+    invalid_channel_log: str,
+    already_running_log: str,
+    start_coro_factory,
+    success_log_factory,
+):
+    """通用的監控任務啟動器。"""
+    if not channel_id:
+        logger.info(missing_config_log)
+        return
+
+    channel = get_channel_fn(channel_id)
+    if not channel:
+        logger.error(invalid_channel_log.format(channel_id=channel_id))
+        return
+
+    task = getattr(task_owner, task_attr, None)
+    if task and not task.done():
+        logger.info(already_running_log)
+        return
+
+    new_task = asyncio.create_task(start_coro_factory(channel_id))
+    setattr(task_owner, task_attr, new_task)
+    logger.info(success_log_factory(channel, channel_id))
+
+
+async def _auto_start_official_article_monitor(bot, article_commands, article_monitor_channel_id):
+    """自動啟動官方文章監控。"""
+    def _get_channel(channel_id):
+        return bot.get_channel(channel_id)
+
+    async def _start(channel_id):
+        if channel_id not in article_commands.monitored_channels:
+            article_commands.monitored_channels.append(channel_id)
+        await article_commands.article_monitor.start_monitoring(
+            channel_ids=article_commands.monitored_channels,
+            check_interval=180,
+        )
+
+    await _auto_start_monitor_task(
+        task_owner=article_commands,
+        task_attr="monitoring_task",
+        get_channel_fn=_get_channel,
+        channel_id=article_monitor_channel_id,
+        missing_config_log="配置文件中沒有設定官方文章更新頻道 ID，跳過官方文章自動啟動",
+        invalid_channel_log="找不到官方文章更新頻道 ID: {channel_id}",
+        already_running_log="官方文章更新已經在運行中",
+        start_coro_factory=_start,
+        success_log_factory=lambda channel, channel_id: f"✅ 已自動啟動官方文章更新！更新頻道: {channel.name} (ID: {channel_id})",
+    )
+
+
+async def _auto_start_fb_monitor(bot, article_commands, article_monitor_channel_id):
+    """自動啟動 FB 貼文監控。當前沿用官方文章頻道設定。"""
+    async def _start(channel_id):
+        await article_commands.article_monitor.start_fb_monitoring(
+            channel_ids=[channel_id],
+            check_interval=600,
+        )
+
+    await _auto_start_monitor_task(
+        task_owner=article_commands,
+        task_attr="fb_monitoring_task",
+        get_channel_fn=bot.get_channel,
+        channel_id=article_monitor_channel_id,
+        missing_config_log="配置文件中沒有設定官方文章更新頻道 ID，跳過 FB 貼文自動啟動",
+        invalid_channel_log="找不到 FB 貼文監控使用的頻道 ID: {channel_id}",
+        already_running_log="FB 貼文監控已經在運行中",
+        start_coro_factory=_start,
+        success_log_factory=lambda channel, channel_id: f"✅ 已自動啟動 FB 貼文監控！更新頻道: {channel.name} (ID: {channel_id})",
+    )
+
+
+async def _auto_start_ptt_forum_monitor(bot, article_commands, forum_article_channel_id):
+    """自動啟動 PTT 論壇文章監控。"""
+    def _get_forum_channel(channel_id):
+        channel = bot.get_channel(channel_id)
+        return channel if isinstance(channel, discord.ForumChannel) else None
+
+    async def _start(channel_id):
+        await article_commands.article_monitor.start_ptt_monitoring(
+            forum_channel_ids=[channel_id],
+            check_interval=600,
+        )
+
+    await _auto_start_monitor_task(
+        task_owner=article_commands,
+        task_attr="ptt_monitoring_task",
+        get_channel_fn=_get_forum_channel,
+        channel_id=forum_article_channel_id,
+        missing_config_log="配置文件中沒有設定論壇文章頻道 ID，跳過 PTT 論壇文章自動啟動",
+        invalid_channel_log="找不到論壇文章頻道 ID: {channel_id}，或該頻道不是論壇頻道",
+        already_running_log="PTT 論壇文章監控已經在運行中",
+        start_coro_factory=_start,
+        success_log_factory=lambda channel, channel_id: f"✅ 已自動啟動 PTT 論壇文章監控！論壇頻道: {channel.name} (ID: {channel_id})",
+    )
 
 # 主函數
 def main():

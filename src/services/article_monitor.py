@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional
 from bs4 import BeautifulSoup
+from urllib.parse import urlparse
 from utils.logger_config import get_discord_bot_logger, get_article_monitor_logger
 
 from .base_monitor import BaseContentMonitor
@@ -30,6 +31,7 @@ class ArticleMonitor(BaseContentMonitor):
     # 網站配置
     BASE_URL = "https://hw-media-cdn-mingchao.kurogame.com"
     WEBSITE_NAME = "鳴潮官方網站"
+    IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
 
     def __init__(self, bot, scraper_api_url: str = "http://scraper:8000"):
         super().__init__(bot, scraper_api_url)
@@ -678,6 +680,188 @@ class ArticleMonitor(BaseContentMonitor):
     async def fetch_recent_fb_posts(self, days: int = 7) -> List[Dict]:
         """從 scraper API 取得最近的 FB 貼文"""
         return await self.fetch_content_from_api("/api/fb_posts/recent", {"days": days, "limit": 20})
+
+    async def fetch_recent_ptt_posts(self, days: int = 3) -> List[Dict]:
+        """從 scraper API 取得最近的 PTT 貼文（舊到新）"""
+        return await self.fetch_content_from_api(
+            "/api/ptt_posts/recent",
+            {"days": days, "limit": 50, "order": "asc"},
+        )
+
+    @staticmethod
+    def _build_ptt_article_key(post: Dict) -> str:
+        board = str(post.get('board') or '').strip()
+        article_id = str(post.get('article_id') or '').strip()
+        return f"ptt:{board}:{article_id}"
+
+    @staticmethod
+    def _sanitize_forum_thread_title(title: str, content: str = "") -> str:
+        sanitized = (title or '').replace('\n', ' ').replace('\r', ' ').strip()
+        sanitized = re.sub(r'\s+', ' ', sanitized)
+
+        if not sanitized:
+            content_preview = (content or '').replace('\n', ' ').replace('\r', ' ').strip()
+            content_preview = re.sub(r'\s+', ' ', content_preview)
+            sanitized = content_preview[:20] if content_preview else 'PTT 文章'
+
+        prefixed_title = f"[PTT] {sanitized}"
+        return prefixed_title[:100]
+
+    def _extract_image_urls_from_text(self, text: str) -> List[str]:
+        """從文字內容中擷取可直接下載的圖片連結。"""
+        if not text:
+            return []
+
+        candidates = re.findall(r'https?://[^\s<>"]+', text)
+        image_urls: List[str] = []
+        seen: set[str] = set()
+
+        for raw_url in candidates:
+            cleaned = raw_url.rstrip('.,);]\">')
+            parsed = urlparse(cleaned)
+            path = (parsed.path or '').lower()
+
+            if not parsed.scheme or not parsed.netloc:
+                continue
+
+            if not path.endswith(self.IMAGE_EXTENSIONS):
+                continue
+
+            if cleaned in seen:
+                continue
+
+            seen.add(cleaned)
+            image_urls.append(cleaned)
+
+        return image_urls
+
+    def _format_ptt_post_content(self, post: Dict) -> str:
+        board = post.get('board') or 'unknown'
+        author = post.get('author') or '未知作者'
+        url = post.get('url') or ''
+        published_at = post.get('published_at') or '未知時間'
+        matched_keywords = post.get('matched_keywords') or '無'
+        raw_content = (post.get('content') or '').strip()
+        preview = raw_content[:1500] + ('\n...（內容已截斷）' if len(raw_content) > 1500 else '')
+
+        parts = [
+            f"**看板**：{board}",
+            f"**作者**：{author}",
+            f"**發文時間**：{published_at}",
+            f"**關鍵字**：{matched_keywords}",
+        ]
+        if url:
+            parts.append(f"**連結**：{url}")
+        if preview:
+            parts.extend(["", "**內文預覽**", preview])
+        return "\n".join(parts)
+
+    async def send_ptt_post_to_forum_channel(self, forum_channel_id: int, post: Dict) -> bool:
+        """將 PTT 貼文發表到指定論壇頻道。"""
+        try:
+            channel = self.bot.get_channel(forum_channel_id)
+            if not isinstance(channel, discord.ForumChannel):
+                logger.error(f"找不到論壇頻道 ID: {forum_channel_id}，或該頻道不是 ForumChannel")
+                return False
+
+            thread_title = self._sanitize_forum_thread_title(
+                post.get('title') or '',
+                post.get('content') or '',
+            )
+            thread_content = self._format_ptt_post_content(post)
+            created = await channel.create_thread(name=thread_title, content=thread_content)
+            thread = created.thread if hasattr(created, 'thread') else created
+
+            image_urls = self._extract_image_urls_from_text(post.get('content') or '')
+            if image_urls and thread:
+                logger.info(
+                    "PTT 貼文偵測到 %s 張圖片，準備重新上傳到 Discord: board=%s article_id=%s",
+                    len(image_urls),
+                    post.get('board'),
+                    post.get('article_id'),
+                )
+
+                chunk_size = 10
+                image_chunks = [image_urls[i:i + chunk_size] for i in range(0, len(image_urls), chunk_size)]
+                for chunk_index, chunk in enumerate(image_chunks, start=1):
+                    files: List[discord.File] = []
+                    async with aiohttp.ClientSession() as session:
+                        for image_index, image_url in enumerate(chunk, start=1):
+                            download_result = await self._download_image_as_file(image_url, session, max_retries=2)
+                            if not download_result:
+                                logger.warning("PTT 圖片下載失敗，略過: %s", image_url)
+                                continue
+
+                            image_data, detected_ext = download_result
+                            filename = self._get_image_filename_with_ext(
+                                image_url,
+                                (chunk_index - 1) * chunk_size + image_index,
+                                detected_ext,
+                            )
+                            files.append(discord.File(image_data, filename=filename))
+
+                    if files:
+                        await asyncio.sleep(0.5)
+                        await thread.send(files=files)
+
+            logger.info(
+                "成功將 PTT 貼文發布到論壇頻道: forum_channel_id=%s board=%s article_id=%s title=%s",
+                forum_channel_id,
+                post.get('board'),
+                post.get('article_id'),
+                thread_title,
+            )
+            return True
+        except Exception as e:
+            logger.error(f"發送 PTT 貼文到論壇頻道失敗: {e}", exc_info=True)
+            return False
+
+    async def check_and_send_new_ptt_posts(self, forum_channel_ids: List[int]):
+        """檢查並發送新的 PTT 貼文到指定論壇頻道。"""
+        try:
+            posts = await self.fetch_recent_ptt_posts(days=3)
+            if not posts:
+                article_logger.info("[PTT] 沒有找到新 PTT 貼文")
+                return
+
+            new_posts: List[Dict] = []
+            for post in posts:
+                article_key = self._build_ptt_article_key(post)
+                if article_key == 'ptt::':
+                    continue
+                if not self.is_content_sent('ptt', article_key):
+                    new_posts.append(post)
+
+            if not new_posts:
+                article_logger.info("[PTT] 沒有新的未發送 PTT 貼文")
+                return
+
+            article_logger.info(f"[PTT] 找到 {len(new_posts)} 篇新 PTT 貼文")
+            for post in new_posts:
+                article_key = self._build_ptt_article_key(post)
+                sent_any = False
+                for channel_id in forum_channel_ids:
+                    success = await self.send_ptt_post_to_forum_channel(channel_id, post)
+                    if success:
+                        sent_any = True
+                        await asyncio.sleep(1)
+
+                if sent_any:
+                    self.mark_content_as_sent('ptt', article_key)
+        except Exception as e:
+            logger.error(f"[PTT] 檢查新 PTT 貼文時發生錯誤: {e}", exc_info=True)
+
+    async def start_ptt_monitoring(self, forum_channel_ids: List[int], check_interval: int = 600):
+        """開始監控 PTT 貼文並發送到論壇頻道。"""
+        article_logger.info(f"[PTT] 開始監控 PTT 貼文，檢查間隔: {check_interval} 秒")
+
+        while True:
+            try:
+                await self.check_and_send_new_ptt_posts(forum_channel_ids)
+                await asyncio.sleep(check_interval)
+            except Exception as e:
+                article_logger.error(f"[PTT] 監控循環發生錯誤: {e}")
+                await asyncio.sleep(300)
 
     async def fetch_fb_post_by_id(self, fb_post_id: int) -> Optional[Dict]:
         """從 scraper API 根據資料庫 ID 取得單篇 FB 貼文。"""

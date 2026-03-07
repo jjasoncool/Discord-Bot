@@ -515,6 +515,7 @@ class ManagementCommands(commands.Cog):
         channel_types = {
             "交易頻道": {"type": discord.ChannelType.forum, "key": "trade_forum_channel_id", "color": discord.Color.blue(), "desc": "交易記錄頻道"},
             "交易紀錄封存": {"type": discord.ChannelType.forum, "key": "archive_channel_id", "color": discord.Color.dark_grey(), "desc": "交易紀錄封存頻道"},
+            "論壇文章頻道": {"type": discord.ChannelType.forum, "key": "forum_article_channel_id", "color": discord.Color.gold(), "desc": "自動發布論壇文章的論壇頻道"},
             "購物車交付": {"type": discord.ChannelType.text, "key": "cart_delivery_channel_id", "color": discord.Color.green(), "desc": "購物車交付通知頻道"},
             "官方文章更新": {"type": discord.ChannelType.text, "key": "article_monitor_channel_id", "color": discord.Color.orange(), "desc": "自動發送官方最新文章的頻道"},
             "自我介紹頻道": {"type": discord.ChannelType.text, "key": "intro_channel_id", "color": discord.Color.purple(), "desc": "使用者填寫自我介紹的頻道"}

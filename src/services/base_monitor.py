@@ -32,13 +32,16 @@ class BaseContentMonitor:
                     data = json.load(f)
                 self.sent_article_ids = set(data.get('sent_article_ids', []))
                 self.sent_fbpost_ids = set(data.get('sent_fbpost_ids', []))
+                self.sent_article_keys = set(data.get('sent_article_keys', []))
             else:
                 self.sent_article_ids = set()
                 self.sent_fbpost_ids = set()
+                self.sent_article_keys = set()
         except Exception as e:
             logger.error(f"載入已發送內容記錄失敗: {e}")
             self.sent_article_ids = set()
             self.sent_fbpost_ids = set()
+            self.sent_article_keys = set()
 
     def _save_sent_content(self):
         """儲存已發送的內容記錄"""
@@ -47,6 +50,7 @@ class BaseContentMonitor:
             data = {
                 'sent_article_ids': list(self.sent_article_ids),
                 'sent_fbpost_ids': list(self.sent_fbpost_ids),
+                'sent_article_keys': list(self.sent_article_keys),
                 'last_updated': datetime.now().isoformat()
             }
 
@@ -114,6 +118,8 @@ class BaseContentMonitor:
             self.sent_article_ids.add(content_id)
         elif content_type == 'fbpost':
             self.sent_fbpost_ids.add(content_id)
+        elif content_type == 'ptt':
+            self.sent_article_keys.add(str(content_id))
 
         self._save_sent_content()
 
@@ -123,4 +129,6 @@ class BaseContentMonitor:
             return content_id in self.sent_article_ids
         elif content_type == 'fbpost':
             return content_id in self.sent_fbpost_ids
+        elif content_type == 'ptt':
+            return str(content_id) in self.sent_article_keys
         return False
