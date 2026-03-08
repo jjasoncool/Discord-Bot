@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 from utils.logger_config import get_discord_bot_logger, get_article_monitor_logger
 
 from .base_monitor import BaseContentMonitor
@@ -55,6 +55,36 @@ class ArticleMonitor(BaseContentMonitor):
             raise ValueError("article_runtime.json 缺少必要欄位: ptt_comment_chunk_limit")
 
         return raw
+
+    @staticmethod
+    def _sanitize_fb_hashtag_url(url: str) -> str:
+        """僅在 Discord 顯示前清洗 Facebook hashtag URL，保留原始資料不變。"""
+        if not url:
+            return ""
+        try:
+            parsed = urlparse(url.strip())
+        except Exception:
+            return url
+
+        if "facebook.com" not in parsed.netloc or "/hashtag/" not in parsed.path:
+            return url
+
+        clean_path = parsed.path.rstrip("/")
+        return urlunparse((parsed.scheme or "https", "www.facebook.com", clean_path, "", "", ""))
+
+    def _sanitize_fb_text_md_for_discord(self, text_md: str) -> str:
+        """清洗 Discord 顯示用的 FB hashtag markdown link，不改動資料來源。"""
+        if not text_md:
+            return ""
+
+        def _replace(match: re.Match) -> str:
+            label = match.group(1)
+            url = match.group(2)
+            sanitized_url = self._sanitize_fb_hashtag_url(url)
+            return f"[{label}]({sanitized_url})"
+
+        pattern = re.compile(r"\[(#[^\]]+)\]\((https?://[^)]+)\)")
+        return pattern.sub(_replace, text_md)
 
     def _build_request_headers(self) -> Dict[str, str]:
         """建立下載圖片用的請求標頭（優先使用 fake-useragent，否則使用內建隨機 UA 池）"""
@@ -1143,6 +1173,8 @@ class ArticleMonitor(BaseContentMonitor):
 
         # 優先使用 text_md（Discord Markdown 格式），如果沒有則使用 text
         description_text = fb_post.get('text_md') or fb_post.get('text', '')
+        if fb_post.get('text_md'):
+            description_text = self._sanitize_fb_text_md_for_discord(description_text)
         description = description_text[:2000] if description_text else ''
 
         # 優先使用 url 欄位，如果 url 是空的則使用 pfbid_url

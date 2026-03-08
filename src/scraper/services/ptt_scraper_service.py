@@ -12,8 +12,18 @@ from typing import Dict, Any, List
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, unquote_plus
 
 import requests
+from requests.adapters import HTTPAdapter
+from requests.exceptions import RequestException, SSLError, ConnectionError, Timeout, HTTPError
 from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
+from urllib3.util.retry import Retry
+
+try:
+    import cloudscraper  # type: ignore
+    CLOUDSCRAPER_AVAILABLE = True
+except Exception:
+    cloudscraper = None
+    CLOUDSCRAPER_AVAILABLE = False
 
 # 讓此檔案可被「單檔直接執行」
 # python services/ptt_scraper_service.py 時，將 /app 加入 sys.path
@@ -131,17 +141,95 @@ class PTTScraperService:
             "Pragma": "no-cache",
         }
 
+    def _build_session(self) -> requests.Session:
+        """建立帶有 retry 的 session；優先使用 cloudscraper。"""
+        if CLOUDSCRAPER_AVAILABLE:
+            session = cloudscraper.create_scraper()
+        else:
+            session = requests.Session()
+
+        retry = Retry(
+            total=3,
+            connect=3,
+            read=3,
+            backoff_factor=1.0,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=frozenset(["GET"]),
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        return session
+
     def _fetch_html(self, url: str) -> str:
         """共用 HTML 抓取"""
-        with requests.Session() as session:
-            response = session.get(
-                url,
-                headers=self._build_headers(),
-                cookies=self.over18_cookie,
-                timeout=self.timeout,
-            )
-        response.raise_for_status()
-        return response.text
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                with self._build_session() as session:
+                    response = session.get(
+                        url,
+                        headers=self._build_headers(),
+                        cookies=self.over18_cookie,
+                        timeout=self.timeout,
+                    )
+                response.raise_for_status()
+                return response.text
+            except SSLError as e:
+                last_error = e
+                self.logger.warning(
+                    "PTT 請求失敗（TLS/SSL handshake 問題，attempt=%s/3）: url=%s error=%s | 可能是對端在 TLS 階段直接中斷連線，或中間網路節點/防護機制重置連線。",
+                    attempt,
+                    url,
+                    e,
+                )
+                if attempt < 3:
+                    human_sleep(1.0 * attempt, 1.5 * attempt)
+            except ConnectionError as e:
+                last_error = e
+                self.logger.warning(
+                    "PTT 請求失敗（TCP 連線被重置/中斷，attempt=%s/3）: url=%s error=%s | 這通常不是 HTTP 403/429，而是底層連線被對端或中間節點直接切斷。",
+                    attempt,
+                    url,
+                    e,
+                )
+                if attempt < 3:
+                    human_sleep(1.0 * attempt, 1.5 * attempt)
+            except Timeout as e:
+                last_error = e
+                self.logger.warning(
+                    "PTT 請求逾時（attempt=%s/3）: url=%s error=%s",
+                    attempt,
+                    url,
+                    e,
+                )
+                if attempt < 3:
+                    human_sleep(1.0 * attempt, 1.5 * attempt)
+            except HTTPError as e:
+                last_error = e
+                status = getattr(getattr(e, 'response', None), 'status_code', 'unknown')
+                self.logger.warning(
+                    "PTT HTTP 層回應錯誤（attempt=%s/3）: url=%s status=%s error=%s | 這代表伺服器有正式回應拒絕，而不是單純 TCP/TLS reset。",
+                    attempt,
+                    url,
+                    status,
+                    e,
+                )
+                if attempt < 3:
+                    human_sleep(1.0 * attempt, 1.5 * attempt)
+            except RequestException as e:
+                last_error = e
+                self.logger.warning(
+                    "PTT 請求失敗（一般 requests 例外，attempt=%s/3）: url=%s error=%s",
+                    attempt,
+                    url,
+                    e,
+                )
+                if attempt < 3:
+                    human_sleep(1.0 * attempt, 1.5 * attempt)
+
+        raise RuntimeError(f"PTT HTML 抓取失敗（重試耗盡）: {url} err={last_error}")
 
     def _trim_article_tail(self, content: str) -> str:
         """更安全地去除 PTT 文章尾段（簽名/發信站），避免誤切正文中的 --"""
