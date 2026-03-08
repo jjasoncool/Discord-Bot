@@ -66,6 +66,7 @@ def append_askai_response_log(
     question: str,
     reply: str,
     model: str,
+    think: bool,
     discord_meta: dict[str, int],
     rag_meta: dict[str, int | bool | str],
 ) -> None:
@@ -83,6 +84,7 @@ def append_askai_response_log(
         "question": question,
         "reply": reply,
         "model": model,
+        "think": think,
         "discord_context_meta": discord_meta,
         "rag_context_meta": rag_meta,
     }
@@ -231,6 +233,7 @@ class LLMCommands(commands.Cog):
 
         # === 呼叫 Service：各司其職，只傳遞乾淨的參數與字串 ===
         target_model = self.llm_service.resolve_request_model()
+        target_think = self.llm_service.resolve_request_think()
 
         reply, prompt_record_log = await self.llm_service.generate_reply(
             prompt=question,              # 單純的使用者問題
@@ -238,6 +241,7 @@ class LLMCommands(commands.Cog):
             context_items=context_items,  # 結構化上下文（由 Service 層統一安全封裝）
             images=image_payload,
             model=target_model,
+            think=target_think,
         )
 
         # askai_prompt.txt：只記錄「真正送給 Ollama 的文字」
@@ -303,6 +307,7 @@ class LLMCommands(commands.Cog):
                 question=question,
                 reply=reply,
                 model=target_model,
+                think=target_think,
                 discord_meta=discord_meta,
                 rag_meta=rag_meta,
             )

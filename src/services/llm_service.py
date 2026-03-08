@@ -46,40 +46,55 @@ class OllamaService:
         self.context_safety_rules = load_context_safety_rules(self.settings.llm_context_safety_rules_path)
         self._runtime_model_cached_value: Optional[str] = None
         self._runtime_model_cached_mtime_ns: Optional[int] = None
+        self._runtime_think_cached_value: Optional[bool] = None
 
-    def _load_runtime_model_from_file(self) -> Optional[str]:
-        """以 mtime 快取 runtime model，降低每次請求都讀檔的成本。"""
+    def _load_runtime_config_cached(self) -> bool:
+        """在 service 層讀取並快取 runtime config。"""
         runtime_config_path = Path(self.settings.ollama_runtime_model_path)
 
         try:
             if not runtime_config_path.exists():
                 self._runtime_model_cached_value = None
                 self._runtime_model_cached_mtime_ns = None
-                return None
+                self._runtime_think_cached_value = None
+                return False
 
-            stat_result = runtime_config_path.stat()
-            current_mtime_ns = stat_result.st_mtime_ns
-
+            current_mtime_ns = runtime_config_path.stat().st_mtime_ns
             if (
                 self._runtime_model_cached_mtime_ns == current_mtime_ns
-                and self._runtime_model_cached_value
+                and self._runtime_model_cached_value is not None
+                and self._runtime_think_cached_value is not None
             ):
-                return self._runtime_model_cached_value
+                return True
 
-            raw_content = runtime_config_path.read_text(encoding="utf-8").strip()
-            runtime_model_from_file: Optional[str] = None
-            if raw_content:
-                runtime_config = load_ollama_runtime_config(runtime_config_path)
-                candidate = runtime_config.model.strip()
-                if candidate:
-                    runtime_model_from_file = candidate
+            runtime_config = load_ollama_runtime_config(runtime_config_path)
+            candidate_model = runtime_config.model.strip()
 
-            self._runtime_model_cached_value = runtime_model_from_file
+            if not candidate_model:
+                self._runtime_model_cached_value = None
+                self._runtime_think_cached_value = None
+                self._runtime_model_cached_mtime_ns = None
+                return False
+
+            self._runtime_model_cached_value = candidate_model or None
+            self._runtime_think_cached_value = runtime_config.think
             self._runtime_model_cached_mtime_ns = current_mtime_ns
-            return runtime_model_from_file
+            return True
         except Exception as exc:
-            logger.warning("讀取 runtime model 檔案失敗: %s", exc)
+            logger.warning("讀取 runtime config 失敗: %s", exc)
+            return False
+
+    def _load_runtime_model_from_file(self) -> Optional[str]:
+        """回傳 runtime config 中的 model，並沿用 service 內快取。"""
+        if not self._load_runtime_config_cached():
             return None
+        return self._runtime_model_cached_value
+
+    def _load_runtime_think_from_file(self) -> Optional[bool]:
+        """回傳 runtime config 中的 think，並沿用 service 內快取。"""
+        if not self._load_runtime_config_cached():
+            return None
+        return self._runtime_think_cached_value
 
     def _resolve_runtime_model(self, override_model: Optional[str] = None) -> str:
         """解析本次請求模型：call override > runtime file > 預設。"""
@@ -96,6 +111,17 @@ class OllamaService:
     def resolve_request_model(self, override_model: Optional[str] = None) -> str:
         """對外提供本次請求最終模型名稱（供記錄/觀測使用）。"""
         return self._resolve_runtime_model(override_model)
+
+    def resolve_request_think(self, override_think: Optional[bool] = None) -> bool:
+        """對外提供本次請求最終 think 設定（供記錄/觀測使用）。"""
+        if override_think is not None:
+            return bool(override_think)
+
+        runtime_think = self._load_runtime_think_from_file()
+        if runtime_think is not None:
+            return runtime_think
+
+        return True
 
     def _serialize_context_items(self, items: List[dict[str, str]]) -> str:
         """將 context 安全序列化為 JSON 字串，避免標記邊界被輸入破壞。"""
@@ -183,6 +209,7 @@ class OllamaService:
         context_items: Optional[List[dict[str, str]]] = None,
         images: Optional[List[str]] = None,
         model: Optional[str] = None,
+        think: Optional[bool] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         repeat_penalty: Optional[float] = None,
@@ -211,9 +238,11 @@ class OllamaService:
         )
 
         target_model = self._resolve_runtime_model(model)
+        target_think = self.resolve_request_think(think)
         payload = {
             "model": target_model,
             "messages": bundle.messages,
+            "think": target_think,
             "options": {
                 "temperature": temperature,
                 "top_p": top_p,

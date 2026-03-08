@@ -22,7 +22,7 @@ class LLMServiceSettings(BaseSettings):
         validation_alias="OLLAMA_BASE_URL",
     )
     ollama_model: str = Field(
-        default="gemma3:12b",
+        default="ministral-3:14b",
         validation_alias="OLLAMA_MODEL",
     )
     ollama_timeout: int = Field(
@@ -110,6 +110,7 @@ class OllamaRuntimeConfig(BaseModel):
     model: str
     embed_model: str
     moderation_model: str | None = None
+    think: bool = True
 
 
 class AskAICommandSettings(BaseSettings):
