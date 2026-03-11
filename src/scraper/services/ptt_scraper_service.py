@@ -232,7 +232,7 @@ class PTTScraperService:
         raise RuntimeError(f"PTT HTML 抓取失敗（重試耗盡）: {url} err={last_error}")
 
     def _trim_article_tail(self, content: str) -> str:
-        """更安全地去除 PTT 文章尾段（簽名/發信站），避免誤切正文中的 --"""
+        """去除 PTT 文章尾段（簽名/發信站），優先依明確站方標記裁切。"""
         if not content:
             return ""
 
@@ -243,10 +243,19 @@ class PTTScraperService:
             if "※ 發信站:" in line:
                 return "\n".join(lines[:idx]).strip()
 
-        # 次選：只切「獨立一行」的簽名分隔線，且僅在文章後半段才採用
+        # 次選：若沒有發信站標記，才用較保守的 -- 規則
+        # 需滿足：
+        # 1. -- 為獨立一行
+        # 2. 位於文章後半段
+        # 3. 後面內容看起來像尾段/簽名，而不是正文
         start_idx = len(lines) // 2
+        tail_markers = ("※ ", "-- ", "http://", "https://", "來自:", "Sent from", "發信站")
         for idx in range(start_idx, len(lines)):
-            if lines[idx].strip() == "--":
+            if lines[idx].strip() != "--":
+                continue
+
+            tail_lines = [line.strip() for line in lines[idx + 1:] if line.strip()]
+            if any(any(marker in line for marker in tail_markers) for line in tail_lines[:5]):
                 return "\n".join(lines[:idx]).strip()
 
         return content.strip()
@@ -362,19 +371,29 @@ class PTTScraperService:
                 "time": (time_node.get_text(" ", strip=True) if time_node else ""),
             })
 
-        # 移除 metadata/push，保留正文
+        # 先保留可能用來判斷尾段的內容（尤其是 span.f2 裡的 ※ 發信站）
         content_soup = BeautifulSoup(str(main_content), "html.parser")
         for selector in [
             "div.article-metaline",
             "div.article-metaline-right",
             "div.push",
-            "span.f2",
         ]:
             for tag in content_soup.select(selector):
                 tag.decompose()
 
         content = content_soup.get_text("\n", strip=True)
         content = self._trim_article_tail(content)
+
+        # 尾段切完後再做殘餘站方/灰字資訊清理，避免把發信站提前刪掉
+        cleaned_lines = []
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("※ 發信站:"):
+                continue
+            cleaned_lines.append(stripped)
+        content = "\n".join(cleaned_lines).strip()
 
         return {
             "ok": True,

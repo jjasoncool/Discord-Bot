@@ -814,6 +814,13 @@ class ArticleMonitor(BaseContentMonitor):
 
         return chunks
 
+    @staticmethod
+    def _chunk_discord_files(files: List[discord.File], chunk_size: int = 10) -> List[List[discord.File]]:
+        """將 Discord 附件依 Discord 限制切成多批。"""
+        if not files:
+            return []
+        return [files[i:i + chunk_size] for i in range(0, len(files), chunk_size)]
+
     async def _resolve_ptt_image_targets(self, text: str) -> List[str]:
         """從文字中解析可下載圖片，包含無副檔名連結（如 imgur 頁面）。"""
         if not text:
@@ -905,6 +912,14 @@ class ArticleMonitor(BaseContentMonitor):
 
             files: List[discord.File] = []
             image_urls = await self._resolve_ptt_image_targets(post.get('content') or '')
+            logger.info(
+                "PTT 貼文圖片解析完成: board=%s article_id=%s title=%s image_urls=%s",
+                post.get('board'),
+                post.get('article_id'),
+                thread_title,
+                len(image_urls),
+            )
+            logger.debug("PTT 圖片 URL 列表: %s", image_urls)
             spoiler_keywords = self.article_runtime_config.get("ptt_spoiler_keywords") or []
             spoiler_first_image = any(keyword in (post.get('title') or '') for keyword in spoiler_keywords)
             if image_urls:
@@ -927,19 +942,77 @@ class ArticleMonitor(BaseContentMonitor):
                             filename = f"SPOILER_{filename}"
                         files.append(discord.File(image_data, filename=filename))
 
+            logger.info(
+                "PTT 附件準備完成: board=%s article_id=%s files=%s",
+                post.get('board'),
+                post.get('article_id'),
+                len(files),
+            )
+
+            initial_files = files[:10]
+            remaining_files = files[10:]
+            if len(files) > 10:
+                logger.warning(
+                    "PTT 附件超過 Discord 單則上限，將分批發送: board=%s article_id=%s total=%s initial=%s remaining=%s",
+                    post.get('board'),
+                    post.get('article_id'),
+                    len(files),
+                    len(initial_files),
+                    len(remaining_files),
+                )
+
             create_thread_kwargs = {
                 "name": thread_title,
                 "content": thread_content,
                 "applied_tags": applied_tags,
             }
-            if files:
-                create_thread_kwargs["files"] = files
+            if initial_files:
+                create_thread_kwargs["files"] = initial_files
 
-            created = await channel.create_thread(**create_thread_kwargs)
+            try:
+                created = await channel.create_thread(**create_thread_kwargs)
+            except discord.HTTPException as e:
+                logger.error(
+                    "使用附件建立 PTT forum thread 失敗，改用純文字 fallback: board=%s article_id=%s err=%s",
+                    post.get('board'),
+                    post.get('article_id'),
+                    e,
+                    exc_info=True,
+                )
+                fallback_kwargs = {
+                    "name": thread_title,
+                    "content": thread_content,
+                    "applied_tags": applied_tags,
+                }
+                created = await channel.create_thread(**fallback_kwargs)
+                remaining_files = files
+
             thread = created.thread if hasattr(created, 'thread') else created
+
+            if thread and remaining_files:
+                remaining_chunks = self._chunk_discord_files(remaining_files, chunk_size=10)
+                for batch_index, chunk in enumerate(remaining_chunks, start=1):
+                    logger.info(
+                        "開始補送 PTT 剩餘圖片批次: board=%s article_id=%s batch=%s size=%s",
+                        post.get('board'),
+                        post.get('article_id'),
+                        batch_index,
+                        len(chunk),
+                    )
+                    if batch_index == 1:
+                        await thread.send("**本文附圖（超過 10 張後續補送）**", files=chunk)
+                    else:
+                        await thread.send(files=chunk)
+                    await asyncio.sleep(0.5)
 
             comments = post.get('comments') or []
             if thread and comments:
+                logger.info(
+                    "PTT 圖片補送完成，開始發送留言: board=%s article_id=%s comments=%s",
+                    post.get('board'),
+                    post.get('article_id'),
+                    len(comments),
+                )
                 comment_chunks = self._format_ptt_comments_messages(comments)
                 comments_message_obj = None
                 for idx, comments_message in enumerate(comment_chunks):
