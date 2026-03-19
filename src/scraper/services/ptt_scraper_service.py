@@ -57,17 +57,18 @@ class PTTScraperService:
         self.db_manager = db_manager
         self.target_search_url = PTT_CONFIG["target_search_url"]
         self.timeout = PTT_CONFIG.get("timeout", 20)
+        self.search_pages = max(1, int(PTT_CONFIG.get("search_pages", 1) or 1))
         self.over18_cookie = PTT_CONFIG.get("over18_cookie", {"over18": "1"})
         self.human_delay_range = PTT_CONFIG.get("human_delay_min", (0.35, 0.9))
         self.ua = self._init_user_agent()
 
-    def _build_first_page_url(self) -> str:
-        """將設定的搜尋 URL 正規化為第一頁（page=1）"""
+    def _build_search_page_url(self, page: int) -> str:
+        """將設定的搜尋 URL 正規化為指定搜尋頁。"""
         parsed = urlparse(self.target_search_url)
         query = parse_qs(parsed.query)
-        query["page"] = ["1"]
-        first_page_query = urlencode(query, doseq=True)
-        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, first_page_query, parsed.fragment))
+        query["page"] = [str(page)]
+        query_string = urlencode(query, doseq=True)
+        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, query_string, parsed.fragment))
 
     def _parse_board_from_url(self, article_url: str) -> str:
         """從文章 URL 解析看板名稱"""
@@ -292,12 +293,12 @@ class PTTScraperService:
 
         return articles
 
-    def fetch_first_page_articles(self) -> Dict[str, Any]:
-        """抓取搜尋結果第一頁文章列表"""
-        first_page_url = self._build_first_page_url()
-        self.logger.info(f"[{datetime.now()}] 開始抓取 PTT 第一頁文章列表: {first_page_url}")
+    def fetch_search_page_articles(self, page: int) -> Dict[str, Any]:
+        """抓取指定搜尋結果頁的文章列表。"""
+        page_url = self._build_search_page_url(page)
+        self.logger.info(f"[{datetime.now()}] 開始抓取 PTT 搜尋結果第 {page} 頁: {page_url}")
 
-        html = self._fetch_html(first_page_url)
+        html = self._fetch_html(page_url)
         soup = BeautifulSoup(html, "html.parser")
         page_title = (soup.title.text.strip() if soup.title else "")
         articles = self._parse_article_list(html)
@@ -305,17 +306,55 @@ class PTTScraperService:
         result = {
             "ok": True,
             "status_code": 200,
-            "url": first_page_url,
+            "url": page_url,
             "title": page_title,
+            "page": page,
             "article_count": len(articles),
             "articles": articles,
         }
 
         self.logger.info(
-            f"[{datetime.now()}] PTT 第一頁文章列表抓取成功: "
+            f"[{datetime.now()}] PTT 搜尋結果第 {page} 頁抓取成功: "
             f"status={result['status_code']}, article_count={result['article_count']}, title={result['title']}"
         )
         return result
+
+    def fetch_multi_page_articles(self) -> Dict[str, Any]:
+        """抓取設定範圍內的多頁搜尋結果並去重合併。"""
+        merged_articles: List[Dict[str, Any]] = []
+        seen_article_ids = set()
+        seen_urls = set()
+        page_results: List[Dict[str, Any]] = []
+
+        for page in range(1, self.search_pages + 1):
+            page_result = self.fetch_search_page_articles(page)
+            page_results.append(page_result)
+
+            for article in page_result.get("articles", []):
+                article_id = article.get("article_id")
+                article_url = article.get("url")
+
+                if article_id in seen_article_ids:
+                    continue
+                if article_url and article_url in seen_urls:
+                    continue
+
+                seen_article_ids.add(article_id)
+                if article_url:
+                    seen_urls.add(article_url)
+                merged_articles.append(article)
+
+        first_result = page_results[0] if page_results else {}
+        return {
+            "ok": True,
+            "status_code": first_result.get("status_code", 200),
+            "url": first_result.get("url", self._build_search_page_url(1)),
+            "title": first_result.get("title", ""),
+            "page_count": len(page_results),
+            "article_count": len(merged_articles),
+            "articles": merged_articles,
+            "page_results": page_results,
+        }
 
     def fetch_article_detail(self, article_url: str) -> Dict[str, Any]:
         """抓取單篇文章內文"""
@@ -409,8 +448,8 @@ class PTTScraperService:
         }
 
     def fetch_ptt_articles_with_content(self) -> Dict[str, Any]:
-        """抓第一頁列表，並逐篇抓內文（先不入庫）"""
-        base_result = self.fetch_first_page_articles()
+        """抓設定頁數的列表，並逐篇抓內文（先不入庫）"""
+        base_result = self.fetch_multi_page_articles()
         articles = base_result.get("articles", [])
 
         detailed_count = 0
@@ -447,7 +486,8 @@ class PTTScraperService:
         base_result["detailed_count"] = detailed_count
 
         self.logger.info(
-            f"[{datetime.now()}] PTT 第一頁內文抓取完成: "
+            f"[{datetime.now()}] PTT 多頁內文抓取完成: "
+            f"page_count={base_result.get('page_count', 1)}, "
             f"article_count={base_result.get('article_count', 0)}, detailed_count={detailed_count}"
         )
         return base_result
@@ -457,9 +497,30 @@ class PTTScraperService:
         active_db_manager = db_manager or self.db_manager
 
         saved_count = 0
+        processed_article_ids = set()
+        processed_urls = set()
 
         for article in articles:
             try:
+                article_id = article.get("article_id")
+                article_url = article.get("url")
+
+                # 同一輪寫入前再做一次去重，避免跨頁或資料合併異常造成重複 insert
+                if article_id and article_id in processed_article_ids:
+                    self.logger.info(
+                        "略過同一輪重複的 PTT 貼文（article_id 重複）: article_id=%s url=%s",
+                        article_id,
+                        article_url,
+                    )
+                    continue
+                if article_url and article_url in processed_urls:
+                    self.logger.info(
+                        "略過同一輪重複的 PTT 貼文（url 重複）: article_id=%s url=%s",
+                        article_id,
+                        article_url,
+                    )
+                    continue
+
                 if article.get("content_length", 0) <= 0:
                     self.logger.info(
                         "略過未取得有效內文的 PTT 貼文，不更新 DB: article_id=%s url=%s",
@@ -467,6 +528,11 @@ class PTTScraperService:
                         article.get("url"),
                     )
                     continue
+
+                if article_id:
+                    processed_article_ids.add(article_id)
+                if article_url:
+                    processed_urls.add(article_url)
 
                 post_data = {
                     "board": self._parse_board_from_url(article.get("url", "")),

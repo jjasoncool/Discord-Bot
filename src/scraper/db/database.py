@@ -7,6 +7,8 @@ from datetime import datetime
 from typing import Optional, List, Dict
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy import case, func
 
 from .models import ArticleMenu, ArticleDetail, SystemState, FBPost, FBImage, PTTPost
 from utils.datetime_utils import parse_datetime
@@ -387,7 +389,7 @@ class DatabaseManager:
 
     # ---------------- PTT Post 區段 ----------------
     def save_ptt_post(self, post_data: dict) -> Optional[PTTPost]:
-        """儲存單篇 PTT 貼文（upsert by board+article_id）"""
+        """儲存單篇 PTT 貼文（先以 board+article_id 判斷，再以 url 做 DB 層 upsert）"""
         try:
             board = post_data.get("board")
             article_id = post_data.get("article_id")
@@ -402,10 +404,13 @@ class DatabaseManager:
                 PTTPost.article_id == article_id,
             ).first()
 
-            if not existing:
-                existing = self.session.query(PTTPost).filter(PTTPost.url == url).first()
-
             if existing:
+                self.logger.info(
+                    "PTT upsert 命中既有文章（board+article_id），改為 update: board=%s article_id=%s url=%s",
+                    board,
+                    article_id,
+                    url,
+                )
                 existing.title = post_data.get("title") or existing.title
                 existing.author = post_data.get("author") or existing.author
                 existing.url = url
@@ -424,23 +429,75 @@ class DatabaseManager:
                 existing.updated_at = datetime.utcnow()
                 return existing
 
+            existing_by_url = self.session.query(PTTPost).filter(PTTPost.url == url).first()
+            if existing_by_url:
+                self.logger.warning(
+                    "PTT upsert 命中既有文章（url unique），將使用 DB 層 upsert update: board=%s article_id=%s url=%s existing_id=%s",
+                    board,
+                    article_id,
+                    url,
+                    existing_by_url.id,
+                )
+            else:
+                self.logger.info(
+                    "PTT upsert 準備新增文章: board=%s article_id=%s url=%s",
+                    board,
+                    article_id,
+                    url,
+                )
+
             comments = post_data.get("comments") or []
-            new_post = PTTPost(
+            now = datetime.utcnow()
+            comments_json = json.dumps(comments, ensure_ascii=False)
+
+            insert_stmt = sqlite_insert(PTTPost).values(
                 board=board,
                 article_id=article_id,
                 title=post_data.get("title") or "",
                 author=post_data.get("author"),
                 url=url,
                 content=post_data.get("content"),
-                comments_json=json.dumps(comments, ensure_ascii=False),
+                comments_json=comments_json,
                 comments_count=post_data.get("comments_count", len(comments)),
                 comments_hash=post_data.get("comments_hash"),
-                last_comment_sync_at=datetime.utcnow(),
+                last_comment_sync_at=now,
                 matched_keywords=post_data.get("matched_keywords"),
                 published_at=post_data.get("published_at"),
+                created_at=now,
+                updated_at=now,
             )
-            self.session.add(new_post)
-            return new_post
+
+            excluded = insert_stmt.excluded
+            update_stmt = insert_stmt.on_conflict_do_update(
+                index_elements=[PTTPost.url],
+                set_={
+                    "board": excluded.board,
+                    "article_id": excluded.article_id,
+                    "title": excluded.title,
+                    "author": excluded.author,
+                    "content": case(
+                        (func.length(excluded.content) > func.length(PTTPost.content), excluded.content),
+                        else_=PTTPost.content,
+                    ),
+                    "comments_json": excluded.comments_json,
+                    "comments_count": excluded.comments_count,
+                    "comments_hash": excluded.comments_hash,
+                    "last_comment_sync_at": excluded.last_comment_sync_at,
+                    "matched_keywords": case(
+                        (excluded.matched_keywords.is_not(None), excluded.matched_keywords),
+                        else_=PTTPost.matched_keywords,
+                    ),
+                    "published_at": case(
+                        (excluded.published_at.is_not(None), excluded.published_at),
+                        else_=PTTPost.published_at,
+                    ),
+                    "updated_at": now,
+                }
+            )
+
+            self.session.execute(update_stmt)
+            self.session.flush()
+            return self.session.query(PTTPost).filter(PTTPost.url == url).first()
 
         except Exception as e:
             self.logger.error(f"儲存 PTT 貼文失敗: {str(e)}", exc_info=True)

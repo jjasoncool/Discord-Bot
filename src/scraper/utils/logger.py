@@ -10,12 +10,25 @@ from datetime import datetime
 from typing import Optional
 
 
+class MaxLevelFilter(logging.Filter):
+    """僅允許小於等於指定等級的 log 通過。"""
+
+    def __init__(self, max_level: int):
+        super().__init__()
+        self.max_level = max_level
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno <= self.max_level
+
+
 class LoggerConfig:
     """日誌配置類別"""
 
     def __init__(self):
         self.log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
         self.log_file = os.getenv('LOG_FILE', '/logs/scraper.log')
+        self.info_log_file = os.getenv('LOG_INFO_FILE', '/logs/scraper_info.log')
+        self.error_log_file = os.getenv('LOG_ERROR_FILE', '/logs/scraper_error.log')
         self.log_max_bytes = int(os.getenv('LOG_MAX_BYTES', str(10 * 1024 * 1024)))  # 10MB
         self.log_backup_count = int(os.getenv('LOG_BACKUP_COUNT', '5'))
         self.log_format = '[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s'
@@ -58,11 +71,13 @@ def setup_logger(name: str, config: Optional[LoggerConfig] = None) -> logging.Lo
 
     # 檔案處理器（帶輪替）
     try:
-        # 確保日誌目錄存在
-        log_dir = os.path.dirname(config.log_file)
-        if log_dir and not os.path.exists(log_dir):
-            os.makedirs(log_dir, exist_ok=True)
+        log_files = {config.log_file, config.info_log_file, config.error_log_file}
+        for log_file in log_files:
+            log_dir = os.path.dirname(log_file)
+            if log_dir and not os.path.exists(log_dir):
+                os.makedirs(log_dir, exist_ok=True)
 
+        # 完整檔：保留所有符合 LOG_LEVEL 的訊息
         file_handler = RotatingFileHandler(
             config.log_file,
             maxBytes=config.log_max_bytes,
@@ -72,6 +87,29 @@ def setup_logger(name: str, config: Optional[LoggerConfig] = None) -> logging.Lo
         file_handler.setLevel(log_level)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
+
+        # info/debug 檔：只保留 INFO 以下（含 DEBUG、INFO）
+        info_file_handler = RotatingFileHandler(
+            config.info_log_file,
+            maxBytes=config.log_max_bytes,
+            backupCount=config.log_backup_count,
+            encoding='utf-8'
+        )
+        info_file_handler.setLevel(logging.DEBUG)
+        info_file_handler.addFilter(MaxLevelFilter(logging.INFO))
+        info_file_handler.setFormatter(formatter)
+        logger.addHandler(info_file_handler)
+
+        # warning/error 檔：保留 WARNING 以上
+        error_file_handler = RotatingFileHandler(
+            config.error_log_file,
+            maxBytes=config.log_max_bytes,
+            backupCount=config.log_backup_count,
+            encoding='utf-8'
+        )
+        error_file_handler.setLevel(logging.WARNING)
+        error_file_handler.setFormatter(formatter)
+        logger.addHandler(error_file_handler)
 
     except Exception as e:
         # 如果無法建立檔案處理器，至少要有控制台輸出
@@ -149,6 +187,8 @@ def log_startup_info():
     logger.info(f"工作目錄: {os.getcwd()}")
     logger.info(f"日誌級別: {os.getenv('LOG_LEVEL', 'INFO')}")
     logger.info(f"日誌檔案: {os.getenv('LOG_FILE', '/logs/scraper.log')}")
+    logger.info(f"資訊日誌檔案: {os.getenv('LOG_INFO_FILE', '/logs/scraper_info.log')}")
+    logger.info(f"警告錯誤日誌檔案: {os.getenv('LOG_ERROR_FILE', '/logs/scraper_error.log')}")
 
 
 if __name__ == "__main__":

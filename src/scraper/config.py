@@ -49,4 +49,5 @@ PTT_CONFIG = {
     "target_search_url": "https://www.ptt.cc/bbs/C_Chat/search?page=2&q=%E9%B3%B4%E6%BD%AE",
     "over18_cookie": {"over18": "1"},
     "timeout": 20,
+    "search_pages": 3,
 }

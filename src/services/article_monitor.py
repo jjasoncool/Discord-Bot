@@ -32,6 +32,7 @@ class ArticleMonitor(BaseContentMonitor):
     BASE_URL = "https://hw-media-cdn-mingchao.kurogame.com"
     WEBSITE_NAME = "鳴潮官方網站"
     IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
+    DISALLOWED_IMAGE_EXTENSIONS = (".ico",)
     PTT_FORUM_TAG_NAME = "PTT"
     ARTICLE_RUNTIME_CONFIG_PATH = Path("/app/settings/article_runtime.json")
 
@@ -836,9 +837,20 @@ class ArticleMonitor(BaseContentMonitor):
                 if cleaned in seen:
                     continue
 
-                seen.add(cleaned)
                 parsed = urlparse(cleaned)
                 path = (parsed.path or '').lower()
+
+                # 只接受 http/https 連結，避免 /favicon.ico 這種相對路徑被當成圖片來源
+                if parsed.scheme not in ("http", "https"):
+                    logger.debug("略過非 http/https 的 PTT 圖片候選 URL: %s", cleaned)
+                    continue
+
+                # 明確排除 favicon / ico 類資源
+                if path.endswith(self.DISALLOWED_IMAGE_EXTENSIONS):
+                    logger.debug("略過不應抓取的 PTT 圖片候選 URL: %s", cleaned)
+                    continue
+
+                seen.add(cleaned)
 
                 if path.endswith(self.IMAGE_EXTENSIONS):
                     resolved.append(cleaned)
@@ -861,7 +873,13 @@ class ArticleMonitor(BaseContentMonitor):
                             soup = BeautifulSoup(html, 'html.parser')
                             og_image = soup.find('meta', attrs={'property': 'og:image'})
                             if og_image and og_image.get('content'):
-                                resolved.append(og_image['content'].strip())
+                                og_image_url = og_image['content'].strip()
+                                og_parsed = urlparse(og_image_url)
+                                og_path = (og_parsed.path or '').lower()
+                                if og_parsed.scheme in ("http", "https") and not og_path.endswith(self.DISALLOWED_IMAGE_EXTENSIONS):
+                                    resolved.append(og_image_url)
+                                else:
+                                    logger.debug("略過 og:image 候選 URL: %s", og_image_url)
                 except Exception:
                     continue
 
