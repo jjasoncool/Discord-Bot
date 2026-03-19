@@ -732,10 +732,10 @@ class ArticleMonitor(BaseContentMonitor):
         return await self.fetch_content_from_api("/api/fb_posts/recent", {"days": days, "limit": 20})
 
     async def fetch_recent_ptt_posts(self, days: int = 3) -> List[Dict]:
-        """從 scraper API 取得最近的 PTT 貼文（舊到新）"""
+        """從 scraper API 取得最近的 PTT 貼文（新到舊，發送前再反轉）"""
         return await self.fetch_content_from_api(
             "/api/ptt_posts/recent",
-            {"days": days, "limit": 50, "order": "asc"},
+            {"days": days, "limit": 50, "order": "desc"},
         )
 
     @staticmethod
@@ -1076,6 +1076,9 @@ class ArticleMonitor(BaseContentMonitor):
             if not valid_posts:
                 article_logger.info("[PTT] 沒有可處理的 PTT 貼文")
                 return
+
+            # 先從 API 以新到舊抓資料，實際發送前再反轉成舊到新，避免 limit 截斷時漏掉最新文章
+            valid_posts = list(reversed(valid_posts))
 
             article_logger.info(f"[PTT] 本輪檢查 {len(valid_posts)} 篇 PTT 貼文")
             for post in valid_posts:
