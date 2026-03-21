@@ -2,7 +2,7 @@ services:
   discord-bot:
     build:
       context: .
-      dockerfile: discord_bot/dockerfile
+      dockerfile: docker/discord_bot/dockerfile
     container_name: discord-bot
     restart: always
     volumes:
@@ -31,7 +31,7 @@ services:
   scraper:
     build:
       context: .
-      dockerfile: scraper/dockerfile
+      dockerfile: docker/scraper/dockerfile
     container_name: scraper
     restart: always
     expose:
@@ -47,6 +47,28 @@ services:
       - .env
     environment:
       - TZ=Asia/Taipei
+    networks:
+      - discord-net
+
+  telegram-scraper:
+    build:
+      context: .
+      dockerfile: docker/telegram_scraper/dockerfile
+    container_name: telegram-scraper
+    restart: always
+    volumes:
+      - type: bind
+        source: ./src/telegram_scraper
+        target: /app
+      - type: bind
+        source: ./logs
+        target: /logs
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Taipei
+      - TELEGRAM_API_ID=${TELEGRAM_API_ID:?TELEGRAM_API_ID_required}
+      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH:?TELEGRAM_API_HASH_required}
     networks:
       - discord-net
 

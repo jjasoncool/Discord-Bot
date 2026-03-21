@@ -1,0 +1,27 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# 安裝必要系統套件
+RUN apt-get update && \
+    apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends ca-certificates && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# 建立非 root 使用者
+RUN groupadd -r appuser && useradd -r -g appuser -m -d /home/appuser -u 1000 appuser
+RUN chown -R appuser:appuser /app
+
+USER appuser
+
+# 安裝 Python 套件
+ENV PATH="/home/appuser/.local/bin:${PATH}"
+ENV PYTHONUNBUFFERED=1
+
+# 複製啟動腳本（依 session 與互動模式決定啟動行為）
+COPY --chown=appuser:appuser docker/telegram_scraper/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+COPY docker/telegram_scraper/requirements.txt .
+RUN pip install --no-cache-dir --user -r requirements.txt
+ENTRYPOINT ["/entrypoint.sh"]

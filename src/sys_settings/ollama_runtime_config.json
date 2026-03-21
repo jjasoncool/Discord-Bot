@@ -1,5 +1,5 @@
 {
-  "model": "qwen3.5:9b",
+  "model": "qwen3.5:35b",
   "embed_model": "bge-m3:latest",
   "moderation_model": "qwen2.5:7b",
   "think": false

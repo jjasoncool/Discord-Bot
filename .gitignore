@@ -10,3 +10,7 @@ src/services/sent_articles.json
 src/settings/item_prices.json
 src/settings/intro_panel_runtime.json
 staged_diff.txt
+
+# Telethon session（避免把登入憑證提交到版本庫）
+src/telegram_scraper/session/
+src/telegram_scraper/runtime_config.json
