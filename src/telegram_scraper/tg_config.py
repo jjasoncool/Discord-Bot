@@ -1,7 +1,10 @@
 import json
 import os
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus
 
 
 def normalize_channel_identifier(value: str) -> str:
@@ -113,6 +116,121 @@ class TelegramConfig:
     skip_forwards: bool = True
     forward_whitelist: set[str] = field(default_factory=set)
     runtime_config_path: str = "runtime_config.json"
+    pg_host: str = "pgvector"
+    pg_port: int = 5432
+    pg_db: str = "telegram_data"
+    pg_user: str = ""
+    pg_password: str = ""
+    pg_notify_channel: str = "telegram_new_message"
+
+    def build_admin_dsn(self) -> str:
+        """組出管理用 DSN（連到 postgres maintenance DB，用於建 DB）。"""
+        encoded_user = quote_plus(self.pg_user)
+        encoded_password = quote_plus(self.pg_password)
+        return (
+            f"postgresql://{encoded_user}:{encoded_password}"
+            f"@{self.pg_host}:{self.pg_port}/postgres"
+        )
+
+    def build_asyncpg_dsn(self) -> str:
+        """組出 asyncpg 連線字串。"""
+        encoded_user = quote_plus(self.pg_user)
+        encoded_password = quote_plus(self.pg_password)
+        return (
+            f"postgresql://{encoded_user}:{encoded_password}"
+            f"@{self.pg_host}:{self.pg_port}/{self.pg_db}"
+        )
+
+
+@dataclass(slots=True, frozen=True)
+class TelegramRuntimeConfigSnapshot:
+    """Telegram runtime_config.json 的快照。"""
+
+    history_hours: int | None
+    skip_forwards: bool
+    forward_whitelist: set[str]
+    download_media: bool
+    media_dir: str
+
+
+class TelegramRuntimeConfigWatcher:
+    """runtime_config.json 變更監聽（polling + 快取）。"""
+
+    def __init__(
+        self,
+        runtime_config_path: str,
+        fallback_config: TelegramConfig,
+        refresh_interval_sec: float = 2.0,
+    ) -> None:
+        self.runtime_config_path = runtime_config_path
+        self.fallback_config = fallback_config
+        self.refresh_interval_sec = max(refresh_interval_sec, 0.2)
+
+        self._last_mtime: float | None = None
+        self._last_checked_at: float = 0.0
+        self._snapshot = TelegramRuntimeConfigSnapshot(
+            history_hours=fallback_config.history_hours,
+            skip_forwards=fallback_config.skip_forwards,
+            forward_whitelist=set(fallback_config.forward_whitelist),
+            download_media=fallback_config.download_media,
+            media_dir=fallback_config.media_dir,
+        )
+
+        # 初始化先強制同步一次
+        self.refresh(force=True)
+
+    def _build_snapshot_from_runtime_json(self, runtime_json: dict[str, Any]) -> TelegramRuntimeConfigSnapshot:
+        """把 runtime JSON 與 fallback 設定合併成快照。"""
+        history_hours_raw = runtime_json.get("history_hours", self.fallback_config.history_hours)
+        history_hours: int | None
+        if history_hours_raw is None or str(history_hours_raw).strip() == "":
+            history_hours = None
+        else:
+            try:
+                history_hours = int(history_hours_raw)
+                if history_hours <= 0:
+                    history_hours = None
+            except (TypeError, ValueError):
+                history_hours = self.fallback_config.history_hours
+
+        skip_forwards = _to_bool(str(runtime_json.get("skip_forwards", self.fallback_config.skip_forwards)))
+        forward_whitelist = _parse_whitelist(runtime_json.get("forward_whitelist", self.fallback_config.forward_whitelist))
+        download_media = _to_bool(str(runtime_json.get("download_media", self.fallback_config.download_media)))
+        media_dir = str(runtime_json.get("media_dir", self.fallback_config.media_dir)).strip() or self.fallback_config.media_dir
+
+        return TelegramRuntimeConfigSnapshot(
+            history_hours=history_hours,
+            skip_forwards=skip_forwards,
+            forward_whitelist=forward_whitelist,
+            download_media=download_media,
+            media_dir=media_dir,
+        )
+
+    def refresh(self, force: bool = False) -> TelegramRuntimeConfigSnapshot:
+        """依檔案 mtime 決定是否重新載入，回傳最新快照。"""
+        now = time.monotonic()
+        if not force and (now - self._last_checked_at) < self.refresh_interval_sec:
+            return self._snapshot
+
+        self._last_checked_at = now
+        path = Path(self.runtime_config_path)
+        mtime = path.stat().st_mtime if path.exists() else None
+        if not force and mtime == self._last_mtime:
+            return self._snapshot
+
+        try:
+            runtime_json = _load_runtime_json_config(self.runtime_config_path)
+            self._snapshot = self._build_snapshot_from_runtime_json(runtime_json)
+            self._last_mtime = mtime
+            print("[Telegram] runtime_config.json 已重新載入（watcher）")
+        except Exception as exc:
+            print(f"[Telegram] runtime_config.json 重新載入失敗，沿用舊快照: {exc}")
+
+        return self._snapshot
+
+    def get_snapshot(self) -> TelegramRuntimeConfigSnapshot:
+        """取得目前快照（必要時自動 refresh）。"""
+        return self.refresh(force=False)
 
 
 def load_config_from_env() -> TelegramConfig:
@@ -139,8 +257,10 @@ def load_config_from_env() -> TelegramConfig:
         if history_hours <= 0:
             history_hours = None
 
-    download_media = _to_bool(os.getenv("TELEGRAM_DOWNLOAD_MEDIA", "false"))
-    media_dir = os.getenv("TELEGRAM_MEDIA_DIR", "media").strip() or "media"
+    # 媒體下載設定優先讀 runtime_config.json，若未設定才回退到 env（相容舊配置）
+    download_media_raw = runtime_json.get("download_media", os.getenv("TELEGRAM_DOWNLOAD_MEDIA", "false"))
+    download_media = _to_bool(str(download_media_raw))
+    media_dir = str(runtime_json.get("media_dir", os.getenv("TELEGRAM_MEDIA_DIR", "media"))).strip() or "media"
     skip_forwards_raw = runtime_json.get("skip_forwards", True)
     skip_forwards = _to_bool(str(skip_forwards_raw))
 
@@ -149,6 +269,16 @@ def load_config_from_env() -> TelegramConfig:
 
     session_dir = os.getenv("TELEGRAM_SESSION_DIR", "session").strip() or "session"
     session_name = os.getenv("TELEGRAM_SESSION_NAME", "telegram_scraper").strip() or "telegram_scraper"
+    pg_host = os.getenv("PGVECTOR_HOST", "pgvector").strip() or "pgvector"
+    pg_port = int(os.getenv("PGVECTOR_PORT", "5432"))
+    telegram_pg_db = os.getenv("TELEGRAM_PGVECTOR_DB", "").strip()
+    if telegram_pg_db:
+        pg_db = telegram_pg_db
+    else:
+        pg_db = os.getenv("PGVECTOR_DB", "discord_data").strip() or "discord_data"
+    pg_user = _load_required_env("PGVECTOR_USER")
+    pg_password = _load_required_env("PGVECTOR_PASSWORD")
+    pg_notify_channel = os.getenv("TELEGRAM_PG_NOTIFY_CHANNEL", "telegram_new_message").strip() or "telegram_new_message"
 
     return TelegramConfig(
         api_id=api_id,
@@ -163,4 +293,10 @@ def load_config_from_env() -> TelegramConfig:
         skip_forwards=skip_forwards,
         forward_whitelist=forward_whitelist,
         runtime_config_path=runtime_config_path,
+        pg_host=pg_host,
+        pg_port=pg_port,
+        pg_db=pg_db,
+        pg_user=pg_user,
+        pg_password=pg_password,
+        pg_notify_channel=pg_notify_channel,
     )
