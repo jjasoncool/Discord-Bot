@@ -20,6 +20,7 @@ from services.intro_profile_service import (
 )
 from services.impression_moderation_service import ImpressionModerationService
 from llm.intro_rag_port import PgVectorIntroRAGPort
+from telegram_scraper.tg_config import normalize_channel_identifier
 
 # 獲取 logger
 logger = logging.getLogger('discord_bot')
@@ -512,12 +513,15 @@ class ManagementCommands(commands.Cog):
         if not await self._check_guild_and_owner(interaction, owner_only=True):
             return
 
+        telegram_route_option_label = "Telegram 路由設定"
+
         channel_types = {
             "交易頻道": {"type": discord.ChannelType.forum, "key": "trade_forum_channel_id", "color": discord.Color.blue(), "desc": "交易記錄頻道"},
             "交易紀錄封存": {"type": discord.ChannelType.forum, "key": "archive_channel_id", "color": discord.Color.dark_grey(), "desc": "交易紀錄封存頻道"},
             "論壇文章頻道": {"type": discord.ChannelType.forum, "key": "forum_article_channel_id", "color": discord.Color.gold(), "desc": "自動發布論壇文章的論壇頻道"},
             "購物車交付": {"type": discord.ChannelType.text, "key": "cart_delivery_channel_id", "color": discord.Color.green(), "desc": "購物車交付通知頻道"},
             "官方文章更新": {"type": discord.ChannelType.text, "key": "article_monitor_channel_id", "color": discord.Color.orange(), "desc": "自動發送官方最新文章的頻道"},
+            telegram_route_option_label: {"type": discord.ChannelType.text, "key": "telegram_channel_routes", "color": discord.Color.teal(), "desc": "先輸入 Telegram 來源（名稱/chat_id），再綁定 Discord 文字頻道"},
             "自我介紹頻道": {"type": discord.ChannelType.text, "key": "intro_channel_id", "color": discord.Color.purple(), "desc": "使用者填寫自我介紹的頻道"}
         }
 
@@ -535,6 +539,86 @@ class ManagementCommands(commands.Cog):
             selected_type = type_select.values[0]
             if selected_type not in channel_types:
                 await safe_send_interaction_message(interaction, f"無效的頻道類型：{selected_type}。請重試。", ephemeral=True)
+                return
+
+            if selected_type == telegram_route_option_label:
+                class TelegramRouteInputModal(discord.ui.Modal):
+                    def __init__(self):
+                        super().__init__(title="設定 Telegram 路由", timeout=300)
+                        self.telegram_source = discord.ui.TextInput(
+                            label="Telegram 來源（名稱或 chat_id）",
+                            placeholder="例如：Seele_WW_leak、@Seele_WW_leak、-1001234567890",
+                            required=True,
+                            max_length=128,
+                        )
+                        self.target_channel = discord.ui.ChannelSelect(
+                            placeholder="選擇要轉發的 Discord 文字頻道...",
+                            min_values=1,
+                            max_values=1,
+                            channel_types=[discord.ChannelType.text],
+                            required=True,
+                        )
+                        self.add_item(self.telegram_source)
+                        self.add_item(discord.ui.Label(text="Discord 目標頻道", component=self.target_channel))
+
+                    async def on_submit(self, modal_interaction: discord.Interaction):
+                        source_raw = self.telegram_source.value.strip()
+                        source_key = normalize_channel_identifier(source_raw).lower()
+
+                        if not source_key:
+                            await safe_send_interaction_message(modal_interaction, "來源值不可為空，請重新設定。", ephemeral=True)
+                            return
+
+                        if not self.target_channel.values:
+                            await safe_send_interaction_message(modal_interaction, "請選擇 Discord 目標頻道。", ephemeral=True)
+                            return
+
+                        selected_channel = self.target_channel.values[0]
+                        selected_channel_id = int(getattr(selected_channel, "id", 0) or 0)
+                        if selected_channel_id <= 0:
+                            await safe_send_interaction_message(modal_interaction, "選擇的頻道無效，請重試。", ephemeral=True)
+                            return
+
+                        config_file = "config.json"
+                        config = ChannelConfig.load_config(config_file, caller="ManagementCommands")
+                        routes = config.get("telegram_channel_routes")
+                        if not isinstance(routes, dict):
+                            routes = {}
+
+                        raw_existing = routes.get(source_key, [])
+                        if isinstance(raw_existing, list):
+                            existing_ids = raw_existing
+                        elif raw_existing in (None, ""):
+                            existing_ids = []
+                        else:
+                            existing_ids = [raw_existing]
+
+                        normalized_ids: list[int] = []
+                        for rid in existing_ids:
+                            try:
+                                rid_int = int(rid)
+                            except (TypeError, ValueError):
+                                continue
+                            if rid_int > 0 and rid_int not in normalized_ids:
+                                normalized_ids.append(rid_int)
+
+                        if selected_channel_id not in normalized_ids:
+                            normalized_ids.append(selected_channel_id)
+
+                        routes[source_key] = normalized_ids
+                        config["telegram_channel_routes"] = routes
+                        ChannelConfig.save_config(config, config_file, caller="ManagementCommands")
+
+                        await safe_send_interaction_message(
+                            modal_interaction,
+                            (
+                                f"✅ 已新增 Telegram 路由：`{source_key}` -> <#{selected_channel_id}>\n"
+                                f"目前目標頻道數：{len(normalized_ids)}"
+                            ),
+                            ephemeral=True,
+                        )
+
+                await interaction.response.send_modal(TelegramRouteInputModal())
                 return
 
             channel_info = channel_types[selected_type]

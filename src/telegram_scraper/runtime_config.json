@@ -1,0 +1,15 @@
+{
+    "source_channel": "Seele_WW_leak",
+    "history_limit": 0,
+    "history_hours": 168,
+    "download_media": true,
+    "_comment_media_dir": "media_dir 為相對於 telegram-scraper 工作目錄（/app）的相對路徑，例如 media 或 media/subdir",
+    "media_dir": "media",
+    "skip_forwards": true,
+    "forward_whitelist": [
+        "Team_Gemberry78",
+        "Sleep_Leaks",
+        "Seele_WW_leak",
+        "-1002405953050"
+    ]
+}

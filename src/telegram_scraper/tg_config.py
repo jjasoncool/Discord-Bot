@@ -12,7 +12,10 @@ def normalize_channel_identifier(value: str) -> str:
     value = value.strip()
     value = value.replace("https://t.me/s/", "")
     value = value.replace("https://t.me/", "")
-    return value.strip("/")
+    value = value.strip("/")
+    if value.startswith("@"):
+        value = value[1:]
+    return value
 
 
 def _load_required_env(name: str) -> str:
@@ -108,7 +111,7 @@ class TelegramConfig:
     api_hash: str
     session_dir: str = "session"
     session_name: str = "telegram_scraper"
-    test_channel: str = "Seele_WW_leak"
+    source_channel: str = "Seele_WW_leak"
     history_limit: int = 5
     history_hours: int | None = None
     download_media: bool = False
@@ -246,8 +249,13 @@ def load_config_from_env() -> TelegramConfig:
     runtime_config_path = "runtime_config.json"
     runtime_json = _load_runtime_json_config(runtime_config_path)
 
-    test_channel_raw = os.getenv("TELEGRAM_TEST_CHANNEL", "Seele_WW_leak").strip()
-    history_limit = int(os.getenv("TELEGRAM_TEST_LIMIT", "5"))
+    source_channel_raw = str(
+        runtime_json.get("source_channel", os.getenv("TELEGRAM_SOURCE_CHANNEL", "Seele_WW_leak"))
+    ).strip()
+    try:
+        history_limit = max(0, int(runtime_json.get("history_limit", 0)))
+    except (TypeError, ValueError):
+        history_limit = 0
     history_hours_raw = runtime_json.get("history_hours", None)
     history_hours: int | None
     if history_hours_raw is None or str(history_hours_raw).strip() == "":
@@ -285,7 +293,7 @@ def load_config_from_env() -> TelegramConfig:
         api_hash=api_hash,
         session_dir=session_dir,
         session_name=session_name,
-        test_channel=normalize_channel_identifier(test_channel_raw),
+        source_channel=normalize_channel_identifier(source_channel_raw),
         history_limit=history_limit,
         history_hours=history_hours,
         download_media=download_media,

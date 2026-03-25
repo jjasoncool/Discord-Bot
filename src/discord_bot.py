@@ -10,6 +10,14 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from utils.logger_config import get_discord_bot_logger
 from utils.utils import safe_send_interaction_message
+from services.telegram_relay_service import (
+    DiscordMessagePublisher,
+    MessageRelayWorker,
+    MessageRouteResolver,
+    TelegramMessageRepository,
+    TelegramRenderAdapter,
+    build_telegram_pg_dsn_from_env,
+)
 
 # 載入環境變數
 load_dotenv()
@@ -50,6 +58,7 @@ class MyBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix='!', intents=intents)
         self.echo_tracker = {}
+        self.telegram_relay_worker = None
 
     async def setup_hook(self):
         logger.info("正在載入指令模組...")
@@ -100,6 +109,7 @@ async def on_ready():
 
     # 自動啟動官方文章更新
     await auto_start_article_monitor(bot)
+    await auto_start_telegram_relay(bot)
 
     try:
         # 列出已註冊的命令
@@ -315,6 +325,40 @@ async def _auto_start_ptt_forum_monitor(bot, article_commands, forum_article_cha
         start_coro_factory=_start,
         success_log_factory=lambda channel, channel_id: f"✅ 已自動啟動 PTT 論壇文章監控！論壇頻道: {channel.name} (ID: {channel_id})",
     )
+
+
+async def auto_start_telegram_relay(bot):
+    """自動啟動 Telegram Relay Worker。"""
+    try:
+        # on_ready 可能因 reconnect 被重複觸發，避免重複建立 worker
+        worker = getattr(bot, "telegram_relay_worker", None)
+        if worker and worker.running:
+            logger.info("Telegram Relay Worker 已在運行中，略過重複啟動")
+            return
+
+        dsn = build_telegram_pg_dsn_from_env()
+        repository = TelegramMessageRepository(dsn=dsn)
+        resolver = MessageRouteResolver(config_path="config.json")
+        adapter = TelegramRenderAdapter(app_root="/app")
+        publisher = DiscordMessagePublisher()
+
+        worker = MessageRelayWorker(
+            bot=bot,
+            repository=repository,
+            route_resolver=resolver,
+            render_adapter=adapter,
+            publisher=publisher,
+            dsn=dsn,
+            notify_channel=os.getenv("TELEGRAM_PG_NOTIFY_CHANNEL", "telegram_new_message"),
+            poll_interval_sec=3600,
+        )
+
+        await worker.start()
+        bot.telegram_relay_worker = worker
+        logger.info("Telegram Relay Worker 啟動流程完成")
+
+    except Exception as e:
+        logger.error(f"自動啟動 Telegram Relay Worker 時發生錯誤: {e}", exc_info=True)
 
 # 主函數
 def main():

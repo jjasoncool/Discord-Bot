@@ -67,6 +67,9 @@ services:
       - PGVECTOR_DB=${PGVECTOR_DB:-discord_data}
       - PGVECTOR_USER=${PGVECTOR_USER:?PGVECTOR_USER_required}
       - PGVECTOR_PASSWORD=${PGVECTOR_PASSWORD:?PGVECTOR_PASSWORD_required}
+    depends_on:
+      pgvector:
+        condition: service_healthy
     networks:
       - discord-net
 
