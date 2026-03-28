@@ -677,3 +677,147 @@
 - [ ] 導入/整合 `DiscordMessagePublisher`（後置）
 - [ ] 保留外部 API 不變，逐步內部改接 publisher
 - [ ] 規劃/新增管理命令：telegram route 查詢與設定
+
+---
+
+## 11) 巴哈姆特論壇爬蟲 / 資料庫 / AI 整合 TODO
+
+### 第一階段：先真的抓到文章與留言（MVP）
+**目標**
+- 能穩定抓到巴哈姆特指定看板/搜尋條件的文章列表
+- 能抓到單篇文章主文、分類、作者、時間、URL
+- 能抓到主文留言
+- 能評估並確認回文、回文留言的可抓性與實際欄位來源
+
+**交付成果**
+- `bahamut_scraper_service.py` MVP 骨架
+- 可用 `cloudscraper` / `requests session` 抓取巴哈頁面
+- 列表頁抓取成功
+- 文章頁抓取成功
+- 留言抓取成功
+- 產出 JSON 範例檔，確認欄位結構
+
+**本階段 TODO**
+- [ ] 研究巴哈文章列表頁、文章頁、留言區、回文區的實際 HTML / API 結構
+- [ ] 確認是否需要登入 cookie、額外 headers、referer、anti-bot 處理
+- [ ] 以 `cloudscraper` 建立 Bahamut session 與 retry 機制
+- [ ] 實作文章列表抓取：標題、分類、作者、時間、URL、文章 ID
+- [ ] 實作文章主文抓取：主文內容、作者資訊、發文時間、分類
+- [ ] 實作主文留言抓取：留言者、內容、時間、樓層/位置
+- [ ] 研究回文與回文留言資料來源，決定第一版是否先支援主文留言、第二版再補回文
+- [ ] 定義 Bahamut JSON payload 結構（post / comments / replies / reply_comments）
+- [ ] 先以檔案輸出驗證資料正確性，不急著寫 DB
+- [ ] 建立錯誤處理、限速、重試、日誌紀錄
+
+**完成標準**
+- 能針對指定巴哈板面穩定抓到文章列表
+- 能抓取至少一篇完整文章與 300~500 則留言樣本
+- JSON 結構可供後續資料庫與 AI pipeline 直接使用
+
+---
+
+### 第二階段：整合資料庫（可查詢、可審查）
+**目標**
+- 把巴哈文章、留言、回文正式存入資料庫
+- 支援未來依使用者、文章、時間、分類查詢
+- 預留 moderation / 審查欄位
+
+**交付成果**
+- SQLAlchemy models
+- Alembic migration
+- upsert / 增量同步流程
+- 可查特定 user 在哪些文章留言過
+- 可查某篇文章的完整討論串
+
+**本階段 TODO**
+- [ ] 設計 `bahamut_posts` 主表
+- [ ] 設計 `bahamut_post_comments` 留言表
+- [ ] 設計 `bahamut_post_replies` 回文表
+- [ ] 設計 `bahamut_reply_comments` 回文留言表
+- [ ] 規劃 `raw_json` / `snapshot_json` 保存策略
+- [ ] 規劃 `discussion_hash`、`last_comment_sync_at`、`last_reply_sync_at` 等增量同步欄位
+- [ ] 預留 moderation 欄位：`moderation_status`、`moderation_score`、`moderation_labels`、`moderation_reason`
+- [ ] 建立必要索引：`post_id`、`user_id`、`published_at`、`category`、`moderation_status`
+- [ ] 在 scraper service 中實作 upsert 與增量更新
+- [ ] 補上查詢 service：依文章、依使用者、依時間範圍查資料
+- [ ] 驗證 Discord bot 後續取用資料時的查詢效率
+
+**完成標準**
+- 新抓到的巴哈文章能自動寫入資料庫
+- 舊文章可做留言/回文增量補抓
+- 可以 SQL 查詢特定留言使用者的歷史發言
+- 可以針對單篇文章完整還原主文與討論結構
+
+---
+
+### 第三階段：整合 AI / pgvector / RAG
+**目標**
+- 讓 Discord bot 可以用巴哈資料做語意搜尋、摘要、審查輔助
+- 讓結構化查詢與向量檢索並存
+
+**交付成果**
+- Bahamut RAG ingestion pipeline
+- pgvector embeddings 與 metadata 設計
+- Discord bot 查人 / 查文 / 摘要 / 審查指令雛型
+- SQL + Vector 雙軌查詢流程
+
+**本階段 TODO**
+- [ ] 在 `retrieval_sources` 新增 `bahamut_forum` 資料來源設定
+- [ ] 設計 Bahamut chunk 策略：主文 chunk、留言 chunk、回文 chunk、回文留言 chunk
+- [ ] 設計 pgvector metadata：`doc_type`、`post_id`、`comment_id`、`reply_id`、`user_id`、`category`、`published_at`、`moderation_status`
+- [ ] 建立 embedding / ingestion pipeline，將 Bahamut 資料寫入 pgvector
+- [ ] 設計 SQL filter + Vector retrieval 的混合查詢流程
+- [ ] 設計 Discord bot 指令：查主題、查文章、查特定使用者、查高風險留言
+- [ ] 將審查欄位與 AI 分析結果串接（例如 review / blocked / summary）
+- [ ] 建立摘要 prompt：單篇文章摘要、討論風向摘要、特定使用者發言摘要
+- [ ] 建立觀測指標：索引筆數、查詢延遲、命中率、審查覆蓋率
+- [ ] 驗證 Discord 問答是否可同時引用 Discord 聊天資料與巴哈論壇資料
+
+**完成標準**
+- Discord bot 可回答巴哈相關問題
+- 可對特定使用者或主題進行 RAG 搜尋與摘要
+- 可結合 moderation 資料做文章審查輔助
+- 可與既有 `discord_chat` / `member_profile` retrieval 共存
+
+---
+
+### 巴哈姆特建議執行順序
+- [ ] 先完成第一階段 MVP，不先碰 AI
+- [ ] 第一階段抓到穩定資料後，再做第二階段資料庫正規化
+- [ ] 第二階段查詢穩定後，再做第三階段 pgvector / RAG / AI 整合
+- [ ] 每階段都保留 JSON 範例與測試案例，避免後續 parser 改版難以驗證
+
+---
+
+## 12) Discord Bot 管理入口與指令整理 TODO
+
+### 目標 1：入口整合（管理操作集中）
+**要交付的成果**
+- 一個管理入口：`/panel admin`
+- 文章監控（開始/停止/狀態/測試）集中在主控台
+
+**行動**
+- [ ] 建立 `/panel admin` 空殼
+- [ ] 將 `/article_manager` 掛入主控台（保留舊命令）
+
+### 目標 2：指令分層（使用者 vs 管理者 vs 開發）
+**要交付的成果**
+- 正式環境只保留必要命令
+- 開發測試命令不干擾正式使用
+
+**行動**
+- [ ] `test_commands` 改成 dev-only 載入
+- [ ] 完成命令分類清單（管理 / 使用者 / 開發）
+
+### 目標 3：未來擴充（子命令化）
+**要交付的成果**
+- 規劃子命令樹（例如 `/article start|stop|status|test`）
+
+**行動**
+- [ ] 提出子命令設計稿（先不改線上行為）
+
+### 主管追蹤指標（每週看這 4 個）
+- [ ] 管理操作是否可由單一入口完成
+- [ ] 指令數量是否下降或更清楚
+- [ ] 正式環境是否已隔離開發命令
+- [ ] 是否維持可回滾（舊入口仍可用）

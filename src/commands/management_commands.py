@@ -25,6 +25,7 @@ from telegram_scraper.tg_config import normalize_channel_identifier
 # 獲取 logger
 logger = logging.getLogger('discord_bot')
 INTRO_PANEL_RUNTIME_FILE = "settings/intro_panel_runtime.json"
+INTRO_SUBMISSION_RUNTIME_FILE = "settings/intro_submission_runtime.json"
 
 
 def _load_intro_panel_runtime_config() -> dict:
@@ -52,6 +53,52 @@ def _save_intro_panel_runtime_config(message_id: int) -> None:
     except Exception as e:
         logger.error(f"寫入 {INTRO_PANEL_RUNTIME_FILE} 失敗: {e}", exc_info=True)
         raise
+
+
+def _load_intro_submission_runtime_config() -> dict:
+    """讀取自我介紹提交訊息 runtime 資料。"""
+    if not os.path.exists(INTRO_SUBMISSION_RUNTIME_FILE):
+        return {"intro_submissions": {}, "impression_submissions": {}}
+
+    try:
+        with open(INTRO_SUBMISSION_RUNTIME_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {"intro_submissions": {}, "impression_submissions": {}}
+        intro_submissions = data.get("intro_submissions")
+        if not isinstance(intro_submissions, dict):
+            intro_submissions = {}
+        impression_submissions = data.get("impression_submissions")
+        if not isinstance(impression_submissions, dict):
+            impression_submissions = {}
+        return {
+            "intro_submissions": intro_submissions,
+            "impression_submissions": impression_submissions,
+        }
+    except Exception as e:
+        logger.error(f"讀取 {INTRO_SUBMISSION_RUNTIME_FILE} 失敗: {e}", exc_info=True)
+        return {"intro_submissions": {}, "impression_submissions": {}}
+
+
+def _save_intro_submission_runtime_config(data: dict) -> None:
+    """寫入自我介紹提交訊息 runtime 資料。"""
+    try:
+        os.makedirs(os.path.dirname(INTRO_SUBMISSION_RUNTIME_FILE), exist_ok=True)
+        with open(INTRO_SUBMISSION_RUNTIME_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"寫入 {INTRO_SUBMISSION_RUNTIME_FILE} 失敗: {e}", exc_info=True)
+        raise
+
+
+def _build_intro_submission_key(*, guild_id: int, author_id: int) -> str:
+    """自我介紹提交訊息的 runtime key。"""
+    return f"{guild_id}:{author_id}"
+
+
+def _build_impression_submission_key(*, guild_id: int, author_id: int, target_user_id: int) -> str:
+    """他人印象提交訊息的 runtime key。"""
+    return f"{guild_id}:{author_id}:{target_user_id}"
 
 
 class ServerInfoView(discord.ui.View):
@@ -154,6 +201,16 @@ class IntroProfileModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)  # 防止超時（最重要！）
 
+        await self.management_cog._delete_previous_submission_messages(
+            interaction,
+            category="intro_submissions",
+            record_key=_build_intro_submission_key(
+                guild_id=interaction.guild.id,
+                author_id=interaction.user.id,
+            ),
+            message_id_fields=("intro_message_id", "success_message_id"),
+        )
+
         # 以下你原本的程式碼完全保留不變（從 embed 開始）
         embed = discord.Embed(
             title="🙋 新的自我介紹",
@@ -173,7 +230,7 @@ class IntroProfileModal(discord.ui.Modal):
         embed.set_footer(text=f"提交者：{interaction.user.display_name}")
 
         # 將 Embed 傳送到觸發指令的頻道
-        await interaction.channel.send(content=f"{interaction.user.mention}", embed=embed)
+        intro_message = await interaction.channel.send(content=f"{interaction.user.mention}", embed=embed)
 
         # 呼叫後端服務寫入資料 (將資料提供給 RAG 使用)
         try:
@@ -193,7 +250,23 @@ class IntroProfileModal(discord.ui.Modal):
             logger.error(f"自我介紹 RAG 介面呼叫失敗: {e}", exc_info=True)
 
         # 直接發送成功訊息（不使用 interaction 回覆）
-        await interaction.channel.send(content=f"{interaction.user.mention} ✅ 已送出你的自我介紹！")
+        success_message = await interaction.channel.send(content=f"{interaction.user.mention} ✅ 已送出你的自我介紹！")
+
+        try:
+            await self.management_cog._record_submission_messages(
+                interaction,
+                category="intro_submissions",
+                record_key=_build_intro_submission_key(
+                    guild_id=interaction.guild.id,
+                    author_id=interaction.user.id,
+                ),
+                extra_fields={
+                    "intro_message_id": intro_message.id,
+                    "success_message_id": success_message.id,
+                },
+            )
+        except Exception as e:
+            logger.error(f"紀錄自我介紹訊息 ID 失敗: {e}", exc_info=True)
 
         try:
             await self.management_cog._auto_bump_intro_panel_after_submission(interaction)
@@ -269,6 +342,17 @@ class IntroImpressionModal(discord.ui.Modal):
         habit = self.habit_text.value.strip()
         impression_text = self.impression.value.strip()
 
+        await self.management_cog._delete_previous_submission_messages(
+            interaction,
+            category="impression_submissions",
+            record_key=_build_impression_submission_key(
+                guild_id=interaction.guild.id,
+                author_id=interaction.user.id,
+                target_user_id=selected_user.id,
+            ),
+            message_id_fields=("impression_message_id", "success_message_id"),
+        )
+
         moderation = await self.moderation_service.moderate(
             target_display=f"{selected_user.display_name}({selected_user.id})",
             text=impression_text,
@@ -318,7 +402,7 @@ class IntroImpressionModal(discord.ui.Modal):
         embed.add_field(name="整體印象", value=impression_text, inline=False)
         embed.set_footer(text=f"填寫者：{interaction.user.display_name}")
 
-        await interaction.channel.send(content=f"{interaction.user.mention}", embed=embed)
+        impression_message = await interaction.channel.send(content=f"{interaction.user.mention}", embed=embed)
 
         try:
             await self.intro_service.on_impression_submitted(
@@ -337,9 +421,27 @@ class IntroImpressionModal(discord.ui.Modal):
             logger.error(f"他人印象 RAG 介面呼叫失敗: {e}", exc_info=True)
 
         # 直接發送成功訊息（不使用 interaction 回覆）
-        await interaction.channel.send(
+        success_message = await interaction.channel.send(
             content=f"✅ 已成功送出你對 {selected_user.mention} 的印象，謝謝分享！"
         )
+
+        try:
+            await self.management_cog._record_submission_messages(
+                interaction,
+                category="impression_submissions",
+                record_key=_build_impression_submission_key(
+                    guild_id=interaction.guild.id,
+                    author_id=interaction.user.id,
+                    target_user_id=selected_user.id,
+                ),
+                extra_fields={
+                    "target_user_id": selected_user.id,
+                    "impression_message_id": impression_message.id,
+                    "success_message_id": success_message.id,
+                },
+            )
+        except Exception as e:
+            logger.error(f"紀錄他人印象訊息 ID 失敗: {e}", exc_info=True)
 
         try:
             await self.management_cog._auto_bump_intro_panel_after_submission(interaction)
@@ -383,6 +485,75 @@ class ManagementCommands(commands.Cog):
         self.bot.add_view(ServerManagerView(self))
         self.bot.add_view(IntroPanelView(self.intro_profile_service, self))
         logger.info("已註冊 ManagementCommands persistent views")
+
+    async def _delete_previous_submission_messages(
+        self,
+        interaction: discord.Interaction,
+        *,
+        category: str,
+        record_key: str,
+        message_id_fields: tuple[str, ...],
+    ) -> None:
+        """刪除舊的提交訊息（自我介紹或他人印象皆適用）。"""
+        if not interaction.guild or not interaction.channel:
+            return
+
+        runtime_data = _load_intro_submission_runtime_config()
+        submissions = runtime_data.get(category, {})
+        record = submissions.get(record_key)
+        if not isinstance(record, dict):
+            return
+
+        channel_id = int(record.get("channel_id") or interaction.channel.id)
+        target_channel = interaction.guild.get_channel(channel_id)
+        if not isinstance(target_channel, discord.TextChannel):
+            submissions.pop(record_key, None)
+            _save_intro_submission_runtime_config(runtime_data)
+            return
+
+        deleted_any = False
+        for field_name in message_id_fields:
+            message_id = record.get(field_name)
+            if not message_id:
+                continue
+            try:
+                old_message = await target_channel.fetch_message(int(message_id))
+                await old_message.delete()
+                deleted_any = True
+            except discord.NotFound:
+                logger.info("舊訊息不存在，略過刪除: category=%s field=%s message_id=%s", category, field_name, message_id)
+            except discord.Forbidden:
+                logger.warning("無權限刪除舊訊息: category=%s field=%s message_id=%s", category, field_name, message_id)
+            except Exception as e:
+                logger.error("刪除舊訊息失敗: category=%s field=%s message_id=%s err=%s", category, field_name, message_id, e, exc_info=True)
+
+        submissions.pop(record_key, None)
+        _save_intro_submission_runtime_config(runtime_data)
+
+        if deleted_any:
+            logger.info("已刪除舊提交訊息: category=%s key=%s", category, record_key)
+
+    async def _record_submission_messages(
+        self,
+        interaction: discord.Interaction,
+        *,
+        category: str,
+        record_key: str,
+        extra_fields: dict,
+    ) -> None:
+        """紀錄最新提交訊息的 message id（自我介紹或他人印象皆適用）。"""
+        if not interaction.guild or not interaction.channel:
+            return
+
+        runtime_data = _load_intro_submission_runtime_config()
+        submissions = runtime_data.setdefault(category, {})
+        submissions[record_key] = {
+            "guild_id": interaction.guild.id,
+            "channel_id": interaction.channel.id,
+            "author_id": interaction.user.id,
+            **extra_fields,
+        }
+        _save_intro_submission_runtime_config(runtime_data)
 
     async def _auto_bump_intro_panel_after_submission(self, interaction: discord.Interaction):
         """提交表單後，自動刪除舊面板並重發置底。"""
@@ -763,17 +934,8 @@ class ManagementCommands(commands.Cog):
                 selected_role_id = int(selected_value)
                 role = interaction.guild.get_role(selected_role_id)
                 if role and not role.is_default():
-                    # 儲存設定到 JSON 檔案
-                    import json
-                    import os
                     config_file = "config.json"
-                    config = {}
-                    if os.path.exists(config_file):
-                        try:
-                            with open(config_file, 'r') as f:
-                                config = json.load(f)
-                        except json.JSONDecodeError:
-                            logger.error(f"無法讀取 {config_file}，將創建新檔案")
+                    config = ChannelConfig.load_config(config_file, caller="ManagementCommands")
 
                     if "role_mapping" not in config:
                         config["role_mapping"] = {}
@@ -782,8 +944,7 @@ class ManagementCommands(commands.Cog):
 
                     if selected_role_id not in config["role_mapping"][selected_type]:
                         config["role_mapping"][selected_type].append(selected_role_id)
-                        with open(config_file, 'w') as f:
-                            json.dump(config, f, indent=2)
+                        ChannelConfig.save_config(config, config_file, caller="ManagementCommands")
 
                         await interaction.response.edit_message(view=None)
                         await safe_send_interaction_message(
@@ -837,18 +998,7 @@ class ManagementCommands(commands.Cog):
         if not await self._check_guild_and_owner(interaction, owner_only=True):
             return
 
-        import json
-        import os
-        config_file = "config.json"
-        config = {}
-        if os.path.exists(config_file):
-            try:
-                with open(config_file, 'r') as f:
-                    config = json.load(f)
-            except json.JSONDecodeError:
-                logger.error(f"無法讀取 {config_file}，將創建新檔案")
-                await safe_send_interaction_message(interaction, "無法讀取配置文件，請重試。", ephemeral=True)
-                return
+        config = ChannelConfig.load_config("config.json", caller="ManagementCommands")
 
         role_mapping = config.get("role_mapping", {})
         if not role_mapping:
@@ -891,18 +1041,8 @@ class ManagementCommands(commands.Cog):
         if not await self._check_guild_and_owner(interaction, owner_only=True):
             return
 
-        import json
-        import os
         config_file = "config.json"
-        config = {}
-        if os.path.exists(config_file):
-            try:
-                with open(config_file, 'r') as f:
-                    config = json.load(f)
-            except json.JSONDecodeError:
-                logger.error(f"無法讀取 {config_file}，將創建新檔案")
-                await safe_send_interaction_message(interaction, "無法讀取配置文件，請重試。", ephemeral=True)
-                return
+        config = ChannelConfig.load_config(config_file, caller="ManagementCommands")
 
         role_mapping = config.get("role_mapping", {})
         if not role_mapping:
@@ -954,8 +1094,7 @@ class ManagementCommands(commands.Cog):
                 if selected_role_id in role_mapping[selected_type]:
                     role_mapping[selected_type].remove(selected_role_id)
                     config["role_mapping"][selected_type] = role_mapping[selected_type]
-                    with open(config_file, 'w') as f:
-                        json.dump(config, f, indent=2)
+                    ChannelConfig.save_config(config, config_file, caller="ManagementCommands")
 
                     role = interaction.guild.get_role(selected_role_id)
                     role_name = role.name if role else f"未知身份組 (ID: {selected_role_id})"
