@@ -29,6 +29,8 @@
 1. 完成項目要打勾。
 2. 完成且無未完成關聯時，應自待辦移除。
 3. 若仍有依賴未完成項目，保留並註記依賴。
+4. **凡 AI/協作者在本輪「讀取過本檔」後，於本輪結束前必須回寫本檔進度**（至少更新：完成勾選、狀態註記或新增/修正共識）。
+5. 若本輪無實作異動，也要在本檔留下「已讀取、已盤點、待確認事項」的最小紀錄，避免只讀不更。
 
 ## 2.1) 【高嚴重性】禁止未經確認刪除/覆寫使用者資料檔（強制）
 
@@ -47,16 +49,7 @@
    - 復原（git/reflog/stash/log/備份）
    - 事故紀錄與防再發措施回寫本檔
 
-## 3) Telegram -> Discord 目前核心定案（摘要）
-
-1. Telegram scraper：寫 DB + `NOTIFY telegram_new_message`。
-2. Discord consumer（`MessageRelayWorker`，舊暫名 `TelegramRelayService`）：
-   - `LISTEN telegram_new_message`
-   - 收 payload 後查 DB 取 message/media
-   - 套路由後發送 Discord
-3. 若無路由：**不發文（skip + log）**。
-4. 除即時 notify 外，需有**每小時補檢**防漏。
-5. 路由/開關由 `config.json` 管理（非硬編碼）。
+## 3) Telegram -> Discord（已完成，歸檔至 TODO-completed.md）
 
 ---
 
@@ -197,223 +190,10 @@
 
 ---
 
-# Telegram Scraper 專案交接（2026-03-22 最新）
+## 8) 跨來源整合方案（按部就班）
 
-> 本段是給下一個 Session 直接接手 Telegram -> Discord 轉發鏈路使用。
-
-## 1) 目前狀態總結
-
-- 已完成 `telegram-scraper` 獨立服務化（Docker 微服務）。
-- Dockerfile 已集中在 `docker/telegram_scraper/dockerfile`。
-- `telegram-scraper` 啟動邏輯改為 `entrypoint.sh` 控制：
-  - 有 session：自動跑 `main.py`
-  - 無 session 且可互動：進登入流程
-  - 無 session 且非互動：待命 `sleep infinity`
-- Telegram 程式已模組化，不再把所有邏輯塞在 `main.py`。
-
-## 2) Telegram 模組化後檔案職責
-
-- `src/telegram_scraper/main.py`
-  - 薄入口，只做：載入設定 -> 呼叫 runner。
-- `src/telegram_scraper/tg_config.py`
-  - 設定解析（env + JSON），`TelegramConfig` dataclass。
-  - forward 白名單寫回函式：`add_identifier_to_forward_whitelist(...)`。
-- `src/telegram_scraper/filters.py`
-  - forward 來源解析：`extract_forward_source_chat_id(...)`。
-  - forward 白名單比對：`is_forward_source_in_whitelist(...)`。
-  - forward 是否略過：`should_skip_forward(...)`。
-- `src/telegram_scraper/handlers.py`
-  - 共用訊息流程 `_process_message(...)`。
-  - 即時與歷史 handler 皆委派到共用流程。
-- `src/telegram_scraper/runner.py`
-  - Telethon client 啟動、歷史掃描、即時監聽。
-
-## 3) 目前 forward 過濾規則（已修正）
-
-### 問題回顧
-先前誤把「目標頻道」拿去比白名單，導致 forward 容易被放行。
-
-### 現行正確規則
-1. forward 訊息先以「**轉發來源**」做白名單比對。
-2. 未命中白名單 -> 直接略過。
-3. 命中白名單 -> 允許通過。
-4. 允許通過的 forward 可自動把來源 identifier 寫回 `runtime_config.json`。
-
-## 4) 設定來源（重要）
-
-- `.env` 只保留必要 Telegram API：
-  - `TELEGRAM_API_ID`
-  - `TELEGRAM_API_HASH`
-- forward 規則固定讀：
-  - `src/telegram_scraper/runtime_config.json`
-
-目前範例（實際內容已被使用者調整）：
-
-```json
-{
-    "history_hours": 24,
-    "skip_forwards": true,
-    "forward_whitelist": [
-        "Team_Gemberry78",
-        "Sleep_Leaks",
-        "Seele_WW_leak"
-    ]
-}
-```
-
-## 5) 歷史訊息抓取規則
-
-- `history_limit`：最多掃幾筆（上限）。
-- `history_hours`：時間窗（抓到多久以前）。
-- 兩者可同時生效。
-- `runner.py` 已實作：超過時間窗會 `break` 停止掃描。
-
-## 6) Docker 相關現況
-
-- `docker-compose.yaml` 已使用集中路徑：
-  - `docker/discord_bot/dockerfile`
-  - `docker/scraper/dockerfile`
-  - `docker/telegram_scraper/dockerfile`
-- `docker/telegram_scraper/entrypoint.sh` 控制首次登入與待命模式。
-- `docker/telegram_scraper/dockerfile` 有 `PYTHONUNBUFFERED=1`，確保 log 即時。
-
-## 7) Session 持久化與 git
-
-- Telethon session 位置：`src/telegram_scraper/session/`
-- `.gitignore` 已忽略：`src/telegram_scraper/session/`
-
-## 8) Telegram Relay 最新設計（2026-03-25 定案版）
-
-> 本段取代舊方案。若與後文舊內容衝突，以本段為準。
-
-### 8.1 完整架構（目前共識）
-
-1. **事件來源層（Source Ingest）**
-   - 目前 source：Telegram scraper（寫 DB + `NOTIFY telegram_new_message`）。
-   - 未來可擴充 FB/PTT/Article 作為其他 source。
-
-2. **事件消費層（Relay Worker）**
-   - 命名採通用：`MessageRelayWorker`（保留未來整合空間）。
-   - 雙軌：
-     - 即時通路：`LISTEN telegram_new_message`
-     - 補償通路：每 1 小時 polling 補漏
-
-3. **資料存取層（Repository）**
-   - 上層抽象：`SourceMessageRepository`
-   - Telegram 具體實作：`TelegramMessageRepository`
-   - 職責：依 message key 取回完整訊息 + 媒體。
-
-4. **路由層（Resolver）**
-   - 命名：`MessageRouteResolver`
-   - 職責：來源事件 -> Discord 頻道清單。
-   - 規則：無路由就不發文（skip + log）。
-
-5. **發送層（Publisher）**
-   - 命名：`DiscordMessagePublisher`
-   - 職責：文字/附件發送、分批、重試、錯誤紀錄。
-   - 策略：先做最小共用核心，不一次硬整合所有來源格式。
-
-6. **格式轉換層（Adapter）**
-   - 建議抽象：`MessageRenderAdapter`
-   - 來源別實作：`TelegramRenderAdapter` / `ArticleRenderAdapter` / `FbRenderAdapter` / `PttRenderAdapter`
-
-### 8.2 設定規則（config.json）
-
-- `telegram_relay_enabled`（bool）
-  - Relay 總開關（保留）。
-
-- `telegram_channel_routes`（dict）
-  - 型態：`{ "<telegram_chat_id>": [discord_channel_id, ...] }`
-  - 用途：來源 Telegram chat 對應目標 Discord 頻道。
-
-- 發文原則
-  - **無路由不發文**（skip + log）。
-
-### 8.3 舊流程相容策略（已確認）
-
-- 可先不引入 `MessageRelayWorker`。
-- 舊流程可直接串 `SourceMessageRepository`（再接 resolver/publisher）。
-- 待穩定後再收斂觸發入口進 `MessageRelayWorker`。
-
-### 8.4 現行 Article / FB / PTT 流程盤點（已確認）
-
-> 目的：先把既有流程講清楚，避免整合時誤拆。
-
-#### A) Article（官方文章）
-1. 啟動來源：
-   - `discord_bot.py` 的 `on_ready` 會讀 `config.json.article_monitor_channel_id` 並自動啟動。
-   - 也可由 `ArticleCommands` 手動啟動監控。
-2. 取文：
-   - `ArticleMonitor.fetch_recent_articles()` 呼叫 `/api/articles/discord`（asc）。
-3. 去重：
-   - `BaseContentMonitor.sent_article_ids`（`/app/services/sent_articles.json`）。
-4. 發文：
-   - `send_article_to_channel()`（Embed + 圖片附件分批）。
-
-#### B) FB
-1. 啟動來源：
-   - `discord_bot.py` 自動啟動 `start_fb_monitoring()`（目前沿用 `article_monitor_channel_id`）。
-2. 取文：
-   - `fetch_recent_fb_posts()` 呼叫 `/api/fb_posts/recent`。
-3. 去重：
-   - `sent_fbpost_ids`。
-4. 發文：
-   - `send_fb_post_to_channel()`（主文 + 第一張圖 + 其餘分批）。
-
-#### C) PTT
-1. 啟動來源：
-   - `discord_bot.py` 讀 `config.json.forum_article_channel_id`，啟動 `start_ptt_monitoring()`。
-2. 取文：
-   - `fetch_recent_ptt_posts()` 呼叫 `/api/ptt_posts/recent`（desc，發送前反轉成舊到新）。
-3. 去重與增量：
-   - `sent_article_keys` + `sent_ptt_state`（留言同步進度）。
-4. 發文：
-   - `send_ptt_post_to_forum_channel()`（Forum thread 建立、附圖、留言分段補送）。
-
-#### D) 現況結論
-- 目前三者都在 `ArticleMonitor` 裡運作，功能可用但責任較重。
-- 發送型態不完全一致（TextChannel Embed / ForumThread / 附件策略），
-  所以整合要分階段，不能一次硬抽成單一流程。
-
-#### E) 目前 service 取得的資料結構（欄位盤點）
-
-> 目的：先掌握「現況 payload 長相」，後續整合時才不會誤砍欄位。
-
-1. **Article（`/api/articles/discord`）常用欄位**
-   - 主鍵/識別：`article_id`
-   - 文字：`article_title`, `article_desc`, `article_content`, `article_content_full`
-   - 分類：`article_type_name`, `article_type`
-   - 時間：`start_time`, `create_time`
-   - 圖片：`article_cover`, `content_cover`, `suggest_cover`
-
-2. **FB（`/api/fb_posts/recent`）常用欄位**
-   - 主鍵/識別：`id`
-   - 文字：`text`, `text_md`
-   - 連結：`url`, `pfbid_url`
-   - 時間：`timestamp`, `created_at`
-   - 圖片：`images`（list）
-
-3. **PTT（`/api/ptt_posts/recent`）常用欄位**
-   - 主鍵/識別：`board`, `article_id`（組合 key：`ptt:{board}:{article_id}`）
-   - 文字：`title`, `content`
-   - 作者/時間：`author`, `published_at`
-   - 連結與標記：`url`, `matched_keywords`
-   - 留言：`comments`（元素含 `tag`, `user`, `content`, `time`）
-
-4. **Telegram（DB 實體，`telegram_scraper/db.py`）**
-   - `telegram_messages`：
-     - `id`（PK）
-     - `telegram_chat_id`, `telegram_message_id`（unique）
-     - `text`, `message_date`, `has_media`
-   - `telegram_message_media`：
-     - `message_id`（FK）
-     - `media_type`, `file_rel_path`, `mime_type`, `file_size`
-     - `width`, `height`, `duration_sec`, `is_spoiler`
-
-5. **整合注意（目前共識）**
-   - Article/FB/PTT 是 API payload；Telegram 是 DB row + media row。
-   - 型別來源不同，但欄位都必須保留（走 lossless envelope）。
-   - 後續 `SourceFetchPort` / `MessageRenderAdapter` 只能做「映射」，不能做「刪減」。
+> Telegram Relay 已完成（架構/設定/流程盤點已歸檔至 `TODO-completed.md`）。
+> 以下為仍待執行的跨來源整合計畫。
 
 ### 8.5 與新 class 整合方案（按部就班）
 
@@ -553,129 +333,20 @@
 
 ---
 
-## 10) TODO（Telegram Relay 實作追蹤）
+## 10) TODO（跨來源整合追蹤）
 
-### 10.0 Telegram 先行實作（本輪追加，優先最高）
-
-> 使用者決議：先做 Telegram。以下細節為必記錄項，避免後續返工。
-
-- [x] 實作 `TelegramMessageRepository` 查詢介面（依 message_pk 取 message + media）
-- [x] 實作 `MessageRelayWorker`：LISTEN `telegram_new_message` + 每小時補償輪詢
-- [x] 實作 `TelegramRenderAdapter`（保留目前格式，不做語意重排）
-- [x] 接入 `DiscordMessagePublisher`（僅執行 RenderPlan，不改內容）
-- [x] 路由套用 `telegram_channel_routes`，無路由一律 skip + log
-
-#### Telegram 先行實作落地紀錄（2026-03-25）
-
-- 新增檔案：`src/services/telegram_relay_service.py`
-  - `TelegramMessageRepository`
-  - `MessageRouteResolver`
-  - `TelegramRenderAdapter`
-  - `DiscordMessagePublisher`
-  - `MessageRelayWorker`
-- 串接啟動：`src/discord_bot.py`
-  - `on_ready()` 新增 `auto_start_telegram_relay(bot)`
-  - 支援重複 on_ready 防重啟（worker 已運行則略過）
-- 設定補齊：`src/config.json`
-  - 新增 `telegram_relay_enabled`（預設 false）
-  - 新增 `telegram_channel_routes`（預設 `{}`）
-  - 新增 `telegram_replay_from_message_pk`（預設 `null`，可指定從某筆後重送）
-
-#### Telegram 狀態持久化共識（2026-03-25 補充）
-
-- `config.json` **只放設定**，不放「已送過哪些資料」。
-- 已送狀態與游標改存 DB：
-  - `telegram_relay_delivery_state`：記錄 `(message_pk, discord_channel_id)` 是否已送
-  - `telegram_relay_runtime_state`：記錄 `last_polled_pk`
-- 可選重送設定：
-  - `telegram_replay_from_message_pk`（例如設 `12345` 表示從 `message_pk >= 12345` 強制重送）
-  - 重送完成後建議手動改回 `null`，恢復一般去重流程
-
-> 注意：目前為「最小可用版」；已具備 LISTEN + 補償 + route + publish。
-> 下一輪可補強 retry/backoff 細節與更多可觀測欄位聚合。
-
-#### 2026-03-26 已解決問題（詳見 TODO-completed.md）
-
-> 以下問題均已解決並歸檔至 `TODO-completed.md`：
-> - route key 型態不一致（chat_id 數字 vs source_channel 名稱）
-> - Telegram scraper 媒體下載重複（`(N)` 後綴問題）
-> - 歷史訊息時序錯亂（PK 與時間反序）
-> - 媒體副檔名缺失（非圖片/影片 mime 類型）
-> - Embed 改善（頻道名、timestamp、Telegram 藍）
-> - Telegram relay 通道連線問題（NOTIFY 即時路徑已驗證正常）
-
-#### Telegram relay NOTIFY 即時路徑驗證結果（2026-03-26）
-
-- **驗證方式**：刪除 DB 最新一筆 → 重啟 telegram-scraper → telegram-scraper 重新 INSERT + NOTIFY → discord-bot 即時收到並發文
-- **結果**：`telegram_relay_result message_pk=88 ... published_count=1 result=published` ✅
-- **結論**：NOTIFY 即時路徑正常運作
-- **已新增 log**：`_on_notify` 收到有效 NOTIFY 時記錄 `收到 NOTIFY: channel=... message_pk=...`（方便追蹤即時路徑）
-- **觀察 log 關鍵字**：
-  - `收到 NOTIFY: channel=... message_pk=...`（即時收到通知）
-  - `Telegram Relay 啟動補償已排入 X 筆歷史訊息`（啟動補償）
-  - `telegram_relay_result ... published_count=... result=...`（處理結果）
-  - `Telegram relay 無路由，略過 ...`（路由問題）
-
-#### Telegram scraper 歷史掃描安全性確認（2026-03-26）
-
-- `history_hours: 168`（7 天）設定安全，原因：
-  - `iter_messages` 本身流量小（只列出訊息 metadata）
-  - 已存在的訊息：`upsert_message_only` ON CONFLICT DO NOTHING
-  - 已存在的媒體：`has_media_records()` 檢查後略過下載
-  - 已存在的訊息不發 NOTIFY（只有 `inserted_new=True` 才通知）
-  - Telethon 內建 `FloodWaitError` 自動等待，不會被封鎖帳號
-- 初始化完成後建議將 `history_hours` 調回 `24`~`48`
-
-#### Telegram 必記錄細節（設計約束）
-
-1. **去重鍵**
-   - DB unique：`(telegram_chat_id, telegram_message_id)`
-   - Relay 端二次保險：以 `message_pk` 做已處理去重（避免重複 notify / 重啟重送）
-
-2. **事件 payload 規格**
-   - `NOTIFY telegram_new_message` payload 固定為 `message_pk`（字串）
-   - consumer 收到後必做型別驗證；無效 payload 直接記錯誤並略過
-
-3. **順序與一致性**
-   - 不強保證全域順序，只保證「單一訊息不重複發送」
-   - 補償輪詢需以 cursor（`last_processed_pk` 或 `last_processed_time`）前進
-
-4. **媒體檔案路徑**
-   - `file_rel_path` 必須能在 discord-bot 容器解析到實際檔案
-   - 啟動時先做 path health-check，失敗要明確告警
-
-5. **Spoiler 與媒體策略**
-   - `is_spoiler=true` 時，優先走 Discord 可識別的 spoiler 發送策略
-   - 不可在 publisher 端臨時改文案，規則寫在 `TelegramRenderAdapter`
-
-6. **錯誤與重試**
-   - 發送失敗採有限次 retry（含 backoff）
-   - 超過上限要落錯誤日誌並保留可補送資訊（message_pk / route / err）
-
-7. **可觀測性（最少欄位）**
-   - 每次處理記錄：`message_pk`, `telegram_chat_id`, `telegram_message_id`, `route_count`, `published_count`, `latency_ms`, `result`
-
-8. **設定驗證**
-   - 啟動即驗證 `telegram_relay_enabled` / `telegram_channel_routes` 型別
-   - route 的 channel id 若不存在或不可發送，啟動時告警 + 執行時 skip
+> Telegram Relay 已全部完成並歸檔至 `TODO-completed.md`。以下為跨來源整合待辦。
 
 ### P0（本期必做）
 - [ ] 建立 `SourceFetchPort` 與來源實作（Article/FB/PTT/Telegram）
 - [ ] 建立 `SourceFetchOrchestrator`（strategy/case 分派）
-- [x] 建立 `SourceMessageRepository` 介面與 `TelegramMessageRepository` 實作
-- [x] 實作 Telegram 即時流程：`LISTEN telegram_new_message` 取文（已驗證 NOTIFY 即時路徑正常）
-- [x] 實作 Telegram 補償流程：每小時 polling 補漏
-- [x] 套用規則：無路由不發文（skip + log）
 
 ### P1（穩定化）
-- [x] 建立 `MessageRouteResolver`（先接 `telegram_channel_routes`，含 chat_id + source_channel fallback）
 - [ ] 建立 `MessageRenderAdapter` 無損封裝模型
 - [ ] 統一 config 讀寫方式，減少直接 `open(config.json)` 的分散寫法
-- [x] 補齊 fetch/route/retry/skip 的可觀測 log（NOTIFY 收到 log、發送目標 log、relay result log）
 
 ### P2（整合擴充）
-- [ ] 導入/整合 `DiscordMessagePublisher`（後置）
-- [ ] 保留外部 API 不變，逐步內部改接 publisher
+- [ ] 保留外部 API 不變，逐步內部改接 publisher（Article/FB/PTT）
 - [ ] 規劃/新增管理命令：telegram route 查詢與設定
 
 ---
@@ -786,6 +457,124 @@
 - [ ] 第一階段抓到穩定資料後，再做第二階段資料庫正規化
 - [ ] 第二階段查詢穩定後，再做第三階段 pgvector / RAG / AI 整合
 - [ ] 每階段都保留 JSON 範例與測試案例，避免後續 parser 改版難以驗證
+
+### 11.1 本輪實作討論草案（2026-03-29 上午，待你確認）
+
+> 目的：依現有 `ptt_scraper_service.py` 與 DB 結構習慣，規劃 Bahamut 第一版最小可行實作（MVP）。
+
+#### A) 實作策略（先可用、再擴充）
+1. **先做 Bahamut 專屬 service，不先硬抽通用框架**
+   - 新增：`src/scraper/services/bahamut_scraper_service.py`
+   - 理由：先把 anti-bot / 解析規則跑通，避免過早抽象導致除錯困難。
+2. **流程比照 PTT 現有模式**
+   - `fetch_list -> fetch_detail -> parse_comments -> 產出標準 payload ->（先 JSON 驗證）-> 再接 DB upsert`
+3. **資料保存採「raw + normalized」雙軌**
+   - raw（原始回應/片段）保留，方便 parser 失效時回溯
+   - normalized（結構化欄位）供 API / Discord / RAG 使用
+
+#### B) 第一階段（MVP）具體落地
+1. Session / 請求層
+   - 優先 `cloudscraper` + retry + timeout + headers + referer
+   - 固定加上 observability log（url, status, latency, retry_count）
+2. 列表抓取
+   - 輸出欄位：`post_id`, `title`, `author`, `category`, `published_at`, `url`
+3. 單篇抓取
+   - 主文欄位：`content`, `author_meta`, `published_at`, `category`
+   - 留言欄位：`comment_id/position`, `user_id`, `content`, `published_at`
+4. 回文策略
+   - 第一版先完成「主文 + 主文留言」
+   - 回文/回文留言先做可抓性探測（保留 raw），第二版再正式結構化
+5. 驗證輸出
+   - 落地 JSON 樣本：`src/scraper/data/bahamut_samples/*.json`
+
+#### C) 第二階段（DB）建議欄位方向
+1. `bahamut_posts`
+   - `post_id`(uniq), `title`, `category`, `author_id`, `author_name`, `url`, `content`, `published_at`
+   - `raw_json`, `snapshot_json`, `discussion_hash`, `last_comment_sync_at`, `last_reply_sync_at`
+2. `bahamut_post_comments`
+   - `post_id`(fk), `comment_id`, `user_id`, `user_name`, `content`, `published_at`, `raw_json`
+3. `bahamut_post_replies` / `bahamut_reply_comments`
+   - 先建表與索引，待第二版 parser 穩定後啟用寫入
+4. moderation 預留
+   - `moderation_status`, `moderation_score`, `moderation_labels`, `moderation_reason`
+
+#### D) 風險與對策
+1. anti-bot / 結構變動風險高
+   - 對策：保留 raw + selector fallback + parser version
+2. 文章/留言量大
+   - 對策：先增量 cursor，同步窗口限制 + retry/backoff
+3. 欄位易漂移
+   - 對策：先定 JSON contract，再進 DB migration
+
+#### E) 建議先做的實作順序（我會照這個做）
+1. 建 `bahamut_scraper_service.py` + list/detail parse + sample JSON
+2. 建 Bahamut models + migration + upsert
+3. 加 API 查詢端點（recent / post detail / user comments）
+4. 最後接 RAG ingestion
+
+#### F) 使用者本輪確認（2026-03-29）
+- 已確認：**第一版先做「主文 + 主文留言」**。
+- 已確認：**回文/回文留言延到第二版**（第一版僅做可抓性探測與 raw 保存）。
+
+#### G) 第一版目標板面與進版圖機制（2026-03-29）
+- 目標板面：`https://forum.gamer.com.tw/B.php?bsn=74934`
+- 使用者提醒：第一次進板會出現「進版圖/看板入口頁」，後續通常不再出現。
+
+進版圖機制與迴避策略（第一版要實作）：
+1. **機制說明**
+   - 巴哈部分看板在首次進入時，會先導到進版圖頁（含「進入看板」按鈕或導頁流程）。
+   - 若 session/cookie 尚未建立，直接抓列表可能拿到進版圖 HTML，而非文章列表。
+2. **迴避方式（程式化）**
+   - 啟動 crawler 時先做一次「預熱請求」：先 GET 看板 URL，檢查是否為進版圖頁。
+   - 若偵測到進版圖，模擬點擊流程（依頁面按鈕/跳轉連結再請求一次）以建立 cookie/session。
+   - 成功進入後保存同一個 session（cookies）供後續列表/內文抓取重用。
+3. **偵測條件（建議）**
+   - URL/path 含進版圖特徵，或 HTML 包含「進入看板」等關鍵字。
+   - 若未偵測到文章列表必要 selector，回退判定為 gate page 並走 gate handling。
+4. **容錯與重試**
+   - gate handling 失敗時，記錄 raw html 快照與關鍵 log（url/status/selector 命中率），
+     走有限次重試，避免卡死在首輪。
+
+#### H) 本輪實作落地（2026-03-29）
+- 已新增 `src/scraper/services/bahamut_scraper_service.py`（MVP）
+  - 具備 `cloudscraper + retry` session
+  - 具備進版圖 gate 偵測與導頁處理（預熱 + hop）
+  - 具備列表抓取、單篇主文抓取、主文留言解析
+  - 具備回文可抓性探測與 raw preview 保留（不入庫）
+  - 具備 JSON 樣本輸出：`data/bahamut_samples/bahamut_sample_*.json`
+- 已更新 `src/scraper/config.py`
+  - 新增 `BAHAMUT_CONFIG`，預設目標板面：`bsn=74934`
+- 已更新 `src/scraper/container.py`
+  - 新增 `create_bahamut_scraper_service()`
+- 已更新 `src/scraper/main.py`
+  - 新增 `bahamut_scrape_task()`
+  - 納入啟動即執行與每小時排程
+
+> 備註：目前為第一版可運行骨架，後續會依實際頁面 selector 再微調欄位解析精度。
+
+#### I) 抓取模式與套件討論草案（2026-03-29，待確認）
+
+1. **抓取模式（第一版建議）**
+   - 模式：`HTTP pull + session 持續化 + gate handling`
+   - 流程：
+     - 先打看板 URL（預熱）
+     - 若命中進版圖（gate page）就跟隨「進入看板」導頁建立 cookie/session
+     - 用同一個 session 抓列表頁
+     - 逐篇抓主文與主文留言
+     - 產出 JSON 樣本（raw + normalized）
+   - 第一版不做：瀏覽器自動化登入、回文結構化入庫。
+
+2. **抓取套件（目前採用）**
+   - `cloudscraper`（優先）：處理常見 anti-bot 挑戰，維持 requests 介面。
+   - `requests`（fallback）：cloudscraper 不可用時退回。
+   - `BeautifulSoup4`：HTML 解析（列表/主文/留言 selector）。
+   - `fake-useragent`：隨機 User-Agent，降低固定指紋風險。
+   - `urllib3.Retry + HTTPAdapter`：重試與 backoff。
+
+3. **為何不先上 Playwright/Selenium**
+   - 第一版目標是穩定拿資料與建立欄位契約，非完整模擬人機互動。
+   - 先用 HTTP 模式維護成本較低、部署較輕、除錯較快。
+   - 若後續遇到強 JS 渲染或更嚴格防護，再升級為瀏覽器模式（第二版候選）。
 
 ---
 
