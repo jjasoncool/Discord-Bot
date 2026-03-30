@@ -96,6 +96,37 @@ def ptt_scrape_task():
             ptt_service.db_manager.close()
 
 
+def bahamut_scrape_task():
+    """Bahamut 爬蟲任務（第一版：主文 + 留言 + JSON 樣本輸出）"""
+    container = ServiceContainer()
+    try:
+        logger.info("開始執行 Bahamut 爬蟲任務")
+
+        bahamut_service = container.create_bahamut_scraper_service()
+        result = bahamut_service.fetch_bahamut_articles_with_content()
+
+        if result.get("ok"):
+            output_path = bahamut_service.export_sample_json(result)
+            logger.info(
+                "Bahamut 爬蟲任務完成: article_count=%s, detailed_count=%s, output=%s",
+                result.get("article_count", 0),
+                result.get("detailed_count", 0),
+                output_path,
+            )
+        else:
+            logger.warning(
+                "Bahamut 爬蟲任務未完成: error=%s gate=%s",
+                result.get("error"),
+                result.get("gate", {}),
+            )
+
+    except Exception as e:
+        logger.error(f"Bahamut 爬蟲任務發生未預期錯誤: {str(e)}", exc_info=True)
+    finally:
+        if 'bahamut_service' in locals() and getattr(bahamut_service, 'db_manager', None):
+            bahamut_service.db_manager.close()
+
+
 def start_api_server():
     """啟動 API 服務器"""
     from api_server import app
@@ -125,6 +156,7 @@ def main():
     schedule.every(15).minutes.do(main_scrape_task)
     schedule.every(1).hours.do(fb_scrape_task)
     schedule.every(1).hours.do(ptt_scrape_task)
+    schedule.every(1).hours.do(bahamut_scrape_task)
 
     # 立即執行一次 Facebook 爬蟲
     logger.info("執行初始 Facebook 爬蟲任務")
@@ -138,8 +170,12 @@ def main():
     logger.info("執行初始 PTT 爬蟲任務")
     ptt_scrape_task()
 
+    # 立即執行一次 Bahamut 爬蟲
+    logger.info("執行初始 Bahamut 爬蟲任務")
+    bahamut_scrape_task()
+
     # 啟動定時任務循環
-    logger.info("定時任務已啟動：每15分鐘執行文章爬蟲，每1小時執行 Facebook 爬蟲，每1小時執行 PTT 爬蟲")
+    logger.info("定時任務已啟動：每15分鐘執行文章爬蟲，每1小時執行 Facebook/PTT/Bahamut 爬蟲")
     while True:
         try:
             schedule.run_pending()

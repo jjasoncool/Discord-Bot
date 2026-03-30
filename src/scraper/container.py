@@ -10,6 +10,7 @@ from config import DATABASE_CONFIG
 from db.models import Base
 from db.database import DatabaseManager
 from services.api_service import APIService
+from services.bahamut_scraper_service import BahamutScraperService
 from services.file_service import FileService
 from services.ptt_scraper_service import PTTScraperService
 from services.scraper_service import ScraperService
@@ -72,6 +73,11 @@ class ServiceContainer:
         """建立 PTT 爬蟲服務"""
         db_manager = self.create_database_manager()
         return PTTScraperService(db_manager=db_manager)
+
+    def create_bahamut_scraper_service(self):
+        """建立 Bahamut 爬蟲服務"""
+        db_manager = self.create_database_manager()
+        return BahamutScraperService(db_manager=db_manager)
 
     def create_database_tables(self):
         """建立資料庫表格"""

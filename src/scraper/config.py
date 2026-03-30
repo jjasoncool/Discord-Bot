@@ -51,3 +51,14 @@ PTT_CONFIG = {
     "timeout": 20,
     "search_pages": 3,
 }
+
+# Bahamut 抓取設定（第一版：主文 + 主文留言）
+BAHAMUT_CONFIG = {
+    "target_board_url": "https://forum.gamer.com.tw/B.php?bsn=74934",
+    "timeout": 20,
+    "board_pages": 1,
+    "max_articles_per_page": 30,
+    "gate_max_hops": 3,
+    "human_delay_min": (0.35, 0.9),
+    "sample_output_dir": "data/bahamut_samples",
+}
