@@ -174,6 +174,74 @@ class PTTPost(Base):
     def __repr__(self):
         return f"<PTTPost(board='{self.board}', article_id='{self.article_id}', title='{self.title[:30]}...')>"
 
+
+class BahamutPost(Base):
+    """巴哈姆特文章表（主文 + 回文共用，以 position 區分）"""
+    __tablename__ = 'bahamut_posts'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    board_id = Column(String(50), nullable=False, index=True)          # bsn (e.g. "74934")
+    post_id = Column(String(50), nullable=False, index=True)           # snA，thread ID
+    sn = Column(String(50), nullable=False)                            # 單篇文章 ID（主文或回文）
+    position = Column(Integer, nullable=False, default=1)              # 1=主文, >1=回文
+    title = Column(String(500))
+    category = Column(String(100))
+    author_name = Column(String(200))
+    author_id = Column(String(100), index=True)
+    url = Column(String(1000))
+    ip = Column(String(50))
+    area = Column(String(20))
+    published_at = Column(DateTime, index=True)
+    content = Column(Text)
+    content_images_json = Column(Text)                                 # JSON array of image URLs
+    comments_count = Column(Integer, default=0)
+    replies_count = Column(Integer, default=0)                         # 只在主文（position=1）有意義
+    raw_json = Column(Text)                                            # 完整 JSON 備份
+    last_seen_at = Column(DateTime)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    # 關聯
+    comments = relationship("BahamutPostComment", back_populates="post", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        UniqueConstraint('board_id', 'sn', name='uq_bahamut_board_sn'),
+    )
+
+    def __repr__(self):
+        return f"<BahamutPost(board_id='{self.board_id}', post_id='{self.post_id}', sn='{self.sn}', position={self.position})>"
+
+
+class BahamutPostComment(Base):
+    """巴哈姆特文章留言表"""
+    __tablename__ = 'bahamut_post_comments'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    bahamut_post_id = Column(Integer, ForeignKey('bahamut_posts.id'), nullable=False, index=True)
+    parent_sn = Column(String(50), nullable=False)                     # 留言所屬文章 block 的 sn
+    comment_id = Column(String(50), nullable=False)                    # 巴哈留言 ID
+    floor = Column(String(20))                                         # B1, B2...
+    position = Column(Integer)                                         # 排序序號
+    user_id = Column(String(100), index=True)
+    user_name = Column(String(200))
+    content = Column(Text)
+    is_hot = Column(Boolean, default=False)
+    published_at = Column(DateTime)
+    raw_text = Column(Text)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    # 關聯
+    post = relationship("BahamutPost", back_populates="comments")
+
+    __table_args__ = (
+        UniqueConstraint('parent_sn', 'comment_id', name='uq_bahamut_comment'),
+    )
+
+    def __repr__(self):
+        return f"<BahamutPostComment(parent_sn='{self.parent_sn}', comment_id='{self.comment_id}')>"
+
+
 # 建立資料庫引擎
 engine = create_engine(DATABASE_CONFIG["url"], echo=False)
 

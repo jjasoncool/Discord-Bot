@@ -6,7 +6,7 @@
 import schedule
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import uvicorn
 
@@ -19,6 +19,11 @@ load_dotenv()
 
 # 建立 logger
 logger = get_logger('main')
+
+
+FB_EMPTY_URL_RETRY_DELAY_MINUTES = 15
+fb_retry_scheduled_at = None
+fb_task_running = False
 
 
 def main_scrape_task():
@@ -48,18 +53,65 @@ def main_scrape_task():
 
 def fb_scrape_task():
     """Facebook 爬蟲任務"""
+    global fb_retry_scheduled_at, fb_task_running
+
+    if fb_task_running:
+        logger.warning("Facebook 爬蟲任務已在執行中，略過本次重複觸發")
+        return
+
+    fb_task_running = True
     try:
         logger.info("開始執行 Facebook 爬蟲任務")
         fb_service = FBScraperService()
         results = fb_service.scrape_facebook_posts()
+        empty_link_failure = bool(getattr(fb_service, "last_empty_link_failure", False))
 
         if results:
             logger.info(f"Facebook 爬蟲任務完成，抓取到 {len(results)} 篇貼文")
+            fb_retry_scheduled_at = None
+        elif empty_link_failure:
+            if fb_retry_scheduled_at is None:
+                fb_retry_scheduled_at = datetime.now() + timedelta(minutes=FB_EMPTY_URL_RETRY_DELAY_MINUTES)
+                logger.warning(
+                    "Facebook 本輪為 0 URL，已排入 %s 分鐘後補抓：scheduled_at=%s",
+                    FB_EMPTY_URL_RETRY_DELAY_MINUTES,
+                    fb_retry_scheduled_at.isoformat(),
+                )
+            else:
+                logger.warning(
+                    "Facebook 本輪為 0 URL，但已有待執行補抓，不重複排入：scheduled_at=%s",
+                    fb_retry_scheduled_at.isoformat(),
+                )
         else:
             logger.warning("Facebook 爬蟲任務完成，但未抓取到貼文")
 
     except Exception as e:
         logger.error(f"Facebook 爬蟲任務發生未預期錯誤: {str(e)}", exc_info=True)
+    finally:
+        fb_task_running = False
+
+
+def run_pending_fb_retry_if_needed():
+    """若先前 FB 首頁 0 URL，於指定時間補抓一次；僅由單一主迴圈呼叫。"""
+    global fb_retry_scheduled_at, fb_task_running
+
+    if fb_retry_scheduled_at is None:
+        return
+    if fb_task_running:
+        return
+
+    now = datetime.now()
+    if now < fb_retry_scheduled_at:
+        return
+
+    scheduled_at = fb_retry_scheduled_at
+    fb_retry_scheduled_at = None
+    logger.info(
+        "開始執行 Facebook 0 URL 延後補抓任務：scheduled_at=%s now=%s",
+        scheduled_at.isoformat(),
+        now.isoformat(),
+    )
+    fb_scrape_task()
 
 
 def ptt_scrape_task():
@@ -97,20 +149,33 @@ def ptt_scrape_task():
 
 
 def bahamut_scrape_task():
-    """Bahamut 爬蟲任務（第一版：主文 + 留言 + JSON 樣本輸出）"""
+    """Bahamut 爬蟲任務：抓取 → 寫入 DB → 輸出 sample JSON"""
     container = ServiceContainer()
     try:
         logger.info("開始執行 Bahamut 爬蟲任務")
+
+        # 確保資料表存在
+        container.create_database_tables()
 
         bahamut_service = container.create_bahamut_scraper_service()
         result = bahamut_service.fetch_bahamut_articles_with_content()
 
         if result.get("ok"):
-            output_path = bahamut_service.export_sample_json(result)
+            # 寫入資料庫
+            saved_count = bahamut_service.save_articles_to_db(result.get("articles", []))
+            bahamut_service.db_manager.commit()
+
+            # 依設定決定是否輸出 sample JSON
+            from config import BAHAMUT_CONFIG
+            output_path = None
+            if BAHAMUT_CONFIG.get("export_sample_json", False):
+                output_path = bahamut_service.export_sample_json(result)
+
             logger.info(
-                "Bahamut 爬蟲任務完成: article_count=%s, detailed_count=%s, output=%s",
+                "Bahamut 爬蟲任務完成: article_count=%s, detailed_count=%s, saved_count=%s, output=%s",
                 result.get("article_count", 0),
                 result.get("detailed_count", 0),
+                saved_count,
                 output_path,
             )
         else:
@@ -179,6 +244,7 @@ def main():
     while True:
         try:
             schedule.run_pending()
+            run_pending_fb_retry_if_needed()
             time.sleep(60)  # 每分鐘檢查一次
         except KeyboardInterrupt:
             logger.info("程式被用戶中斷")

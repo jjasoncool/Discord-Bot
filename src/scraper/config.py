@@ -61,4 +61,5 @@ BAHAMUT_CONFIG = {
     "gate_max_hops": 3,
     "human_delay_min": (0.35, 0.9),
     "sample_output_dir": "data/bahamut_samples",
+    "export_sample_json": True,
 }

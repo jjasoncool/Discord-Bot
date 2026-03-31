@@ -10,7 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy import case, func
 
-from .models import ArticleMenu, ArticleDetail, SystemState, FBPost, FBImage, PTTPost
+from .models import ArticleMenu, ArticleDetail, SystemState, FBPost, FBImage, PTTPost, BahamutPost, BahamutPostComment
 from utils.datetime_utils import parse_datetime
 from utils.logger import get_logger
 
@@ -502,3 +502,187 @@ class DatabaseManager:
         except Exception as e:
             self.logger.error(f"儲存 PTT 貼文失敗: {str(e)}", exc_info=True)
             return None
+
+    # ---------------- Bahamut Post 區段 ----------------
+    def save_bahamut_post(self, post_data: dict) -> Optional[BahamutPost]:
+        """儲存單篇巴哈文章（主文或回文），以 (board_id, sn) 做 upsert"""
+        try:
+            board_id = post_data.get("board_id")
+            sn = post_data.get("sn")
+
+            if not board_id or not sn:
+                self.logger.warning("略過巴哈文章：缺少必要欄位 board_id/sn")
+                return None
+
+            now = datetime.utcnow()
+            content_images_json = json.dumps(
+                post_data.get("content_images", []), ensure_ascii=False
+            )
+            raw_json = json.dumps(post_data.get("raw"), ensure_ascii=False) if post_data.get("raw") else None
+
+            insert_stmt = sqlite_insert(BahamutPost).values(
+                board_id=board_id,
+                post_id=post_data.get("post_id", ""),
+                sn=sn,
+                position=post_data.get("position", 1),
+                title=post_data.get("title", ""),
+                category=post_data.get("category", ""),
+                author_name=post_data.get("author_name", ""),
+                author_id=post_data.get("author_id", ""),
+                url=post_data.get("url", ""),
+                ip=post_data.get("ip", ""),
+                area=post_data.get("area", ""),
+                published_at=post_data.get("published_at"),
+                content=post_data.get("content", ""),
+                content_images_json=content_images_json,
+                comments_count=post_data.get("comments_count", 0),
+                replies_count=post_data.get("replies_count", 0),
+                raw_json=raw_json,
+                last_seen_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+
+            excluded = insert_stmt.excluded
+            update_stmt = insert_stmt.on_conflict_do_update(
+                index_elements=[BahamutPost.board_id, BahamutPost.sn],
+                set_={
+                    "post_id": excluded.post_id,
+                    "position": excluded.position,
+                    "title": case(
+                        (excluded.title != "", excluded.title),
+                        else_=BahamutPost.title,
+                    ),
+                    "category": case(
+                        (excluded.category != "", excluded.category),
+                        else_=BahamutPost.category,
+                    ),
+                    "author_name": case(
+                        (excluded.author_name != "", excluded.author_name),
+                        else_=BahamutPost.author_name,
+                    ),
+                    "author_id": case(
+                        (excluded.author_id != "", excluded.author_id),
+                        else_=BahamutPost.author_id,
+                    ),
+                    "url": case(
+                        (excluded.url != "", excluded.url),
+                        else_=BahamutPost.url,
+                    ),
+                    "ip": excluded.ip,
+                    "area": excluded.area,
+                    "published_at": case(
+                        (excluded.published_at.is_not(None), excluded.published_at),
+                        else_=BahamutPost.published_at,
+                    ),
+                    # content 取較長版本
+                    "content": case(
+                        (func.length(excluded.content) > func.length(BahamutPost.content), excluded.content),
+                        else_=BahamutPost.content,
+                    ),
+                    "content_images_json": excluded.content_images_json,
+                    "comments_count": excluded.comments_count,
+                    "replies_count": excluded.replies_count,
+                    "raw_json": excluded.raw_json,
+                    "last_seen_at": now,
+                    "updated_at": now,
+                },
+            )
+
+            self.session.execute(update_stmt)
+            self.session.flush()
+
+            saved = self.session.query(BahamutPost).filter(
+                BahamutPost.board_id == board_id,
+                BahamutPost.sn == sn,
+            ).first()
+
+            self.logger.info(
+                "巴哈文章 upsert 完成: board_id=%s post_id=%s sn=%s position=%s",
+                board_id, post_data.get("post_id"), sn, post_data.get("position"),
+            )
+            return saved
+
+        except Exception as e:
+            self.logger.error(f"儲存巴哈文章失敗: {str(e)}", exc_info=True)
+            return None
+
+    def save_bahamut_comments(self, bahamut_post_id: int, parent_sn: str, comments: list) -> int:
+        """儲存巴哈留言（以 (parent_sn, comment_id) 做 upsert），回傳儲存數量"""
+        if not comments:
+            return 0
+
+        saved_count = 0
+        now = datetime.utcnow()
+
+        for comment in comments:
+            try:
+                comment_id = comment.get("comment_id")
+                if not comment_id:
+                    continue
+
+                # 解析留言時間
+                published_at = None
+                raw_published = comment.get("published_at", "")
+                if raw_published:
+                    try:
+                        published_at = datetime.strptime(raw_published, "%Y-%m-%d %H:%M:%S")
+                    except (ValueError, TypeError):
+                        pass
+
+                insert_stmt = sqlite_insert(BahamutPostComment).values(
+                    bahamut_post_id=bahamut_post_id,
+                    parent_sn=parent_sn,
+                    comment_id=comment_id,
+                    floor=comment.get("floor", ""),
+                    position=comment.get("position", 0),
+                    user_id=comment.get("user_id", ""),
+                    user_name=comment.get("user_name", ""),
+                    content=comment.get("content", ""),
+                    is_hot=comment.get("is_hot", False),
+                    published_at=published_at,
+                    raw_text=comment.get("raw_text", ""),
+                    created_at=now,
+                    updated_at=now,
+                )
+
+                excluded = insert_stmt.excluded
+                update_stmt = insert_stmt.on_conflict_do_update(
+                    index_elements=[BahamutPostComment.parent_sn, BahamutPostComment.comment_id],
+                    set_={
+                        "bahamut_post_id": excluded.bahamut_post_id,
+                        "floor": excluded.floor,
+                        "position": excluded.position,
+                        "user_id": case(
+                            (excluded.user_id != "", excluded.user_id),
+                            else_=BahamutPostComment.user_id,
+                        ),
+                        "user_name": case(
+                            (excluded.user_name != "", excluded.user_name),
+                            else_=BahamutPostComment.user_name,
+                        ),
+                        "content": case(
+                            (excluded.content != "", excluded.content),
+                            else_=BahamutPostComment.content,
+                        ),
+                        "is_hot": excluded.is_hot,
+                        "published_at": case(
+                            (excluded.published_at.is_not(None), excluded.published_at),
+                            else_=BahamutPostComment.published_at,
+                        ),
+                        "raw_text": excluded.raw_text,
+                        "updated_at": now,
+                    },
+                )
+
+                self.session.execute(update_stmt)
+                saved_count += 1
+
+            except Exception as e:
+                self.logger.warning(
+                    "儲存巴哈留言失敗: parent_sn=%s comment_id=%s err=%s",
+                    parent_sn, comment.get("comment_id"), e,
+                )
+
+        self.session.flush()
+        return saved_count

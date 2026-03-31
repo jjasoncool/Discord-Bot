@@ -164,6 +164,9 @@ class FBScraperService:
         self.TEXT_MAX_LEN = 8000
         self.config["image_limit"] = IMAGE_LIMIT
 
+        # 由外部 scheduler 讀取的本輪狀態
+        self.last_empty_link_failure = False
+
         # 主分頁 handle（啟動後會記錄）
         self.main_handle: Optional[str] = None
 
@@ -1774,6 +1777,12 @@ class FBScraperService:
         Returns:
             List[Dict]: 抓取到的貼文列表
         """
+        results, empty_link_failure = self._scrape_facebook_posts_once()
+        self.last_empty_link_failure = empty_link_failure
+        return results
+
+    def _scrape_facebook_posts_once(self) -> Tuple[List[Dict], bool]:
+        """單輪抓取；回傳 (results, empty_link_failure)。"""
         driver = None
         try:
             driver = self.setup_driver()
@@ -1792,7 +1801,7 @@ class FBScraperService:
             links = self.collect_first_n_links(driver)
             if not links:
                 self.logger.error("未能取得任何貼文連結")
-                return []
+                return [], True
 
             results = []
             for i, url in enumerate(links, 1):
@@ -1807,13 +1816,13 @@ class FBScraperService:
 
             # 集中決策：去重 + 合併 + 產生 DB ops + 寫 JSON + 套 DB
             self._save_fb_posts_to_json(results)
-            return results
+            return results, False
 
         except Exception as e:
             self.logger.error(f"抓取過程發生錯誤: {e}")
             import traceback
             self.logger.error(traceback.format_exc())
-            return []
+            return [], False
         finally:
             if driver:
                 try:

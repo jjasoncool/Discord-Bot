@@ -190,13 +190,26 @@ class BahamutScraperService:
                     )
                 )
 
-                if redirected_to_mobile and not session.cookies.get("ckNOMOBILE", domain=".gamer.com.tw"):
+                had_cknomobile = bool(session.cookies.get("ckNOMOBILE", domain=".gamer.com.tw"))
+
+                if redirected_to_mobile and not had_cknomobile:
                     session.cookies.set("ckNOMOBILE", "1", domain=".gamer.com.tw", path="/")
                     self.logger.info("Bahamut 偵測到 desktop->mobile 302，補寫 cookie: ckNOMOBILE=1")
 
                 desktop_url = self._to_desktop_forum_url(resp.url)
                 if desktop_url != resp.url:
-                    self.logger.warning("Bahamut 被導向手機版，強制改抓 desktop 版: %s -> %s", resp.url, desktop_url)
+                    if had_cknomobile:
+                        self.logger.warning(
+                            "Bahamut 已有 ckNOMOBILE cookie 仍被導向手機版，強制改抓 desktop 版: %s -> %s",
+                            resp.url,
+                            desktop_url,
+                        )
+                    else:
+                        self.logger.info(
+                            "Bahamut 首次被導向手機版，已補 cookie，並改以 desktop URL 重新請求: %s -> %s",
+                            resp.url,
+                            desktop_url,
+                        )
                     resp = session.get(
                         desktop_url,
                         headers=self._build_headers(referer=referer or url),
@@ -218,6 +231,13 @@ class BahamutScraperService:
                         resp.headers.get("Location"),
                         resp.headers.get("Set-Cookie"),
                     )
+
+                    if urlparse(resp.url).netloc == "m.gamer.com.tw":
+                        self.logger.warning(
+                            "Bahamut 補寫 ckNOMOBILE 並重試 desktop 後，仍落在手機版: request_url=%s final_url=%s",
+                            desktop_url,
+                            resp.url,
+                        )
 
                 status = resp.status_code
                 if status >= 400:
@@ -479,16 +499,96 @@ class BahamutScraperService:
             "thumbsdown_emoji": "👎" if bp_button else "",
         }
 
+    def _clean_published_at(self, raw: str) -> str:
+        """清除 published_at 中的非時間前綴（如「留言時間 」），只保留 datetime 字串。"""
+        if not raw:
+            return ""
+        match = re.search(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", raw)
+        return match.group(1) if match else raw.strip()
+
     def _extract_comment_published_at_from_node(self, node: BeautifulSoup, raw_text: str = "") -> str:
         """從 DOM 或 raw_text 抓留言時間，避免誤抓到樓層。"""
         time_node = node.select_one(".edittime[data-tippy-content]") or node.select_one(".edittime") or node.select_one("time")
         if time_node:
             candidate = (time_node.get("data-tippy-content") or time_node.get_text(" ", strip=True)).strip()
             if re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", candidate):
-                return candidate
+                return self._clean_published_at(candidate)
 
         parsed = self._parse_comment_text_fallback(raw_text)
-        return parsed.get("published_at", "")
+        return self._clean_published_at(parsed.get("published_at", ""))
+
+    def _parse_floor_number(self, floor_text: str) -> int:
+        """將 B43 之類樓層轉成可排序數字；失敗則回傳極大值。"""
+        if not floor_text:
+            return 10**9
+
+        match = re.search(r"B(\d+)", floor_text.strip(), re.IGNORECASE)
+        if not match:
+            return 10**9
+
+        try:
+            return int(match.group(1))
+        except Exception:
+            return 10**9
+
+    def _parse_comment_id_number(self, comment_id: str) -> int:
+        """將 comment_id 轉成可排序數字；允許跳號，但可用來判斷 asc。"""
+        if not comment_id:
+            return 10**9
+
+        match = re.search(r"(\d+)", str(comment_id).strip())
+        if not match:
+            return 10**9
+
+        try:
+            return int(match.group(1))
+        except Exception:
+            return 10**9
+
+    def _merge_and_normalize_comments(
+        self,
+        html_comments: List[Dict[str, Any]],
+        xhr_comments: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        合併 HTML 與 moreCommend 留言，並重新編排 position。
+
+        原則：
+        1. 若 XHR 有資料，優先採用 XHR（通常較完整，避免先吃到未展開前 HTML 造成 position 偏移）
+        2. 保留 HTML 中 XHR 沒抓到的留言作補集
+        3. 最後依 floor 重新排序並重編 position，避免 HTML / XHR 各自獨立編碼造成重複或錯位
+        """
+        merged_by_id: Dict[str, Dict[str, Any]] = {}
+        fallback_comments: List[Dict[str, Any]] = []
+
+        for item in xhr_comments:
+            cid = (item.get("comment_id") or "").strip()
+            if cid:
+                merged_by_id[cid] = dict(item)
+            else:
+                fallback_comments.append(dict(item))
+
+        for item in html_comments:
+            cid = (item.get("comment_id") or "").strip()
+            if cid:
+                if cid not in merged_by_id:
+                    merged_by_id[cid] = dict(item)
+            else:
+                fallback_comments.append(dict(item))
+
+        merged_comments = list(merged_by_id.values()) + fallback_comments
+        merged_comments.sort(
+            key=lambda item: (
+                self._parse_floor_number(str(item.get("floor", ""))),
+                self._parse_comment_id_number(str(item.get("comment_id", ""))),
+                str(item.get("comment_id", "")),
+            )
+        )
+
+        for idx, item in enumerate(merged_comments, start=1):
+            item["position"] = idx
+
+        return merged_comments
 
     def fetch_board_articles(self, session: requests.Session) -> Dict[str, Any]:
         preheat = self._ensure_board_access(session, self.target_board_url)
@@ -648,6 +748,20 @@ class BahamutScraperService:
         time_node = block.select_one("time, .edittime, .publish-time")
         return time_node.get_text(" ", strip=True) if time_node else ""
 
+    def _extract_block_ip(self, block: BeautifulSoup) -> str:
+        """從 .edittime[data-hideip] 取得發文者 IP（公開資訊，末段已被巴哈遮蔽為 xxx）。"""
+        node = block.select_one(".edittime[data-hideip]")
+        if node:
+            return node.get("data-hideip", "").strip()
+        return ""
+
+    def _extract_block_area(self, block: BeautifulSoup) -> str:
+        """從 .edittime[data-area] 取得發文區域標記。"""
+        node = block.select_one(".edittime[data-area]")
+        if node:
+            return node.get("data-area", "").strip()
+        return ""
+
     def _extract_block_title(self, block: BeautifulSoup) -> str:
         title_node = block.select_one("h1.c-post__header__title, h1, .c-article__title, .title")
         return title_node.get_text(" ", strip=True) if title_node else ""
@@ -675,15 +789,7 @@ class BahamutScraperService:
                 referer=final_url or article_url,
             )
 
-            comments = []
-            seen_comment_ids = set()
-            for item in html_comments + xhr_comments:
-                cid = item.get("comment_id") or ""
-                if cid and cid in seen_comment_ids:
-                    continue
-                if cid:
-                    seen_comment_ids.add(cid)
-                comments.append(item)
+            comments = self._merge_and_normalize_comments(html_comments, xhr_comments)
 
             blocks.append(
                 {
@@ -693,6 +799,8 @@ class BahamutScraperService:
                     "author": author_name_node.get_text(" ", strip=True) if author_name_node else "",
                     "author_id": author_node.get_text(" ", strip=True) if author_node else "",
                     "published_at": self._extract_block_published_at(block),
+                    "ip": self._extract_block_ip(block),
+                    "area": self._extract_block_area(block),
                     "content": self._extract_article_content(block),
                     "content_images": self._extract_article_images(block, base_url=final_url or article_url),
                     "content_length": len(self._extract_article_content(block)),
@@ -901,12 +1009,14 @@ class BahamutScraperService:
             "title": root_post.get("title", ""),
             "author": root_post.get("author", ""),
             "author_id": root_post.get("author_id", ""),
+            "ip": root_post.get("ip", ""),
+            "area": root_post.get("area", ""),
             "published_at": root_post.get("published_at", ""),
             "content": root_post.get("content", ""),
             "content_images": root_post.get("content_images", []),
             "content_length": root_post.get("content_length", 0),
-            "comments": root_post.get("comments", []),
             "comments_count": root_post.get("comments_count", 0),
+            "comments": root_post.get("comments", []),
             "replies": replies,
             "replies_count": len(replies),
             "raw": {
@@ -939,17 +1049,19 @@ class BahamutScraperService:
 
                     article["title"] = detail.get("title") or article.get("title")
                     article["author"] = detail.get("author") or article.get("author")
+                    article["ip"] = detail.get("ip", "")
+                    article["area"] = detail.get("area", "")
                     article["published_at"] = detail.get("published_at") or article.get("published_at")
+                    article["snA"] = detail.get("snA", "")
+                    article["sn"] = detail.get("sn", "")
+                    article["position"] = detail.get("position", 1)
                     article["content"] = detail.get("content", "")
                     article["content_images"] = detail.get("content_images", [])
                     article["content_length"] = detail.get("content_length", 0)
-                    article["comments"] = detail.get("comments", [])
                     article["comments_count"] = detail.get("comments_count", 0)
-                    article["sn"] = detail.get("sn", "")
-                    article["position"] = detail.get("position", 1)
+                    article["comments"] = detail.get("comments", [])
                     article["replies"] = detail.get("replies", [])
                     article["replies_count"] = detail.get("replies_count", 0)
-                    article["snA"] = detail.get("snA", "")
                     article["raw"] = detail.get("raw", {})
                     detailed_count += 1
                 except Exception as e:
@@ -978,22 +1090,23 @@ class BahamutScraperService:
                 "fetched_at": datetime.now().isoformat(),
                 "articles": [
                     {
-                        "source_type": "bahamut",
                         "post_id": detail.get("post_id", post_id),
-                        "title": detail.get("title", ""),
                         "snA": detail.get("snA", post_id),
+                        "sn": detail.get("sn", ""),
+                        "position": detail.get("position", 1),
+                        "title": detail.get("title", ""),
                         "url": detail.get("url", article_url),
                         "final_url": detail.get("final_url", article_url),
                         "author": detail.get("author", ""),
                         "author_id": detail.get("author_id", ""),
+                        "ip": detail.get("ip", ""),
+                        "area": detail.get("area", ""),
                         "published_at": detail.get("published_at", ""),
                         "content": detail.get("content", ""),
                         "content_images": detail.get("content_images", []),
                         "content_length": detail.get("content_length", 0),
-                        "comments": detail.get("comments", []),
                         "comments_count": detail.get("comments_count", 0),
-                        "sn": detail.get("sn", ""),
-                        "position": detail.get("position", 1),
+                        "comments": detail.get("comments", []),
                         "replies": detail.get("replies", []),
                         "replies_count": detail.get("replies_count", 0),
                         "raw": detail.get("raw", {}),
@@ -1001,6 +1114,126 @@ class BahamutScraperService:
                 ],
             }
             return result
+
+    def _get_board_id(self) -> str:
+        """從設定的 target_board_url 取出 bsn"""
+        return parse_qs(urlparse(self.target_board_url).query).get("bsn", [""])[0]
+
+    def _parse_published_at(self, raw: str) -> Optional[datetime]:
+        """將 published_at 字串轉為 datetime，失敗回傳 None"""
+        if not raw:
+            return None
+        try:
+            return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            return None
+
+    def save_articles_to_db(self, articles: List[Dict[str, Any]]) -> int:
+        """將抓到的文章（含回文、留言）寫入資料庫"""
+        if not self.db_manager:
+            self.logger.warning("未提供 db_manager，略過 DB 寫入")
+            return 0
+
+        board_id = self._get_board_id()
+        saved_count = 0
+        processed_sns = set()
+
+        for article in articles:
+            try:
+                # --- 主文 ---
+                root_sn = article.get("sn", "")
+                if not root_sn:
+                    continue
+                if root_sn in processed_sns:
+                    continue
+
+                if article.get("content_length", 0) <= 0 and not article.get("content_images"):
+                    self.logger.info(
+                        "略過無內容的巴哈文章: post_id=%s sn=%s",
+                        article.get("post_id"), root_sn,
+                    )
+                    continue
+
+                processed_sns.add(root_sn)
+
+                post_data = {
+                    "board_id": board_id,
+                    "post_id": article.get("post_id", ""),
+                    "sn": root_sn,
+                    "position": 1,
+                    "title": article.get("title", ""),
+                    "category": article.get("category", ""),
+                    "author_name": article.get("author", ""),
+                    "author_id": article.get("author_id", ""),
+                    "url": article.get("url", ""),
+                    "ip": article.get("ip", ""),
+                    "area": article.get("area", ""),
+                    "published_at": self._parse_published_at(article.get("published_at", "")),
+                    "content": article.get("content", ""),
+                    "content_images": article.get("content_images", []),
+                    "comments_count": article.get("comments_count", 0),
+                    "replies_count": article.get("replies_count", 0),
+                    "raw": article.get("raw"),
+                }
+
+                saved_post = self.db_manager.save_bahamut_post(post_data)
+                if not saved_post:
+                    continue
+                saved_count += 1
+
+                # 主文留言
+                root_comments = article.get("comments", [])
+                if root_comments:
+                    self.db_manager.save_bahamut_comments(
+                        saved_post.id, root_sn, root_comments,
+                    )
+
+                # --- 回文 ---
+                for reply in article.get("replies", []):
+                    reply_sn = reply.get("sn", "")
+                    if not reply_sn or reply_sn in processed_sns:
+                        continue
+                    processed_sns.add(reply_sn)
+
+                    reply_data = {
+                        "board_id": board_id,
+                        "post_id": article.get("post_id", ""),
+                        "sn": reply_sn,
+                        "position": reply.get("position", 0),
+                        "title": reply.get("title", ""),
+                        "category": "",
+                        "author_name": reply.get("author", ""),
+                        "author_id": reply.get("author_id", ""),
+                        "url": article.get("url", ""),
+                        "ip": reply.get("ip", ""),
+                        "area": reply.get("area", ""),
+                        "published_at": self._parse_published_at(reply.get("published_at", "")),
+                        "content": reply.get("content", ""),
+                        "content_images": reply.get("content_images", []),
+                        "comments_count": reply.get("comments_count", 0),
+                        "replies_count": 0,
+                        "raw": None,
+                    }
+
+                    saved_reply = self.db_manager.save_bahamut_post(reply_data)
+                    if not saved_reply:
+                        continue
+                    saved_count += 1
+
+                    # 回文留言
+                    reply_comments = reply.get("comments", [])
+                    if reply_comments:
+                        self.db_manager.save_bahamut_comments(
+                            saved_reply.id, reply_sn, reply_comments,
+                        )
+
+            except Exception as e:
+                self.logger.warning(
+                    "寫入巴哈文章失敗: post_id=%s sn=%s err=%s",
+                    article.get("post_id"), article.get("sn"), e,
+                )
+
+        return saved_count
 
     def export_sample_json(self, result: Dict[str, Any]) -> str:
         os.makedirs(self.sample_output_dir, exist_ok=True)
