@@ -50,10 +50,12 @@ class BahamutScraperService:
 
         self.target_board_url = BAHAMUT_CONFIG["target_board_url"]
         self.timeout = int(BAHAMUT_CONFIG.get("timeout", 20) or 20)
-        self.board_pages = max(1, int(BAHAMUT_CONFIG.get("board_pages", 1) or 1))
+        self.board_start_page = max(1, int(BAHAMUT_CONFIG.get("board_start_page", 1) or 1))
+        self.board_end_page = max(1, int(BAHAMUT_CONFIG.get("board_end_page", 1) or 1))
         self.max_articles_per_page = max(1, int(BAHAMUT_CONFIG.get("max_articles_per_page", 30) or 30))
         self.gate_max_hops = max(1, int(BAHAMUT_CONFIG.get("gate_max_hops", 3) or 3))
         self.human_delay_range = BAHAMUT_CONFIG.get("human_delay_min", (0.35, 0.9))
+        self.page_delay_range = BAHAMUT_CONFIG.get("page_delay_range", (2, 5))
         self.sample_output_dir = BAHAMUT_CONFIG.get("sample_output_dir", "data/bahamut_samples")
 
         self.ua = self._init_user_agent()
@@ -483,21 +485,88 @@ class BahamutScraperService:
         normalized = text.replace("", "👍").replace("", "👎")
         return normalized.strip()
 
-    def _extract_comment_reaction_meta(self, node: BeautifulSoup) -> Dict[str, Any]:
-        """用較安全的 DOM 規則辨識推/噓按鈕，而非只靠 icon 字元。"""
-        gp_button = node.select_one(
-            "button.gp, button[onclick*='commentGp'], button[title*='推一個']"
-        )
-        bp_button = node.select_one(
-            "button.bp, button[onclick*='commentBp'], button[title*='我要噓']"
-        )
+    def _parse_count_from_element(self, node) -> int:
+        """從 DOM 元素取得數字（GP/BP 計數），取不到回 0。"""
+        if not node:
+            return 0
+        text = node.get_text(" ", strip=True)
+        match = re.search(r"(\d+)", text)
+        return int(match.group(1)) if match else 0
+
+    def _extract_gp_bp_from_raw_text(self, raw_text: str) -> Tuple[int, int]:
+        """從 raw_text 的 👍 N 👎 模式提取 GP/BP 數字作為 fallback。"""
+        gp = 0
+        bp = 0
+        gp_match = re.search(r"👍\s*(\d+)", raw_text or "")
+        bp_match = re.search(r"👎\s*(\d+)", raw_text or "")
+        if gp_match:
+            gp = int(gp_match.group(1))
+        if bp_match:
+            bp = int(bp_match.group(1))
+        return gp, bp
+
+    def _extract_comment_reaction_meta(self, node: BeautifulSoup, raw_text: str = "") -> Dict[str, Any]:
+        """從留言 DOM 提取 GP/BP 數字。
+
+        留言 DOM 結構：
+        <a data-gp="105" class="gp-count">105</a>
+        <a data-bp="0" class="bp-count"></a>
+        """
+        gp_count = 0
+        bp_count = 0
+
+        # 優先從 data-gp / data-bp 屬性取（最可靠）
+        gp_node = node.select_one("a.gp-count[data-gp]")
+        bp_node = node.select_one("a.bp-count[data-bp]")
+
+        if gp_node:
+            try:
+                gp_count = int(gp_node.get("data-gp", "0"))
+            except (ValueError, TypeError):
+                gp_count = self._parse_count_from_element(gp_node)
+
+        if bp_node:
+            try:
+                bp_count = int(bp_node.get("data-bp", "0"))
+            except (ValueError, TypeError):
+                bp_count = self._parse_count_from_element(bp_node)
+
+        # fallback：從 raw_text 的 👍 N 👎 模式取
+        if gp_count == 0 and bp_count == 0 and raw_text:
+            gp_count, bp_count = self._extract_gp_bp_from_raw_text(raw_text)
 
         return {
-            "has_thumbsup_button": bool(gp_button),
-            "has_thumbsdown_button": bool(bp_button),
-            "thumbsup_emoji": "👍" if gp_button else "",
-            "thumbsdown_emoji": "👎" if bp_button else "",
+            "gp_count": gp_count,
+            "bp_count": bp_count,
         }
+
+    def _extract_block_gp_bp(self, block: BeautifulSoup) -> Tuple[int, int]:
+        """從文章 block 提取 GP/BP 數。
+
+        巴哈 DOM 結構：
+        <div class="gp">
+            <button ...>...</button>
+            <a class="count ...">249</a>   ← GP 數字在這
+        </div>
+        <div class="bp">
+            <button ...>...</button>
+            <a class="count ...">-</a>     ← BP 數字在這，"-" 表示 0
+        </div>
+        """
+        gp = 0
+        bp = 0
+
+        gp_div = block.select_one("div.gp")
+        if gp_div:
+            count_node = gp_div.select_one("a.count")
+            gp = self._parse_count_from_element(count_node)
+
+        bp_div = block.select_one("div.bp")
+        if bp_div:
+            count_node = bp_div.select_one("a.count")
+            bp = self._parse_count_from_element(count_node)
+
+        return gp, bp
 
     def _clean_published_at(self, raw: str) -> str:
         """清除 published_at 中的非時間前綴（如「留言時間 」），只保留 datetime 字串。"""
@@ -604,8 +673,12 @@ class BahamutScraperService:
         page_results: List[Dict[str, Any]] = []
         merged_articles: List[Dict[str, Any]] = []
         seen = set()
+        total_pages = self.board_end_page - self.board_start_page + 1
 
-        for page in range(1, self.board_pages + 1):
+        for page in range(self.board_start_page, self.board_end_page + 1):
+            # 頁與頁之間加延遲（第一頁不用等）
+            if page > self.board_start_page:
+                human_sleep(*self.page_delay_range)
             page_url = self._build_board_page_url(self.target_board_url, page)
             html, final_url, status = self._fetch_html(session, page_url, referer=preheat.get("final_url"))
             is_gate = self._is_gate_page(final_url, html)
@@ -644,6 +717,14 @@ class BahamutScraperService:
                 "added_count": added,
                 "ok": True,
             })
+
+            self.logger.info(
+                "Bahamut 列表進度: page %s/%s done, 本頁 %s 篇, 累計 %s 篇",
+                page - self.board_start_page + 1,
+                total_pages,
+                added,
+                len(merged_articles),
+            )
 
         return {
             "ok": True,
@@ -790,6 +871,7 @@ class BahamutScraperService:
             )
 
             comments = self._merge_and_normalize_comments(html_comments, xhr_comments)
+            block_gp, block_bp = self._extract_block_gp_bp(block)
 
             blocks.append(
                 {
@@ -801,6 +883,8 @@ class BahamutScraperService:
                     "published_at": self._extract_block_published_at(block),
                     "ip": self._extract_block_ip(block),
                     "area": self._extract_block_area(block),
+                    "gp_count": block_gp,
+                    "bp_count": block_bp,
                     "content": self._extract_article_content(block),
                     "content_images": self._extract_article_images(block, base_url=final_url or article_url),
                     "content_length": len(self._extract_article_content(block)),
@@ -845,7 +929,7 @@ class BahamutScraperService:
                 self._extract_comment_content_from_node(node) or parsed.get("content", raw_text[:200])
             )
             published_at = self._extract_comment_published_at_from_node(node, raw_text=raw_text)
-            reaction_meta = self._extract_comment_reaction_meta(node)
+            reaction_meta = self._extract_comment_reaction_meta(node, raw_text=raw_text)
 
             comments.append(
                 {
@@ -955,7 +1039,7 @@ class BahamutScraperService:
                 raw_text = self._normalize_comment_text(node.get_text(" ", strip=True)[:500])
                 content_text = self._normalize_comment_text(self._extract_comment_content_from_node(node))
                 published_at = self._extract_comment_published_at_from_node(node, raw_text=raw_text)
-                reaction_meta = self._extract_comment_reaction_meta(node)
+                reaction_meta = self._extract_comment_reaction_meta(node, raw_text=raw_text)
 
                 fetched.append(
                     {
@@ -985,15 +1069,72 @@ class BahamutScraperService:
 
         return fetched
 
+    def _extract_article_page_count(self, soup: BeautifulSoup) -> int:
+        """從文章頁的分頁列取得總頁數。
+
+        DOM 結構：
+        <p class="BH-pagebtnA">
+            <a class="pagenow">1</a>
+            <a href="?page=2&bsn=...">2</a>
+            <a href="?page=4&bsn=...">4</a>  ← 最後一個 = 總頁數
+        </p>
+        """
+        pager = soup.select_one("p.BH-pagebtnA")
+        if not pager:
+            return 1
+
+        page_links = pager.select("a")
+        max_page = 1
+        for link in page_links:
+            text = link.get_text(strip=True)
+            if text.isdigit():
+                max_page = max(max_page, int(text))
+        return max_page
+
+    def _build_article_page_url(self, article_url: str, page: int) -> str:
+        """為文章 URL 加上或替換 page 參數。"""
+        parsed = urlparse(article_url)
+        query = parse_qs(parsed.query)
+        query["page"] = [str(page)]
+        query_string = urlencode(query, doseq=True)
+        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, query_string, parsed.fragment))
+
     def fetch_article_detail(self, session: requests.Session, article_url: str) -> Dict[str, Any]:
+        # 第一頁
         html, final_url, status = self._fetch_html(session, article_url, referer=self.target_board_url)
         soup = BeautifulSoup(html, "html.parser")
 
         bsn = parse_qs(urlparse(self.target_board_url).query).get("bsn", [""])[0]
-        blocks = self._extract_article_blocks(session, soup, article_url, final_url, bsn)
+        total_pages = self._extract_article_page_count(soup)
+        all_blocks = self._extract_article_blocks(session, soup, article_url, final_url, bsn)
 
-        root_post = blocks[0] if blocks else {}
-        replies = blocks[1:] if len(blocks) > 1 else []
+        # 後續頁面（第 2 頁起）
+        for page in range(2, total_pages + 1):
+            human_sleep(*self.page_delay_range)
+            page_url = self._build_article_page_url(final_url or article_url, page)
+            try:
+                page_html, page_final_url, page_status = self._fetch_html(session, page_url, referer=final_url)
+                page_soup = BeautifulSoup(page_html, "html.parser")
+                page_blocks = self._extract_article_blocks(session, page_soup, page_url, page_final_url, bsn)
+                all_blocks.extend(page_blocks)
+                self.logger.info(
+                    "Bahamut 文章分頁進度: snA=%s page %s/%s, 本頁 %s blocks",
+                    parse_qs(urlparse(article_url).query).get("snA", [""])[0],
+                    page, total_pages, len(page_blocks),
+                )
+            except Exception as e:
+                self.logger.warning(
+                    "Bahamut 文章分頁抓取失敗: page=%s/%s url=%s err=%s",
+                    page, total_pages, page_url, e,
+                )
+
+        root_post = all_blocks[0] if all_blocks else {}
+        replies = all_blocks[1:] if len(all_blocks) > 1 else []
+
+        # 重新編排所有 block 的 position（跨頁連續編號）
+        for idx, block in enumerate(all_blocks, start=1):
+            block["position"] = idx
+
         post_id = self._parse_post_id_from_url(final_url or article_url)
         sn_a = parse_qs(urlparse(final_url or article_url).query).get("snA", [post_id])[0]
 
@@ -1011,6 +1152,8 @@ class BahamutScraperService:
             "author_id": root_post.get("author_id", ""),
             "ip": root_post.get("ip", ""),
             "area": root_post.get("area", ""),
+            "gp_count": root_post.get("gp_count", 0),
+            "bp_count": root_post.get("bp_count", 0),
             "published_at": root_post.get("published_at", ""),
             "content": root_post.get("content", ""),
             "content_images": root_post.get("content_images", []),
@@ -1019,6 +1162,7 @@ class BahamutScraperService:
             "comments": root_post.get("comments", []),
             "replies": replies,
             "replies_count": len(replies),
+            "total_pages": total_pages,
             "raw": {
                 "html_preview": html[:3000],
                 "reply_probe": {
@@ -1026,7 +1170,7 @@ class BahamutScraperService:
                     "reply_block_count": len(replies),
                     "note": "目前已切出 post + replies 結構，每個 block 各自帶 comments",
                 },
-                "block_count": len(blocks),
+                "block_count": len(all_blocks),
             },
         }
 
@@ -1051,6 +1195,8 @@ class BahamutScraperService:
                     article["author"] = detail.get("author") or article.get("author")
                     article["ip"] = detail.get("ip", "")
                     article["area"] = detail.get("area", "")
+                    article["gp_count"] = detail.get("gp_count", 0)
+                    article["bp_count"] = detail.get("bp_count", 0)
                     article["published_at"] = detail.get("published_at") or article.get("published_at")
                     article["snA"] = detail.get("snA", "")
                     article["sn"] = detail.get("sn", "")
@@ -1101,6 +1247,8 @@ class BahamutScraperService:
                         "author_id": detail.get("author_id", ""),
                         "ip": detail.get("ip", ""),
                         "area": detail.get("area", ""),
+                        "gp_count": detail.get("gp_count", 0),
+                        "bp_count": detail.get("bp_count", 0),
                         "published_at": detail.get("published_at", ""),
                         "content": detail.get("content", ""),
                         "content_images": detail.get("content_images", []),
@@ -1168,6 +1316,8 @@ class BahamutScraperService:
                     "url": article.get("url", ""),
                     "ip": article.get("ip", ""),
                     "area": article.get("area", ""),
+                    "gp_count": article.get("gp_count", 0),
+                    "bp_count": article.get("bp_count", 0),
                     "published_at": self._parse_published_at(article.get("published_at", "")),
                     "content": article.get("content", ""),
                     "content_images": article.get("content_images", []),
@@ -1207,6 +1357,8 @@ class BahamutScraperService:
                         "url": article.get("url", ""),
                         "ip": reply.get("ip", ""),
                         "area": reply.get("area", ""),
+                        "gp_count": reply.get("gp_count", 0),
+                        "bp_count": reply.get("bp_count", 0),
                         "published_at": self._parse_published_at(reply.get("published_at", "")),
                         "content": reply.get("content", ""),
                         "content_images": reply.get("content_images", []),
@@ -1245,27 +1397,61 @@ class BahamutScraperService:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Bahamut scraper sample exporter")
+    parser = argparse.ArgumentParser(description="Bahamut scraper CLI")
     parser.add_argument(
         "--sna",
         dest="sn_a",
         required=False,
         help="指定主文 ID（snA），只抓單篇文章；bsn 預設沿用設定檔中的 74934",
     )
+    parser.add_argument(
+        "--start-page",
+        type=int,
+        default=None,
+        help="從第幾頁開始抓（覆蓋 config 的 board_start_page）",
+    )
+    parser.add_argument(
+        "--end-page",
+        type=int,
+        default=None,
+        help="抓到第幾頁（覆蓋 config 的 board_end_page）",
+    )
     args = parser.parse_args()
 
-    service = BahamutScraperService()
+    # 透過 container 建立帶 db_manager 的 service
+    from container import ServiceContainer
+    container = ServiceContainer()
+    container.create_database_tables()
+    service = container.create_bahamut_scraper_service()
+
+    # CLI 參數覆蓋 config 設定
+    if args.start_page is not None:
+        service.board_start_page = max(1, args.start_page)
+    if args.end_page is not None:
+        service.board_end_page = max(service.board_start_page, args.end_page)
+
     target_sn_a = args.sn_a
     if target_sn_a:
         result = service.fetch_single_bahamut_article(target_sn_a)
     else:
         result = service.fetch_bahamut_articles_with_content()
-    out = service.export_sample_json(result)
+
+    # 寫入資料庫
+    saved_count = service.save_articles_to_db(result.get("articles", []))
+    service.db_manager.commit()
+    service.db_manager.close()
+
+    # 依設定決定是否輸出 sample JSON
+    output_path = None
+    if BAHAMUT_CONFIG.get("export_sample_json", False):
+        output_path = service.export_sample_json(result)
+
     print(json.dumps({
         "ok": result.get("ok"),
         "article_count": result.get("article_count", 0),
         "detailed_count": result.get("detailed_count", 0),
-        "output": out,
+        "saved_count": saved_count,
+        "output": output_path,
     }, ensure_ascii=False, indent=2))
 
 

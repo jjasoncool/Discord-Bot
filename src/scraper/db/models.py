@@ -195,6 +195,8 @@ class BahamutPost(Base):
     content = Column(Text)
     content_images_json = Column(Text)                                 # JSON array of image URLs
     comments_count = Column(Integer, default=0)
+    gp_count = Column(Integer, default=0)                               # 文章 GP（推）數
+    bp_count = Column(Integer, default=0)                              # 文章 BP（噓）數
     replies_count = Column(Integer, default=0)                         # 只在主文（position=1）有意義
     raw_json = Column(Text)                                            # 完整 JSON 備份
     last_seen_at = Column(DateTime)
@@ -226,6 +228,8 @@ class BahamutPostComment(Base):
     user_name = Column(String(200))
     content = Column(Text)
     is_hot = Column(Boolean, default=False)
+    gp_count = Column(Integer, default=0)                              # 留言 GP（推）數
+    bp_count = Column(Integer, default=0)                              # 留言 BP（噓）數
     published_at = Column(DateTime)
     raw_text = Column(Text)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

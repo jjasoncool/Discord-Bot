@@ -28,6 +28,7 @@
 - 2026-03-31：已依新共識調整規範為「非每輪強制回寫」，並允許 AI 僅讀取任務所需區塊。
 - 2026-03-31：本輪已讀取、已盤點全文；未實作、不變更既有共識。
 - 2026-03-31：完成 Bahamut DB 第一版落地（model + upsert + save_articles_to_db + main.py 串接）。詳見 BAHAMUT.STATE / BAHAMUT.CONTRACT / DB Schema 各區塊。
+- 2026-04-01：新增 GP/BP 數字提取（主文 + 留言）、文章多頁遍歷（C.php 分頁）、列表分頁範圍（B.php start/end page）、CLI 預設寫 DB。
 
 ---
 
@@ -96,8 +97,8 @@ last_confirmed: 2026-03-31
 |---|---|---:|---|
 | Discord Bot / AI 對話能力 | 已有可用基礎能力 | 70% | [專案架構](#專案-ai-架構總覽) |
 | 跨來源整合（Article/FB/PTT/TG） | 有方向，尚未全面收斂 | 35% | [跨來源整合](#跨來源整合專區) |
-| Bahamut parser | **目前最活躍主線**，結構已收斂 | 80% | [Bahamut 專區](#bahamut-專區) |
-| Bahamut DB schema / upsert | **第一版已落地** | 75% | [DB 設計](#bahamut-db-schema-設計) |
+| Bahamut parser | **目前最活躍主線**，結構已收斂，含多頁遍歷 | 85% | [Bahamut 專區](#bahamut-專區) |
+| Bahamut DB schema / upsert | **第一版已落地**，含 GP/BP | 80% | [DB 設計](#bahamut-db-schema-設計) |
 | Bahamut RAG / AI 整合 | 尚未開始 | 5% | [RAG TODO](#第三階段整合-ai--pgvector--rag) |
 | Discord Bot 管理入口 | 規劃中 | 10% | [管理 TODO](#discord-bot-管理入口與指令整理-todo) |
 
@@ -246,8 +247,8 @@ last_confirmed: 2026-03-31
 - 主文 + 回文共用 `bahamut_posts` 表（以 `position` 區分），留言獨立 `bahamut_post_comments` 表。
 
 **目前已落地**
-- 可抓 board list
-- 可抓 article detail
+- 可抓 board list（支援 `--start-page` / `--end-page` 指定範圍，頁間有延遲）
+- 可抓 article detail（支援文章多頁遍歷，自動偵測 C.php 分頁數並逐頁抓取）
 - 可處理 gate / 進版圖
 - 可抓 HTML + XHR 留言（`moreCommend.php`）
 - 可保留主文圖片 `content_images`
@@ -259,11 +260,13 @@ last_confirmed: 2026-03-31
 - 留言 `published_at` 已清除「留言時間 」前綴，格式統一為 `YYYY-MM-DD HH:MM:SS`
 - `source_type` 已移除（表名已隱含來源）
 - JSON sample 輸出改為可設定開關（`config.py` 的 `export_sample_json`）
+- GP/BP 數字提取：主文/回文從 `div.gp > a.count` / `div.bp > a.count` 取，留言從 `a.gp-count[data-gp]` / `a.bp-count[data-bp]` 取，fallback 從 `raw_text` 提取
+- CLI 預設寫 DB（透過 container 注入 db_manager），不需額外 flag
 
 **目前暫停事項**
 - Bahamut 自動排程目前已暫停
 - 啟動時不自動執行 Bahamut 初始抓取
-- 暫停原因：尚未正式驗證 DB 寫入結果，待確認後可恢復排程
+- 暫停原因：需先 drop 舊表（缺 `gp_count`/`bp_count` 欄位）再跑一次驗證 DB 寫入
 
 **目前尚未落地**
 - 正式 DB migration（第一版用 `create_tables()` 自動建表）
@@ -317,6 +320,8 @@ last_confirmed: 2026-03-31
 - `author_id`
 - `ip`
 - `area`
+- `gp_count`
+- `bp_count`
 - `published_at`
 - `content`
 - `content_images`
@@ -325,8 +330,9 @@ last_confirmed: 2026-03-31
 - `comments`
 - `replies`
 - `replies_count`
+- `total_pages`
 
-> `source_type` 已移除（DB 表名已隱含來源）。`ip`、`area` 為後加欄位，已補進契約。
+> `source_type` 已移除（DB 表名已隱含來源）。`ip`、`area`、`gp_count`、`bp_count`、`total_pages` 為後加欄位，已補進契約。
 
 #### BAHAMUT.ID_MODEL
 
@@ -426,9 +432,11 @@ last_confirmed: 2026-03-31
 6. ~~DB 第一版落地~~ — model + upsert + save_articles_to_db + main.py 串接
 
 **下一個 session 最應該先做**
-1. 實際跑一次 `bahamut_scrape_task()` 驗證 DB 寫入結果
-2. 確認 upsert 重複執行不會產生異常
-3. 視驗證結果決定是否恢復 Bahamut 排程
+1. Drop 舊的 `bahamut_posts` / `bahamut_post_comments` 表（缺 `gp_count`/`bp_count` 欄位）
+2. 跑一次 `--sna 16219` 驗證 DB 寫入（含 GP/BP）
+3. 跑一次多頁文章（如 `--sna 5819`，4 頁回文）驗證文章分頁遍歷
+4. 確認 upsert 重複執行不會產生異常
+5. 視驗證結果決定是否恢復 Bahamut 排程
 
 **完成這些之前先不要做**
 - 不要先做防惡意覆蓋（`prev_*` / `content_hash`）
@@ -501,7 +509,7 @@ last_confirmed: 2026-03-31
 - `fetch_bahamut_articles_with_content()` 由 service 自行管理 session 已符合
 - `container.py` 僅新增 `create_bahamut_scraper_service()` 已符合
 
-**已完成（2026-03-31 本輪新增）：**
+**已完成（2026-03-31 ~ 2026-04-01）：**
 - `save_articles_to_db(articles)` 已實作（主文 + 回文 + 各自留言）
 - `main.py` 已切成正式 `fetch -> save_articles_to_db -> commit`
 - `source_type` 已移除（表名已隱含來源）
@@ -510,6 +518,10 @@ last_confirmed: 2026-03-31
 - 留言 `published_at` 格式已清理（清除「留言時間 」前綴）
 - JSON sample 輸出改為設定開關（`config.py` 的 `export_sample_json`）
 - `post_id / snA / sn` 命名已收斂：`post_id = snA`，DB unique key 為 `(board_id, sn)`
+- GP/BP 數字提取：主文從 `div.gp > a.count` / `div.bp > a.count`，留言從 `a.gp-count[data-gp]` / `a.bp-count[data-bp]`，DB 兩張表都有 `gp_count` / `bp_count`
+- 文章多頁遍歷（C.php 分頁）：自動偵測 `p.BH-pagebtnA` 取總頁數，逐頁抓取合併 blocks，跨頁 position 重編
+- 列表分頁範圍（B.php）：config 支援 `board_start_page` / `board_end_page`，CLI 支援 `--start-page` / `--end-page`，頁間延遲 `page_delay_range`
+- CLI 預設寫 DB（透過 container 注入 db_manager）
 
 **尚未完成：**
 - 正式 DB migration（第一版用 `create_tables()` 自動建表）
