@@ -34,9 +34,9 @@ async def run_telegram_scraper(config: TelegramConfig) -> None:
     session_path = f"{config.session_dir}/{config.session_name}"
     client = TelegramClient(session_path, config.api_id, config.api_hash)
 
-    @client.on(events.NewMessage)
+    @client.on(events.NewMessage(chats=[config.source_channel]))
     async def on_new_message(event: events.NewMessage.Event) -> None:
-        """即時新訊息事件入口。"""
+        """即時新訊息事件入口 — 僅監聽 source_channel。"""
         await handle_new_message(event, client, config, runtime_watcher, db)
 
     try:
