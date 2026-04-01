@@ -193,11 +193,19 @@ class BahamutPost(Base):
     area = Column(String(20))
     published_at = Column(DateTime, index=True)
     content = Column(Text)
+    content_hash = Column(String(64), index=True)                      # SHA256，偵測內容異動
     content_images_json = Column(Text)                                 # JSON array of image URLs
     comments_count = Column(Integer, default=0)
-    gp_count = Column(Integer, default=0)                               # 文章 GP（推）數
+    gp_count = Column(Integer, default=0)                              # 文章 GP（推）數
     bp_count = Column(Integer, default=0)                              # 文章 BP（噓）數
     replies_count = Column(Integer, default=0)                         # 只在主文（position=1）有意義
+    prev_title = Column(String(500))                                   # 上一版標題
+    prev_content = Column(Text)                                        # 上一版內容
+    prev_content_hash = Column(String(64))                             # 上一版 content_hash
+    prev_updated_at = Column(DateTime)                                 # 上一版更新時間
+    update_blocked = Column(Boolean, default=False)                    # 是否因異常縮水被阻擋
+    update_block_reason = Column(String(200))                          # 阻擋原因
+    is_deleted = Column(Boolean, default=False, index=True)            # 巴哈端已刪除
     raw_json = Column(Text)                                            # 完整 JSON 備份
     last_seen_at = Column(DateTime)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

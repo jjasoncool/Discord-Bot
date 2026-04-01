@@ -504,8 +504,20 @@ class DatabaseManager:
             return None
 
     # ---------------- Bahamut Post 區段 ----------------
+    def _compute_content_hash(self, content: str) -> str:
+        """計算內容的 SHA256 hash"""
+        import hashlib
+        return hashlib.sha256((content or "").encode("utf-8")).hexdigest()
+
     def save_bahamut_post(self, post_data: dict) -> Optional[BahamutPost]:
-        """儲存單篇巴哈文章（主文或回文），以 (board_id, sn) 做 upsert"""
+        """儲存單篇巴哈文章（主文或回文）。
+
+        更新規則：
+        1. 新文章 → INSERT
+        2. 已存在，content_hash 相同 → 只更新 last_seen_at / comments_count / gp_count 等metadata
+        3. 已存在，content_hash 不同，shrink_ratio >= 0.5 → 正常更新，舊版搬到 prev_*
+        4. 已存在，content_hash 不同，shrink_ratio < 0.5 且 old_len >= 500 → 阻擋覆蓋
+        """
         try:
             board_id = post_data.get("board_id")
             sn = post_data.get("sn")
@@ -515,97 +527,121 @@ class DatabaseManager:
                 return None
 
             now = datetime.utcnow()
+            new_content = post_data.get("content", "")
+            new_content_hash = self._compute_content_hash(new_content)
             content_images_json = json.dumps(
                 post_data.get("content_images", []), ensure_ascii=False
             )
             raw_json = json.dumps(post_data.get("raw"), ensure_ascii=False) if post_data.get("raw") else None
 
-            insert_stmt = sqlite_insert(BahamutPost).values(
-                board_id=board_id,
-                post_id=post_data.get("post_id", ""),
-                sn=sn,
-                position=post_data.get("position", 1),
-                title=post_data.get("title", ""),
-                category=post_data.get("category", ""),
-                author_name=post_data.get("author_name", ""),
-                author_id=post_data.get("author_id", ""),
-                url=post_data.get("url", ""),
-                ip=post_data.get("ip", ""),
-                area=post_data.get("area", ""),
-                published_at=post_data.get("published_at"),
-                content=post_data.get("content", ""),
-                content_images_json=content_images_json,
-                comments_count=post_data.get("comments_count", 0),
-                gp_count=post_data.get("gp_count", 0),
-                bp_count=post_data.get("bp_count", 0),
-                replies_count=post_data.get("replies_count", 0),
-                raw_json=raw_json,
-                last_seen_at=now,
-                created_at=now,
-                updated_at=now,
-            )
-
-            excluded = insert_stmt.excluded
-            update_stmt = insert_stmt.on_conflict_do_update(
-                index_elements=[BahamutPost.board_id, BahamutPost.sn],
-                set_={
-                    "post_id": excluded.post_id,
-                    "position": excluded.position,
-                    "title": case(
-                        (excluded.title != "", excluded.title),
-                        else_=BahamutPost.title,
-                    ),
-                    "category": case(
-                        (excluded.category != "", excluded.category),
-                        else_=BahamutPost.category,
-                    ),
-                    "author_name": case(
-                        (excluded.author_name != "", excluded.author_name),
-                        else_=BahamutPost.author_name,
-                    ),
-                    "author_id": case(
-                        (excluded.author_id != "", excluded.author_id),
-                        else_=BahamutPost.author_id,
-                    ),
-                    "url": case(
-                        (excluded.url != "", excluded.url),
-                        else_=BahamutPost.url,
-                    ),
-                    "ip": excluded.ip,
-                    "area": excluded.area,
-                    "published_at": case(
-                        (excluded.published_at.is_not(None), excluded.published_at),
-                        else_=BahamutPost.published_at,
-                    ),
-                    # content 取較長版本
-                    "content": case(
-                        (func.length(excluded.content) > func.length(BahamutPost.content), excluded.content),
-                        else_=BahamutPost.content,
-                    ),
-                    "content_images_json": excluded.content_images_json,
-                    "comments_count": excluded.comments_count,
-                    "gp_count": excluded.gp_count,
-                    "bp_count": excluded.bp_count,
-                    "replies_count": excluded.replies_count,
-                    "raw_json": excluded.raw_json,
-                    "last_seen_at": now,
-                    "updated_at": now,
-                },
-            )
-
-            self.session.execute(update_stmt)
-            self.session.flush()
-
-            saved = self.session.query(BahamutPost).filter(
+            # 先查是否已存在
+            existing = self.session.query(BahamutPost).filter(
                 BahamutPost.board_id == board_id,
                 BahamutPost.sn == sn,
             ).first()
 
+            if not existing:
+                # --- 新文章：INSERT ---
+                post = BahamutPost(
+                    board_id=board_id,
+                    post_id=post_data.get("post_id", ""),
+                    sn=sn,
+                    position=post_data.get("position", 1),
+                    title=post_data.get("title", ""),
+                    category=post_data.get("category", ""),
+                    author_name=post_data.get("author_name", ""),
+                    author_id=post_data.get("author_id", ""),
+                    url=post_data.get("url", ""),
+                    ip=post_data.get("ip", ""),
+                    area=post_data.get("area", ""),
+                    published_at=post_data.get("published_at"),
+                    content=new_content,
+                    content_hash=new_content_hash,
+                    content_images_json=content_images_json,
+                    comments_count=post_data.get("comments_count", 0),
+                    gp_count=post_data.get("gp_count", 0),
+                    bp_count=post_data.get("bp_count", 0),
+                    replies_count=post_data.get("replies_count", 0),
+                    raw_json=raw_json,
+                    last_seen_at=now,
+                    created_at=now,
+                    updated_at=now,
+                )
+                self.session.add(post)
+                self.session.flush()
+                self.logger.info(
+                    "巴哈文章新增: board_id=%s post_id=%s sn=%s position=%s",
+                    board_id, post_data.get("post_id"), sn, post_data.get("position"),
+                )
+                return post
+
+            # --- 已存在：判斷更新策略 ---
+            old_content_hash = existing.content_hash or ""
+            content_changed = (new_content_hash != old_content_hash)
+
+            # 永遠更新的 metadata 欄位
+            existing.last_seen_at = now
+            existing.comments_count = post_data.get("comments_count", existing.comments_count)
+            existing.gp_count = post_data.get("gp_count", existing.gp_count)
+            existing.bp_count = post_data.get("bp_count", existing.bp_count)
+            existing.replies_count = post_data.get("replies_count", existing.replies_count)
+            existing.content_images_json = content_images_json
+            existing.raw_json = raw_json
+            existing.ip = post_data.get("ip", "") or existing.ip
+            existing.area = post_data.get("area", "") or existing.area
+
+            if not content_changed:
+                # hash 相同 → 無內容變更
+                self.session.flush()
+                self.logger.debug(
+                    "巴哈文章無內容變更: board_id=%s sn=%s",
+                    board_id, sn,
+                )
+                return existing
+
+            # content_hash 不同 → 檢查防惡意覆蓋
+            old_len = len(existing.content or "")
+            new_len = len(new_content)
+
+            if old_len >= 500 and new_len > 0:
+                shrink_ratio = new_len / old_len
+                if shrink_ratio < 0.5:
+                    # 異常縮水 → 阻擋覆蓋
+                    existing.update_blocked = True
+                    existing.update_block_reason = (
+                        f"suspicious_massive_shrink: old_len={old_len} new_len={new_len} ratio={shrink_ratio:.2f}"
+                    )
+                    self.session.flush()
+                    self.logger.warning(
+                        "巴哈文章異常縮水，阻擋覆蓋: board_id=%s sn=%s old_len=%s new_len=%s ratio=%.2f",
+                        board_id, sn, old_len, new_len, shrink_ratio,
+                    )
+                    return existing
+
+            # 正常更新 → 舊版搬到 prev_*，新版寫入正式欄位
+            existing.prev_title = existing.title
+            existing.prev_content = existing.content
+            existing.prev_content_hash = existing.content_hash
+            existing.prev_updated_at = existing.updated_at
+
+            existing.title = post_data.get("title", "") or existing.title
+            existing.category = post_data.get("category", "") or existing.category
+            existing.author_name = post_data.get("author_name", "") or existing.author_name
+            existing.author_id = post_data.get("author_id", "") or existing.author_id
+            existing.url = post_data.get("url", "") or existing.url
+            existing.published_at = post_data.get("published_at") or existing.published_at
+            existing.content = new_content
+            existing.content_hash = new_content_hash
+            existing.update_blocked = False
+            existing.update_block_reason = None
+            existing.updated_at = now
+
+            self.session.flush()
             self.logger.info(
-                "巴哈文章 upsert 完成: board_id=%s post_id=%s sn=%s position=%s",
-                board_id, post_data.get("post_id"), sn, post_data.get("position"),
+                "巴哈文章內容更新: board_id=%s sn=%s old_hash=%s new_hash=%s",
+                board_id, sn, old_content_hash[:12], new_content_hash[:12],
             )
-            return saved
+            return existing
 
         except Exception as e:
             self.logger.error(f"儲存巴哈文章失敗: {str(e)}", exc_info=True)

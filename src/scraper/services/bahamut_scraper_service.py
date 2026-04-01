@@ -1100,13 +1100,20 @@ class BahamutScraperService:
         return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, query_string, parsed.fragment))
 
     def fetch_article_detail(self, session: requests.Session, article_url: str) -> Dict[str, Any]:
+        fetch_start = datetime.now()
+
         # 第一頁
         html, final_url, status = self._fetch_html(session, article_url, referer=self.target_board_url)
         soup = BeautifulSoup(html, "html.parser")
 
+        # 偵測是否被導到手機版
+        mobile_redirect = urlparse(final_url).netloc == "m.gamer.com.tw"
+
         bsn = parse_qs(urlparse(self.target_board_url).query).get("bsn", [""])[0]
         total_pages = self._extract_article_page_count(soup)
         all_blocks = self._extract_article_blocks(session, soup, article_url, final_url, bsn)
+        blocks_per_page = [len(all_blocks)]
+        failed_pages: List[int] = []
 
         # 後續頁面（第 2 頁起）
         for page in range(2, total_pages + 1):
@@ -1117,12 +1124,15 @@ class BahamutScraperService:
                 page_soup = BeautifulSoup(page_html, "html.parser")
                 page_blocks = self._extract_article_blocks(session, page_soup, page_url, page_final_url, bsn)
                 all_blocks.extend(page_blocks)
+                blocks_per_page.append(len(page_blocks))
                 self.logger.info(
                     "Bahamut 文章分頁進度: snA=%s page %s/%s, 本頁 %s blocks",
                     parse_qs(urlparse(article_url).query).get("snA", [""])[0],
                     page, total_pages, len(page_blocks),
                 )
             except Exception as e:
+                blocks_per_page.append(0)
+                failed_pages.append(page)
                 self.logger.warning(
                     "Bahamut 文章分頁抓取失敗: page=%s/%s url=%s err=%s",
                     page, total_pages, page_url, e,
@@ -1137,6 +1147,21 @@ class BahamutScraperService:
 
         post_id = self._parse_post_id_from_url(final_url or article_url)
         sn_a = parse_qs(urlparse(final_url or article_url).query).get("snA", [post_id])[0]
+
+        fetch_duration = (datetime.now() - fetch_start).total_seconds()
+
+        # 抓取 metadata（存入 raw_json）
+        fetch_meta = {
+            "fetched_at": fetch_start.isoformat(),
+            "fetch_duration_sec": round(fetch_duration, 2),
+            "total_pages": total_pages,
+            "blocks_per_page": blocks_per_page,
+            "block_count": len(all_blocks),
+            "mobile_redirect": mobile_redirect,
+            "status_code": status,
+        }
+        if failed_pages:
+            fetch_meta["failed_pages"] = failed_pages
 
         return {
             "ok": True,
@@ -1163,15 +1188,7 @@ class BahamutScraperService:
             "replies": replies,
             "replies_count": len(replies),
             "total_pages": total_pages,
-            "raw": {
-                "html_preview": html[:3000],
-                "reply_probe": {
-                    "has_reply_block": len(replies) > 0,
-                    "reply_block_count": len(replies),
-                    "note": "目前已切出 post + replies 結構，每個 block 各自帶 comments",
-                },
-                "block_count": len(all_blocks),
-            },
+            "raw": fetch_meta,
         }
 
     def fetch_bahamut_articles_with_content(self) -> Dict[str, Any]:
