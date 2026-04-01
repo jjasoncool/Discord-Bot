@@ -1,6 +1,7 @@
 """
 基礎內容監控類別
 提供共用的內容監控、發送和記錄功能
+底層使用 SQLite（state_db.py）取代原本的 sent_articles.json
 """
 import asyncio
 import aiohttp
@@ -9,11 +10,24 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional
-# from abc import ABC, abstractmethod  # 不使用抽象方法
 
 from utils.logger_config import get_article_monitor_logger
+from services.state_db import StateDB
 
 logger = get_article_monitor_logger()
+
+# 全域共用 StateDB 實例（避免多個 monitor 各開各的連線）
+_shared_state_db: Optional[StateDB] = None
+
+
+async def get_shared_state_db() -> StateDB:
+    """取得全域共用的 StateDB 實例。"""
+    global _shared_state_db
+    if _shared_state_db is None:
+        _shared_state_db = StateDB()
+        await _shared_state_db.connect()
+    return _shared_state_db
+
 
 class BaseContentMonitor:
     """基礎內容監控類別"""
@@ -21,48 +35,13 @@ class BaseContentMonitor:
     def __init__(self, bot, scraper_api_url: str = "http://scraper:8000"):
         self.bot = bot
         self.scraper_api_url = scraper_api_url
-        self.sent_content_file = Path("/app/services/sent_articles.json")
-        self._load_sent_content()
+        self._state_db: Optional[StateDB] = None
 
-    def _load_sent_content(self):
-        """載入已發送的內容記錄"""
-        try:
-            if self.sent_content_file.exists():
-                with open(self.sent_content_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                self.sent_article_ids = set(data.get('sent_article_ids', []))
-                self.sent_fbpost_ids = set(data.get('sent_fbpost_ids', []))
-                self.sent_article_keys = set(data.get('sent_article_keys', []))
-                self.sent_ptt_state = data.get('sent_ptt_state', {}) or {}
-            else:
-                self.sent_article_ids = set()
-                self.sent_fbpost_ids = set()
-                self.sent_article_keys = set()
-                self.sent_ptt_state = {}
-        except Exception as e:
-            logger.error(f"載入已發送內容記錄失敗: {e}")
-            self.sent_article_ids = set()
-            self.sent_fbpost_ids = set()
-            self.sent_article_keys = set()
-            self.sent_ptt_state = {}
-
-    def _save_sent_content(self):
-        """儲存已發送的內容記錄"""
-        try:
-            # 只保留最近 7 天的記錄
-            data = {
-                'sent_article_ids': list(self.sent_article_ids),
-                'sent_fbpost_ids': list(self.sent_fbpost_ids),
-                'sent_article_keys': list(self.sent_article_keys),
-                'sent_ptt_state': self.sent_ptt_state,
-                'last_updated': datetime.now().isoformat()
-            }
-
-            with open(self.sent_content_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-
-        except Exception as e:
-            logger.error(f"儲存已發送內容記錄失敗: {e}")
+    async def _get_state_db(self) -> StateDB:
+        """延遲取得 StateDB（第一次使用時才建立連線）。"""
+        if self._state_db is None:
+            self._state_db = await get_shared_state_db()
+        return self._state_db
 
     async def fetch_content_from_api(self, endpoint: str, params: Dict = None) -> List[Dict]:
         """從 API 獲取內容的通用方法"""
@@ -116,33 +95,22 @@ class BaseContentMonitor:
 
         return success_count > 0
 
-    def mark_content_as_sent(self, content_type: str, content_id):
+    async def mark_content_as_sent(self, content_type: str, content_id) -> None:
         """標記內容為已發送"""
-        if content_type == 'article':
-            self.sent_article_ids.add(content_id)
-        elif content_type == 'fbpost':
-            self.sent_fbpost_ids.add(content_id)
-        elif content_type == 'ptt':
-            self.sent_article_keys.add(str(content_id))
+        db = await self._get_state_db()
+        await db.mark_content_as_sent(content_type, str(content_id))
 
-        self._save_sent_content()
-
-    def update_ptt_state(self, article_key: str, state: Dict):
+    async def update_ptt_state(self, article_key: str, state: Dict) -> None:
         """更新 PTT 發送狀態（thread/comment 增量用）"""
-        self.sent_article_keys.add(str(article_key))
-        self.sent_ptt_state[str(article_key)] = state
-        self._save_sent_content()
+        db = await self._get_state_db()
+        await db.update_ptt_state(article_key, state)
 
-    def get_ptt_state(self, article_key: str) -> Dict:
+    async def get_ptt_state(self, article_key: str) -> Dict:
         """取得 PTT 發送狀態"""
-        return self.sent_ptt_state.get(str(article_key), {})
+        db = await self._get_state_db()
+        return await db.get_ptt_state(article_key)
 
-    def is_content_sent(self, content_type: str, content_id) -> bool:
+    async def is_content_sent(self, content_type: str, content_id) -> bool:
         """檢查內容是否已發送"""
-        if content_type == 'article':
-            return content_id in self.sent_article_ids
-        elif content_type == 'fbpost':
-            return content_id in self.sent_fbpost_ids
-        elif content_type == 'ptt':
-            return str(content_id) in self.sent_article_keys
-        return False
+        db = await self._get_state_db()
+        return await db.is_content_sent(content_type, str(content_id))

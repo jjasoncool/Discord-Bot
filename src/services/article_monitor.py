@@ -456,7 +456,7 @@ class ArticleMonitor(BaseContentMonitor):
                 logger.info("📎 無附件需要發送")
 
             # 記錄已發送的文章
-            self.mark_content_as_sent('article', article['article_id'])
+            await self.mark_content_as_sent('article', article['article_id'])
 
             logger.info(f"成功發送文章 {article['article_id']} 到頻道 {channel_id}")
             return True
@@ -478,7 +478,7 @@ class ArticleMonitor(BaseContentMonitor):
             # 篩選出未發送的文章
             new_articles = []
             for article in articles:
-                if not self.is_content_sent('article', article['article_id']):
+                if not await self.is_content_sent('article', article['article_id']):
                     new_articles.append(article)
 
             if not new_articles:
@@ -1083,25 +1083,25 @@ class ArticleMonitor(BaseContentMonitor):
             article_logger.info(f"[PTT] 本輪檢查 {len(valid_posts)} 篇 PTT 貼文")
             for post in valid_posts:
                 article_key = self._build_ptt_article_key(post)
-                state = self.get_ptt_state(article_key)
+                state = await self.get_ptt_state(article_key)
                 new_comments = [self._normalize_comment(item) for item in (post.get('comments') or [])]
                 synced_comments_count = int(state.get('synced_comments_count', 0) or 0)
                 delta_comments = new_comments[synced_comments_count:] if len(new_comments) > synced_comments_count else []
 
-                if not self.is_content_sent('ptt', article_key):
+                if not await self.is_content_sent('ptt', article_key):
                     sent_any = False
                     for channel_id in forum_channel_ids:
                         result = await self.send_ptt_post_to_forum_channel(channel_id, post)
                         if result.get('ok'):
                             sent_any = True
-                            self.update_ptt_state(article_key, {
+                            await self.update_ptt_state(article_key, {
                                 "thread_id": result.get('thread_id'),
                                 "synced_comments_count": len(new_comments),
                             })
                             await asyncio.sleep(1)
 
                     if sent_any:
-                        self.mark_content_as_sent('ptt', article_key)
+                        await self.mark_content_as_sent('ptt', article_key)
                     continue
 
                 if not delta_comments:
@@ -1121,7 +1121,7 @@ class ArticleMonitor(BaseContentMonitor):
                         await thread.send(delta_message)
                         await asyncio.sleep(1)
 
-                self.update_ptt_state(article_key, {
+                await self.update_ptt_state(article_key, {
                     "thread_id": state.get('thread_id'),
                     "synced_comments_count": len(new_comments),
                 })
@@ -1253,7 +1253,7 @@ class ArticleMonitor(BaseContentMonitor):
             success = True
 
             if success:
-                self.mark_content_as_sent('fbpost', fb_post['id'])
+                await self.mark_content_as_sent('fbpost', fb_post['id'])
                 logger.info(f"成功發送 FB 貼文 {fb_post['id']} 到頻道 {channel_id}")
 
             return success
@@ -1324,7 +1324,7 @@ class ArticleMonitor(BaseContentMonitor):
             # 篩選未發送的貼文
             new_posts = []
             for post in fb_posts:
-                if not self.is_content_sent('fbpost', post['id']):
+                if not await self.is_content_sent('fbpost', post['id']):
                     new_posts.append(post)
 
             if not new_posts:

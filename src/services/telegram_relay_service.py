@@ -13,6 +13,8 @@ import hashlib
 import json
 import logging
 import os
+import shutil
+import tempfile
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -487,61 +489,243 @@ class TelegramRenderAdapter:
 class DiscordMessagePublisher:
     """共用發送能力：只執行 RenderPlan，不決定內容。"""
 
+    # 備用上限（無法取得 guild 資訊時使用）
+    _DISCORD_FILE_LIMIT_FALLBACK = 25 * 1024 * 1024 - 512 * 1024  # ~24.5 MB
+    _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff"}
+    _VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".wmv"}
+
+    @staticmethod
+    def _get_file_limit(channel: discord.abc.Messageable) -> int:
+        """從 channel 所屬 guild 取得實際檔案上限，留 512 KB 餘裕。"""
+        guild = getattr(channel, "guild", None)
+        if guild is not None:
+            return guild.filesize_limit - 512 * 1024
+        return DiscordMessagePublisher._DISCORD_FILE_LIMIT_FALLBACK
+
     @staticmethod
     def _chunk_attachments(attachments: list[AttachmentSpec], chunk_size: int = 10) -> list[list[AttachmentSpec]]:
         return [attachments[i:i + chunk_size] for i in range(0, len(attachments), chunk_size)]
 
+    # ------------------------------------------------------------------
+    # 媒體壓縮：影片 (ffmpeg) / 圖片 (Pillow)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _compress_video(src: str, dst: str, target_bytes: int) -> bool:
+        """用 ffmpeg 將影片壓縮到 target_bytes 以內。回傳是否成功且檔案小於上限。"""
+        probe_cmd = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            src,
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *probe_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+            duration = float(stdout.decode().strip())
+        except Exception as exc:
+            logger.warning("ffprobe 執行失敗: %s err=%s", src, exc, exc_info=True)
+            duration = 0
+
+        if duration <= 0:
+            logger.warning("無法取得影片長度，跳過壓縮: %s", src)
+            return False
+
+        # 目標 bitrate（留 5% 給容器 overhead）
+        target_bitrate = int(target_bytes * 8 / duration * 0.95)
+        if target_bitrate < 100_000:  # 低於 100 kbps 品質太差，放棄
+            logger.warning("影片壓縮目標 bitrate 過低 (%d bps)，跳過: %s", target_bitrate, src)
+            return False
+
+        ffmpeg_cmd = [
+            "ffmpeg", "-y", "-i", src,
+            "-c:v", "libx264", "-preset", "fast",
+            "-b:v", str(target_bitrate),
+            "-maxrate", str(target_bitrate),
+            "-bufsize", str(target_bitrate // 2),
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            dst,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *ffmpeg_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            logger.warning("ffmpeg 壓縮失敗 (rc=%s): %s\n%s", proc.returncode, src, stderr.decode()[-500:])
+            return False
+
+        result_size = os.path.getsize(dst)
+        if result_size > target_bytes:
+            logger.warning("ffmpeg 壓縮後仍超限 (%s bytes > %s): %s", result_size, target_bytes, src)
+            return False
+
+        logger.info("影片壓縮完成: %s -> %s bytes", src, result_size)
+        return True
+
+    @staticmethod
+    async def _compress_image(src: str, dst: str, target_bytes: int) -> bool:
+        """用 Pillow 縮圖到 target_bytes 以內。回傳是否成功。"""
+        from PIL import Image
+
+        def _do_compress() -> bool:
+            try:
+                img = Image.open(src)
+            except Exception as exc:
+                logger.warning("Pillow 無法開啟圖片: %s err=%s", src, exc)
+                return False
+
+            # 先嘗試只降品質（JPEG）
+            if img.mode in ("RGBA", "P"):
+                img = img.convert("RGB")
+
+            for quality in (85, 70, 50, 30):
+                img.save(dst, format="JPEG", quality=quality, optimize=True)
+                if os.path.getsize(dst) <= target_bytes:
+                    logger.info("圖片壓縮完成 (quality=%s): %s -> %s bytes", quality, src, os.path.getsize(dst))
+                    return True
+
+            # 品質不夠，逐步縮小解析度
+            scale = 0.75
+            for _ in range(4):
+                new_w = int(img.width * scale)
+                new_h = int(img.height * scale)
+                if new_w < 100 or new_h < 100:
+                    break
+                resized = img.resize((new_w, new_h), Image.LANCZOS)
+                resized.save(dst, format="JPEG", quality=50, optimize=True)
+                if os.path.getsize(dst) <= target_bytes:
+                    logger.info("圖片縮小完成 (%sx%s): %s -> %s bytes", new_w, new_h, src, os.path.getsize(dst))
+                    return True
+                scale *= 0.75
+
+            logger.warning("圖片壓縮後仍超限: %s", src)
+            return False
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _do_compress)
+
+    async def _ensure_under_limit(self, attachment: AttachmentSpec, tmp_dir: str, file_limit: int) -> Optional[AttachmentSpec]:
+        """檢查附件大小，超過上限時嘗試壓縮。回傳可用的 AttachmentSpec 或 None（放棄）。"""
+        file_size = os.path.getsize(attachment.abs_path)
+        if file_size <= file_limit:
+            return attachment
+
+        ext = os.path.splitext(attachment.abs_path)[1].lower()
+        original_name = attachment.filename or os.path.basename(attachment.abs_path)
+        logger.warning(
+            "附件超過 Discord 上限 (%s bytes, limit=%s): %s — 嘗試壓縮",
+            file_size, file_limit, attachment.abs_path,
+        )
+
+        if ext in self._VIDEO_EXTS:
+            dst = os.path.join(tmp_dir, f"compressed_{original_name}")
+            # 輸出一定是 mp4
+            if not dst.lower().endswith(".mp4"):
+                dst = os.path.splitext(dst)[0] + ".mp4"
+                original_name = os.path.splitext(original_name)[0] + ".mp4"
+            ok = await self._compress_video(attachment.abs_path, dst, file_limit)
+            if ok:
+                return AttachmentSpec(
+                    abs_path=dst,
+                    is_spoiler=attachment.is_spoiler,
+                    filename=original_name,
+                )
+        elif ext in self._IMAGE_EXTS:
+            dst = os.path.join(tmp_dir, f"compressed_{os.path.splitext(original_name)[0]}.jpg")
+            ok = await self._compress_image(attachment.abs_path, dst, file_limit)
+            if ok:
+                return AttachmentSpec(
+                    abs_path=dst,
+                    is_spoiler=attachment.is_spoiler,
+                    filename=os.path.splitext(original_name)[0] + ".jpg",
+                )
+        else:
+            logger.warning("不支援壓縮的檔案類型 (%s)，跳過: %s", ext, attachment.abs_path)
+
+        logger.warning("附件壓縮失敗或仍超限，跳過該檔案: %s", attachment.abs_path)
+        return None
+
+    # ------------------------------------------------------------------
+
     async def publish_to_channel(self, channel: discord.abc.Messageable, plan: RenderPlan) -> int:
         published_count = 0
+        tmp_dir: Optional[str] = None
+        file_limit = self._get_file_limit(channel)
+        logger.debug("Discord 檔案上限: %s bytes (guild=%s)", file_limit, getattr(getattr(channel, "guild", None), "name", "N/A"))
 
-        for operation in plan.operations:
-            if operation.op_type != "send_message":
-                logger.warning("未知 RenderOperation，略過: %s", operation.op_type)
-                continue
-
-            valid_attachments: list[AttachmentSpec] = []
-            for attachment in operation.attachments:
-                if not os.path.exists(attachment.abs_path):
-                    logger.warning("附件不存在，略過: %s", attachment.abs_path)
+        try:
+            for operation in plan.operations:
+                if operation.op_type != "send_message":
+                    logger.warning("未知 RenderOperation，略過: %s", operation.op_type)
                     continue
-                valid_attachments.append(attachment)
 
-            chunks = self._chunk_attachments(valid_attachments, chunk_size=10)
+                valid_attachments: list[AttachmentSpec] = []
+                for attachment in operation.attachments:
+                    if not os.path.exists(attachment.abs_path):
+                        logger.warning("附件不存在，略過: %s", attachment.abs_path)
+                        continue
+                    valid_attachments.append(attachment)
 
-            if not chunks:
-                await channel.send(content=operation.content or None, embed=operation.embed)
-                published_count += 1
-                continue
+                # 檢查大小，必要時壓縮
+                sized_attachments: list[AttachmentSpec] = []
+                for attachment in valid_attachments:
+                    file_size = os.path.getsize(attachment.abs_path)
+                    if file_size > file_limit:
+                        if tmp_dir is None:
+                            tmp_dir = tempfile.mkdtemp(prefix="tg_relay_compress_")
+                        result = await self._ensure_under_limit(attachment, tmp_dir, file_limit)
+                        if result is not None:
+                            sized_attachments.append(result)
+                    else:
+                        sized_attachments.append(attachment)
 
-            for index, chunk in enumerate(chunks):
-                files = [
-                    discord.File(
-                        item.abs_path,
-                        filename=item.filename or os.path.basename(item.abs_path),
-                        spoiler=item.is_spoiler,
-                    )
-                    for item in chunk
-                ]
-                if index == 0:
-                    embed = operation.embed.copy() if operation.embed else None
-                    if embed is not None:
-                        # 只對圖片設 embed image，影片檔讓 Discord 原生播放
-                        _image_exts = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
-                        first_image = next(
-                            (
-                                item for item in chunk
-                                if not item.is_spoiler
-                                and item.filename is not None
-                                and item.filename.lower().rsplit(".", 1)[-1] in {e.lstrip(".") for e in _image_exts}
-                            ),
-                            None,
+                chunks = self._chunk_attachments(sized_attachments, chunk_size=10)
+
+                if not chunks:
+                    await channel.send(content=operation.content or None, embed=operation.embed)
+                    published_count += 1
+                    continue
+
+                for index, chunk in enumerate(chunks):
+                    files = [
+                        discord.File(
+                            item.abs_path,
+                            filename=item.filename or os.path.basename(item.abs_path),
+                            spoiler=item.is_spoiler,
                         )
-                        if first_image and first_image.filename:
-                            embed.set_image(url=f"attachment://{first_image.filename}")
-                    await channel.send(content=operation.content or None, embed=embed, files=files)
-                else:
-                    await channel.send(files=files)
-                published_count += 1
+                        for item in chunk
+                    ]
+                    if index == 0:
+                        embed = operation.embed.copy() if operation.embed else None
+                        if embed is not None:
+                            # 只對圖片設 embed image，影片檔讓 Discord 原生播放
+                            _image_exts = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+                            first_image = next(
+                                (
+                                    item for item in chunk
+                                    if not item.is_spoiler
+                                    and item.filename is not None
+                                    and item.filename.lower().rsplit(".", 1)[-1] in {e.lstrip(".") for e in _image_exts}
+                                ),
+                                None,
+                            )
+                            if first_image and first_image.filename:
+                                embed.set_image(url=f"attachment://{first_image.filename}")
+                        await channel.send(content=operation.content or None, embed=embed, files=files)
+                    else:
+                        await channel.send(files=files)
+                    published_count += 1
+        finally:
+            # 清理暫存壓縮檔
+            if tmp_dir is not None:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
 
         return published_count
 

@@ -279,3 +279,45 @@
    - Article/FB/PTT 是 API payload；Telegram 是 DB row + media row。
    - 型別來源不同，但欄位都必須保留（走 lossless envelope）。
    - 後續 `SourceFetchPort` / `MessageRenderAdapter` 只能做「映射」，不能做「刪減」。
+
+---
+
+## Bahamut Scraper MVP 完成歸檔（2026-04-01）
+
+### 第一階段 MVP — 全部完成
+- 研究巴哈 HTML / API 結構（文章列表、文章頁、留言區、回文區）
+- 確認 anti-bot 處理（cloudscraper + gate 進版圖處理）
+- 實作文章列表抓取（標題、分類、作者、時間、URL、文章 ID，支援多頁）
+- 實作文章主文抓取（含多頁遍歷、圖片提取）
+- 實作主文留言抓取（HTML + XHR moreCommend.php 合併去重）
+- 實作回文與回文留言抓取
+- 定義 JSON payload 結構（post + replies[] + 各自 comments[]）
+- JSON 範例輸出驗證：`src/scraper/data/bahamut_samples/*.json`
+- 錯誤處理、限速、重試、日誌紀錄
+- GP/BP 提取（主文/回文/留言）
+- CLI 單篇除錯：`--sna <id>`
+- 排程串接：`main.py` 每 1 小時自動 `fetch → save_articles_to_db → commit`
+
+### 第二階段 DB — 大部分完成
+- `bahamut_posts` 主表（主文+回文共用，position 區分）
+- `bahamut_post_comments` 留言表
+- Upsert 邏輯：文章 `(board_id, sn)`、留言 `(parent_sn, comment_id)`
+- Content hash 變更偵測 + 可疑縮水阻擋（prev_* 欄位）
+- 必要索引（board_id, post_id, author_id, user_id, published_at, content_hash, is_deleted）
+- raw_json 完整備份
+- Scraper API：`/api/bahamut/recent` + `/api/bahamut/{board_id}/{post_id}`
+
+### Bahamut → Discord Relay 首版
+- `src/services/bahamut_monitor.py`：embed 格式化 + 留言格預建/溢出 + 鏈式導航
+- `src/scraper/api_server.py`：巴哈 API endpoints（按 snA 分組，含主文+回覆+留言）
+- `/get_baha_post` 斜線命令（`article_commands.py`）
+- 主文（藍色 embed）、回覆（綠色 embed）、留言格（灰色 embed）
+- 留言格式：`🔥 B1 **user** 👍107 — content`
+- 作者名連結巴哈小屋、圖片 URL 轉 `[🖼 圖片](url)`
+- 溢出導航：格3→格4→格5 鏈式 reply + `⬇️ 更多留言...` 連結
+
+### ID 模型定案
+- `snA` = thread/group ID = `post_id`
+- `sn` = 單篇文章 ID
+- `comment_id` = 留言唯一鍵（搭配 parent_sn）
+- `floor` / `position` 僅供顯示，不作唯一鍵

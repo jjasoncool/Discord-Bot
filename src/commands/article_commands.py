@@ -603,6 +603,60 @@ class ArticleCommands(commands.Cog):
             logger.error(f"重新發送內容 {id} 失敗: {e}")
             await safe_send_interaction_message(interaction, f"❌ 重新發送內容時發生錯誤：{str(e)}", ephemeral=True)
 
+    # ── 巴哈文章指令 ──
+
+    @app_commands.command(name="get_baha_post", description="取得巴哈討論串並發送到論壇頻道")
+    @app_commands.describe(
+        post_id="討論串 ID（snA）",
+        board_id="看板 ID（預設 74934）",
+    )
+    async def get_baha_post(
+        self,
+        interaction: discord.Interaction,
+        post_id: str,
+        board_id: str = "74934",
+    ):
+        """從 Scraper API 取得巴哈討論串並發送到論壇頻道。"""
+        from utils.utils import check_guild
+        if not await check_guild(interaction, admin_only=True):
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            config_data = json.load(open("config.json", "r", encoding="utf-8"))
+            forum_channel_id = config_data.get("forum_article_channel_id")
+            if not forum_channel_id:
+                await interaction.followup.send("❌ config.json 中沒有設定 forum_article_channel_id", ephemeral=True)
+                return
+        except Exception as e:
+            await interaction.followup.send(f"❌ 讀取 config.json 失敗: {e}", ephemeral=True)
+            return
+
+        from services.bahamut_monitor import BahamutMonitor
+        monitor = BahamutMonitor(self.bot)
+
+        state = await monitor.test_send_single_thread(
+            forum_channel_id=forum_channel_id,
+            board_id=board_id,
+            post_id=post_id,
+        )
+
+        if state:
+            thread_id = state.get("thread_id")
+            posts_count = len(state.get("posts", {}))
+            await interaction.followup.send(
+                f"✅ 巴哈討論串已發送！\n"
+                f"Thread ID: {thread_id}\n"
+                f"文章數（含主文+回覆）: {posts_count}",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                f"❌ 發送失敗，請查看日誌。board_id={board_id}, post_id={post_id}",
+                ephemeral=True,
+            )
+
 
 async def setup(bot):
     """載入 Cog"""

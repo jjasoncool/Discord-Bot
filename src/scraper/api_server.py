@@ -10,7 +10,7 @@ from pydantic import BaseModel
 import json
 from sqlalchemy import case
 
-from db.models import ArticleMenu, ArticleDetail, FBPost, FBImage, PTTPost, get_db_session
+from db.models import ArticleMenu, ArticleDetail, FBPost, FBImage, PTTPost, BahamutPost, BahamutPostComment, get_db_session
 from sqlalchemy.orm import joinedload
 from utils.logger import get_logger
 
@@ -546,6 +546,250 @@ async def get_ptt_post_by_id(
     except Exception as e:
         logger.error(f"查詢 PTT 貼文 {post_id} 時發生錯誤: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"查詢 PTT 貼文失敗: {str(e)}")
+
+# === Bahamut API ===
+
+class BahamutCommentResponse(BaseModel):
+    comment_id: str
+    floor: Optional[str]
+    position: Optional[int]
+    user_id: Optional[str]
+    user_name: Optional[str]
+    content: Optional[str]
+    is_hot: bool = False
+    gp_count: int = 0
+    bp_count: int = 0
+    published_at: Optional[str]
+
+    class Config:
+        from_attributes = True
+
+
+class BahamutPostResponse(BaseModel):
+    """單篇巴哈文章（主文或回覆）"""
+    id: int
+    board_id: str
+    post_id: str                          # snA
+    sn: str
+    position: int
+    title: Optional[str]
+    category: Optional[str]
+    author_name: Optional[str]
+    author_id: Optional[str]
+    url: Optional[str]
+    gp_count: int = 0
+    bp_count: int = 0
+    content: Optional[str]
+    content_images: List[str] = []
+    comments_count: int = 0
+    replies_count: int = 0
+    published_at: Optional[str]
+    created_at: str
+    comments: List[BahamutCommentResponse] = []
+
+    class Config:
+        from_attributes = True
+
+
+class BahamutThreadResponse(BaseModel):
+    """一個完整討論串（主文 + 回覆，以 snA 分組）"""
+    post_id: str                          # snA
+    board_id: str
+    main_post: BahamutPostResponse
+    replies: List[BahamutPostResponse] = []
+
+
+class BahamutThreadsResponse(BaseModel):
+    success: bool
+    message: str
+    threads: List[BahamutThreadResponse]
+    total_count: int
+
+
+class SingleBahamutThreadResponse(BaseModel):
+    success: bool
+    thread: Optional[BahamutThreadResponse] = None
+    message: Optional[str] = None
+
+
+def _build_bahamut_post_response(post: BahamutPost) -> BahamutPostResponse:
+    """將 BahamutPost ORM 物件轉為 API response。"""
+    content_images = []
+    if post.content_images_json:
+        try:
+            content_images = json.loads(post.content_images_json)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    comments = [
+        BahamutCommentResponse(
+            comment_id=c.comment_id,
+            floor=c.floor,
+            position=c.position,
+            user_id=c.user_id,
+            user_name=c.user_name,
+            content=c.content,
+            is_hot=c.is_hot or False,
+            gp_count=c.gp_count or 0,
+            bp_count=c.bp_count or 0,
+            published_at=c.published_at.isoformat() if c.published_at else None,
+        )
+        for c in sorted(post.comments, key=lambda x: x.position or 0)
+    ]
+
+    return BahamutPostResponse(
+        id=post.id,
+        board_id=post.board_id,
+        post_id=post.post_id,
+        sn=post.sn,
+        position=post.position,
+        title=post.title,
+        category=post.category,
+        author_name=post.author_name,
+        author_id=post.author_id,
+        url=post.url,
+        gp_count=post.gp_count or 0,
+        bp_count=post.bp_count or 0,
+        content=post.content,
+        content_images=content_images,
+        comments_count=post.comments_count or 0,
+        replies_count=post.replies_count or 0,
+        published_at=post.published_at.isoformat() if post.published_at else None,
+        created_at=post.created_at.isoformat() if post.created_at else "",
+        comments=comments,
+    )
+
+
+def _group_posts_into_threads(posts: List[BahamutPost]) -> List[BahamutThreadResponse]:
+    """將 BahamutPost 列表按 (board_id, post_id/snA) 分組成討論串。"""
+    from collections import OrderedDict
+    threads_map: OrderedDict[str, dict] = OrderedDict()
+
+    for post in posts:
+        key = f"{post.board_id}:{post.post_id}"
+        if key not in threads_map:
+            threads_map[key] = {"board_id": post.board_id, "post_id": post.post_id, "main": None, "replies": []}
+        resp = _build_bahamut_post_response(post)
+        if post.position == 1:
+            threads_map[key]["main"] = resp
+        else:
+            threads_map[key]["replies"].append(resp)
+
+    result = []
+    for key, group in threads_map.items():
+        if group["main"] is None:
+            continue
+        group["replies"].sort(key=lambda r: r.position)
+        result.append(BahamutThreadResponse(
+            post_id=group["post_id"],
+            board_id=group["board_id"],
+            main_post=group["main"],
+            replies=group["replies"],
+        ))
+    return result
+
+
+@app.get("/api/bahamut/recent", response_model=BahamutThreadsResponse)
+async def get_recent_bahamut_threads(
+    days: int = 3,
+    limit: int = 50,
+    board_id: Optional[str] = None,
+    order: str = "desc",
+    db: Session = Depends(get_db)
+):
+    """取得最近的巴哈討論串（含主文、回覆、留言）"""
+    try:
+        start_date = datetime.now() - timedelta(days=days)
+
+        # 先找出符合條件的主文 post_id（snA）
+        main_query = db.query(BahamutPost.post_id, BahamutPost.board_id).filter(
+            BahamutPost.position == 1,
+            BahamutPost.is_deleted == False,
+            (BahamutPost.published_at >= start_date) | (BahamutPost.created_at >= start_date),
+        )
+        if board_id:
+            main_query = main_query.filter(BahamutPost.board_id == board_id)
+
+        published_sort = case(
+            (BahamutPost.published_at.is_(None), BahamutPost.created_at),
+            else_=BahamutPost.published_at,
+        )
+        if order.lower() == "asc":
+            main_query = main_query.order_by(published_sort.asc())
+        else:
+            main_query = main_query.order_by(published_sort.desc())
+
+        main_query = main_query.limit(limit)
+        thread_keys = main_query.all()
+
+        if not thread_keys:
+            return BahamutThreadsResponse(success=True, message="沒有符合條件的巴哈討論串", threads=[], total_count=0)
+
+        # 取出所有相關的 post（主文 + 回覆），含留言
+        post_id_pairs = [(row.board_id, row.post_id) for row in thread_keys]
+        from sqlalchemy import tuple_
+        all_posts = (
+            db.query(BahamutPost)
+            .options(joinedload(BahamutPost.comments))
+            .filter(
+                tuple_(BahamutPost.board_id, BahamutPost.post_id).in_(post_id_pairs),
+                BahamutPost.is_deleted == False,
+            )
+            .all()
+        )
+
+        threads = _group_posts_into_threads(all_posts)
+
+        return BahamutThreadsResponse(
+            success=True,
+            message=f"成功獲取 {len(threads)} 個巴哈討論串",
+            threads=threads,
+            total_count=len(threads),
+        )
+
+    except Exception as e:
+        logger.error(f"查詢巴哈討論串時發生錯誤: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"查詢巴哈討論串失敗: {str(e)}")
+
+
+@app.get("/api/bahamut/{board_id}/{post_id}", response_model=SingleBahamutThreadResponse)
+async def get_bahamut_thread(
+    board_id: str,
+    post_id: str,
+    db: Session = Depends(get_db)
+):
+    """根據 board_id + post_id(snA) 取得單一巴哈討論串"""
+    try:
+        posts = (
+            db.query(BahamutPost)
+            .options(joinedload(BahamutPost.comments))
+            .filter(
+                BahamutPost.board_id == board_id,
+                BahamutPost.post_id == post_id,
+                BahamutPost.is_deleted == False,
+            )
+            .all()
+        )
+
+        if not posts:
+            return SingleBahamutThreadResponse(
+                success=False,
+                message=f"找不到 board_id={board_id}, post_id={post_id} 的巴哈討論串",
+            )
+
+        threads = _group_posts_into_threads(posts)
+        if not threads:
+            return SingleBahamutThreadResponse(
+                success=False,
+                message=f"找不到主文：board_id={board_id}, post_id={post_id}",
+            )
+
+        return SingleBahamutThreadResponse(success=True, thread=threads[0])
+
+    except Exception as e:
+        logger.error(f"查詢巴哈討論串 {board_id}/{post_id} 時發生錯誤: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"查詢巴哈討論串失敗: {str(e)}")
+
 
 @app.get("/api/debug/tables")
 async def debug_table_structure(db: Session = Depends(get_db)):
