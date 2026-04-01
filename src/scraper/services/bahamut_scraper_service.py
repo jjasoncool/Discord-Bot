@@ -38,6 +38,8 @@ if SCRAPER_ROOT not in sys.path:
 
 from config import BAHAMUT_CONFIG
 from utils.logger import get_logger
+
+logger = get_logger("bahamut_scraper")
 from utils.request_utils import human_sleep
 
 
@@ -1433,6 +1435,12 @@ def main():
         default=None,
         help="抓到第幾頁（覆蓋 config 的 board_end_page）",
     )
+    parser.add_argument(
+        "--delay-multiplier",
+        type=float,
+        default=None,
+        help="延遲倍率（例如 3 = 所有延遲 ×3，適合大量抓取避免被鎖）",
+    )
     args = parser.parse_args()
 
     # 透過 container 建立帶 db_manager 的 service
@@ -1446,6 +1454,19 @@ def main():
         service.board_start_page = max(1, args.start_page)
     if args.end_page is not None:
         service.board_end_page = max(service.board_start_page, args.end_page)
+
+    if args.delay_multiplier is not None and args.delay_multiplier > 0:
+        multiplier = args.delay_multiplier
+        old_human = service.human_delay_range
+        old_page = service.page_delay_range
+        service.human_delay_range = (old_human[0] * multiplier, old_human[1] * multiplier)
+        service.page_delay_range = (old_page[0] * multiplier, old_page[1] * multiplier)
+        logger.info(
+            "延遲倍率 %.1fx: human_delay=%.1f~%.1fs, page_delay=%.1f~%.1fs",
+            multiplier,
+            service.human_delay_range[0], service.human_delay_range[1],
+            service.page_delay_range[0], service.page_delay_range[1],
+        )
 
     target_sn_a = args.sn_a
     if target_sn_a:
