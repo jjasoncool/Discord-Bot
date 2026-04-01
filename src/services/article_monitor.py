@@ -18,6 +18,11 @@ from typing import List, Dict, Optional
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urlunparse
 from utils.logger_config import get_discord_bot_logger, get_article_monitor_logger
+from utils.discord_content import (
+    sanitize_forum_thread_title,
+    chunk_discord_files,
+    get_forum_tags,
+)
 
 from .base_monitor import BaseContentMonitor
 
@@ -744,35 +749,6 @@ class ArticleMonitor(BaseContentMonitor):
         article_id = str(post.get('article_id') or '').strip()
         return f"ptt:{board}:{article_id}"
 
-    @staticmethod
-    def _sanitize_forum_thread_title(title: str, content: str = "") -> str:
-        sanitized = (title or '').replace('\n', ' ').replace('\r', ' ').strip()
-        sanitized = re.sub(r'\s+', ' ', sanitized)
-
-        if not sanitized:
-            content_preview = (content or '').replace('\n', ' ').replace('\r', ' ').strip()
-            content_preview = re.sub(r'\s+', ' ', content_preview)
-            sanitized = content_preview[:20] if content_preview else 'PTT 文章'
-
-        return sanitized[:100]
-
-    async def _get_ptt_forum_tags(self, forum_channel: discord.ForumChannel) -> List[discord.ForumTag]:
-        """取得 PTT 論壇貼文要套用的 tag。"""
-        applied_tags: List[discord.ForumTag] = []
-
-        for tag in forum_channel.available_tags:
-            if tag.name == self.PTT_FORUM_TAG_NAME:
-                applied_tags.append(tag)
-                break
-
-        if not applied_tags:
-            logger.warning(
-                "找不到 PTT forum tag，將不套用 tag: channel_id=%s expected_tag=%s",
-                forum_channel.id,
-                self.PTT_FORUM_TAG_NAME,
-            )
-
-        return applied_tags
 
     @staticmethod
     def _normalize_comment(comment: Dict) -> Dict:
@@ -815,12 +791,6 @@ class ArticleMonitor(BaseContentMonitor):
 
         return chunks
 
-    @staticmethod
-    def _chunk_discord_files(files: List[discord.File], chunk_size: int = 10) -> List[List[discord.File]]:
-        """將 Discord 附件依 Discord 限制切成多批。"""
-        if not files:
-            return []
-        return [files[i:i + chunk_size] for i in range(0, len(files), chunk_size)]
 
     async def _resolve_ptt_image_targets(self, text: str) -> List[str]:
         """從文字中解析可下載圖片，包含無副檔名連結（如 imgur 頁面）。"""
@@ -921,12 +891,12 @@ class ArticleMonitor(BaseContentMonitor):
                 logger.error(f"找不到論壇頻道 ID: {forum_channel_id}，或該頻道不是 ForumChannel")
                 return False
 
-            thread_title = self._sanitize_forum_thread_title(
+            thread_title = sanitize_forum_thread_title(
                 post.get('title') or '',
                 post.get('content') or '',
             )
             thread_content = self._format_ptt_post_content(post)
-            applied_tags = await self._get_ptt_forum_tags(channel)
+            applied_tags = await get_forum_tags(channel, self.PTT_FORUM_TAG_NAME)
 
             files: List[discord.File] = []
             image_urls = await self._resolve_ptt_image_targets(post.get('content') or '')
@@ -1008,7 +978,7 @@ class ArticleMonitor(BaseContentMonitor):
             thread = created.thread if hasattr(created, 'thread') else created
 
             if thread and remaining_files:
-                remaining_chunks = self._chunk_discord_files(remaining_files, chunk_size=10)
+                remaining_chunks = chunk_discord_files(remaining_files, chunk_size=10)
                 for batch_index, chunk in enumerate(remaining_chunks, start=1):
                     logger.info(
                         "開始補送 PTT 剩餘圖片批次: board=%s article_id=%s batch=%s size=%s",

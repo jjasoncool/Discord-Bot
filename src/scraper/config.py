@@ -57,11 +57,11 @@ BAHAMUT_CONFIG = {
     "target_board_url": "https://forum.gamer.com.tw/B.php?bsn=74934",
     "timeout": 20,
     "board_start_page": 1,
-    "board_end_page": 1,
+    "board_end_page": 2,
     "max_articles_per_page": 30,
     "gate_max_hops": 3,
     "human_delay_min": (0.35, 0.9),
     "page_delay_range": (2, 5),
     "sample_output_dir": "data/bahamut_samples",
-    "export_sample_json": True,
+    "export_sample_json": False,
 }

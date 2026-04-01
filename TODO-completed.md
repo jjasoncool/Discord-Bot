@@ -321,3 +321,40 @@
 - `sn` = 單篇文章 ID
 - `comment_id` = 留言唯一鍵（搭配 parent_sn）
 - `floor` / `position` 僅供顯示，不作唯一鍵
+
+---
+
+## Bahamut 增量更新 + SQLite 遷移 + Webhook 通知完成歸檔（2026-04-02）
+
+### 增量更新
+- `_update_existing_thread`：已存在的 thread 自動走增量更新
+- GP/BP edit：主文/回覆 embed 有變化才 edit
+- 留言 slot 重組：用最新全部留言重組 slot 內容，有變化才 edit
+- 新回覆 append：state 裡沒有的 sn → send + 預建留言格
+- hash 比對：md5 比對 embed description，無變化跳過不 edit（防 Discord rate limit）
+
+### SQLite State 遷移
+- `state_db.py`：async SQLite 封裝，5 張表
+  - `sent_content`：所有來源去重（Article / FB / PTT / Bahamut）
+  - `forum_thread_state`：PTT / Bahamut 共用 thread 追蹤
+  - `bahamut_post_state`：巴哈文章 Discord msg_id
+  - `bahamut_comment_slot`：巴哈留言格 msg_id + used_chars
+  - `bahamut_synced_comment`：巴哈留言去重
+- `base_monitor.py`：所有 state 方法改 async，全域共用 StateDB + `asyncio.Lock` 併發安全
+- `article_monitor.py`：所有 state 呼叫加 `await`
+- `migrate_json_to_sqlite.py`：手動遷移腳本
+- 遷移已執行完成（446 articles + 386 fb + 507 ptt）
+
+### HTTP Webhook 通知
+- `notify_server.py`：通用 aiohttp.web server，`POST /notify/{source}` 分派架構
+- Scraper `main.py`：巴哈抓完存 DB 後呼叫 `_notify_discord_bot("bahamut", ...)`
+- `discord_bot.py`：on_ready 啟動 notify server (port 5000)
+- `docker-compose.yaml`：discord-bot 加 `expose: ["5000"]`
+
+### 共用工具抽取
+- `discord_content.py`：sanitize_forum_thread_title / linkify_image_urls / content_hash / chunk_discord_files / get_forum_tags
+- article_monitor + bahamut_monitor 共用，移除各自重複的實作
+
+### Config 快取
+- `ChannelConfig`：TTL 5 分鐘記憶體快取，save_config 同步更新
+- Scraper config：board_end_page 1→2（自動抓前 2 頁）、export_sample_json 關閉

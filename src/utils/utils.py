@@ -98,18 +98,29 @@ async def safe_send_interaction_message(
             await asyncio.sleep(delay)
 
 class ChannelConfig:
-    """管理從配置文件中讀取頻道 ID 的類別"""
+    """管理從配置文件中讀取頻道 ID 的類別（含記憶體快取，TTL 5 分鐘）"""
     DEFAULT_ID = 1234567890  # 預設佔位符 ID
+    _cache: dict = {}        # {config_file: config_dict}
+    _cache_time: dict = {}   # {config_file: timestamp}
+    _CACHE_TTL = 300         # 快取有效期（秒）
 
     @staticmethod
     def load_config(config_file="config.json", caller="unknown") -> dict:
-        """讀取完整設定檔，讀取失敗時回傳空 dict。"""
-        logger.debug(f"開始讀取設定檔: {config_file} (調用者: {caller})")
+        """讀取完整設定檔（優先從快取取，TTL 過期自動重讀），讀取失敗時回傳空 dict。"""
+        import time
+        now = time.time()
+        cached_time = ChannelConfig._cache_time.get(config_file, 0)
+        if config_file in ChannelConfig._cache and (now - cached_time) < ChannelConfig._CACHE_TTL:
+            return ChannelConfig._cache[config_file]
+
+        logger.debug(f"從磁碟讀取設定檔: {config_file} (調用者: {caller})")
         config = {}
         if os.path.exists(config_file):
             try:
                 with open(config_file, 'r') as f:
                     config = json.load(f)
+                ChannelConfig._cache[config_file] = config
+                ChannelConfig._cache_time[config_file] = now
             except json.JSONDecodeError as e:
                 logger.error(f"無法讀取 {config_file}，JSON 解碼錯誤: {str(e)} (調用者: {caller})")
             except Exception as e:
@@ -120,36 +131,32 @@ class ChannelConfig:
 
     @staticmethod
     def save_config(config: dict, config_file="config.json", caller="unknown") -> None:
-        """寫入完整設定檔。"""
+        """寫入完整設定檔並更新快取。"""
         try:
             with open(config_file, 'w') as f:
                 json.dump(config, f, indent=2)
+            import time
+            ChannelConfig._cache[config_file] = config
+            ChannelConfig._cache_time[config_file] = time.time()
             logger.debug(f"設定檔已寫入: {config_file} (調用者: {caller})")
         except Exception as e:
             logger.error(f"寫入 {config_file} 失敗: {str(e)} (調用者: {caller})")
             raise
 
     @staticmethod
+    def invalidate_cache(config_file="config.json") -> None:
+        """手動清除快取（外部修改設定檔後呼叫）。"""
+        ChannelConfig._cache.pop(config_file, None)
+
+    @staticmethod
     async def get_channel_id(config_key, config_file="config.json", caller="unknown"):
-        """從配置文件中讀取指定鍵的頻道 ID"""
-        logger.debug(f"開始讀取頻道 ID，鍵: {config_key}，配置文件: {config_file}，調用者: {caller}")
-        channel_id = ChannelConfig.DEFAULT_ID
-        if os.path.exists(config_file):
-            try:
-                with open(config_file, 'r') as f:
-                    config = json.load(f)
-                    channel_id = config.get(config_key, ChannelConfig.DEFAULT_ID)
-                    if channel_id != ChannelConfig.DEFAULT_ID:
-                        logger.info(f"從 {config_file} 讀取到頻道 ID: {channel_id} (鍵: {config_key}，調用者: {caller})")
-                    else:
-                        logger.warning(f"從 {config_file} 讀取到頻道 ID，但未設定，使用預設佔位符 ID (鍵: {config_key}，調用者: {caller})")
-            except json.JSONDecodeError as e:
-                logger.error(f"無法讀取 {config_file}，JSON 解碼錯誤: {str(e)}，使用預設佔位符 ID (鍵: {config_key}，調用者: {caller})")
-            except Exception as e:
-                logger.error(f"讀取 {config_file} 時發生未知錯誤: {str(e)}，使用預設佔位符 ID (鍵: {config_key}，調用者: {caller})")
+        """從配置文件中讀取指定鍵的頻道 ID（使用快取）"""
+        config = ChannelConfig.load_config(config_file, caller)
+        channel_id = config.get(config_key, ChannelConfig.DEFAULT_ID)
+        if channel_id != ChannelConfig.DEFAULT_ID:
+            logger.debug(f"取得頻道 ID: {channel_id} (鍵: {config_key}，調用者: {caller})")
         else:
-            logger.warning(f"配置文件 {config_file} 不存在，使用預設佔位符 ID (鍵: {config_key}，調用者: {caller})")
-        logger.debug(f"返回頻道 ID: {channel_id} (鍵: {config_key}，調用者: {caller})")
+            logger.warning(f"頻道 ID 未設定，使用預設佔位符 (鍵: {config_key}，調用者: {caller})")
         return channel_id
 
 async def get_trade_forum_channel_id(config_file="config.json", caller="unknown"):

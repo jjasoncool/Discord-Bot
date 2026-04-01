@@ -16,6 +16,13 @@ from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 
 from utils.logger_config import get_article_monitor_logger
+from utils.discord_content import (
+    IMAGE_EXTENSIONS,
+    sanitize_forum_thread_title,
+    linkify_image_urls,
+    content_hash,
+    get_forum_tags,
+)
 from services.base_monitor import BaseContentMonitor
 
 logger = get_article_monitor_logger()
@@ -41,10 +48,10 @@ CONTENT_TRUNCATE_LIMIT = 3500
 BAHAMUT_FORUM_TAG_NAME = "巴哈"
 # 留言格佔位文字
 COMMENT_SLOT_PLACEHOLDER = "💬 預留留言區（等待更新中...）"
+# 每則 Discord 訊息之間的延遲（秒），避免 rate limit
+SEND_DELAY = 0.8
 # 巴哈小屋個人頁 URL 模板
 BAHAMUT_PROFILE_URL = "https://home.gamer.com.tw/profile/index.php?owner={user_id}"
-# 常見圖片副檔名
-IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
 
 
 def _author_link(name: str, user_id: str) -> str:
@@ -53,19 +60,6 @@ def _author_link(name: str, user_id: str) -> str:
         url = BAHAMUT_PROFILE_URL.format(user_id=user_id)
         return f"[**{name}**]({url})"
     return f"**{name}**"
-
-
-def _linkify_image_urls(text: str) -> str:
-    """將文字中的裸圖片 URL 轉為 markdown 連結。"""
-    import re
-    def _replace(match):
-        url = match.group(0)
-        # 檢查是否為圖片 URL
-        lower = url.lower().split("?")[0]  # 去掉 query string 再判斷
-        if any(lower.endswith(ext) for ext in IMAGE_EXTENSIONS):
-            return f"[🖼 圖片]({url})"
-        return url
-    return re.sub(r'https?://[^\s<>"]+', _replace, text)
 
 
 class BahamutMonitor(BaseContentMonitor):
@@ -273,7 +267,7 @@ class BahamutMonitor(BaseContentMonitor):
 
         # 內容（圖片 URL 轉 markdown 連結）
         content = comment.get("content") or ""
-        content = _linkify_image_urls(content)
+        content = linkify_image_urls(content)
         parts.append(f"— {content}")
 
         return " ".join(parts)
@@ -313,25 +307,6 @@ class BahamutMonitor(BaseContentMonitor):
 
     # ── Forum Thread 建立 ──
 
-    async def _get_forum_tags(self, channel: discord.ForumChannel) -> List[discord.ForumTag]:
-        """取得巴哈 forum tag。"""
-        tags = []
-        for tag in channel.available_tags:
-            if tag.name == BAHAMUT_FORUM_TAG_NAME:
-                tags.append(tag)
-                break
-        return tags
-
-    @staticmethod
-    def _sanitize_thread_title(title: str) -> str:
-        """清理 thread 標題（Discord 上限 100 字元）。"""
-        title = title.replace("\n", " ").strip()
-        if len(title) > 100:
-            title = title[:97] + "..."
-        if not title:
-            title = "（無標題）"
-        return title
-
     async def send_bahamut_thread_to_forum(
         self,
         forum_channel_id: int,
@@ -355,17 +330,17 @@ class BahamutMonitor(BaseContentMonitor):
             board_id = thread_data.get("board_id", "")
             post_id = thread_data.get("post_id", "")
 
-            # 檢查是否已發送過
+            # 檢查是否已發送過 → 走增量更新
             content_key = f"bahamut:{board_id}:{post_id}"
             if await self.is_content_sent("bahamut", content_key):
-                logger.info("巴哈討論串已存在，跳過: %s", content_key)
-                # TODO: 未來改為增量更新模式
-                return None
+                return await self._update_existing_thread(
+                    forum_channel_id, board_id, post_id, thread_data,
+                )
 
             # 1. 建立主文 embed + thread
             main_embed = self.format_main_post_embed(main_post)
-            thread_title = self._sanitize_thread_title(main_post.get("title") or "")
-            applied_tags = await self._get_forum_tags(channel)
+            thread_title = sanitize_forum_thread_title(main_post.get("title") or "")
+            applied_tags = await get_forum_tags(channel, BAHAMUT_FORUM_TAG_NAME)
 
             created = await channel.create_thread(
                 name=thread_title,
@@ -404,6 +379,7 @@ class BahamutMonitor(BaseContentMonitor):
             for idx, reply in enumerate(replies, start=2):
                 reply_embed = self.format_reply_embed(reply, idx)
                 reply_msg = await thread.send(embed=reply_embed)
+                await asyncio.sleep(SEND_DELAY)
 
                 reply_sn = reply.get("sn", "")
                 reply_state = await self._send_post_comments(
@@ -425,6 +401,244 @@ class BahamutMonitor(BaseContentMonitor):
 
         except Exception as e:
             logger.error("發送巴哈討論串到論壇頻道失敗: %s", e, exc_info=True)
+            return None
+
+    # ── 增量更新 ──
+
+    async def _update_existing_thread(
+        self,
+        forum_channel_id: int,
+        board_id: str,
+        post_id: str,
+        thread_data: Dict,
+    ) -> Optional[Dict]:
+        """已存在的討論串：增量更新 GP/BP、新留言、新回覆。"""
+        try:
+            db = await self._get_state_db()
+            old_state = await db.get_bahamut_thread(board_id, post_id)
+            if not old_state:
+                logger.error("增量更新失敗：找不到 state board=%s post_id=%s", board_id, post_id)
+                return None
+
+            thread_id = old_state["thread_id"]
+            channel = self.bot.get_channel(forum_channel_id)
+            if not channel:
+                logger.error("增量更新失敗：找不到頻道 %s", forum_channel_id)
+                return None
+
+            thread = channel.get_thread(thread_id)
+            if not thread:
+                # thread 可能被歸檔，嘗試 fetch
+                try:
+                    thread = await self.bot.fetch_channel(thread_id)
+                except Exception:
+                    logger.error("增量更新失敗：找不到 thread %s", thread_id)
+                    return None
+
+            main_post = thread_data.get("main_post", {})
+            new_replies = thread_data.get("replies") or []
+            guild_id = thread.guild.id
+
+            # 1. 更新主文 embed（GP/BP 同步，有變化才 edit）
+            main_sn = main_post.get("sn", "")
+            main_post_state = old_state["posts"].get(main_sn)
+            if main_post_state and main_post_state.get("msg_id"):
+                try:
+                    updated_embed = self.format_main_post_embed(main_post)
+                    new_hash = content_hash(updated_embed.description or "")
+                    main_msg = await thread.fetch_message(main_post_state["msg_id"])
+                    old_hash = content_hash(main_msg.embeds[0].description or "") if main_msg.embeds else ""
+                    if new_hash != old_hash:
+                        await main_msg.edit(embed=updated_embed)
+                        logger.info("增量更新：已更新主文 embed sn=%s", main_sn)
+                    else:
+                        logger.debug("增量更新：主文無變化，跳過 sn=%s", main_sn)
+                except Exception as e:
+                    logger.warning("增量更新：更新主文 embed 失敗 sn=%s: %s", main_sn, e)
+
+            # 2. 更新既有回覆的 embed（GP/BP 同步，有變化才 edit）
+            for reply in new_replies:
+                reply_sn = reply.get("sn", "")
+                reply_state = old_state["posts"].get(reply_sn)
+                if reply_state and reply_state.get("msg_id"):
+                    try:
+                        reply_idx = next(
+                            (i for i, r in enumerate(new_replies, start=2) if r.get("sn") == reply_sn),
+                            2,
+                        )
+                        updated_embed = self.format_reply_embed(reply, reply_idx)
+                        new_hash = content_hash(updated_embed.description or "")
+                        reply_msg = await thread.fetch_message(reply_state["msg_id"])
+                        old_hash = content_hash(reply_msg.embeds[0].description or "") if reply_msg.embeds else ""
+                        if new_hash != old_hash:
+                            await reply_msg.edit(embed=updated_embed)
+                            logger.info("增量更新：已更新回覆 embed sn=%s", reply_sn)
+                        else:
+                            logger.debug("增量更新：回覆無變化，跳過 sn=%s", reply_sn)
+                    except Exception as e:
+                        logger.warning("增量更新：更新回覆 embed 失敗 sn=%s: %s", reply_sn, e)
+
+            # 3. 更新留言（每個 sn 各自比對）
+            all_posts = [("main", main_sn, main_post)]
+            for reply in new_replies:
+                all_posts.append(("reply", reply.get("sn", ""), reply))
+
+            for post_type, sn, post_data in all_posts:
+                post_state = old_state["posts"].get(sn)
+                if not post_state:
+                    # 全新回覆，走新增路徑（下面第 4 步處理）
+                    continue
+
+                new_comments = post_data.get("comments") or []
+                old_comment_ids = set(post_state.get("synced_comment_ids", []))
+                delta_count = len([c for c in new_comments if c.get("comment_id") not in old_comment_ids])
+
+                logger.info(
+                    "留言比對：sn=%s 留言總數=%s 新增=%s",
+                    sn, len(new_comments), delta_count,
+                )
+
+                # 重組所有留言（舊 + 新）成 slots
+                all_comment_slots = self.split_comments_into_slots(new_comments)
+
+                # 更新預建格（edit）
+                slots = post_state.get("comment_slots", [])
+                for i, slot in enumerate(slots):
+                    if i < len(all_comment_slots):
+                        embed = self.format_comments_embed(all_comment_slots[i])
+                        used_chars = sum(len(self._format_single_comment(c)) + 1 for c in all_comment_slots[i])
+                    else:
+                        embed = discord.Embed(description=COMMENT_SLOT_PLACEHOLDER, color=COLOR_COMMENTS)
+                        used_chars = 0
+
+                    # 第三格且有溢出 → 加導航連結
+                    if i == COMMENT_SLOTS_COUNT - 1 and len(all_comment_slots) > COMMENT_SLOTS_COUNT:
+                        overflow_slots = post_state.get("overflow_slots", [])
+                        if overflow_slots:
+                            nav_link = f"https://discord.com/channels/{guild_id}/{thread.id}/{overflow_slots[0]['msg_id']}"
+                            lines = [self._format_single_comment(c) for c in all_comment_slots[i]]
+                            lines.append("")
+                            lines.append(f"⬇️ [更多留言...]({nav_link})")
+                            description = "\n".join(lines)
+                            if len(description) > EMBED_DESC_LIMIT:
+                                description = description[:EMBED_DESC_LIMIT - 20] + "\n\n⋯（已截斷）"
+                            embed = discord.Embed(description=description, color=COLOR_COMMENTS)
+
+                    try:
+                        new_hash = content_hash(embed.description or "")
+                        msg = await thread.fetch_message(slot["msg_id"])
+                        old_hash = content_hash(msg.embeds[0].description or "") if msg.embeds else ""
+                        if new_hash != old_hash:
+                            await msg.edit(embed=embed)
+                            slot["used_chars"] = used_chars
+                            logger.info("增量更新：已更新留言格 sn=%s slot=%s", sn, i)
+                        else:
+                            logger.debug("增量更新：留言格無變化，跳過 sn=%s slot=%s", sn, i)
+                    except Exception as e:
+                        logger.warning("增量更新：edit 留言格失敗 sn=%s slot=%s: %s", sn, i, e)
+
+                # 更新溢出格（edit 既有的，有變化才 edit）
+                overflow_slots = post_state.get("overflow_slots", [])
+                overflow_data_start = COMMENT_SLOTS_COUNT
+                for i, overflow_slot in enumerate(overflow_slots):
+                    data_idx = overflow_data_start + i
+                    if data_idx < len(all_comment_slots):
+                        embed = self.format_comments_embed(all_comment_slots[data_idx])
+                        used_chars = sum(len(self._format_single_comment(c)) + 1 for c in all_comment_slots[data_idx])
+
+                        # 如果還有下一格溢出，加導航連結
+                        next_overflow_idx = i + 1
+                        if next_overflow_idx < len(overflow_slots):
+                            next_msg_id = overflow_slots[next_overflow_idx]["msg_id"]
+                            lines = [self._format_single_comment(c) for c in all_comment_slots[data_idx]]
+                            lines.append("")
+                            lines.append(f"⬇️ [更多留言...](https://discord.com/channels/{guild_id}/{thread.id}/{next_msg_id})")
+                            description = "\n".join(lines)
+                            if len(description) > EMBED_DESC_LIMIT:
+                                description = description[:EMBED_DESC_LIMIT - 20] + "\n\n⋯（已截斷）"
+                            embed = discord.Embed(description=description, color=COLOR_COMMENTS)
+
+                        try:
+                            new_hash = content_hash(embed.description or "")
+                            msg = await thread.fetch_message(overflow_slot["msg_id"])
+                            old_hash = content_hash(msg.embeds[0].description or "") if msg.embeds else ""
+                            if new_hash != old_hash:
+                                await msg.edit(embed=embed)
+                                overflow_slot["used_chars"] = used_chars
+                                logger.info("增量更新：已更新溢出格 sn=%s overflow=%s", sn, i)
+                            else:
+                                logger.debug("增量更新：溢出格無變化，跳過 sn=%s overflow=%s", sn, i)
+                        except Exception as e:
+                            logger.warning("增量更新：edit 溢出格失敗 sn=%s overflow=%s: %s", sn, i, e)
+
+                # 需要新的溢出格？
+                total_existing_slots = len(slots) + len(overflow_slots)
+                if len(all_comment_slots) > total_existing_slots:
+                    # 找最後一個 msg 作為 reply anchor
+                    if overflow_slots:
+                        last_msg_id = overflow_slots[-1]["msg_id"]
+                        last_comments = all_comment_slots[total_existing_slots - 1] if total_existing_slots - 1 < len(all_comment_slots) else []
+                    else:
+                        last_msg_id = slots[-1]["msg_id"]
+                        last_comments = all_comment_slots[COMMENT_SLOTS_COUNT - 1] if COMMENT_SLOTS_COUNT - 1 < len(all_comment_slots) else []
+
+                    prev_msg = await thread.fetch_message(last_msg_id)
+
+                    for data_idx in range(total_existing_slots, len(all_comment_slots)):
+                        overflow_comments = all_comment_slots[data_idx]
+                        embed = self.format_comments_embed(overflow_comments)
+                        used_chars = sum(len(self._format_single_comment(c)) + 1 for c in overflow_comments)
+
+                        overflow_msg = await thread.send(embed=embed, reference=prev_msg)
+                        await asyncio.sleep(SEND_DELAY)
+                        overflow_slots.append({"msg_id": overflow_msg.id, "used_chars": used_chars})
+
+                        # edit 前一格加導航連結
+                        nav_link = f"https://discord.com/channels/{guild_id}/{thread.id}/{overflow_msg.id}"
+                        lines = [self._format_single_comment(c) for c in last_comments]
+                        lines.append("")
+                        lines.append(f"⬇️ [更多留言...]({nav_link})")
+                        description = "\n".join(lines)
+                        if len(description) > EMBED_DESC_LIMIT:
+                            description = description[:EMBED_DESC_LIMIT - 20] + "\n\n⋯（已截斷）"
+                        await prev_msg.edit(embed=discord.Embed(description=description, color=COLOR_COMMENTS))
+
+                        prev_msg = overflow_msg
+                        last_comments = overflow_comments
+
+                # 更新 synced_comment_ids
+                post_state["synced_comment_ids"] = [c.get("comment_id") for c in new_comments]
+
+            # 4. 新回覆（state 裡沒有的 sn）
+            existing_sns = set(old_state["posts"].keys())
+            new_reply_idx = len(existing_sns) + 1  # 接續原本的回覆編號
+            for reply in new_replies:
+                reply_sn = reply.get("sn", "")
+                if reply_sn in existing_sns:
+                    continue
+
+                new_reply_idx += 1
+                reply_embed = self.format_reply_embed(reply, new_reply_idx)
+                reply_msg = await thread.send(embed=reply_embed)
+                await asyncio.sleep(SEND_DELAY)
+
+                reply_state = await self._send_post_comments(thread=thread, post_data=reply)
+                reply_state["msg_id"] = reply_msg.id
+                old_state["posts"][reply_sn] = reply_state
+
+                logger.info("增量更新：新增回覆 sn=%s reply_idx=%s", reply_sn, new_reply_idx)
+
+            # 5. 存回 state DB
+            await db.save_bahamut_thread(board_id, post_id, old_state)
+
+            logger.info(
+                "巴哈討論串增量更新完成: board=%s post_id=%s",
+                board_id, post_id,
+            )
+            return old_state
+
+        except Exception as e:
+            logger.error("增量更新巴哈討論串失敗: %s", e, exc_info=True)
             return None
 
     async def _send_post_comments(
@@ -463,6 +677,7 @@ class BahamutMonitor(BaseContentMonitor):
                 used_chars = 0
 
             msg = await thread.send(embed=embed)
+            await asyncio.sleep(SEND_DELAY)
             post_state["comment_slots"].append({
                 "msg_id": msg.id,
                 "used_chars": used_chars,
@@ -489,6 +704,7 @@ class BahamutMonitor(BaseContentMonitor):
                     embed=embed,
                     reference=prev_msg,
                 )
+                await asyncio.sleep(SEND_DELAY)
                 post_state["overflow_slots"].append({
                     "msg_id": overflow_msg.id,
                     "used_chars": used_chars,

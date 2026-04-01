@@ -18,14 +18,16 @@ logger = get_article_monitor_logger()
 
 # 全域共用 StateDB 實例（避免多個 monitor 各開各的連線）
 _shared_state_db: Optional[StateDB] = None
+_shared_state_db_lock = asyncio.Lock()
 
 
 async def get_shared_state_db() -> StateDB:
-    """取得全域共用的 StateDB 實例。"""
+    """取得全域共用的 StateDB 實例（併發安全）。"""
     global _shared_state_db
-    if _shared_state_db is None:
-        _shared_state_db = StateDB()
-        await _shared_state_db.connect()
+    async with _shared_state_db_lock:
+        if _shared_state_db is None:
+            _shared_state_db = StateDB()
+            await _shared_state_db.connect()
     return _shared_state_db
 
 

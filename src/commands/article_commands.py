@@ -103,6 +103,7 @@ class ArticleCommands(commands.Cog):
         self.monitoring_task = None
         self.fb_monitoring_task = None
         self.ptt_monitoring_task = None
+        self._bahamut_sync_started_at = None  # 批次同步開始時間
         self.monitored_channels = []
 
     async def cog_load(self):
@@ -605,15 +606,15 @@ class ArticleCommands(commands.Cog):
 
     # ── 巴哈文章指令 ──
 
-    @app_commands.command(name="get_baha_post", description="取得巴哈討論串並發送到論壇頻道")
+    @app_commands.command(name="get_baha_post", description="取得巴哈討論串並發送到論壇頻道（不填 ID 則同步最近 3 天）")
     @app_commands.describe(
-        post_id="討論串 ID（snA）",
+        post_id="討論串 ID（snA），不填則同步最近 3 天所有文章",
         board_id="看板 ID（預設 74934）",
     )
     async def get_baha_post(
         self,
         interaction: discord.Interaction,
-        post_id: str,
+        post_id: str = None,
         board_id: str = "74934",
     ):
         """從 Scraper API 取得巴哈討論串並發送到論壇頻道。"""
@@ -623,39 +624,81 @@ class ArticleCommands(commands.Cog):
 
         await interaction.response.defer(ephemeral=True)
 
-        try:
-            config_data = json.load(open("config.json", "r", encoding="utf-8"))
-            forum_channel_id = config_data.get("forum_article_channel_id")
-            if not forum_channel_id:
-                await interaction.followup.send("❌ config.json 中沒有設定 forum_article_channel_id", ephemeral=True)
-                return
-        except Exception as e:
-            await interaction.followup.send(f"❌ 讀取 config.json 失敗: {e}", ephemeral=True)
+        from utils.utils import ChannelConfig
+        forum_channel_id = ChannelConfig.load_config(caller="get_baha_post").get("forum_article_channel_id")
+        if not forum_channel_id:
+            await interaction.followup.send("❌ config.json 中沒有設定 forum_article_channel_id", ephemeral=True)
             return
 
         from services.bahamut_monitor import BahamutMonitor
         monitor = BahamutMonitor(self.bot)
 
-        state = await monitor.test_send_single_thread(
-            forum_channel_id=forum_channel_id,
-            board_id=board_id,
-            post_id=post_id,
-        )
-
-        if state:
-            thread_id = state.get("thread_id")
-            posts_count = len(state.get("posts", {}))
+        if post_id:
+            # 單篇模式（通常快，直接等結果）
             await interaction.followup.send(
-                f"✅ 巴哈討論串已發送！\n"
-                f"Thread ID: {thread_id}\n"
-                f"文章數（含主文+回覆）: {posts_count}",
+                f"⏳ 正在處理巴哈討論串 post_id={post_id}...",
                 ephemeral=True,
             )
+            state = await monitor.test_send_single_thread(
+                forum_channel_id=forum_channel_id,
+                board_id=board_id,
+                post_id=post_id,
+            )
+            if state:
+                posts_count = len(state.get("posts", {}))
+                await interaction.followup.send(
+                    f"✅ 巴哈討論串已發送！\n"
+                    f"Thread ID: {state.get('thread_id')}\n"
+                    f"文章數（含主文+回覆）: {posts_count}",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    f"❌ 發送失敗或無變化，請查看日誌。board_id={board_id}, post_id={post_id}",
+                    ephemeral=True,
+                )
         else:
+            # 批次模式：檢查是否已在執行中
+            if self._bahamut_sync_started_at is not None:
+                from datetime import datetime
+                elapsed = (datetime.now() - self._bahamut_sync_started_at).total_seconds()
+                minutes = int(elapsed // 60)
+                seconds = int(elapsed % 60)
+                await interaction.followup.send(
+                    f"⚠️ 巴哈批次同步已在執行中（已執行 {minutes} 分 {seconds} 秒），請等待完成。",
+                    ephemeral=True,
+                )
+                return
+
+            threads = await monitor.fetch_recent_threads(days=3, limit=50, board_id=board_id)
+            if not threads:
+                await interaction.followup.send("ℹ️ 沒有找到最近 3 天的巴哈討論串", ephemeral=True)
+                return
+
             await interaction.followup.send(
-                f"❌ 發送失敗，請查看日誌。board_id={board_id}, post_id={post_id}",
+                f"⏳ 開始背景同步 {len(threads)} 個巴哈討論串，完成後會在論壇頻道看到結果。",
                 ephemeral=True,
             )
+
+            cog = self  # 給 closure 用
+
+            async def _batch_sync():
+                from datetime import datetime
+                cog._bahamut_sync_started_at = datetime.now()
+                try:
+                    processed = 0
+                    for thread_data in threads:
+                        try:
+                            result = await monitor.send_bahamut_thread_to_forum(forum_channel_id, thread_data)
+                            if result:
+                                processed += 1
+                        except Exception as e:
+                            logger.error("批次同步單篇失敗: post_id=%s err=%s", thread_data.get("post_id"), e)
+                    logger.info("巴哈批次同步完成: 掃描=%s 處理=%s", len(threads), processed)
+                finally:
+                    cog._bahamut_sync_started_at = None
+
+            asyncio.create_task(_batch_sync())
 
 
 async def setup(bot):

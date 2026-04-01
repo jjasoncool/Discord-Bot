@@ -31,6 +31,24 @@
 - 2026-04-01：新增 GP/BP 數字提取（主文 + 留言）、文章多頁遍歷（C.php 分頁）、列表分頁範圍（B.php start/end page）、CLI 預設寫 DB。
 - 2026-04-01：定案 Bahamut → Discord relay 架構：HTTP webhook 通知 + Scraper API + embed 呈現 + 留言格預建/溢出機制。
 - 2026-04-01：Telegram Relay 大檔案處理 — publish_to_channel 加入檔案大小檢查與自動壓縮（ffmpeg 影片 / Pillow 圖片），Dockerfile 加裝 ffmpeg。壓縮失敗或仍超限則跳過該檔，不阻斷其他內容。
+- 2026-04-02：完成 Bahamut → Discord relay 首版 + 增量更新 + SQLite state 遷移。詳細變更如下：
+  - Scraper API：`/api/bahamut/recent` + `/api/bahamut/{board_id}/{post_id}`
+  - `bahamut_monitor.py`：embed 格式化（主文藍/回覆綠/留言灰）+ 留言格預建3格 + 鏈式溢出導航
+  - `/get_baha_post` 斜線命令（article_commands.py，board_id 預設 74934）
+  - 增量更新：GP/BP 同步 + 新留言 edit + 新回覆 append，hash 比對跳過無變化（防 rate limit）
+  - `state_db.py`：SQLite 取代 sent_articles.json，5 張表（sent_content / forum_thread_state / bahamut_post_state / bahamut_comment_slot / bahamut_synced_comment）
+  - `base_monitor.py`：所有 state 方法改 async，全域共用 StateDB + asyncio.Lock 併發安全
+  - `article_monitor.py`：所有 state 呼叫加 await
+  - 留言格式：作者連結巴哈小屋、圖片 URL 轉 `[🖼 圖片](url)`、🔥/👍/👎 條件顯示
+  - JSON → SQLite 手動遷移腳本：`migrate_json_to_sqlite.py`
+- 2026-04-02：完成 HTTP webhook 通知 + 共用工具抽取 + config 快取。詳細變更：
+  - `notify_server.py`：通用 aiohttp.web 通知伺服器，`POST /notify/{source}` 分派架構
+  - `main.py`（scraper）：巴哈抓完存 DB 後呼叫 `_notify_discord_bot("bahamut", ...)`
+  - `discord_bot.py`：on_ready 啟動 notify server (port 5000)
+  - `docker-compose.yaml`：discord-bot 加 `expose: ["5000"]`
+  - `discord_content.py`：共用工具抽取（sanitize_forum_thread_title / linkify_image_urls / content_hash / chunk_discord_files / get_forum_tags）
+  - `ChannelConfig`：加入 TTL 5 分鐘記憶體快取，避免重複讀檔
+  - Scraper config：`board_end_page` 1→2（自動抓前 2 頁）、`export_sample_json` 關閉
 
 ---
 
@@ -101,7 +119,7 @@ last_confirmed: 2026-03-31
 | 跨來源整合（Article/FB/PTT/TG） | 有方向，尚未全面收斂 | 35% | [跨來源整合](#跨來源整合專區) |
 | Bahamut parser | **目前最活躍主線**，結構已收斂，含多頁遍歷 | 85% | [Bahamut 專區](#bahamut-專區) |
 | Bahamut DB schema / upsert | **第一版已落地**，含 GP/BP | 80% | [DB 設計](#bahamut-db-schema-設計) |
-| Bahamut → Discord relay | **首版已落地，待接 state 追蹤** | 50% | [呈現策略](#bahamut-discord-呈現策略) |
+| Bahamut → Discord relay | **全自動閉環已實作，待端到端測試** | 90% | [呈現策略](#bahamut-discord-呈現策略) |
 | Bahamut RAG / AI 整合 | 尚未開始 | 5% | [RAG TODO](#第三階段整合-ai--pgvector--rag) |
 | Discord Bot 管理入口 | 規劃中 | 10% | [管理 TODO](#discord-bot-管理入口與指令整理-todo) |
 
@@ -242,7 +260,7 @@ type: STATE
 status: confirmed
 depends_on: []
 affects: [bahamut-contract-formal, bahamut-next-formal, bahamut-risk-formal]
-last_confirmed: 2026-03-31
+last_confirmed: 2026-04-02
 -->
 
 **目前主線**
@@ -266,20 +284,34 @@ last_confirmed: 2026-03-31
 - GP/BP 數字提取：主文/回文從 `div.gp > a.count` / `div.bp > a.count` 取，留言從 `a.gp-count[data-gp]` / `a.bp-count[data-bp]` 取，fallback 從 `raw_text` 提取
 - CLI 預設寫 DB（透過 container 注入 db_manager），不需額外 flag
 
-**目前已落地（Discord relay，2026-04-01）**
+**目前已落地（Discord relay + 增量更新，2026-04-02）**
 - Scraper API：`/api/bahamut/recent`、`/api/bahamut/{board_id}/{post_id}`（含主文+回覆+留言，按 snA 分組）
 - Discord Bot：`bahamut_monitor.py`（embed 格式化 + 留言格預建/溢出 + 鏈式導航連結）
 - 斜線命令：`/get_baha_post post_id:<snA> [board_id:74934]`
 - 留言格式：`🔥 B1 **user** 👍107 — content`，圖片 URL 轉 `[🖼 圖片](url)`，作者名連結巴哈小屋
 - 溢出導航：格3→格4→格5 鏈式 reply + `⬇️ 更多留言...` 導航連結
+- 增量更新：已存在 thread 時自動走 `_update_existing_thread`（GP/BP edit + 新留言重組 slot + 新回覆 append）
+- hash 比對：無變化的 embed/留言格跳過不 edit（防 Discord rate limit）
+- `BahamutMonitor` 繼承 `BaseContentMonitor`，共用 StateDB
+
+**目前已落地（State 追蹤 SQLite 遷移，2026-04-02）**
+- `state_db.py`：async SQLite 封裝，5 張表（`sent_content` / `forum_thread_state` / `bahamut_post_state` / `bahamut_comment_slot` / `bahamut_synced_comment`）
+- `base_monitor.py`：所有 state 方法改 async，全域共用 StateDB + `asyncio.Lock` 併發安全
+- `article_monitor.py`：所有 state 呼叫加 `await`
+- `migrate_json_to_sqlite.py`：手動遷移腳本，sent_articles.json → sent_articles.db
+- 遷移已執行完成（446 articles + 386 fb + 507 ptt）
+
+**目前已落地（webhook 通知 + 共用工具，2026-04-02）**
+- `notify_server.py`：通用 aiohttp.web server，`POST /notify/{source}` 分派架構，日後加新來源只需加 handler
+- Scraper `main.py`：巴哈抓完存 DB 後自動 POST `http://discord-bot:5000/notify/bahamut`
+- `discord_bot.py`：on_ready 啟動 notify server (port 5000)
+- `discord_content.py`：共用工具（sanitize_forum_thread_title / linkify_image_urls / content_hash / chunk_discord_files / get_forum_tags）
+- `ChannelConfig` 快取：TTL 5 分鐘，避免每次讀檔
+- Scraper config：自動抓前 2 頁、關閉 JSON sample 輸出
 
 **目前尚未落地**
 - 正式 DB migration（第一版用 `create_tables()` 自動建表）
 - 防惡意覆蓋機制（`prev_*` / `content_hash` / `shrink_ratio`）
-- State 追蹤（`sent_bahamut_state`）— 已規劃 SQLite 方案，尚未實作
-- HTTP webhook 通知機制（Scraper → Bot）
-- 增量更新模式（edit 既有 thread 而非重建）
-- 跨來源整合（`BaseContentMonitor` 接入）
 - RAG ingestion
 
 #### BAHAMUT.CONTRACT
@@ -405,19 +437,19 @@ type: RISK
 status: confirmed
 depends_on: [bahamut-id-formal, bahamut-structure-formal]
 affects: [bahamut-next-formal]
-last_confirmed: 2026-03-31
+last_confirmed: 2026-04-02
 -->
 
 **目前主要風險**
 1. `snB == sn` 雖高度吻合，但不能當作 100% 已證明事實
 2. HTML 結構若再變，`section.c-section` / `Commendlist_*` selector 可能失效
-3. State 追蹤尚未實作，重複呼叫 `/get_baha_post` 會重複建立 thread
-4. `sent_articles.json` 持續膨脹，已規劃 SQLite 遷移但尚未執行
 
 **已解除的風險**
 - ~~DB 層尚未實作~~ — 已落地，upsert 邏輯已驗證
 - ~~sample JSON 與程式意圖不一致~~ — 已驗證通過
 - ~~post_id / snA / sn 命名未收斂~~ — 已定案 `post_id = snA`
+- ~~State 追蹤尚未實作~~ — SQLite 已遷移，增量更新含去重
+- ~~sent_articles.json 膨脹~~ — 已遷移至 SQLite
 
 #### BAHAMUT.NEXT
 
@@ -427,29 +459,16 @@ type: TODO
 status: confirmed
 depends_on: [bahamut-state-formal, bahamut-contract-formal, bahamut-risk-formal]
 affects: []
-last_confirmed: 2026-03-31
+last_confirmed: 2026-04-02
 -->
 
-**已完成（2026-03-31）**
-1. ~~重跑最新 sample~~ — 已驗證 `bahamut_sample_20260331_224709.json`
-2. ~~驗證主文頂層欄位是否符合正式契約~~ — 通過，`ip`/`area` 已補進契約
-3. ~~驗證 `replies[]` 與各自 `comments[]`~~ — 通過
-4. ~~確定 `post_id / snA / sn` 最終命名~~ — `post_id = snA`（方案 A，JSON 保留兩欄位，DB 都存）
-5. ~~確認留言正式唯一鍵~~ — 採 `(parent_sn, comment_id)`
-6. ~~DB 第一版落地~~ — model + upsert + save_articles_to_db + main.py 串接
-
-**已完成（2026-04-01）**
-7. ~~Bahamut 排程已恢復~~ — `main.py` 每 1 小時自動抓取並寫 DB
-8. ~~Scraper API 已實作~~ — `/api/bahamut/recent` + `/api/bahamut/{board_id}/{post_id}`
-9. ~~Discord relay embed 格式~~ — 主文（藍）、回覆（綠）、留言格（灰）+ 鏈式溢出導航
-10. ~~斜線命令 `/get_baha_post`~~ — 手動取得並發送到論壇頻道
+**已完成項目已歸檔整理（截至 2026-04-02）**
+- 已完成項目不再保留於此待辦清單，避免重複追蹤。
+- 主要完成里程碑已反映於 STATE 區塊。
 
 **下一步（依優先序）**
-1. 確認 embed 視覺效果是否需要微調
-2. 將 `sent_articles.json` + 巴哈 state 統一遷移至 SQLite
-3. 實作增量更新模式（已存在的 thread 用 edit 而非重建）
-4. 實作 HTTP webhook 通知（Scraper 寫完 DB → POST discord-bot）
-5. 接入 `BaseContentMonitor` 做跨來源整合
+1. 端到端測試：重啟兩容器後等 Scraper 自動抓取 → 確認 Bot 自動發文/更新
+2. RAG ingestion
 
 ### Bahamut 歷史附錄（raw history / appendix）
 
@@ -928,7 +947,7 @@ id: bahamut-discord-display
 type: DECISION
 status: confirmed
 depends_on: [bahamut-db-schema]
-last_confirmed: 2026-04-01
+last_confirmed: 2026-04-02
 -->
 
 **核心原則：1 snA = 1 Discord Forum Thread，主文 + 回覆共存同一 thread。**
@@ -1052,79 +1071,22 @@ last_confirmed: 2026-03-31
 id: bahamut-todo
 type: TODO
 status: confirmed
-last_confirmed: 2026-04-01
+last_confirmed: 2026-04-02
 -->
 
-**當前待辦（依優先序）：**
-1. 確認 Discord embed 視覺效果，微調格式
-2. `sent_articles.json` + 巴哈 state → SQLite 遷移
-3. 巴哈增量更新模式（edit 既有 thread）
-4. HTTP webhook 通知（Scraper → Bot）
-5. 跨來源整合（`BaseContentMonitor` 接入）
+**當前待辦：**
+1. 端到端測試：重啟兩容器後等 Scraper 自動抓取 → 確認全自動閉環
+2. RAG ingestion（不急）
 
-**現在不該優先做：** 不要先做 RAG ingestion、不要先抽象過度泛化 base class
+**現在不該優先做：** 不要先抽象過度泛化 base class
 
-#### 第一階段：MVP（先抓到文章與留言）
+#### 第一階段 MVP + 第二階段 DB — ✅ 已完成，歸檔至 `TODO-completed.md`
 
-**目標：** 穩定抓到巴哈指定看板文章列表、單篇主文、主文留言、能評估回文可抓性
+#### 剩餘待辦（第二階段）
 
-**交付成果：**
-- `bahamut_scraper_service.py` MVP 骨架
-- 可用 `cloudscraper` / `requests session` 抓取巴哈頁面
-- 列表頁 / 文章頁 / 留言抓取成功
-- 產出 JSON 範例檔，確認欄位結構
-
-**MVP 具體落地欄位：**
-- 列表抓取：`post_id`, `title`, `author`, `category`, `published_at`, `url`
-- 單篇主文：`content`, `author_meta`, `published_at`, `category`
-- 留言：`comment_id/position`, `user_id`, `content`, `published_at`
-- 驗證輸出：`src/scraper/data/bahamut_samples/*.json`
-
-**Parser 修正紀錄（2026-03-29）：**
-- 先前樣本只抓到較前段文章（多為置頂文），原因是列表 parser 以 title link 為主掃描，未以 `tr.b-list__row.b-list-item` 為單位做完整 row 解析
-- 這版仍屬 HTML selector + fallback parser，需用新樣本驗證覆蓋度
-
-**風險與對策：**
-1. anti-bot / 結構變動風險高 → 對策：保留 raw + selector fallback + parser version
-2. 文章/留言量大 → 對策：先增量 cursor，同步窗口限制 + retry/backoff
-3. 欄位易漂移 → 對策：先定 JSON contract，再進 DB migration
-
-- [x] 研究巴哈文章列表頁、文章頁、留言區、回文區的實際 HTML / API 結構
-- [x] 確認是否需要登入 cookie、額外 headers、referer、anti-bot 處理
-- [x] 以 `cloudscraper` 建立 Bahamut session 與 retry 機制
-- [x] 實作文章列表抓取：標題、分類、作者、時間、URL、文章 ID
-- [x] 實作文章主文抓取：主文內容、作者資訊、發文時間、分類
-- [x] 實作主文留言抓取：留言者、內容、時間、樓層/位置
-- [x] 研究回文與回文留言資料來源，決定第一版是否先支援主文留言、第二版再補回文
-- [x] 定義 Bahamut JSON payload 結構（post / comments / replies / reply_comments）
-- [x] 先以檔案輸出驗證資料正確性，不急著寫 DB
-- [x] 建立錯誤處理、限速、重試、日誌紀錄
-
-**完成標準：** 能穩定抓到文章列表、至少一篇完整文章與 300~500 則留言樣本、JSON 可供後續 DB 與 AI pipeline 使用
-
-#### 第二階段：整合資料庫
-
-**目標：** 巴哈文章、留言、回文正式存入資料庫，支援查詢與審查，預留 moderation 欄位
-
-**交付成果：**
-- SQLAlchemy models + Alembic migration
-- upsert / 增量同步流程
-- 可查特定 user 在哪些文章留言過
-- 可查某篇文章的完整討論串
-
-- [x] 設計 `bahamut_posts` 主表（主文+回文共用，以 position 區分）
-- [x] 設計 `bahamut_post_comments` 留言表
-- ~~設計 `bahamut_post_replies` 回文表~~ — 不需要，回文併入 `bahamut_posts`
-- ~~設計 `bahamut_reply_comments` 回文留言表~~ — 不需要，回文留言併入 `bahamut_post_comments`
-- [x] 規劃 `raw_json` / `snapshot_json` 保存策略
 - [ ] 規劃增量同步欄位（`discussion_hash`、`last_comment_sync_at`、`last_reply_sync_at`）
 - [ ] 預留 moderation 欄位
-- [x] 建立必要索引
-- [x] 在 scraper service 中實作 upsert 與增量更新
-- [x] 補上查詢 service：Scraper API `/api/bahamut/recent` + `/api/bahamut/{board_id}/{post_id}`
 - [ ] 驗證 Discord bot 後續取用資料時的查詢效率
-
-**完成標準：** 新文章自動寫入 DB、舊文章可增量補抓、可 SQL 查詢使用者歷史發言、可完整還原單篇討論結構
 
 #### 第三階段：整合 AI / pgvector / RAG
 
@@ -1153,8 +1115,8 @@ last_confirmed: 2026-04-01
 - [ ] 驗證 Discord 問答是否可同時引用 Discord 聊天資料與巴哈論壇資料
 
 **建議執行順序：**
-- [ ] 先完成第一階段 MVP，不先碰 AI
-- [ ] 第一階段穩定後再做第二階段 DB
+- 第一階段 MVP ✅ 已完成
+- 第二階段 DB ✅ 大部分完成（剩餘 moderation / 增量同步欄位）
 - [ ] 第二階段穩定後再做第三階段 RAG
 - [ ] 每階段保留 JSON 範例與測試案例
 

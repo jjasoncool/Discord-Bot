@@ -5,6 +5,8 @@ services:
       dockerfile: docker/discord_bot/dockerfile
     container_name: discord-bot
     restart: always
+    expose:
+      - "5000"  # notify server，供 scraper 內網通知用
     volumes:
       - type: bind
         source: ./src

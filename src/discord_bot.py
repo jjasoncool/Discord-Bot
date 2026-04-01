@@ -111,6 +111,9 @@ async def on_ready():
     await auto_start_article_monitor(bot)
     await auto_start_telegram_relay(bot)
 
+    # 啟動 Notify Server（接收 Scraper webhook 通知）
+    await auto_start_notify_server(bot)
+
     try:
         # 列出已註冊的命令
         commands = await bot.tree.fetch_commands()
@@ -359,6 +362,25 @@ async def auto_start_telegram_relay(bot):
 
     except Exception as e:
         logger.error(f"自動啟動 Telegram Relay Worker 時發生錯誤: {e}", exc_info=True)
+
+
+async def auto_start_notify_server(bot):
+    """啟動 Notify Server（接收 Scraper webhook 通知）。"""
+    try:
+        # 避免 on_ready reconnect 重複啟動
+        if getattr(bot, "_notify_server", None):
+            logger.info("Notify Server 已在運行中，略過重複啟動")
+            return
+
+        from services.notify_server import NotifyServer
+        server = NotifyServer(bot)
+        await server.start()
+        bot._notify_server = server
+        logger.info("✅ 已自動啟動 Notify Server (port 5000)")
+
+    except Exception as e:
+        logger.error(f"自動啟動 Notify Server 時發生錯誤: {e}", exc_info=True)
+
 
 # 主函數
 def main():

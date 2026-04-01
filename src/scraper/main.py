@@ -6,6 +6,7 @@
 import schedule
 import time
 import threading
+import requests
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import uvicorn
@@ -148,6 +149,19 @@ def ptt_scrape_task():
             ptt_service.db_manager.close()
 
 
+DISCORD_BOT_NOTIFY_URL = "http://discord-bot:5000"
+
+
+def _notify_discord_bot(source: str, payload: dict = None):
+    """通知 Discord Bot 有新資料可處理。失敗只 log，不阻斷排程。"""
+    try:
+        url = f"{DISCORD_BOT_NOTIFY_URL}/notify/{source}"
+        resp = requests.post(url, json=payload or {}, timeout=10)
+        logger.info("已通知 Discord Bot: %s status=%s", url, resp.status_code)
+    except Exception as e:
+        logger.warning("通知 Discord Bot 失敗（不影響排程）: %s", e)
+
+
 def bahamut_scrape_task():
     """Bahamut 爬蟲任務：抓取 → 寫入 DB → 輸出 sample JSON"""
     container = ServiceContainer()
@@ -178,6 +192,9 @@ def bahamut_scrape_task():
                 saved_count,
                 output_path,
             )
+
+            # 通知 Discord Bot 有新資料
+            _notify_discord_bot("bahamut", {"board_id": "74934", "count": saved_count})
         else:
             logger.warning(
                 "Bahamut 爬蟲任務未完成: error=%s gate=%s",
