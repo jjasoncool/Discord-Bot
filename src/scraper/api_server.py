@@ -11,7 +11,7 @@ import json
 from sqlalchemy import case
 
 from db.models import ArticleMenu, ArticleDetail, FBPost, FBImage, PTTPost, BahamutPost, BahamutPostComment, get_db_session
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, subqueryload
 from utils.logger import get_logger
 
 # 建立 FastAPI 實例
@@ -692,48 +692,65 @@ def _group_posts_into_threads(posts: List[BahamutPost]) -> List[BahamutThreadRes
 @app.get("/api/bahamut/recent", response_model=BahamutThreadsResponse)
 async def get_recent_bahamut_threads(
     days: int = 3,
+    hours: Optional[int] = None,
     limit: int = 50,
     board_id: Optional[str] = None,
     order: str = "desc",
     db: Session = Depends(get_db)
 ):
-    """取得最近的巴哈討論串（含主文、回覆、留言）"""
+    """取得最近的巴哈討論串（含主文、回覆、留言）。hours 優先於 days。"""
     try:
-        start_date = datetime.now() - timedelta(days=days)
+        if hours is not None:
+            start_date = datetime.now() - timedelta(hours=hours)
+        else:
+            start_date = datetime.now() - timedelta(days=days)
 
-        # 先找出符合條件的主文 post_id（snA）
-        main_query = db.query(BahamutPost.post_id, BahamutPost.board_id).filter(
-            BahamutPost.position == 1,
-            BahamutPost.is_deleted == False,
-            (BahamutPost.published_at >= start_date) | (BahamutPost.created_at >= start_date),
+        # 找出活躍的 snA：只要該 snA 底下任一 post 或 comment 的 published_at 在時間範圍內
+        from sqlalchemy import func, or_
+        latest_activity = func.max(
+            case(
+                (BahamutPostComment.published_at.isnot(None), BahamutPostComment.published_at),
+                else_=BahamutPost.published_at,
+            )
+        ).label("latest_activity")
+
+        active_sna_query = (
+            db.query(
+                BahamutPost.post_id,
+                BahamutPost.board_id,
+                latest_activity,
+            )
+            .outerjoin(BahamutPostComment, BahamutPostComment.bahamut_post_id == BahamutPost.id)
+            .filter(BahamutPost.is_deleted.in_([False, None]))
+            .group_by(BahamutPost.board_id, BahamutPost.post_id)
+            .having(or_(
+                func.max(BahamutPost.published_at) >= start_date,
+                func.max(BahamutPostComment.published_at) >= start_date,
+            ))
         )
         if board_id:
-            main_query = main_query.filter(BahamutPost.board_id == board_id)
+            active_sna_query = active_sna_query.filter(BahamutPost.board_id == board_id)
 
-        published_sort = case(
-            (BahamutPost.published_at.is_(None), BahamutPost.created_at),
-            else_=BahamutPost.published_at,
-        )
         if order.lower() == "asc":
-            main_query = main_query.order_by(published_sort.asc())
+            active_sna_query = active_sna_query.order_by(latest_activity.asc())
         else:
-            main_query = main_query.order_by(published_sort.desc())
+            active_sna_query = active_sna_query.order_by(latest_activity.desc())
 
-        main_query = main_query.limit(limit)
-        thread_keys = main_query.all()
+        active_sna_query = active_sna_query.limit(limit)
+        thread_keys = active_sna_query.all()
 
         if not thread_keys:
             return BahamutThreadsResponse(success=True, message="沒有符合條件的巴哈討論串", threads=[], total_count=0)
 
-        # 取出所有相關的 post（主文 + 回覆），含留言
-        post_id_pairs = [(row.board_id, row.post_id) for row in thread_keys]
+        # 一次查所有相關 posts + comments
+        target_post_ids = [row.post_id for row in thread_keys]
         from sqlalchemy import tuple_
         all_posts = (
             db.query(BahamutPost)
-            .options(joinedload(BahamutPost.comments))
+            .options(subqueryload(BahamutPost.comments))
             .filter(
-                tuple_(BahamutPost.board_id, BahamutPost.post_id).in_(post_id_pairs),
-                BahamutPost.is_deleted == False,
+                BahamutPost.post_id.in_(target_post_ids),
+                BahamutPost.is_deleted.in_([False, None]),
             )
             .all()
         )
@@ -762,11 +779,11 @@ async def get_bahamut_thread(
     try:
         posts = (
             db.query(BahamutPost)
-            .options(joinedload(BahamutPost.comments))
+            .options(subqueryload(BahamutPost.comments))
             .filter(
                 BahamutPost.board_id == board_id,
                 BahamutPost.post_id == post_id,
-                BahamutPost.is_deleted == False,
+                BahamutPost.is_deleted.in_([False, None]),
             )
             .all()
         )

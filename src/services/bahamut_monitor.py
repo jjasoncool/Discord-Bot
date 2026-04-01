@@ -439,24 +439,30 @@ class BahamutMonitor(BaseContentMonitor):
             new_replies = thread_data.get("replies") or []
             guild_id = thread.guild.id
 
-            # 1. 更新主文 embed（GP/BP 同步，有變化才 edit）
+            # 1. 更新主文 embed（GP/BP 同步，用 DB hash 比對）
             main_sn = main_post.get("sn", "")
             main_post_state = old_state["posts"].get(main_sn)
             if main_post_state and main_post_state.get("msg_id"):
                 try:
                     updated_embed = self.format_main_post_embed(main_post)
                     new_hash = content_hash(updated_embed.description or "")
-                    main_msg = await thread.fetch_message(main_post_state["msg_id"])
-                    old_hash = content_hash(main_msg.embeds[0].description or "") if main_msg.embeds else ""
-                    if new_hash != old_hash:
+                    old_hash = main_post_state.get("content_hash")
+                    if old_hash is None:
+                        # 首次：只寫 hash，不 edit（避免無意義的 API 呼叫）
+                        main_post_state["content_hash"] = new_hash
+                        logger.debug("增量更新：主文首次寫入 hash sn=%s", main_sn)
+                    elif new_hash != old_hash:
+                        main_msg = await thread.fetch_message(main_post_state["msg_id"])
                         await main_msg.edit(embed=updated_embed)
+                        await asyncio.sleep(SEND_DELAY)
+                        main_post_state["content_hash"] = new_hash
                         logger.info("增量更新：已更新主文 embed sn=%s", main_sn)
                     else:
                         logger.debug("增量更新：主文無變化，跳過 sn=%s", main_sn)
                 except Exception as e:
                     logger.warning("增量更新：更新主文 embed 失敗 sn=%s: %s", main_sn, e)
 
-            # 2. 更新既有回覆的 embed（GP/BP 同步，有變化才 edit）
+            # 2. 更新既有回覆的 embed（GP/BP 同步，用 DB hash 比對）
             for reply in new_replies:
                 reply_sn = reply.get("sn", "")
                 reply_state = old_state["posts"].get(reply_sn)
@@ -468,10 +474,15 @@ class BahamutMonitor(BaseContentMonitor):
                         )
                         updated_embed = self.format_reply_embed(reply, reply_idx)
                         new_hash = content_hash(updated_embed.description or "")
-                        reply_msg = await thread.fetch_message(reply_state["msg_id"])
-                        old_hash = content_hash(reply_msg.embeds[0].description or "") if reply_msg.embeds else ""
-                        if new_hash != old_hash:
+                        old_hash = reply_state.get("content_hash")
+                        if old_hash is None:
+                            reply_state["content_hash"] = new_hash
+                            logger.debug("增量更新：回覆首次寫入 hash sn=%s", reply_sn)
+                        elif new_hash != old_hash:
+                            reply_msg = await thread.fetch_message(reply_state["msg_id"])
                             await reply_msg.edit(embed=updated_embed)
+                            await asyncio.sleep(SEND_DELAY)
+                            reply_state["content_hash"] = new_hash
                             logger.info("增量更新：已更新回覆 embed sn=%s", reply_sn)
                         else:
                             logger.debug("增量更新：回覆無變化，跳過 sn=%s", reply_sn)
@@ -526,11 +537,16 @@ class BahamutMonitor(BaseContentMonitor):
 
                     try:
                         new_hash = content_hash(embed.description or "")
-                        msg = await thread.fetch_message(slot["msg_id"])
-                        old_hash = content_hash(msg.embeds[0].description or "") if msg.embeds else ""
-                        if new_hash != old_hash:
+                        old_hash = slot.get("content_hash")
+                        if old_hash is None:
+                            slot["content_hash"] = new_hash
+                            logger.debug("增量更新：留言格首次寫入 hash sn=%s slot=%s", sn, i)
+                        elif new_hash != old_hash:
+                            msg = await thread.fetch_message(slot["msg_id"])
                             await msg.edit(embed=embed)
+                            await asyncio.sleep(SEND_DELAY)
                             slot["used_chars"] = used_chars
+                            slot["content_hash"] = new_hash
                             logger.info("增量更新：已更新留言格 sn=%s slot=%s", sn, i)
                         else:
                             logger.debug("增量更新：留言格無變化，跳過 sn=%s slot=%s", sn, i)
@@ -560,11 +576,16 @@ class BahamutMonitor(BaseContentMonitor):
 
                         try:
                             new_hash = content_hash(embed.description or "")
-                            msg = await thread.fetch_message(overflow_slot["msg_id"])
-                            old_hash = content_hash(msg.embeds[0].description or "") if msg.embeds else ""
-                            if new_hash != old_hash:
+                            old_hash = overflow_slot.get("content_hash")
+                            if old_hash is None:
+                                overflow_slot["content_hash"] = new_hash
+                                logger.debug("增量更新：溢出格首次寫入 hash sn=%s overflow=%s", sn, i)
+                            elif new_hash != old_hash:
+                                msg = await thread.fetch_message(overflow_slot["msg_id"])
                                 await msg.edit(embed=embed)
+                                await asyncio.sleep(SEND_DELAY)
                                 overflow_slot["used_chars"] = used_chars
+                                overflow_slot["content_hash"] = new_hash
                                 logger.info("增量更新：已更新溢出格 sn=%s overflow=%s", sn, i)
                             else:
                                 logger.debug("增量更新：溢出格無變化，跳過 sn=%s overflow=%s", sn, i)

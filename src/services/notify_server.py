@@ -32,6 +32,8 @@ class NotifyServer:
         self._handlers: Dict[str, Callable[..., Coroutine]] = {
             "bahamut": self._process_bahamut,
         }
+        # 來源 → 是否正在處理中（防止重複執行）
+        self._processing: Dict[str, bool] = {}
         self._setup_routes()
 
     def _setup_routes(self):
@@ -74,14 +76,27 @@ class NotifyServer:
 
             logger.info("收到通知: source=%s payload=%s", source, payload)
 
+            # 檢查是否已在處理中
+            if self._processing.get(source):
+                logger.info("通知跳過：source=%s 已在處理中", source)
+                return web.json_response({"status": "skipped", "source": source, "reason": "already processing"})
+
             # 在背景排程處理，不阻塞 HTTP 回應
-            asyncio.create_task(self._handlers[source](payload))
+            asyncio.create_task(self._guarded_process(source, payload))
 
             return web.json_response({"status": "accepted", "source": source})
 
         except Exception as e:
             logger.error("處理通知失敗: source=%s err=%s", source, e, exc_info=True)
             return web.json_response({"status": "error", "message": str(e)}, status=500)
+
+    async def _guarded_process(self, source: str, payload: Dict) -> None:
+        """加鎖的背景處理：同一來源同時只能有一個在跑。"""
+        self._processing[source] = True
+        try:
+            await self._handlers[source](payload)
+        finally:
+            self._processing[source] = False
 
     # ── 來源處理函式 ──
 

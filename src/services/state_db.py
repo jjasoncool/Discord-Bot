@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS bahamut_post_state (
     post_id TEXT NOT NULL,
     sn TEXT NOT NULL,
     msg_id INTEGER NOT NULL,
+    content_hash TEXT,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (board_id, post_id, sn)
 );
@@ -58,6 +59,7 @@ CREATE TABLE IF NOT EXISTS bahamut_comment_slot (
     msg_id INTEGER NOT NULL,
     used_chars INTEGER DEFAULT 0,
     is_overflow INTEGER DEFAULT 0,
+    content_hash TEXT,
     PRIMARY KEY (board_id, post_id, sn, slot_index)
 );
 
@@ -68,6 +70,12 @@ CREATE TABLE IF NOT EXISTS bahamut_synced_comment (
     PRIMARY KEY (sn, comment_id)
 );
 """
+
+# 漸進式 migration（對既有 DB 安全，column 已存在會跳過）
+_MIGRATIONS_SQL = [
+    "ALTER TABLE bahamut_post_state ADD COLUMN content_hash TEXT",
+    "ALTER TABLE bahamut_comment_slot ADD COLUMN content_hash TEXT",
+]
 
 
 class StateDB:
@@ -84,6 +92,12 @@ class StateDB:
         self._db = await aiosqlite.connect(str(self.db_path))
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(_CREATE_TABLES_SQL)
+        # 漸進式 migration（column 已存在會跳過）
+        for sql in _MIGRATIONS_SQL:
+            try:
+                await self._db.execute(sql)
+            except Exception:
+                pass  # column 已存在，忽略
         await self._db.commit()
         logger.info("StateDB 已連線: %s", self.db_path)
 
@@ -177,18 +191,18 @@ class StateDB:
 
         # 取所有 post
         async with self.db.execute(
-            "SELECT sn, msg_id FROM bahamut_post_state WHERE board_id=? AND post_id=?",
+            "SELECT sn, msg_id, content_hash FROM bahamut_post_state WHERE board_id=? AND post_id=?",
             (board_id, post_id),
         ) as cursor:
             post_rows = await cursor.fetchall()
 
         for post_row in post_rows:
             sn = post_row[0]
-            post_state = {"msg_id": post_row[1], "comment_slots": [], "overflow_slots": []}
+            post_state = {"msg_id": post_row[1], "content_hash": post_row[2], "comment_slots": [], "overflow_slots": []}
 
             # 取留言格
             async with self.db.execute(
-                """SELECT slot_index, msg_id, used_chars, is_overflow
+                """SELECT slot_index, msg_id, used_chars, is_overflow, content_hash
                    FROM bahamut_comment_slot
                    WHERE board_id=? AND post_id=? AND sn=?
                    ORDER BY slot_index""",
@@ -197,7 +211,7 @@ class StateDB:
                 slot_rows = await cursor.fetchall()
 
             for slot_row in slot_rows:
-                slot_data = {"msg_id": slot_row[1], "used_chars": slot_row[2]}
+                slot_data = {"msg_id": slot_row[1], "used_chars": slot_row[2], "content_hash": slot_row[4]}
                 if slot_row[3]:  # is_overflow
                     post_state["overflow_slots"].append(slot_data)
                 else:
@@ -227,34 +241,35 @@ class StateDB:
         posts = state.get("posts", {})
         for sn, post_state in posts.items():
             msg_id = post_state.get("msg_id", 0)
+            post_hash = post_state.get("content_hash")
             await self.db.execute(
-                """INSERT INTO bahamut_post_state (board_id, post_id, sn, msg_id, updated_at)
-                   VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """INSERT INTO bahamut_post_state (board_id, post_id, sn, msg_id, content_hash, updated_at)
+                   VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                    ON CONFLICT(board_id, post_id, sn)
-                   DO UPDATE SET msg_id=excluded.msg_id, updated_at=CURRENT_TIMESTAMP""",
-                (board_id, post_id, sn, msg_id),
+                   DO UPDATE SET msg_id=excluded.msg_id, content_hash=excluded.content_hash, updated_at=CURRENT_TIMESTAMP""",
+                (board_id, post_id, sn, msg_id, post_hash),
             )
 
             # 留言格（預建 + 溢出）
             for idx, slot in enumerate(post_state.get("comment_slots", [])):
                 await self.db.execute(
                     """INSERT INTO bahamut_comment_slot
-                       (board_id, post_id, sn, slot_index, msg_id, used_chars, is_overflow)
-                       VALUES (?, ?, ?, ?, ?, ?, 0)
+                       (board_id, post_id, sn, slot_index, msg_id, used_chars, is_overflow, content_hash)
+                       VALUES (?, ?, ?, ?, ?, ?, 0, ?)
                        ON CONFLICT(board_id, post_id, sn, slot_index)
-                       DO UPDATE SET msg_id=excluded.msg_id, used_chars=excluded.used_chars""",
-                    (board_id, post_id, sn, idx, slot.get("msg_id", 0), slot.get("used_chars", 0)),
+                       DO UPDATE SET msg_id=excluded.msg_id, used_chars=excluded.used_chars, content_hash=excluded.content_hash""",
+                    (board_id, post_id, sn, idx, slot.get("msg_id", 0), slot.get("used_chars", 0), slot.get("content_hash")),
                 )
 
             overflow_start = len(post_state.get("comment_slots", []))
             for idx, slot in enumerate(post_state.get("overflow_slots", [])):
                 await self.db.execute(
                     """INSERT INTO bahamut_comment_slot
-                       (board_id, post_id, sn, slot_index, msg_id, used_chars, is_overflow)
-                       VALUES (?, ?, ?, ?, ?, ?, 1)
+                       (board_id, post_id, sn, slot_index, msg_id, used_chars, is_overflow, content_hash)
+                       VALUES (?, ?, ?, ?, ?, ?, 1, ?)
                        ON CONFLICT(board_id, post_id, sn, slot_index)
-                       DO UPDATE SET msg_id=excluded.msg_id, used_chars=excluded.used_chars, is_overflow=1""",
-                    (board_id, post_id, sn, overflow_start + idx, slot.get("msg_id", 0), slot.get("used_chars", 0)),
+                       DO UPDATE SET msg_id=excluded.msg_id, used_chars=excluded.used_chars, is_overflow=1, content_hash=excluded.content_hash""",
+                    (board_id, post_id, sn, overflow_start + idx, slot.get("msg_id", 0), slot.get("used_chars", 0), slot.get("content_hash")),
                 )
 
             # 已同步留言
