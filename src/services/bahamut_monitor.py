@@ -62,6 +62,17 @@ def _author_link(name: str, user_id: str) -> str:
     return f"**{name}**"
 
 
+# 模組級 snA 鎖：同一個 snA 同時只能有一個 task 在處理（跨實例共用）
+_thread_locks: Dict[str, asyncio.Lock] = {}
+
+
+def _get_thread_lock(content_key: str) -> asyncio.Lock:
+    """取得或建立某個 snA 的 asyncio.Lock。"""
+    if content_key not in _thread_locks:
+        _thread_locks[content_key] = asyncio.Lock()
+    return _thread_locks[content_key]
+
+
 class BahamutMonitor(BaseContentMonitor):
     """巴哈姆特文章 → Discord Forum Channel 監控器"""
 
@@ -329,12 +340,37 @@ class BahamutMonitor(BaseContentMonitor):
 
             board_id = thread_data.get("board_id", "")
             post_id = thread_data.get("post_id", "")
+            content_key = f"bahamut:{board_id}:{post_id}"
+
+            # 同一個 snA 加鎖，避免手動指令和排程同時處理同一篇
+            lock = _get_thread_lock(content_key)
+            if lock.locked():
+                logger.info("snA 正在處理中，跳過: %s", content_key)
+                return None
+
+            async with lock:
+                return await self._process_thread(channel, board_id, post_id, content_key, thread_data)
+
+        except Exception as e:
+            logger.error("發送巴哈討論串到論壇頻道失敗: %s", e, exc_info=True)
+            return None
+
+    async def _process_thread(
+        self,
+        channel: discord.ForumChannel,
+        board_id: str,
+        post_id: str,
+        content_key: str,
+        thread_data: Dict,
+    ) -> Optional[Dict]:
+        """實際處理一個討論串（已在鎖內）。"""
+        try:
+            main_post = thread_data.get("main_post", {})
 
             # 檢查是否已發送過 → 走增量更新
-            content_key = f"bahamut:{board_id}:{post_id}"
             if await self.is_content_sent("bahamut", content_key):
                 return await self._update_existing_thread(
-                    forum_channel_id, board_id, post_id, thread_data,
+                    channel.id, board_id, post_id, thread_data,
                 )
 
             # 1. 建立主文 embed + thread
@@ -362,6 +398,7 @@ class BahamutMonitor(BaseContentMonitor):
                 "thread_id": thread.id,
                 "posts": {},
             }
+            db = await self._get_state_db()
 
             # 2. 處理主文留言 + 預建留言格
             main_sn = main_post.get("sn", "")
@@ -369,28 +406,43 @@ class BahamutMonitor(BaseContentMonitor):
                 thread=thread,
                 post_data=main_post,
             )
-            # 主文 msg_id = thread 首則訊息（create_thread 回傳的 message）
             starter_message = created.message if hasattr(created, "message") else None
             main_state["msg_id"] = starter_message.id if starter_message else thread.id
+            main_state["content_hash"] = content_hash(self.format_main_post_embed(main_post).description or "")
             state["posts"][main_sn] = main_state
 
-            # 3. 處理回覆文章
+            # 立刻寫入 state（即使後續回覆失敗，也不會重複建 thread）
+            await db.save_bahamut_thread(board_id, post_id, state)
+            logger.info("巴哈 thread 已建立並存入 state: board=%s post_id=%s", board_id, post_id)
+
+            # 3. 處理回覆文章（每 50 則回覆存一次 state）
             replies = thread_data.get("replies") or []
+            state_save_interval = 50
             for idx, reply in enumerate(replies, start=2):
-                reply_embed = self.format_reply_embed(reply, idx)
-                reply_msg = await thread.send(embed=reply_embed)
-                await asyncio.sleep(SEND_DELAY)
+                try:
+                    reply_embed = self.format_reply_embed(reply, idx)
+                    reply_msg = await thread.send(embed=reply_embed)
+                    await asyncio.sleep(SEND_DELAY)
 
-                reply_sn = reply.get("sn", "")
-                reply_state = await self._send_post_comments(
-                    thread=thread,
-                    post_data=reply,
-                )
-                reply_state["msg_id"] = reply_msg.id
-                state["posts"][reply_sn] = reply_state
+                    reply_sn = reply.get("sn", "")
+                    reply_state = await self._send_post_comments(
+                        thread=thread,
+                        post_data=reply,
+                    )
+                    reply_state["msg_id"] = reply_msg.id
+                    reply_state["content_hash"] = content_hash(reply_embed.description or "")
+                    state["posts"][reply_sn] = reply_state
 
-            # 4. 寫入 state DB（含 sent_content 去重 + forum_thread_state）
-            db = await self._get_state_db()
+                    # 每 N 則回覆存一次 state（斷掉時能從中間接續）
+                    replies_processed = idx - 1  # idx 從 2 開始
+                    if replies_processed % state_save_interval == 0:
+                        await db.save_bahamut_thread(board_id, post_id, state)
+                        logger.info("巴哈 state 中繼儲存: board=%s post_id=%s 已處理 %s/%s 則回覆",
+                                    board_id, post_id, replies_processed, len(replies))
+                except Exception as e:
+                    logger.warning("處理回覆失敗，跳過繼續: sn=%s err=%s", reply.get("sn"), e)
+
+            # 最後一次存（處理完全部或不足 N 則的尾巴）
             await db.save_bahamut_thread(board_id, post_id, state)
 
             logger.info(
@@ -594,7 +646,7 @@ class BahamutMonitor(BaseContentMonitor):
 
                 # 需要新的溢出格？
                 total_existing_slots = len(slots) + len(overflow_slots)
-                if len(all_comment_slots) > total_existing_slots:
+                if len(all_comment_slots) > total_existing_slots and (slots or overflow_slots):
                     # 找最後一個 msg 作為 reply anchor
                     if overflow_slots:
                         last_msg_id = overflow_slots[-1]["msg_id"]
