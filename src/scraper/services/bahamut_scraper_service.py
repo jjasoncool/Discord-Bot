@@ -747,17 +747,53 @@ class BahamutScraperService:
             "article",
         ]
 
+        node = None
         for sel in selectors:
             node = soup.select_one(sel)
             if node:
-                return node.get_text("\n", strip=True)
+                break
 
-        # fallback：擷取較可能是主文區的大段內容
-        body = soup.select_one("body")
-        if not body:
-            return ""
-        txt = body.get_text("\n", strip=True)
-        return txt[:3000]
+        if not node:
+            body = soup.select_one("body")
+            if not body:
+                return ""
+            txt = body.get_text("\n", strip=True)
+            return txt[:3000]
+
+        # 將嵌入式 YouTube iframe 轉為可讀連結
+        for iframe in node.select("iframe[data-src*='youtube'], iframe[src*='youtube']"):
+            embed_url = iframe.get("data-src") or iframe.get("src") or ""
+            video_id = re.search(r'/embed/([^?&]+)', embed_url)
+            if video_id:
+                watch_url = f"https://www.youtube.com/watch?v={video_id.group(1)}"
+                iframe.replace_with(f"\n🎬 {watch_url}\n")
+
+        # 收集超連結 mapping（純文字 → markdown 連結）
+        link_replacements = []
+        for a_tag in node.select("a[href]"):
+            href = a_tag.get("href", "")
+            text = a_tag.get_text(strip=True)
+            if not text or a_tag.select("img"):
+                continue
+            # 解開巴哈跳轉連結 ref.gamer.com.tw/redir.php?url=...
+            if "ref.gamer.com.tw/redir.php" in href:
+                from urllib.parse import parse_qs, urlparse
+                parsed = parse_qs(urlparse(href).query)
+                real_url = parsed.get("url", [href])[0]
+            else:
+                real_url = href
+            link_replacements.append((text, f"[{text}]({real_url})"))
+
+        content = node.get_text("\n", strip=True)
+
+        # 後處理：把純文字替換為 markdown 連結（由長到短避免短的先配到）
+        for plain_text, md_link in sorted(link_replacements, key=lambda x: -len(x[0])):
+            content = content.replace(plain_text, md_link, 1)
+
+        # 清理殘留的裝飾角括號（get_text 後 < 和 > 跟連結在不同行）
+        content = re.sub(r'<\s*\n\s*(\[.+?\]\(.+?\))\s*\n\s*>', r'\1', content)
+
+        return content
 
     def _extract_article_images(self, soup: BeautifulSoup, base_url: str) -> List[str]:
         """保留主文內圖片 URL，供 JSON / 後續 Discord 呈現使用。"""
@@ -1491,6 +1527,18 @@ def main():
         "saved_count": saved_count,
         "output": output_path,
     }, ensure_ascii=False, indent=2))
+
+    # 通知 Discord Bot
+    if result.get("ok") and saved_count > 0:
+        try:
+            import requests as req
+            payload = {"board_id": BAHAMUT_CONFIG.get("target_board_url", "").split("bsn=")[-1].split("&")[0] or "74934"}
+            if target_sn_a:
+                payload["post_id"] = target_sn_a
+            req.post("http://discord-bot:5000/notify/bahamut", json=payload, timeout=10)
+            logger.info("已通知 Discord Bot: %s", payload)
+        except Exception as e:
+            logger.warning("通知 Discord Bot 失敗（不影響結果）: %s", e)
 
 
 if __name__ == "__main__":

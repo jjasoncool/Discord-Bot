@@ -101,11 +101,14 @@ class NotifyServer:
     # ── 來源處理函式 ──
 
     async def _process_bahamut(self, payload: Dict) -> None:
-        """巴哈通知：從 Scraper API 拉最新資料，逐一發文/更新。"""
+        """巴哈通知：從 Scraper API 拉最新資料，逐一發文/更新。
+        payload 帶 post_id 時只處理單篇，不帶則批次處理最近 3 天。
+        """
         try:
             from services.bahamut_monitor import BahamutMonitor
 
             board_id = payload.get("board_id", "74934")
+            post_id = payload.get("post_id")
             config = ChannelConfig.load_config(caller="notify_server")
             forum_channel_id = config.get("forum_article_channel_id")
             if not forum_channel_id:
@@ -113,6 +116,18 @@ class NotifyServer:
                 return
 
             monitor = BahamutMonitor(self.bot)
+
+            if post_id:
+                # 單篇模式
+                thread_data = await monitor.fetch_single_thread(board_id, post_id)
+                if not thread_data:
+                    logger.info("巴哈單篇通知：找不到 post_id=%s", post_id)
+                    return
+                result = await monitor.send_bahamut_thread_to_forum(forum_channel_id, thread_data)
+                logger.info("巴哈單篇通知處理完成: post_id=%s result=%s", post_id, "ok" if result else "skip/fail")
+                return
+
+            # 批次模式
             threads = await monitor.fetch_recent_threads(days=3, limit=50, board_id=board_id)
 
             if not threads:
