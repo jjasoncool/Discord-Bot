@@ -55,6 +55,7 @@ PTT_CONFIG = {
 # Bahamut 抓取設定（第一版：主文 + 主文留言）
 BAHAMUT_CONFIG = {
     "target_board_url": "https://forum.gamer.com.tw/B.php?bsn=74934",
+    "subbsn": "13",         # 子看板 ID，空字串=不帶（預設公開看板），多個用 _ 分隔（如 "12_13"）
     "timeout": 20,
     "board_start_page": 1,
     "board_end_page": 2,

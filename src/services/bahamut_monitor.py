@@ -24,7 +24,7 @@ from utils.discord_content import (
     content_hash,
     get_forum_tags,
 )
-from services.base_monitor import BaseContentMonitor
+from services.base_monitor import BaseContentMonitor, get_article_runtime_config
 
 logger = get_article_monitor_logger()
 
@@ -57,6 +57,7 @@ COMMENT_SLOT_PLACEHOLDER = "💬 預留留言區（等待更新中...）"
 SEND_DELAY = 0.8
 # 巴哈小屋個人頁 URL 模板
 BAHAMUT_PROFILE_URL = "https://home.gamer.com.tw/profile/index.php?owner={user_id}"
+
 
 
 def _author_link(name: str, user_id: str) -> str:
@@ -385,6 +386,13 @@ class BahamutMonitor(BaseContentMonitor):
             main_post = thread_data.get("main_post")
             if not main_post:
                 logger.error("討論串缺少主文: post_id=%s", thread_data.get("post_id"))
+                return None
+
+            # 檢查 category 黑名單
+            exclude = get_article_runtime_config().get("bahamut_exclude_categories", [])
+            category = main_post.get("category") or ""
+            if category in exclude:
+                logger.debug("巴哈文章分類被排除，跳過: post_id=%s category=%s", thread_data.get("post_id"), category)
                 return None
 
             board_id = thread_data.get("board_id", "")

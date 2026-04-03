@@ -51,6 +51,10 @@ class BahamutScraperService:
         self.db_manager = db_manager
 
         self.target_board_url = BAHAMUT_CONFIG["target_board_url"]
+        subbsn = BAHAMUT_CONFIG.get("subbsn", "").strip()
+        if subbsn:
+            sep = "&" if "?" in self.target_board_url else "?"
+            self.target_board_url = f"{self.target_board_url}{sep}subbsn={subbsn}"
         self.timeout = int(BAHAMUT_CONFIG.get("timeout", 20) or 20)
         self.board_start_page = max(1, int(BAHAMUT_CONFIG.get("board_start_page", 1) or 1))
         self.board_end_page = max(1, int(BAHAMUT_CONFIG.get("board_end_page", 1) or 1))
@@ -1481,6 +1485,12 @@ def main():
         default=None,
         help="延遲倍率（例如 3 = 所有延遲 ×3，適合大量抓取避免被鎖）",
     )
+    parser.add_argument(
+        "--subbsn",
+        type=str,
+        default=None,
+        help="子看板 ID（例如 13），會在 target_board_url 加上 &subbsn=N",
+    )
     args = parser.parse_args()
 
     # 透過 container 建立帶 db_manager 的 service
@@ -1494,6 +1504,13 @@ def main():
         service.board_start_page = max(1, args.start_page)
     if args.end_page is not None:
         service.board_end_page = max(service.board_start_page, args.end_page)
+
+    if args.subbsn is not None:
+        # CLI 覆蓋 config 的 subbsn：先還原到不帶 subbsn 的基礎 URL
+        base_url = BAHAMUT_CONFIG["target_board_url"]
+        sep = "&" if "?" in base_url else "?"
+        service.target_board_url = f"{base_url}{sep}subbsn={args.subbsn}"
+        logger.info("CLI 子看板模式: %s", service.target_board_url)
 
     if args.delay_multiplier is not None and args.delay_multiplier > 0:
         multiplier = args.delay_multiplier

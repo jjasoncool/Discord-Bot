@@ -162,51 +162,68 @@ def _notify_discord_bot(source: str, payload: dict = None):
         logger.warning("通知 Discord Bot 失敗（不影響排程）: %s", e)
 
 
+def _run_bahamut_scrape(service, label: str, notify: bool = True):
+    """執行一輪巴哈抓取 + 寫 DB + 通知（notify=False 只存不通知）。"""
+    result = service.fetch_bahamut_articles_with_content()
+    if result.get("ok"):
+        saved_count = service.save_articles_to_db(result.get("articles", []))
+        service.db_manager.commit()
+
+        from config import BAHAMUT_CONFIG
+        output_path = None
+        if BAHAMUT_CONFIG.get("export_sample_json", False):
+            output_path = service.export_sample_json(result)
+
+        logger.info(
+            "Bahamut 爬蟲任務完成 [%s]: article_count=%s, detailed_count=%s, saved_count=%s, output=%s",
+            label,
+            result.get("article_count", 0),
+            result.get("detailed_count", 0),
+            saved_count,
+            output_path,
+        )
+
+        if notify:
+            _notify_discord_bot("bahamut", {"board_id": "74934", "count": saved_count})
+    else:
+        logger.warning(
+            "Bahamut 爬蟲任務未完成 [%s]: error=%s gate=%s",
+            label,
+            result.get("error"),
+            result.get("gate", {}),
+        )
+
+
 def bahamut_scrape_task():
-    """Bahamut 爬蟲任務：抓取 → 寫入 DB → 輸出 sample JSON"""
+    """Bahamut 爬蟲任務：預設公開看板 + 額外子看板（順序執行，避免觸發 anti-bot）"""
+    from config import BAHAMUT_CONFIG
+    base_url = BAHAMUT_CONFIG["target_board_url"]
     container = ServiceContainer()
+
     try:
         logger.info("開始執行 Bahamut 爬蟲任務")
-
-        # 確保資料表存在
         container.create_database_tables()
 
-        bahamut_service = container.create_bahamut_scraper_service()
-        result = bahamut_service.fetch_bahamut_articles_with_content()
+        # 第 1 輪：預設公開看板
+        service = container.create_bahamut_scraper_service()
+        service.target_board_url = base_url
+        _run_bahamut_scrape(service, "公開看板")
+        service.db_manager.close()
 
-        if result.get("ok"):
-            # 寫入資料庫
-            saved_count = bahamut_service.save_articles_to_db(result.get("articles", []))
-            bahamut_service.db_manager.commit()
-
-            # 依設定決定是否輸出 sample JSON
-            from config import BAHAMUT_CONFIG
-            output_path = None
-            if BAHAMUT_CONFIG.get("export_sample_json", False):
-                output_path = bahamut_service.export_sample_json(result)
-
-            logger.info(
-                "Bahamut 爬蟲任務完成: article_count=%s, detailed_count=%s, saved_count=%s, output=%s",
-                result.get("article_count", 0),
-                result.get("detailed_count", 0),
-                saved_count,
-                output_path,
-            )
-
-            # 通知 Discord Bot 有新資料
-            _notify_discord_bot("bahamut", {"board_id": "74934", "count": saved_count})
-        else:
-            logger.warning(
-                "Bahamut 爬蟲任務未完成: error=%s gate=%s",
-                result.get("error"),
-                result.get("gate", {}),
-            )
+        # 第 2 輪：額外子看板（config 有設定才跑）
+        extra_subbsn = BAHAMUT_CONFIG.get("subbsn", "").strip()
+        if extra_subbsn:
+            service2 = container.create_bahamut_scraper_service()
+            sep = "&" if "?" in base_url else "?"
+            service2.target_board_url = f"{base_url}{sep}subbsn={extra_subbsn}"
+            service2.board_start_page = 1
+            service2.board_end_page = 1  # 子看板只抓第 1 頁
+            logger.info("額外子看板抓取: %s", service2.target_board_url)
+            _run_bahamut_scrape(service2, f"subbsn={extra_subbsn}", notify=False)
+            service2.db_manager.close()
 
     except Exception as e:
         logger.error(f"Bahamut 爬蟲任務發生未預期錯誤: {str(e)}", exc_info=True)
-    finally:
-        if 'bahamut_service' in locals() and getattr(bahamut_service, 'db_manager', None):
-            bahamut_service.db_manager.close()
 
 
 def start_api_server():

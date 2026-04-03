@@ -20,6 +20,27 @@ logger = get_article_monitor_logger()
 _shared_state_db: Optional[StateDB] = None
 _shared_state_db_lock = asyncio.Lock()
 
+# article_runtime.json 共用快取（TTL 5 分鐘）
+_article_runtime_cache: Dict = {}
+_article_runtime_cache_time: float = 0
+_ARTICLE_RUNTIME_PATH = Path(__file__).parent.parent / "settings" / "article_runtime.json"
+_ARTICLE_RUNTIME_TTL = 300
+
+
+def get_article_runtime_config() -> Dict:
+    """讀取 article_runtime.json（TTL 快取，所有 monitor 共用）。"""
+    import time
+    global _article_runtime_cache, _article_runtime_cache_time
+    now = time.time()
+    if _article_runtime_cache and (now - _article_runtime_cache_time) < _ARTICLE_RUNTIME_TTL:
+        return _article_runtime_cache
+    try:
+        _article_runtime_cache = json.loads(_ARTICLE_RUNTIME_PATH.read_text(encoding="utf-8"))
+        _article_runtime_cache_time = now
+    except Exception:
+        pass
+    return _article_runtime_cache
+
 
 async def get_shared_state_db() -> StateDB:
     """取得全域共用的 StateDB 實例（併發安全）。"""
