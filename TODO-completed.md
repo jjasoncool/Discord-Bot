@@ -1,5 +1,120 @@
 # 已完成項目歸檔
 
+## Bahamut 正式知識層清理歸檔（2026-04-03）
+
+> 依使用者指示，將 `AI_HANDOFF_AND_TODO.md` 中仍殘留的 Bahamut 已完成內容移出，集中歸檔到本檔，讓 handoff 只保留仍需追蹤的事項。
+
+### 已移出 handoff 的完成內容
+
+#### 舊版歷史附錄 / 重複狀態描述
+- 舊的 `Bahamut 歷史附錄（raw history / appendix）`
+- 舊的 `Bahamut 目前狀態` 區塊（與正式知識層重複）
+- 舊區塊中的「已完成（2026-03-31 ~ 2026-04-01）」列表
+
+#### 已完成能力（保留於歸檔）
+- `cloudscraper + retry` session
+- 進版圖 gate 偵測與導頁處理（預熱 + hop）
+- 列表抓取（`tr.b-list__row.b-list-item`）
+- 單篇抓取（含 `--sna 16219`）
+- HTML + XHR 留言抓取（`moreCommend.php`）
+- `post + replies` 結構輸出
+- 主文圖片 `content_images` 抽取
+- `HOT -> is_hot`、推/噓 icon -> `👍` / `👎`
+- `has_thumbsup_button` / `has_thumbsdown_button`
+- `is_sticky` 置頂標記
+- 列表補抓：`author` / `author_user_id` / `last_reply_user` / `last_reply_user_id` / `category`
+- `save_articles_to_db(articles)` 已實作（主文 + 回文 + 各自留言）
+- `main.py` 已切成正式 `fetch -> save_articles_to_db -> commit`
+- `source_type` 已移除（表名已隱含來源）
+- DB model 已落地：`BahamutPost` + `BahamutPostComment`
+- DB upsert 已落地：文章 `(board_id, sn)` / 留言 `(parent_sn, comment_id)`
+- 留言 `published_at` 格式已清理
+- JSON sample 輸出改為設定開關
+- `post_id / snA / sn` 命名已收斂：`post_id = snA`
+- GP/BP 數字提取
+- 文章多頁遍歷（C.php 分頁）
+- 列表分頁範圍（B.php start/end page）
+- CLI 預設寫 DB
+
+#### Bahamut Relay / State / Webhook 已完成項目
+- Scraper API：`/api/bahamut/recent`、`/api/bahamut/{board_id}/{post_id}`
+- `bahamut_monitor.py`：embed 格式化、留言格預建/溢出、鏈式導航
+- `/get_baha_post` 斜線命令
+- 增量更新：既有 thread 自動 edit / append
+- `state_db.py`：SQLite state 追蹤
+- `base_monitor.py`：async state + 共用 StateDB
+- `migrate_json_to_sqlite.py`：JSON → SQLite 遷移腳本
+- `notify_server.py`：`POST /notify/{source}` 通知架構
+- Scraper 抓完 Bahamut 後自動 webhook 通知 Discord Bot
+- `discord_content.py` 共用工具抽取
+- `ChannelConfig` TTL 快取
+- 內容防護 / 更新保護：`content_hash`、`prev_*`、`shrink_ratio`、`update_blocked`
+
+### 這輪整理後 Bahamut 真正剩餘待辦
+- 端到端測試（全自動閉環驗證）
+- 正式 DB migration（Alembic）
+- RAG ingestion
+
+### Bahamut 已定案設計文件歸檔（2026-04-03 從 handoff 移出）
+
+以下為已落地的設計文件，不再作為待辦追蹤，僅供參考。
+
+#### 方法與 JSON 契約
+- `fetch_board_articles(session)` → `Dict[str, Any]`
+- `fetch_article_detail(session, url)` → `Dict[str, Any]`
+- `fetch_bahamut_articles_with_content()` → `Dict[str, Any]`
+- `save_articles_to_db(articles)` → `int`
+- 主文欄位展平頂層，回覆放 `replies[]`，每個 reply 各自 `comments[]`
+- 留言唯一鍵：`(parent_sn, comment_id)`
+
+#### ID 語意
+- `snA` = thread/group ID = `post_id`
+- `sn` = 單篇文章 ID
+- `snB` = 留言 XHR 目標 ID（高度吻合 sn）
+- `comment_id` = 留言唯一鍵
+
+#### 文章結構
+- `section.c-section[id^='post_']` = 文章 block
+- 第一個 block = 主文，後續 = 回覆
+- 每個 block 有自己的 `Commendlist_<sn>` 留言區
+
+#### XHR 留言抓取
+- endpoint: `moreCommend.php`，參數 `bsn` + `snB` + `snC`（分頁游標）
+
+#### 留言 parser
+- HOT 標籤、推噓 icon 轉換、`is_hot` / `has_thumbsup_button` / `has_thumbsdown_button`
+- `comment_id` 為唯一鍵，`floor` 可跳號，`position` 僅排序用
+
+#### sn 抓取策略
+- 優先找 HTML 內嵌資料、DOM data-* 屬性，最後才考慮 JS 還原
+
+#### 版本路由
+- desktop HTML first，被導到 mobile 時堅持再請求 desktop URL
+
+#### 進版圖處理
+- 預熱 + gate 偵測 + 模擬進入 + session 重用
+
+#### 抓取模式
+- `cloudscraper` + `BeautifulSoup4` + `fake-useragent`
+- HTTP pull first，不先上 Playwright
+
+#### 開發原則
+- 先做專屬 service，不先抽通用框架
+- 依賴注入 `db_manager=None`，抓取與寫 DB 分離
+- normalized + raw 雙軌
+
+#### DB Schema
+- `bahamut_posts`（主文+回文共用，position 區分）+ `bahamut_post_comments`
+- unique: `(board_id, sn)` / `(parent_sn, comment_id)`
+- 雙版本保留（`prev_*` 欄位）+ 防惡意覆蓋（`shrink_ratio` / `update_blocked`）
+- SQLite first，RAG 時再進 pgvector
+
+#### Discord 呈現策略
+- 1 snA = 1 Forum Thread，embed 格式（藍主文/綠回覆/灰留言）
+- 留言格預建 3 格 + 鏈式溢出導航
+- HTTP webhook 通知：`POST /notify/{source}`
+- State 追蹤改用 SQLite（5 張表）
+
 ## Telegram Relay 功能完成歸檔（2026-03-29）
 
 > 依使用者指示，將 `AI_HANDOFF_AND_TODO.md` 的 Telegram 功能完成項目移入本檔保存。
