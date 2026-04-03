@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS bahamut_post_state (
     sn TEXT NOT NULL,
     msg_id INTEGER NOT NULL,
     content_hash TEXT,
+    continuation_msg_ids TEXT,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (board_id, post_id, sn)
 );
@@ -75,6 +76,7 @@ CREATE TABLE IF NOT EXISTS bahamut_synced_comment (
 _MIGRATIONS_SQL = [
     "ALTER TABLE bahamut_post_state ADD COLUMN content_hash TEXT",
     "ALTER TABLE bahamut_comment_slot ADD COLUMN content_hash TEXT",
+    "ALTER TABLE bahamut_post_state ADD COLUMN continuation_msg_ids TEXT",
 ]
 
 
@@ -191,14 +193,15 @@ class StateDB:
 
         # 取所有 post
         async with self.db.execute(
-            "SELECT sn, msg_id, content_hash FROM bahamut_post_state WHERE board_id=? AND post_id=?",
+            "SELECT sn, msg_id, content_hash, continuation_msg_ids FROM bahamut_post_state WHERE board_id=? AND post_id=?",
             (board_id, post_id),
         ) as cursor:
             post_rows = await cursor.fetchall()
 
         for post_row in post_rows:
             sn = post_row[0]
-            post_state = {"msg_id": post_row[1], "content_hash": post_row[2], "comment_slots": [], "overflow_slots": []}
+            cont_ids = json.loads(post_row[3]) if post_row[3] else []
+            post_state = {"msg_id": post_row[1], "content_hash": post_row[2], "continuation_msg_ids": cont_ids, "comment_slots": [], "overflow_slots": []}
 
             # 取留言格
             async with self.db.execute(
@@ -242,12 +245,14 @@ class StateDB:
         for sn, post_state in posts.items():
             msg_id = post_state.get("msg_id", 0)
             post_hash = post_state.get("content_hash")
+            cont_ids = json.dumps(post_state.get("continuation_msg_ids", []))
             await self.db.execute(
-                """INSERT INTO bahamut_post_state (board_id, post_id, sn, msg_id, content_hash, updated_at)
-                   VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """INSERT INTO bahamut_post_state (board_id, post_id, sn, msg_id, content_hash, continuation_msg_ids, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                    ON CONFLICT(board_id, post_id, sn)
-                   DO UPDATE SET msg_id=excluded.msg_id, content_hash=excluded.content_hash, updated_at=CURRENT_TIMESTAMP""",
-                (board_id, post_id, sn, msg_id, post_hash),
+                   DO UPDATE SET msg_id=excluded.msg_id, content_hash=excluded.content_hash,
+                                 continuation_msg_ids=excluded.continuation_msg_ids, updated_at=CURRENT_TIMESTAMP""",
+                (board_id, post_id, sn, msg_id, post_hash, cont_ids),
             )
 
             # 留言格（預建 + 溢出）

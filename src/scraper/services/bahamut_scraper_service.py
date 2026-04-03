@@ -782,7 +782,11 @@ class BahamutScraperService:
                 real_url = parsed.get("url", [href])[0]
             else:
                 real_url = href
-            link_replacements.append((text, f"[{text}]({real_url})"))
+            # 如果顯示文字就是 URL，直接放裸 URL（Discord 自動變連結，省空間）
+            if text.startswith("http://") or text.startswith("https://"):
+                link_replacements.append((text, real_url))
+            else:
+                link_replacements.append((text, f"[{text}]({real_url})"))
 
         content = node.get_text("\n", strip=True)
 
