@@ -686,15 +686,16 @@ class ArticleCommands(commands.Cog):
                 from datetime import datetime
                 cog._bahamut_sync_started_at = datetime.now()
                 try:
-                    processed = 0
+                    # 每篇文章各自背景處理，不互相阻塞
+                    tasks = []
                     for thread_data in threads:
-                        try:
-                            result = await monitor.send_bahamut_thread_to_forum(forum_channel_id, thread_data)
-                            if result:
-                                processed += 1
-                        except Exception as e:
-                            logger.error("批次同步單篇失敗: post_id=%s err=%s", thread_data.get("post_id"), e)
-                    logger.info("巴哈批次同步完成: 掃描=%s 處理=%s", len(threads), processed)
+                        tasks.append(asyncio.create_task(
+                            monitor.send_bahamut_thread_to_forum(forum_channel_id, thread_data)
+                        ))
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    processed = sum(1 for r in results if r and not isinstance(r, Exception))
+                    errors = sum(1 for r in results if isinstance(r, Exception))
+                    logger.info("巴哈批次同步完成: 掃描=%s 處理=%s 失敗=%s", len(threads), processed, errors)
                 finally:
                     cog._bahamut_sync_started_at = None
 

@@ -127,23 +127,28 @@ class NotifyServer:
                 logger.info("巴哈單篇通知處理完成: post_id=%s result=%s", post_id, "ok" if result else "skip/fail")
                 return
 
-            # 批次模式
+            # 批次模式：每篇文章各自背景處理，不互相阻塞
             threads = await monitor.fetch_recent_threads(days=3, limit=50, board_id=board_id)
 
             if not threads:
                 logger.info("巴哈通知處理：沒有新的討論串")
                 return
 
-            processed = 0
+            logger.info("巴哈通知：開始背景處理 %s 個討論串", len(threads))
             for thread_data in threads:
-                result = await monitor.send_bahamut_thread_to_forum(forum_channel_id, thread_data)
-                if result:
-                    processed += 1
-
-            logger.info(
-                "巴哈通知處理完成: board_id=%s threads=%s processed=%s",
-                board_id, len(threads), processed,
-            )
+                asyncio.create_task(self._process_single_bahamut(
+                    monitor, forum_channel_id, thread_data, board_id,
+                ))
 
         except Exception as e:
             logger.error("巴哈通知背景處理失敗: %s", e, exc_info=True)
+
+    async def _process_single_bahamut(self, monitor, forum_channel_id: int, thread_data: Dict, board_id: str) -> None:
+        """背景處理單篇巴哈討論串。每篇獨立 task，由 snA 鎖保護不重複。"""
+        post_id = thread_data.get("post_id", "?")
+        try:
+            result = await monitor.send_bahamut_thread_to_forum(forum_channel_id, thread_data)
+            if result:
+                logger.info("巴哈背景處理完成: post_id=%s", post_id)
+        except Exception as e:
+            logger.error("巴哈背景處理失敗: post_id=%s err=%s", post_id, e)

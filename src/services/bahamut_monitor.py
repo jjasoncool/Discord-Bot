@@ -11,6 +11,7 @@ import asyncio
 import aiohttp
 import json
 import logging
+import io
 import discord
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
@@ -64,6 +65,8 @@ def _author_link(name: str, user_id: str) -> str:
 
 # 模組級 snA 鎖：同一個 snA 同時只能有一個 task 在處理（跨實例共用）
 _thread_locks: Dict[str, asyncio.Lock] = {}
+# 全域並行上限：同時最多處理 N 篇文章（避免 rate limit 和資源搶奪）
+_concurrency_semaphore = asyncio.Semaphore(3)
 
 
 def _get_thread_lock(content_key: str) -> asyncio.Lock:
@@ -348,8 +351,10 @@ class BahamutMonitor(BaseContentMonitor):
                 logger.info("snA 正在處理中，跳過: %s", content_key)
                 return None
 
-            async with lock:
-                return await self._process_thread(channel, board_id, post_id, content_key, thread_data)
+            # 全域並行上限（同時最多 3 篇），避免 rate limit 和資源搶奪
+            async with _concurrency_semaphore:
+                async with lock:
+                    return await self._process_thread(channel, board_id, post_id, content_key, thread_data)
 
         except Exception as e:
             logger.error("發送巴哈討論串到論壇頻道失敗: %s", e, exc_info=True)
@@ -400,7 +405,10 @@ class BahamutMonitor(BaseContentMonitor):
             }
             db = await self._get_state_db()
 
-            # 2. 處理主文留言 + 預建留言格
+            # 2. 發送主文額外圖片（第 2 張起）
+            await self._send_post_images(thread, main_post)
+
+            # 3. 處理主文留言 + 預建留言格
             main_sn = main_post.get("sn", "")
             main_state = await self._send_post_comments(
                 thread=thread,
@@ -423,6 +431,9 @@ class BahamutMonitor(BaseContentMonitor):
                     reply_embed = self.format_reply_embed(reply, idx)
                     reply_msg = await thread.send(embed=reply_embed)
                     await asyncio.sleep(SEND_DELAY)
+
+                    # 回覆的額外圖片
+                    await self._send_post_images(thread, reply)
 
                     reply_sn = reply.get("sn", "")
                     reply_state = await self._send_post_comments(
@@ -484,8 +495,22 @@ class BahamutMonitor(BaseContentMonitor):
                 try:
                     thread = await self.bot.fetch_channel(thread_id)
                 except Exception:
-                    logger.error("增量更新失敗：找不到 thread %s", thread_id)
-                    return None
+                    thread = None
+
+            if not thread:
+                # thread 已被刪除 → 清除舊 state，直接重建
+                logger.warning("增量更新：thread %s 已不存在，清除 state 並重建", thread_id)
+                content_key = f"bahamut:{board_id}:{post_id}"
+                await db.db.execute("DELETE FROM sent_content WHERE source='bahamut' AND content_key=?", (content_key,))
+                await db.db.execute("DELETE FROM forum_thread_state WHERE source='bahamut' AND content_key=?", (content_key,))
+                await db.db.execute("DELETE FROM bahamut_post_state WHERE board_id=? AND post_id=?", (board_id, post_id))
+                await db.db.execute("DELETE FROM bahamut_comment_slot WHERE board_id=? AND post_id=?", (board_id, post_id))
+                await db.db.commit()
+                # 直接走新建流程
+                return await self._process_thread(
+                    self.bot.get_channel(forum_channel_id),
+                    board_id, post_id, content_key, thread_data,
+                )
 
             main_post = thread_data.get("main_post", {})
             new_replies = thread_data.get("replies") or []
@@ -695,6 +720,9 @@ class BahamutMonitor(BaseContentMonitor):
                 reply_msg = await thread.send(embed=reply_embed)
                 await asyncio.sleep(SEND_DELAY)
 
+                # 回覆的額外圖片
+                await self._send_post_images(thread, reply)
+
                 reply_state = await self._send_post_comments(thread=thread, post_data=reply)
                 reply_state["msg_id"] = reply_msg.id
                 old_state["posts"][reply_sn] = reply_state
@@ -713,6 +741,44 @@ class BahamutMonitor(BaseContentMonitor):
         except Exception as e:
             logger.error("增量更新巴哈討論串失敗: %s", e, exc_info=True)
             return None
+
+    async def _send_post_images(
+        self,
+        thread: discord.Thread,
+        post_data: Dict,
+    ) -> None:
+        """發送文章的額外圖片（第 2 張起）到 thread，每批最多 10 張。"""
+        images = post_data.get("content_images") or []
+        if len(images) <= 1:
+            return  # 第一張已在 embed set_image，不需要額外發
+
+        remaining = images[1:]  # 跳過第一張
+        async with aiohttp.ClientSession() as session:
+            for batch_start in range(0, len(remaining), 10):
+                batch_urls = remaining[batch_start:batch_start + 10]
+                files = []
+                for idx, img_url in enumerate(batch_urls, start=batch_start + 2):
+                    try:
+                        async with session.get(img_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                            if resp.status == 200 and resp.content_length and resp.content_length < 25 * 1024 * 1024:
+                                data = await resp.read()
+                                # 從 URL 或 content-type 推斷副檔名
+                                ct = resp.headers.get("content-type", "")
+                                ext = ".jpg"
+                                if "png" in ct:
+                                    ext = ".png"
+                                elif "gif" in ct:
+                                    ext = ".gif"
+                                elif "webp" in ct:
+                                    ext = ".webp"
+                                files.append(discord.File(io.BytesIO(data), filename=f"image_{idx}{ext}"))
+                    except Exception as e:
+                        logger.warning("巴哈圖片下載失敗，跳過: url=%s err=%s", img_url, e)
+
+                if files:
+                    label = "**本文附圖**" if batch_start == 0 else ""
+                    await thread.send(content=label, files=files)
+                    await asyncio.sleep(SEND_DELAY)
 
     async def _send_post_comments(
         self,
