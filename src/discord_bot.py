@@ -287,7 +287,7 @@ async def _auto_start_official_article_monitor(bot, article_commands, article_mo
 async def _auto_start_fb_monitor(bot, article_commands, article_monitor_channel_id):
     """自動啟動 FB 貼文監控。當前沿用官方文章頻道設定。"""
     async def _start(channel_id):
-        await article_commands.article_monitor.start_fb_monitoring(
+        await article_commands.fb_monitor.start_fb_monitoring(
             channel_ids=[channel_id],
             check_interval=600,
         )
@@ -312,7 +312,7 @@ async def _auto_start_ptt_forum_monitor(bot, article_commands, forum_article_cha
         return channel if isinstance(channel, discord.ForumChannel) else None
 
     async def _start(channel_id):
-        await article_commands.article_monitor.start_ptt_monitoring(
+        await article_commands.ptt_monitor.start_ptt_monitoring(
             forum_channel_ids=[channel_id],
             check_interval=600,
         )

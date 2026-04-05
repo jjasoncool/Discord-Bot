@@ -49,6 +49,7 @@ class TelegramMessageRecord:
     text: str
     message_date: Optional[object]
     has_media: bool
+    chat_title: Optional[str] = None
     media_items: list[TelegramMediaRecord] = field(default_factory=list)
 
 
@@ -241,7 +242,8 @@ class TelegramMessageRepository:
                     telegram_message_id,
                     text,
                     message_date,
-                    has_media
+                    has_media,
+                    chat_title
                 FROM telegram_messages
                 WHERE id = $1;
                 """,
@@ -289,6 +291,7 @@ class TelegramMessageRepository:
             text=str(message_row["text"] or ""),
             message_date=message_row["message_date"],
             has_media=bool(message_row["has_media"]),
+            chat_title=message_row["chat_title"],
             media_items=media_items,
         )
 
@@ -462,7 +465,7 @@ class TelegramRenderAdapter:
         content = (message.text or "").strip()
         description = content[:4000] + ("..." if len(content) > 4000 else "")
 
-        source_name = self._get_source_channel_name()
+        source_name = message.chat_title or self._get_source_channel_name()
         embed = discord.Embed(
             title=source_name,
             description=description or None,

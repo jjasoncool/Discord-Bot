@@ -26,6 +26,18 @@
 
 最後盤點紀錄：
 - 2026-04-03：清理 handoff，已完成的設計文件和歷史盤點移至 `TODO-completed.md`。
+- 2026-04-05：本輪完成項目：
+  - 續文機制：長文自動分割為多則 embed（`_split_content_for_embeds` + `_send_continuations` + `_update_continuations`），DB 新增 `continuation_msg_ids` 欄位
+  - 多圖分批發送：`_send_post_images` 每批最多 10 張，主文/回覆各自處理
+  - 並行控制：`asyncio.Semaphore(3)` 全域並行上限 + snA 鎖
+  - thread 被刪自動重建：清除 state 後直接呼叫 `_process_thread` 重建
+  - Scraper 改進：YouTube iframe 提取（`🎬`）、超連結 markdown 轉換（URL=文字時不包 markdown）、角括號清理
+  - 第一則 embed 上限改為 3500（避免 Discord 500）
+  - subbsn 子看板支援：config `subbsn` 欄位 + CLI `--subbsn` + 排程兩輪（公開看板 + 子看板）
+  - category 黑名單：`article_runtime.json` 的 `bahamut_exclude_categories`，無音區不發 Discord
+  - `get_article_runtime_config()` 搬到 `base_monitor.py` 共用（TTL 5 分鐘快取）
+  - notify 防重複：`_processing` dict + `_guarded_process`
+  - 每 50 則回覆存一次 state + create_thread 後立刻存 state
 
 ---
 
@@ -250,10 +262,10 @@ last_confirmed: 2026-04-03
 -->
 
 **下一步（依優先序）**
-1. 端到端測試：重啟兩容器 → 確認全自動閉環
+1. 端到端測試：重啟兩容器 → 確認續文 + 多圖 + 自動閉環
 2. 正式 DB migration（Alembic）
-3. RAG ingestion
-4. 超連結 markdown 轉換 + YouTube iframe 提取（已實作，待重啟生效）
+3. 跨來源整合（base_monitor 共用層擴展）
+4. RAG ingestion
 
 ### 已歸檔設計文件（移至 TODO-completed.md）
 
@@ -268,15 +280,13 @@ last_confirmed: 2026-04-03
 id: bahamut-todo
 type: TODO
 status: confirmed
-last_confirmed: 2026-04-02
+last_confirmed: 2026-04-05
 -->
 
 **當前待辦：**
-1. 端到端測試：重啟兩容器後等 Scraper 自動抓取 → 確認全自動閉環
+1. 端到端測試：重啟兩容器 → 確認續文 + 多圖 + subbsn + 自動閉環
 2. 正式 DB migration（Alembic）
 3. RAG ingestion（不急）
-
-**現在不該優先做：** 不要先抽象過度泛化 base class
 
 #### 第三階段：整合 AI / pgvector / RAG
 
@@ -308,6 +318,38 @@ last_confirmed: 2026-04-02
 - 第三階段前先補端到端測試與 migration
 - [ ] 第二階段穩定後再做第三階段 RAG
 - [ ] 每階段保留 JSON 範例與測試案例
+
+---
+
+## Telegram Relay 待辦
+
+<!-- @meta
+id: telegram-relay-todo
+type: TODO
+status: confirmed
+last_confirmed: 2026-04-06
+-->
+
+### embed title 應顯示實際來源頻道名稱
+
+**問題：** 目前 Telegram relay 的 embed title 固定顯示 `Seele_WW_leak`（`runtime_config.json` 的 `source_channel`），但訊息可能來自不同的轉發頻道。
+
+**相關檔案：**
+- `src/services/telegram_relay_service.py`
+  - `_get_source_channel_name()` (line ~401) — 只讀 `source_channel` 單一值
+  - `TelegramRenderAdapter.render()` (line ~465) — `title=source_name`
+- `src/telegram_scraper/runtime_config.json` — `source_channel` + `forward_whitelist`
+- DB 表 `telegram_messages` — 有 `telegram_chat_id` 但沒有頻道名稱
+
+**建議做法：**
+1. 每則訊息的 `telegram_chat_id` 可以反查 `forward_whitelist` 裡的名稱
+2. 或在 telegram-scraper 端存入 chat title 到 DB
+3. embed title 改用 per-message 的頻道名稱而非固定值
+
+**注意事項：**
+- telegram-scraper 是獨立容器（`docker/telegram_scraper/`）
+- 訊息來源可能是主頻道本身、或轉發自 whitelist 裡的其他頻道
+- `forward_whitelist` 混合了頻道名稱（`Team_Gemberry78`）和 chat_id（`-1002405953050`），需要統一處理
 
 ---
 

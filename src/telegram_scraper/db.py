@@ -90,10 +90,19 @@ class TelegramDatabase:
                     text TEXT,
                     message_date TIMESTAMPTZ,
                     has_media BOOLEAN NOT NULL DEFAULT FALSE,
+                    chat_title TEXT,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     UNIQUE (telegram_chat_id, telegram_message_id)
                 );
+                """
+            )
+
+            # 既有資料庫補欄位
+            await conn.execute(
+                """
+                ALTER TABLE telegram_messages
+                ADD COLUMN IF NOT EXISTS chat_title TEXT;
                 """
             )
 
@@ -139,6 +148,7 @@ class TelegramDatabase:
         text: str,
         message_date,
         has_media: bool,
+        chat_title: str | None = None,
     ) -> tuple[int, bool]:
         """Upsert 訊息（不含媒體），回傳 (message_pk, inserted_new_message)。"""
         if self.pool is None:
@@ -152,9 +162,10 @@ class TelegramDatabase:
                     telegram_message_id,
                     text,
                     message_date,
-                    has_media
+                    has_media,
+                    chat_title
                 )
-                VALUES ($1, $2, $3, $4, $5)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 ON CONFLICT (telegram_chat_id, telegram_message_id) DO NOTHING
                 RETURNING id;
                 """,
@@ -163,6 +174,7 @@ class TelegramDatabase:
                 text,
                 message_date,
                 has_media,
+                chat_title,
             )
 
             if insert_row is not None:
@@ -191,6 +203,7 @@ class TelegramDatabase:
                     END,
                     message_date = COALESCE(message_date, $3),
                     has_media = has_media OR $4,
+                    chat_title = COALESCE(chat_title, $5),
                     updated_at = NOW()
                 WHERE id = $1;
                 """,
@@ -198,6 +211,7 @@ class TelegramDatabase:
                 text,
                 message_date,
                 has_media,
+                chat_title,
             )
             return message_pk, False
 

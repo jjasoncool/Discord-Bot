@@ -179,6 +179,25 @@ def _build_media_item(message: Any, file_rel_path: str) -> dict:
     }
 
 
+_chat_title_cache: dict[int, str | None] = {}
+
+
+async def _resolve_chat_title(client: Any, chat_id: int | None) -> str | None:
+    """解析頻道顯示名稱，結果快取避免重複 API 呼叫。"""
+    if not chat_id:
+        return None
+    if chat_id in _chat_title_cache:
+        return _chat_title_cache[chat_id]
+    title: str | None = None
+    try:
+        entity = await client.get_entity(chat_id)
+        title = getattr(entity, "title", None) or getattr(entity, "username", None)
+    except Exception:
+        pass
+    _chat_title_cache[chat_id] = title
+    return title
+
+
 async def _process_message(
     *,
     message: Any,
@@ -215,6 +234,9 @@ async def _process_message(
     text = raw_text or ""
     has_media = bool(message.media)
 
+    # 解析頻道顯示名稱（title 或 username），供 relay 端作為 embed title
+    resolved_chat_title = await _resolve_chat_title(client, chat_id)
+
     if log_prefix == "History":
         print(f"[History] source_channel={config.source_channel} message_id={message.id} has_media={has_media} text={text}")
     else:
@@ -227,6 +249,7 @@ async def _process_message(
         text=text,
         message_date=message.date,
         has_media=has_media,
+        chat_title=resolved_chat_title,
     )
 
     # 2. 媒體下載（僅在需要時：新訊息 或 尚無媒體記錄）

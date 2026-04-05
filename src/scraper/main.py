@@ -251,27 +251,23 @@ def main():
     api_thread.start()
     logger.info("API 服務器已在背景啟動")
 
-    # 設定定時任務
-    schedule.every(15).minutes.do(main_scrape_task)
-    schedule.every(1).hours.do(fb_scrape_task)
-    schedule.every(1).hours.do(ptt_scrape_task)
-    schedule.every(1).hours.do(bahamut_scrape_task)
+    # 用 thread 包裝，避免各論壇互相阻塞
+    def _run_in_thread(func):
+        def wrapper():
+            t = threading.Thread(target=func, daemon=True)
+            t.start()
+        return wrapper
 
-    # 立即執行一次 Facebook 爬蟲
-    logger.info("執行初始 Facebook 爬蟲任務")
-    fb_scrape_task()
+    # 設定定時任務（各自獨立 thread）
+    schedule.every(15).minutes.do(_run_in_thread(main_scrape_task))
+    schedule.every(1).hours.do(_run_in_thread(fb_scrape_task))
+    schedule.every(1).hours.do(_run_in_thread(ptt_scrape_task))
+    schedule.every(1).hours.do(_run_in_thread(bahamut_scrape_task))
 
-    # 立即執行一次主要爬蟲
-    logger.info("執行初始爬蟲任務")
-    main_scrape_task()
-
-    # 立即執行一次 PTT 爬蟲
-    logger.info("執行初始 PTT 爬蟲任務")
-    ptt_scrape_task()
-
-    # 立即執行一次 Bahamut 爬蟲
-    logger.info("執行初始 Bahamut 爬蟲任務")
-    bahamut_scrape_task()
+    # 立即執行一次（各自獨立 thread，不互相等）
+    logger.info("執行初始爬蟲任務（各論壇並行）")
+    for task in [fb_scrape_task, main_scrape_task, ptt_scrape_task, bahamut_scrape_task]:
+        threading.Thread(target=task, daemon=True).start()
 
     # 啟動定時任務循環
     logger.info("定時任務已啟動：每15分鐘執行文章爬蟲，每1小時執行 Facebook/PTT/Bahamut 爬蟲")

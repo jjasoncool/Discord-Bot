@@ -100,6 +100,8 @@ class ArticleCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.article_monitor = None
+        self.fb_monitor = None
+        self.ptt_monitor = None
         self.monitoring_task = None
         self.fb_monitoring_task = None
         self.ptt_monitoring_task = None
@@ -107,12 +109,16 @@ class ArticleCommands(commands.Cog):
         self.monitored_channels = []
 
     async def cog_load(self):
-        """Cog 載入時初始化官方文章更新器"""
+        """Cog 載入時初始化各來源監控器"""
         from services.article_monitor import ArticleMonitor
+        from services.fb_monitor import FBMonitor
+        from services.ptt_monitor import PTTMonitor
         self.article_monitor = ArticleMonitor(self.bot)
+        self.fb_monitor = FBMonitor(self.bot)
+        self.ptt_monitor = PTTMonitor(self.bot)
         self.bot.add_view(ArticleManagerView(self))
         logger.info("已註冊 ArticleManagerView persistent view")
-        logger.info("官方文章更新器已初始化")
+        logger.info("官方文章更新器、FB 監控器、PTT 監控器已初始化")
 
     @app_commands.command(name="article_manager", description="官方文章更新管理中心")
     async def article_manager(self, interaction: discord.Interaction):
@@ -296,8 +302,8 @@ class ArticleCommands(commands.Cog):
                 inline=False
             )
             embed.add_field(
-                name="📝 已發送文章數",
-                value=str(len(self.article_monitor.sent_articles) if self.article_monitor else 0),
+                name="📝 狀態",
+                value="運行中" if self.article_monitor else "未初始化",
                 inline=True
             )
             embed.add_field(
@@ -323,7 +329,7 @@ class ArticleCommands(commands.Cog):
 
         try:
             if not self.article_monitor:
-                await safe_send_interaction_message(interaction, "❌ 官方文章更新器未初始化", ephemeral=True)
+                await safe_send_interaction_message(interaction, "❌ 監控器未初始化", ephemeral=True)
                 return
 
             base_url = self.article_monitor.scraper_api_url.rstrip("/")
@@ -564,14 +570,14 @@ class ArticleCommands(commands.Cog):
                     return
 
                 try:
-                    content = await self.article_monitor.fetch_fb_post_by_id(fb_db_id)
+                    content = await self.fb_monitor.fetch_fb_post_by_id(fb_db_id)
                 except Exception as e:
                     logger.error(f"獲取 FB 貼文資料庫 ID {fb_db_id} 失敗: {e}", exc_info=True)
                     await safe_send_interaction_message(interaction, "❌ 獲取 FB 貼文時發生錯誤，請稍後再試。", ephemeral=True)
                     return
 
                 content_name = f"FB 貼文 `{fb_db_id}`"
-                send_method = self.article_monitor.send_fb_post_to_channel
+                send_method = self.fb_monitor.send_fb_post_to_channel
                 logger.info(f"[RESEND_ROUTE] 路由到 FB 流程: fb_db_id={fb_db_id}")
 
             if not content:
