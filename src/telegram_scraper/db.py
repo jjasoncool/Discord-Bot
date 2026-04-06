@@ -108,6 +108,21 @@ class TelegramDatabase:
 
             await conn.execute(
                 """
+                ALTER TABLE telegram_messages
+                ADD COLUMN IF NOT EXISTS grouped_id BIGINT;
+                """
+            )
+
+            await conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_telegram_messages_grouped_id
+                ON telegram_messages (grouped_id)
+                WHERE grouped_id IS NOT NULL;
+                """
+            )
+
+            await conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS telegram_message_media (
                     id BIGSERIAL PRIMARY KEY,
                     message_id BIGINT NOT NULL REFERENCES telegram_messages(id) ON DELETE CASCADE,
@@ -149,6 +164,7 @@ class TelegramDatabase:
         message_date,
         has_media: bool,
         chat_title: str | None = None,
+        grouped_id: int | None = None,
     ) -> tuple[int, bool]:
         """Upsert 訊息（不含媒體），回傳 (message_pk, inserted_new_message)。"""
         if self.pool is None:
@@ -163,9 +179,10 @@ class TelegramDatabase:
                     text,
                     message_date,
                     has_media,
-                    chat_title
+                    chat_title,
+                    grouped_id
                 )
-                VALUES ($1, $2, $3, $4, $5, $6)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
                 ON CONFLICT (telegram_chat_id, telegram_message_id) DO NOTHING
                 RETURNING id;
                 """,
@@ -175,6 +192,7 @@ class TelegramDatabase:
                 message_date,
                 has_media,
                 chat_title,
+                grouped_id,
             )
 
             if insert_row is not None:
@@ -204,6 +222,7 @@ class TelegramDatabase:
                     message_date = COALESCE(message_date, $3),
                     has_media = has_media OR $4,
                     chat_title = COALESCE(chat_title, $5),
+                    grouped_id = COALESCE(grouped_id, $6),
                     updated_at = NOW()
                 WHERE id = $1;
                 """,
@@ -212,6 +231,7 @@ class TelegramDatabase:
                 message_date,
                 has_media,
                 chat_title,
+                grouped_id,
             )
             return message_pk, False
 

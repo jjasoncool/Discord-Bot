@@ -242,6 +242,10 @@ async def _process_message(
     else:
         print(f"[{log_prefix}] chat_id={chat_id} message_id={message.id} has_media={has_media} text={text}")
 
+    # 取得 Telegram media group ID（同一相簿的訊息共享此值）
+    raw_grouped_id = getattr(message, "grouped_id", None)
+    grouped_id = int(raw_grouped_id) if raw_grouped_id else None
+
     # 1. 先 upsert 訊息（取得 pk 與是否新增）
     message_pk, inserted_new = await db.upsert_message_only(
         telegram_chat_id=int(chat_id or 0),
@@ -250,6 +254,7 @@ async def _process_message(
         message_date=message.date,
         has_media=has_media,
         chat_title=resolved_chat_title,
+        grouped_id=grouped_id,
     )
 
     # 2. 媒體下載（僅在需要時：新訊息 或 尚無媒體記錄）

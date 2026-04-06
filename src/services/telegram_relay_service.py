@@ -50,6 +50,7 @@ class TelegramMessageRecord:
     message_date: Optional[object]
     has_media: bool
     chat_title: Optional[str] = None
+    grouped_id: Optional[int] = None
     media_items: list[TelegramMediaRecord] = field(default_factory=list)
 
 
@@ -243,7 +244,8 @@ class TelegramMessageRepository:
                     text,
                     message_date,
                     has_media,
-                    chat_title
+                    chat_title,
+                    grouped_id
                 FROM telegram_messages
                 WHERE id = $1;
                 """,
@@ -284,6 +286,9 @@ class TelegramMessageRepository:
             for row in media_rows
         ]
 
+        raw_gid = message_row["grouped_id"]
+        grouped_id = int(raw_gid) if raw_gid is not None else None
+
         return TelegramMessageRecord(
             message_pk=int(message_row["id"]),
             telegram_chat_id=int(message_row["telegram_chat_id"]),
@@ -292,8 +297,27 @@ class TelegramMessageRepository:
             message_date=message_row["message_date"],
             has_media=bool(message_row["has_media"]),
             chat_title=message_row["chat_title"],
+            grouped_id=grouped_id,
             media_items=media_items,
         )
+
+
+    async def get_grouped_message_pks(self, grouped_id: int, chat_id: int) -> list[int]:
+        """取得同一 media group 的所有 message pk（按 telegram_message_id 排序）。"""
+        if self.pool is None:
+            raise RuntimeError("TelegramMessageRepository 尚未 connect")
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id
+                FROM telegram_messages
+                WHERE grouped_id = $1 AND telegram_chat_id = $2
+                ORDER BY telegram_message_id ASC;
+                """,
+                int(grouped_id),
+                int(chat_id),
+            )
+        return [int(row["id"]) for row in rows]
 
 
 class MessageRouteResolver:
@@ -951,6 +975,67 @@ class MessageRelayWorker:
             return None
         return channel  # type: ignore[return-value]
 
+    # media group 等待同組訊息到齊的秒數
+    _GROUP_WAIT_SEC = 3.0
+    # 等待期間輪詢 DB 的間隔秒數
+    _GROUP_POLL_INTERVAL = 0.5
+
+    async def _collect_media_group(self, message: TelegramMessageRecord) -> TelegramMessageRecord:
+        """等待同一 media group 的訊息到齊，合併成單一虛擬訊息。
+
+        策略：短暫等待（_GROUP_WAIT_SEC），輪詢 DB 直到組員數穩定，
+        然後把所有組員的 media_items 合併到第一則訊息上。
+        """
+        grouped_id = message.grouped_id
+        chat_id = message.telegram_chat_id
+        if grouped_id is None:
+            return message
+
+        prev_count = 0
+        elapsed = 0.0
+        while elapsed < self._GROUP_WAIT_SEC:
+            await asyncio.sleep(self._GROUP_POLL_INTERVAL)
+            elapsed += self._GROUP_POLL_INTERVAL
+            sibling_pks = await self.repository.get_grouped_message_pks(grouped_id, chat_id)
+            if len(sibling_pks) == prev_count:
+                break  # 數量穩定，認為到齊
+            prev_count = len(sibling_pks)
+
+        sibling_pks = await self.repository.get_grouped_message_pks(grouped_id, chat_id)
+
+        if len(sibling_pks) <= 1:
+            return message
+
+        # 合併所有 sibling 的文字與媒體到第一則訊息
+        merged_text_parts: list[str] = []
+        merged_media: list[TelegramMediaRecord] = []
+        first_msg: Optional[TelegramMessageRecord] = None
+        all_pks: list[int] = []
+
+        for pk in sibling_pks:
+            sibling = await self.repository.get_message_by_pk(pk)
+            if sibling is None:
+                continue
+            all_pks.append(pk)
+            if first_msg is None:
+                first_msg = sibling
+            if sibling.text.strip():
+                merged_text_parts.append(sibling.text.strip())
+            merged_media.extend(sibling.media_items)
+
+        if first_msg is None:
+            return message
+
+        merged_text = "\n".join(merged_text_parts)
+        first_msg.text = merged_text
+        first_msg.media_items = merged_media
+
+        logger.info(
+            "Telegram relay media group 合併: grouped_id=%s pks=%s media_count=%s",
+            grouped_id, all_pks, len(merged_media),
+        )
+        return first_msg
+
     async def _process_one(self, message_pk: int) -> None:
         if self._seen_processed(message_pk):
             return
@@ -970,6 +1055,28 @@ class MessageRelayWorker:
             )
             self._mark_processed(message_pk)
             return
+
+        # media group 合併：同一 grouped_id 只由最小 pk 負責發送
+        sibling_pks: list[int] = []
+        if message.grouped_id is not None:
+            sibling_pks = await self.repository.get_grouped_message_pks(
+                message.grouped_id, message.telegram_chat_id,
+            )
+            first_pk = sibling_pks[0] if sibling_pks else message_pk
+            if message_pk != first_pk:
+                # 非組內第一則 → 標記已處理，由第一則統一發送
+                logger.info(
+                    "Telegram relay media group 成員，交由首則處理: "
+                    "message_pk=%s grouped_id=%s first_pk=%s",
+                    message_pk, message.grouped_id, first_pk,
+                )
+                self._mark_processed(message_pk)
+                self._last_polled_pk = max(self._last_polled_pk, message_pk)
+                await self.repository.set_runtime_cursor_pk(self._last_polled_pk)
+                return
+
+            # 是第一則 → 等待同組到齊，合併媒體
+            message = await self._collect_media_group(message)
 
         route_ids = self.route_resolver.resolve_telegram_routes(message.telegram_chat_id)
         if not route_ids:
@@ -1015,6 +1122,10 @@ class MessageRelayWorker:
             try:
                 published_count += await self.publisher.publish_to_channel(channel, plan)
                 await self.repository.mark_message_published(message_pk, channel_id)
+                # 同時標記所有 sibling 為已發送，避免重複送出
+                for sib_pk in sibling_pks:
+                    if sib_pk != message_pk:
+                        await self.repository.mark_message_published(sib_pk, channel_id)
             except Exception as exc:
                 logger.error(
                     "Telegram relay 發送失敗: message_pk=%s channel_id=%s err=%s",
@@ -1024,13 +1135,18 @@ class MessageRelayWorker:
                     exc_info=True,
                 )
 
+        # 標記自己與所有 sibling 為已處理
         self._mark_processed(message_pk)
-        self._last_polled_pk = max(self._last_polled_pk, message_pk)
+        for sib_pk in sibling_pks:
+            self._mark_processed(sib_pk)
+
+        max_pk = max([message_pk] + sibling_pks) if sibling_pks else message_pk
+        self._last_polled_pk = max(self._last_polled_pk, max_pk)
         await self.repository.set_runtime_cursor_pk(self._last_polled_pk)
         latency_ms = int((time.perf_counter() - started) * 1000)
         result = "published" if published_count > 0 else "failed_or_skipped"
         logger.info(
-            "telegram_relay_result message_pk=%s telegram_chat_id=%s telegram_message_id=%s route_count=%s published_count=%s latency_ms=%s result=%s",
+            "telegram_relay_result message_pk=%s telegram_chat_id=%s telegram_message_id=%s route_count=%s published_count=%s latency_ms=%s result=%s grouped_id=%s group_size=%s",
             message.message_pk,
             message.telegram_chat_id,
             message.telegram_message_id,
@@ -1038,6 +1154,8 @@ class MessageRelayWorker:
             published_count,
             latency_ms,
             result,
+            message.grouped_id,
+            len(sibling_pks) if sibling_pks else 1,
         )
 
     async def _process_loop(self) -> None:
