@@ -26,18 +26,9 @@
 
 最後盤點紀錄：
 - 2026-04-03：清理 handoff，已完成的設計文件和歷史盤點移至 `TODO-completed.md`。
-- 2026-04-05：本輪完成項目：
-  - 續文機制：長文自動分割為多則 embed（`_split_content_for_embeds` + `_send_continuations` + `_update_continuations`），DB 新增 `continuation_msg_ids` 欄位
-  - 多圖分批發送：`_send_post_images` 每批最多 10 張，主文/回覆各自處理
-  - 並行控制：`asyncio.Semaphore(3)` 全域並行上限 + snA 鎖
-  - thread 被刪自動重建：清除 state 後直接呼叫 `_process_thread` 重建
-  - Scraper 改進：YouTube iframe 提取（`🎬`）、超連結 markdown 轉換（URL=文字時不包 markdown）、角括號清理
-  - 第一則 embed 上限改為 3500（避免 Discord 500）
-  - subbsn 子看板支援：config `subbsn` 欄位 + CLI `--subbsn` + 排程兩輪（公開看板 + 子看板）
-  - category 黑名單：`article_runtime.json` 的 `bahamut_exclude_categories`，無音區不發 Discord
-  - `get_article_runtime_config()` 搬到 `base_monitor.py` 共用（TTL 5 分鐘快取）
-  - notify 防重複：`_processing` dict + `_guarded_process`
-  - 每 50 則回覆存一次 state + create_thread 後立刻存 state
+- 2026-04-05：續文/多圖/並行/子看板等完成，已歸檔至 `TODO-completed.md`。
+- 2026-04-06：Telegram embed title 來源頻道名稱修正，已歸檔至 `TODO-completed.md`。
+- 2026-04-07：Telegram media group 合併（grouped_id + 多圖合併為單則 Discord 訊息），已歸檔至 `TODO-completed.md`。
 
 ---
 
@@ -106,7 +97,6 @@ last_confirmed: 2026-03-31
 |---|---|---:|---|
 | Discord Bot / AI 對話能力 | 已有可用基礎能力 | 70% | [專案架構](#專案-ai-架構總覽) |
 | 跨來源整合（Article/FB/PTT/TG） | 有方向，尚未全面收斂 | 35% | [跨來源整合](#跨來源整合專區) |
-| Bahamut 全流程（scraper → DB → API → Discord） | **已完成，持續運行中** | 95% | [Bahamut TODO](#bahamut-todo) |
 | Bahamut RAG / AI 整合 | 尚未開始 | 5% | [RAG TODO](#第三階段整合-ai--pgvector--rag) |
 | Discord Bot 管理入口 | 規劃中 | 10% | [管理 TODO](#discord-bot-管理入口與指令整理-todo) |
 
@@ -290,6 +280,9 @@ last_confirmed: 2026-04-05
 
 #### 第三階段：整合 AI / pgvector / RAG
 
+> **前置已完成：** Bahamut 全流程（scraper → DB → API → Discord）已 100% 完成並持續運行中。
+> 詳見 `TODO-completed.md`（Bahamut Scraper MVP、增量更新、續文/多圖/並行/子看板等）。
+
 **目標：** Discord bot 可用巴哈資料做語意搜尋、摘要、審查輔助；讓結構化查詢與向量檢索並存
 
 **交付成果：**
@@ -320,36 +313,6 @@ last_confirmed: 2026-04-05
 - [ ] 每階段保留 JSON 範例與測試案例
 
 ---
-
-## Telegram Relay 待辦
-
-<!-- @meta
-id: telegram-relay-todo
-type: TODO
-status: confirmed
-last_confirmed: 2026-04-06
--->
-
-### embed title 應顯示實際來源頻道名稱
-
-**問題：** 目前 Telegram relay 的 embed title 固定顯示 `Seele_WW_leak`（`runtime_config.json` 的 `source_channel`），但訊息可能來自不同的轉發頻道。
-
-**相關檔案：**
-- `src/services/telegram_relay_service.py`
-  - `_get_source_channel_name()` (line ~401) — 只讀 `source_channel` 單一值
-  - `TelegramRenderAdapter.render()` (line ~465) — `title=source_name`
-- `src/telegram_scraper/runtime_config.json` — `source_channel` + `forward_whitelist`
-- DB 表 `telegram_messages` — 有 `telegram_chat_id` 但沒有頻道名稱
-
-**建議做法：**
-1. 每則訊息的 `telegram_chat_id` 可以反查 `forward_whitelist` 裡的名稱
-2. 或在 telegram-scraper 端存入 chat title 到 DB
-3. embed title 改用 per-message 的頻道名稱而非固定值
-
-**注意事項：**
-- telegram-scraper 是獨立容器（`docker/telegram_scraper/`）
-- 訊息來源可能是主頻道本身、或轉發自 whitelist 裡的其他頻道
-- `forward_whitelist` 混合了頻道名稱（`Team_Gemberry78`）和 chat_id（`-1002405953050`），需要統一處理
 
 ---
 

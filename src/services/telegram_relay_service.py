@@ -720,35 +720,43 @@ class DiscordMessagePublisher:
                     published_count += 1
                     continue
 
-                for index, chunk in enumerate(chunks):
-                    files = [
-                        discord.File(
-                            item.abs_path,
-                            filename=item.filename or os.path.basename(item.abs_path),
-                            spoiler=item.is_spoiler,
-                        )
-                        for item in chunk
-                    ]
-                    if index == 0:
-                        embed = operation.embed.copy() if operation.embed else None
-                        if embed is not None:
-                            # 只對圖片設 embed image，影片檔讓 Discord 原生播放
-                            _image_exts = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
-                            first_image = next(
-                                (
-                                    item for item in chunk
-                                    if not item.is_spoiler
-                                    and item.filename is not None
-                                    and item.filename.lower().rsplit(".", 1)[-1] in {e.lstrip(".") for e in _image_exts}
-                                ),
-                                None,
+                # 把所有附件攤平成單一列表
+                all_items = [item for chunk in chunks for item in chunk]
+
+                # 第一則：embed + 第一張附件
+                first_item = all_items[0]
+                first_file = discord.File(
+                    first_item.abs_path,
+                    filename=first_item.filename or os.path.basename(first_item.abs_path),
+                    spoiler=first_item.is_spoiler,
+                )
+                embed = operation.embed.copy() if operation.embed else None
+                if embed is not None:
+                    _image_exts = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+                    if (
+                        not first_item.is_spoiler
+                        and first_item.filename
+                        and first_item.filename.lower().rsplit(".", 1)[-1] in {e.lstrip(".") for e in _image_exts}
+                    ):
+                        embed.set_image(url=f"attachment://{first_item.filename}")
+                await channel.send(content=operation.content or None, embed=embed, files=[first_file])
+                published_count += 1
+
+                # 剩餘附件分批發送
+                remaining = all_items[1:]
+                if remaining:
+                    remaining_chunks = self._chunk_attachments(remaining, chunk_size=10)
+                    for chunk in remaining_chunks:
+                        files = [
+                            discord.File(
+                                item.abs_path,
+                                filename=item.filename or os.path.basename(item.abs_path),
+                                spoiler=item.is_spoiler,
                             )
-                            if first_image and first_image.filename:
-                                embed.set_image(url=f"attachment://{first_image.filename}")
-                        await channel.send(content=operation.content or None, embed=embed, files=files)
-                    else:
+                            for item in chunk
+                        ]
                         await channel.send(files=files)
-                    published_count += 1
+                        published_count += 1
         finally:
             # 清理暫存壓縮檔
             if tmp_dir is not None:

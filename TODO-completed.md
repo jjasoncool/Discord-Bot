@@ -1,5 +1,78 @@
 # 已完成項目歸檔
 
+## Index
+
+> 依時間倒序排列，方便快速定位。搜尋關鍵字可直接跳到對應區塊。
+
+| 日期 | 區塊 | 關鍵字 |
+|---|---|---|
+| 2026-04-07 | [Telegram media group 合併](#telegram-media-group-合併歸檔2026-04-07) | grouped_id, media group, 多圖合併, Discord 單則 |
+| 2026-04-06 | [Telegram embed title 修正](#telegram-embed-title-來源頻道名稱修正歸檔2026-04-06) | chat_title, embed title, 轉發頻道名稱 |
+| 2026-04-05 | [Bahamut 續文/多圖/並行/子看板等](#bahamut-續文多圖並行子看板等完成歸檔2026-04-05) | 續文, 多圖分批, semaphore, subbsn, category 黑名單 |
+| 2026-04-02 | [Bahamut 增量更新 + SQLite 遷移 + Webhook](#bahamut-增量更新--sqlite-遷移--webhook-通知完成歸檔2026-04-02) | 增量更新, SQLite, state_db, webhook, notify |
+| 2026-04-01 | [Bahamut Scraper MVP](#bahamut-scraper-mvp-完成歸檔2026-04-01) | scraper, 文章抓取, 留言, DB schema, Discord relay |
+| 2026-04-03 | [Bahamut 正式知識層清理](#bahamut-正式知識層清理歸檔2026-04-03) | 設計文件歸檔, ID 語意, DB schema |
+| 2026-03-29 | [Telegram Relay 功能完成](#telegram-relay-功能完成歸檔2026-03-29) | relay worker, LISTEN/NOTIFY, publisher, render adapter |
+| 2026-03-26 | [Telegram 已解決問題集](#telegram-relay-通道連線問題2026-03-26-已解決) | 通道連線, 媒體重複, 時序, 副檔名, route key |
+| 2026-03-25 | [Telegram Relay 設計定案](#telegram-relay-設計定案--架構設定相容流程盤點2026-03-25已完成歸檔) | 架構, config, 路由, 六層設計 |
+| 2026-03-22 | [Telegram Scraper 專案交接](#telegram-scraper-專案交接2026-03-22已完成歸檔) | Docker, 模組化, forward 過濾, session |
+
+---
+
+## Telegram media group 合併歸檔（2026-04-07）
+
+### 功能
+- Telegram 的 media group（一次發多張圖/影片）在 Discord 合併成單則訊息
+- DB 新增 `grouped_id BIGINT` 欄位 + partial index
+- Scraper 端從 `message.grouped_id` 寫入 DB
+- Relay 端偵測同一 `grouped_id`：由最小 pk 的訊息負責，等待 3 秒讓同組到齊後合併文字與媒體
+- 所有 sibling 同時標記 delivery_state，避免重複發送
+- 發送順序：embed + 第一張附件 → 剩餘附件分批
+
+### 修改檔案
+- `src/telegram_scraper/db.py`：`init_db()` 補欄位 + `upsert_message_only()` 新增 `grouped_id` 參數
+- `src/telegram_scraper/handlers.py`：取 `message.grouped_id` 傳入 DB
+- `src/services/telegram_relay_service.py`：
+  - `TelegramMessageRecord` 加 `grouped_id`
+  - 新增 `get_grouped_message_pks()` 查同組訊息
+  - 新增 `_collect_media_group()` 等待到齊並合併
+  - `_process_one()` 加入 media group 判斷
+  - `publish_to_channel()` 改為先發 embed+首圖、再發剩餘附件
+
+---
+
+## Telegram embed title 來源頻道名稱修正歸檔（2026-04-06）
+
+### 功能
+- Telegram relay embed title 改為顯示實際來源頻道名稱（`chat_title`），而非固定的 `source_channel`
+- Scraper 端在 `_process_message()` 解析頻道 title（`_resolve_chat_title()`，帶快取）
+- DB `telegram_messages` 新增 `chat_title TEXT` 欄位
+- Relay 端 `TelegramRenderAdapter.render()` 優先使用 per-message 的 `chat_title`
+
+### 修改檔案
+- `src/telegram_scraper/db.py`：`init_db()` 補 `chat_title` 欄位，upsert 支援寫入
+- `src/telegram_scraper/handlers.py`：新增 `_resolve_chat_title()`，呼叫 Telegram API 解析名稱
+- `src/services/telegram_relay_service.py`：`get_message_by_pk()` 讀取 `chat_title`，render 時使用
+
+---
+
+## Bahamut 續文/多圖/並行/子看板等完成歸檔（2026-04-05）
+
+### 完成項目
+- **續文機制**：長文自動分割為多則 embed（`_split_content_for_embeds` + `_send_continuations` + `_update_continuations`），DB 新增 `continuation_msg_ids` 欄位
+- **多圖分批發送**：`_send_post_images` 每批最多 10 張，主文/回覆各自處理
+- **並行控制**：`asyncio.Semaphore(3)` 全域並行上限 + snA 鎖
+- **thread 被刪自動重建**：清除 state 後直接呼叫 `_process_thread` 重建
+- **Scraper 改進**：YouTube iframe 提取（`🎬`）、超連結 markdown 轉換（URL=文字時不包 markdown）、角括號清理
+- **第一則 embed 上限改為 3500**（避免 Discord 500）
+- **subbsn 子看板支援**：config `subbsn` 欄位 + CLI `--subbsn` + 排程兩輪（公開看板 + 子看板）
+- **category 黑名單**：`article_runtime.json` 的 `bahamut_exclude_categories`，無音區不發 Discord
+- **`get_article_runtime_config()` 搬到 `base_monitor.py` 共用**（TTL 5 分鐘快取）
+- **notify 防重複**：`_processing` dict + `_guarded_process`
+- **每 50 則回覆存一次 state** + create_thread 後立刻存 state
+
+---
+
 ## Bahamut 正式知識層清理歸檔（2026-04-03）
 
 > 依使用者指示，將 `AI_HANDOFF_AND_TODO.md` 中仍殘留的 Bahamut 已完成內容移出，集中歸檔到本檔，讓 handoff 只保留仍需追蹤的事項。
