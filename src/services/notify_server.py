@@ -31,6 +31,7 @@ class NotifyServer:
         # 來源 → 處理函式 的分派表
         self._handlers: Dict[str, Callable[..., Coroutine]] = {
             "bahamut": self._process_bahamut,
+            "fb": self._process_fb,
         }
         # 來源 → 是否正在處理中（防止重複執行）
         self._processing: Dict[str, bool] = {}
@@ -142,6 +143,24 @@ class NotifyServer:
 
         except Exception as e:
             logger.error("巴哈通知背景處理失敗: %s", e, exc_info=True)
+
+    async def _process_fb(self, payload: Dict) -> None:
+        """FB 通知：從 Scraper API 拉最新貼文，逐一發送到 Discord。"""
+        try:
+            from services.fb_monitor import FBMonitor
+
+            config = ChannelConfig.load_config(caller="notify_server")
+            channel_id = config.get("article_monitor_channel_id")
+            if not channel_id:
+                logger.error("FB 通知處理失敗：config.json 未設定 article_monitor_channel_id")
+                return
+
+            monitor = FBMonitor(self.bot)
+            await monitor.check_and_send_fb_posts(channel_ids=[channel_id])
+            logger.info("FB 通知處理完成")
+
+        except Exception as e:
+            logger.error("FB 通知背景處理失敗: %s", e, exc_info=True)
 
     async def _process_single_bahamut(self, monitor, forum_channel_id: int, thread_data: Dict, board_id: str) -> None:
         """背景處理單篇巴哈討論串。每篇獨立 task，由 snA 鎖保護不重複。"""

@@ -29,6 +29,7 @@
 - 2026-04-05：續文/多圖/並行/子看板等完成，已歸檔至 `TODO-completed.md`。
 - 2026-04-06：Telegram embed title 來源頻道名稱修正，已歸檔至 `TODO-completed.md`。
 - 2026-04-07：Telegram media group 合併（grouped_id + 多圖合併為單則 Discord 訊息），已歸檔至 `TODO-completed.md`。
+- 2026-04-07：FB 貼文改推送模式 + 圖片 URL 刷新機制（詳見跨來源整合專區）。
 
 ---
 
@@ -324,10 +325,37 @@ type: STATE
 status: confirmed
 depends_on: []
 affects: [project-architecture]
-last_confirmed: 2026-03-31
+last_confirmed: 2026-04-07
 -->
 
 > Telegram Relay 已完成（歸檔至 `TODO-completed.md`）。
+
+### FB 貼文推送模式（2026-04-07 完成，待部署驗證）
+
+<!-- @meta
+id: fb-push-notify
+type: STATE
+status: confirmed
+depends_on: [cross-source-integration]
+affects: [project-architecture]
+last_confirmed: 2026-04-07
+-->
+
+**起因：** post id=399「光耀灼痕——贊妮」DB 有 8 張圖，但 bot 收到 API 回傳 images 為空，Discord 貼文無圖。根因：輪詢模式下時間差 + FB CDN URL token 過期 + 無 URL 刷新機制。
+
+**變更（4 檔案）：**
+1. `src/scraper/main.py`：FB 抓完後呼叫 `_notify_discord_bot("fb")`
+2. `src/services/notify_server.py`：新增 `"fb"` handler → `_process_fb` → 呼叫 `FBMonitor.check_and_send_fb_posts()`
+3. `src/discord_bot.py`：移除 `_auto_start_fb_monitor` 輪詢（原每 600 秒）
+4. `src/scraper/services/fb_scraper_service.py`：`_merge_fields_for_duplicate` 圖片合併改為 `>=` 時更新（刷新 CDN token，但不縮水）
+5. `src/scraper/db/database.py`：`_update_fb_post` 圖片從「只新增」改為「全量替換」（URL 有變時刪舊插新）
+
+**流程（改後）：**
+> scraper 抓 FB → 寫 DB（URL 最新鮮） → POST /notify/fb → bot 從 API 拉資料 → 下載圖片 → 發送 Discord
+
+**注意事項：**
+- 舊貼文（不在 FB 首頁的）不會被重抓，其 CDN URL 過期後無法自動更新
+- `start_fb_monitoring()` 仍保留於 `fb_monitor.py`，可供手動指令使用
 
 ### 整合方案（按部就班）
 
@@ -406,7 +434,11 @@ last_confirmed: 2026-03-31
    - 補償：每 1 小時 polling 補漏
    - 查詢：`TelegramMessageRepository` 依 message key 取完整訊息 + 媒體
 
-2. **PTT / FB / Article 走來源資料存取層（SourceMessageRepository/Fetch）**
+2. **FB 走 Scraper 推送通知（與 Bahamut 同模式）**
+   - Scraper 抓完 → POST `/notify/fb` → `notify_server._process_fb` → `FBMonitor.check_and_send_fb_posts()`
+   - 不再輪詢（原 `start_fb_monitoring` 每 600 秒）
+
+3. **PTT / Article 走來源資料存取層（SourceMessageRepository/Fetch）**
    - 目前來源型態：API pull
    - 由對應 fetch/repository adapter 取資料（非 Telegram notify 路徑）
    - 後續再進入 render adapter 與共用 publisher

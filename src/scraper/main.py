@@ -70,6 +70,7 @@ def fb_scrape_task():
         if results:
             logger.info(f"Facebook 爬蟲任務完成，抓取到 {len(results)} 篇貼文")
             fb_retry_scheduled_at = None
+            _notify_discord_bot("fb", {"count": len(results)})
         elif empty_link_failure:
             if fb_retry_scheduled_at is None:
                 fb_retry_scheduled_at = datetime.now() + timedelta(minutes=FB_EMPTY_URL_RETRY_DELAY_MINUTES)

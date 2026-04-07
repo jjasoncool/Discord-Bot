@@ -720,33 +720,52 @@ class DiscordMessagePublisher:
                     published_count += 1
                     continue
 
-                # 把所有附件攤平成單一列表
+                # 把所有附件攤平成單一列表，並分離圖片與非圖片（影片等）
                 all_items = [item for chunk in chunks for item in chunk]
+                _image_exts = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
-                # 第一則：embed + 第一張附件
-                first_item = all_items[0]
-                first_file = discord.File(
-                    first_item.abs_path,
-                    filename=first_item.filename or os.path.basename(first_item.abs_path),
-                    spoiler=first_item.is_spoiler,
-                )
+                def _is_image(item: AttachmentSpec) -> bool:
+                    fn = (item.filename or "").lower()
+                    return fn.rsplit(".", 1)[-1] in {e.lstrip(".") for e in _image_exts}
+
+                image_items = [item for item in all_items if _is_image(item)]
+                non_image_items = [item for item in all_items if not _is_image(item)]
+
+                # 第一則：embed（+ 第一張圖片，若有的話）
                 embed = operation.embed.copy() if operation.embed else None
-                if embed is not None:
-                    _image_exts = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
-                    if (
-                        not first_item.is_spoiler
-                        and first_item.filename
-                        and first_item.filename.lower().rsplit(".", 1)[-1] in {e.lstrip(".") for e in _image_exts}
-                    ):
-                        embed.set_image(url=f"attachment://{first_item.filename}")
-                await channel.send(content=operation.content or None, embed=embed, files=[first_file])
+                first_image_file: Optional[discord.File] = None
+                if image_items and not image_items[0].is_spoiler:
+                    first = image_items[0]
+                    first_image_file = discord.File(
+                        first.abs_path,
+                        filename=first.filename or os.path.basename(first.abs_path),
+                        spoiler=first.is_spoiler,
+                    )
+                    if embed is not None:
+                        embed.set_image(url=f"attachment://{first.filename}")
+                    image_items = image_items[1:]
+
+                send_files = [first_image_file] if first_image_file else []
+                await channel.send(content=operation.content or None, embed=embed, files=send_files or None)
                 published_count += 1
 
-                # 剩餘附件分批發送
-                remaining = all_items[1:]
-                if remaining:
-                    remaining_chunks = self._chunk_attachments(remaining, chunk_size=10)
-                    for chunk in remaining_chunks:
+                # 剩餘圖片分批發送
+                if image_items:
+                    for chunk in self._chunk_attachments(image_items, chunk_size=10):
+                        files = [
+                            discord.File(
+                                item.abs_path,
+                                filename=item.filename or os.path.basename(item.abs_path),
+                                spoiler=item.is_spoiler,
+                            )
+                            for item in chunk
+                        ]
+                        await channel.send(files=files)
+                        published_count += 1
+
+                # 非圖片附件（影片等）在 embed 之後發送
+                if non_image_items:
+                    for chunk in self._chunk_attachments(non_image_items, chunk_size=10):
                         files = [
                             discord.File(
                                 item.abs_path,
@@ -796,6 +815,7 @@ class MessageRelayWorker:
 
         self._processed_set: set[int] = set()
         self._processed_order: deque[int] = deque(maxlen=5000)
+        self._queued_set: set[int] = set()  # 追蹤已在 queue 中的 PK，防止重複入隊
         self._last_polled_pk: int = 0
 
     @property
@@ -914,8 +934,11 @@ class MessageRelayWorker:
     async def _enqueue_message_pk(self, message_pk: int) -> None:
         if message_pk <= 0:
             return
+        if message_pk in self._queued_set or message_pk in self._processed_set:
+            return
         try:
             self._queue.put_nowait(message_pk)
+            self._queued_set.add(message_pk)
         except asyncio.QueueFull:
             logger.error("Telegram relay queue 已滿，丟棄 message_pk=%s", message_pk)
 
@@ -1166,21 +1189,36 @@ class MessageRelayWorker:
             len(sibling_pks) if sibling_pks else 1,
         )
 
+    # 同時處理訊息的並行上限（避免大檔壓縮卡住整條 pipeline）
+    _PROCESS_CONCURRENCY = 3
+
     async def _process_loop(self) -> None:
+        sem = asyncio.Semaphore(self._PROCESS_CONCURRENCY)
+        bg_tasks: set[asyncio.Task] = set()
+
+        async def _run(pk: int) -> None:
+            async with sem:
+                try:
+                    await self._process_one(pk)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.error("Telegram relay process loop 發生錯誤: %s", exc, exc_info=True)
+                finally:
+                    self._queued_set.discard(pk)
+                    try:
+                        self._queue.task_done()
+                    except ValueError:
+                        pass
+
         while self._running:
             try:
                 message_pk = await self._queue.get()
-                await self._process_one(message_pk)
+                task = asyncio.create_task(_run(message_pk), name=f"tg_relay_{message_pk}")
+                bg_tasks.add(task)
+                task.add_done_callback(bg_tasks.discard)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
-                logger.error("Telegram relay process loop 發生錯誤: %s", exc, exc_info=True)
-            finally:
-                try:
-                    self._queue.task_done()
-                except ValueError:
-                    # queue 可能尚未取得項目就進入 finally
-                    pass
 
 
 def build_telegram_pg_dsn_from_env() -> str:

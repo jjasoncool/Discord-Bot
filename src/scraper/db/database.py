@@ -267,13 +267,19 @@ class DatabaseManager:
                 existing_post.text_md = post_data["text_md"]
                 updated = True
 
-            # 圖片：合併
+            # 圖片：以最新 URL 全量替換（確保 CDN token 不過期）
             if post_data.get("images"):
-                current_images = {img.image_url for img in existing_post.images}
-                new_images = [u for u in post_data["images"] if u not in current_images]
-                for img_url in new_images:
-                    self.session.add(FBImage(fb_post_id=existing_post.id, image_url=img_url))
-                if new_images:
+                current_urls = [img.image_url for img in existing_post.images]
+                incoming_urls = post_data["images"]
+                if current_urls != incoming_urls:
+                    for img in list(existing_post.images):
+                        self.session.delete(img)
+                    self.session.flush()
+                    seen = set()
+                    for img_url in incoming_urls:
+                        if img_url and img_url not in seen:
+                            seen.add(img_url)
+                            self.session.add(FBImage(fb_post_id=existing_post.id, image_url=img_url))
                     updated = True
 
             # timestamp：若未知則補

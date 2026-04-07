@@ -1888,13 +1888,13 @@ class FBScraperService:
             base["text_md"] = new_text_md
             changed = True
 
-        # 圖片取較多（同時做 canonical 去重）
+        # 圖片合併去重（新 URL 優先，確保 CDN token 是最新的）
         imgs_old = [x for x in (base.get("images") or []) if x]
         imgs_new = [x for x in (incoming.get("images") or []) if x]
 
         combined = []
         seen = set()
-        for img in imgs_new + imgs_old:   # 新圖優先
+        for img in imgs_new + imgs_old:   # 新圖優先（CDN token 較新鮮）
             if not img: continue
             key = self._get_image_dedup_key(img)
             if key not in seen:
@@ -1903,12 +1903,12 @@ class FBScraperService:
 
         # 最終輸出前再輕度正規化一次（確保圖片可顯示）
         combined = [self._canonical_image(x) for x in combined]
+        old_canonical = [self._canonical_image(x) for x in imgs_old]
 
-        if len(combined) > len(imgs_old):
+        if len(combined) >= len(imgs_old) and combined != old_canonical:
+            # 數量不縮水才更新（防止抓取不完整時丟失圖片），同時刷新 CDN token
             base["images"] = combined
             changed = True
-        else:
-            base["images"] = [self._canonical_image(x) for x in imgs_old]
 
         # 時間戳：若 base 無而 incoming 有
         if (not base.get("timestamp")) and incoming.get("timestamp"):

@@ -219,7 +219,6 @@ async def auto_start_article_monitor(bot):
             return
 
         await _auto_start_official_article_monitor(bot, article_commands, article_monitor_channel_id)
-        await _auto_start_fb_monitor(bot, article_commands, article_monitor_channel_id)
         await _auto_start_ptt_forum_monitor(bot, article_commands, forum_article_channel_id)
 
     except Exception as e:
@@ -281,27 +280,6 @@ async def _auto_start_official_article_monitor(bot, article_commands, article_mo
         already_running_log="官方文章更新已經在運行中",
         start_coro_factory=_start,
         success_log_factory=lambda channel, channel_id: f"✅ 已自動啟動官方文章更新！更新頻道: {channel.name} (ID: {channel_id})",
-    )
-
-
-async def _auto_start_fb_monitor(bot, article_commands, article_monitor_channel_id):
-    """自動啟動 FB 貼文監控。當前沿用官方文章頻道設定。"""
-    async def _start(channel_id):
-        await article_commands.fb_monitor.start_fb_monitoring(
-            channel_ids=[channel_id],
-            check_interval=600,
-        )
-
-    await _auto_start_monitor_task(
-        task_owner=article_commands,
-        task_attr="fb_monitoring_task",
-        get_channel_fn=bot.get_channel,
-        channel_id=article_monitor_channel_id,
-        missing_config_log="配置文件中沒有設定官方文章更新頻道 ID，跳過 FB 貼文自動啟動",
-        invalid_channel_log="找不到 FB 貼文監控使用的頻道 ID: {channel_id}",
-        already_running_log="FB 貼文監控已經在運行中",
-        start_coro_factory=_start,
-        success_log_factory=lambda channel, channel_id: f"✅ 已自動啟動 FB 貼文監控！更新頻道: {channel.name} (ID: {channel_id})",
     )
 
 
