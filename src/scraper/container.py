@@ -3,7 +3,7 @@
 管理所有服務的建立和配置
 """
 import os
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from config import DATABASE_CONFIG
@@ -28,7 +28,17 @@ class ServiceContainer:
     def get_database_engine(self):
         """取得資料庫引擎"""
         if self._engine is None:
-            self._engine = create_engine(DATABASE_CONFIG["url"], echo=False)
+            self._engine = create_engine(
+                DATABASE_CONFIG["url"],
+                echo=False,
+                connect_args={"timeout": 30},
+            )
+
+            @event.listens_for(self._engine, "connect")
+            def _set_sqlite_wal(dbapi_conn, connection_record):
+                cursor = dbapi_conn.cursor()
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.close()
         return self._engine
 
     def get_session_factory(self):

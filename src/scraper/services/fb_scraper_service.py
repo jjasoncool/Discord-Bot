@@ -51,6 +51,7 @@ import random
 import html as ihtml
 import hashlib
 import copy  # 本版新增：為了不改動寫回 JSON 的內容，DB 同步時複製 ops
+import subprocess
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional, Tuple
 from urllib.parse import urlparse, parse_qs, urlunparse, urlencode, urljoin, unquote
@@ -238,8 +239,43 @@ class FBScraperService:
                 pass
         return True
 
+    # ---------- 人類式行為 & Driver ----------
+    def _get_firefox_user_agent(self) -> str:
+        """動態取得系統目前最新的 Firefox User-Agent（最佳實踐）
+
+        優點：
+        - 永遠跟系統 Firefox 版本同步，不會過期
+        - 大幅降低被 Facebook 偵測為 bot 的風險
+        - 自動 fallback 安全版本
+        """
+        try:
+            # 執行 firefox --version 取得版本號
+            result = subprocess.run(
+                ["firefox", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=True
+            )
+            version_output = result.stdout.strip()
+            # 解析如 "Mozilla Firefox 149.0.2" → 取出版本
+            match = re.search(r"Firefox\s+(\d+\.\d+(?:\.\d+)?)", version_output)
+            version = match.group(1) if match else "149.0.2"
+
+            self.logger.info(f"🔍 偵測到 Firefox 版本: {version}，已套用最新 User-Agent")
+            return (
+                f"Mozilla/5.0 (X11; Linux x86_64; rv:{version}) "
+                f"Gecko/20100101 Firefox/{version}"
+            )
+        except Exception as e:
+            self.logger.warning(f"⚠️ 無法偵測 Firefox 版本，使用 fallback 149.0.2: {e}")
+            return (
+                "Mozilla/5.0 (X11; Linux x86_64; rv:149.0.2) "
+                "Gecko/20100101 Firefox/149.0.2"
+            )
+
     def setup_driver(self):
-        """設定瀏覽器驅動"""
+        """設定瀏覽器驅動（已改用動態 UA）"""
         opts = FirefoxOptions()
         env_firefox = os.path.join(sys.prefix, 'bin', 'firefox')
         if os.path.exists(env_firefox):
@@ -252,8 +288,11 @@ class FBScraperService:
         opts.add_argument("--private")
         opts.add_argument("--lang=zh-TW")
         opts.set_preference("intl.accept_languages", "zh-TW,zh,en-US,en")
-        ua = "Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/120.0"
+
+        # 使用動態最新 UA
+        ua = self._get_firefox_user_agent()
         opts.set_preference("general.useragent.override", ua)
+
         opts.set_preference("dom.webdriver.enabled", False)
         driver = webdriver.Firefox(options=opts)
         return driver
@@ -1031,10 +1070,10 @@ class FBScraperService:
 
                 # ==================== 登入牆恢復 ====================
                 if self._is_login_wall_blocking(driver):
-                    self.logger.warning(f"     ⚠️  偵測到關不掉的登入牆！開始恢復流程 (第 {flip} 輪)")
+                    self.logger.info(f"     ⚠️  偵測到關不掉的登入牆！開始恢復流程 (第 {flip} 輪)")
                     resume_url = driver.current_url or start_url
                     recovered = False
-                    for attempt in range(2):
+                    for attempt in range(3):
                         try:
                             driver.close()
                             if parent_handle in driver.window_handles:
@@ -1042,11 +1081,16 @@ class FBScraperService:
                             else:
                                 driver.switch_to.window(driver.window_handles[0])
 
+                            # 遞增等待，降低被 FB 連續封鎖的機率
+                            wait_sec = 3.0 + attempt * 3.0
+                            self.logger.info(f"     等待 {wait_sec:.0f} 秒後重試 (第 {attempt+1} 次)...")
+                            time.sleep(wait_sec)
+
                             new_handle = self.open_in_new_tab(driver, resume_url)
                             if new_handle:
                                 self.close_login_wall(driver)
                                 self.wait_page_loaded(driver, timeout=12)
-                                self.human_sleep(1.0, 2.5)
+                                self.human_sleep(1.5, 3.0)
                                 if not self._is_login_wall_blocking(driver):
                                     recovered = True
                                     self.logger.info(f"     ✅ 登入牆恢復成功 (第 {attempt+1} 次)")
@@ -1054,7 +1098,7 @@ class FBScraperService:
                         except Exception as e:
                             self.logger.error(f"     重開分頁失敗: {e}")
                     if not recovered:
-                        self.logger.error("     ❌ 登入牆恢復失敗，結束 viewer 循環")
+                        self.logger.error(f"     ❌ 登入牆恢復失敗，結束 viewer 循環（已收集 {len(images)} 張）")
                         break
 
                 # ==================== 抓圖 ====================
@@ -2013,11 +2057,22 @@ class FBScraperService:
                             noop_count += 1  # JSON 不需異動 → DB 也不動
                     else:
                         # content_hash 不同 → 更新現有貼文（相同 URL 的不同內容版本）
-                        # 保留 URL，更新內容
+                        # 圖片合併去重（不縮水），與 _merge_fields_for_duplicate 同邏輯
+                        imgs_old = [x for x in (existing_post.get("images") or []) if x]
+                        imgs_new = [x for x in (np.get("images") or []) if x]
+                        combined = []
+                        seen_keys = set()
+                        for img in imgs_new + imgs_old:
+                            key = self._get_image_dedup_key(img)
+                            if key not in seen_keys:
+                                seen_keys.add(key)
+                                combined.append(self._canonical_image(img))
+                        merged_images = combined if len(combined) >= len(imgs_old) else imgs_old
+
                         existing_post.update({
                             "text": np.get("text", ""),
                             "text_md": np.get("text_md", ""),
-                            "images": np.get("images", []),
+                            "images": merged_images,
                             "timestamp": np.get("timestamp"),
                             "content_hash": ch,
                             "last_seen": np["last_seen"]

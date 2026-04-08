@@ -56,8 +56,17 @@ def setup_logger(name: str, config: Optional[LoggerConfig] = None) -> logging.Lo
     if logger.handlers:
         return logger
 
-    # 設定日誌級別
-    log_level = getattr(logging, config.log_level, logging.INFO)
+    # 設定日誌級別（支援個別 logger 覆蓋，優先順序：config.py LOGGER_LEVELS > 預設 LOG_LEVEL）
+    log_level = None
+    try:
+        from config import LOGGER_LEVELS
+        override = LOGGER_LEVELS.get(name, "").upper()
+        if override:
+            log_level = getattr(logging, override, None)
+    except ImportError:
+        pass
+    if log_level is None:
+        log_level = getattr(logging, config.log_level, logging.INFO)
     logger.setLevel(log_level)
 
     # 建立格式器

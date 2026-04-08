@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, ForeignKey, UniqueConstraint
+from sqlalchemy import create_engine, event, Column, Integer, String, Text, DateTime, Boolean, ForeignKey, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime, timezone
@@ -255,7 +255,18 @@ class BahamutPostComment(Base):
 
 
 # 建立資料庫引擎
-engine = create_engine(DATABASE_CONFIG["url"], echo=False)
+engine = create_engine(
+    DATABASE_CONFIG["url"],
+    echo=False,
+    connect_args={"timeout": 30},
+)
+
+
+@event.listens_for(engine, "connect")
+def _set_sqlite_wal(dbapi_conn, connection_record):
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.close()
 
 # 建立 Session
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

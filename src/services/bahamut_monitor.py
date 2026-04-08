@@ -648,10 +648,11 @@ class BahamutMonitor(BaseContentMonitor):
                 old_comment_ids = set(post_state.get("synced_comment_ids", []))
                 delta_count = len([c for c in new_comments if c.get("comment_id") not in old_comment_ids])
 
-                logger.info(
-                    "留言比對：sn=%s 留言總數=%s 新增=%s",
-                    sn, len(new_comments), delta_count,
-                )
+                if delta_count > 0:
+                    logger.info(
+                        "留言比對：sn=%s 留言總數=%s 新增=%s",
+                        sn, len(new_comments), delta_count,
+                    )
 
                 # 重組所有留言（舊 + 新）成 slots
                 all_comment_slots = self.split_comments_into_slots(new_comments)

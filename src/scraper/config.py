@@ -66,3 +66,11 @@ BAHAMUT_CONFIG = {
     "sample_output_dir": "data/bahamut_samples",
     "export_sample_json": False,
 }
+
+# 個別 Logger 的 log level 覆蓋（不設定的 logger 使用預設 LOG_LEVEL）
+# 可用值：DEBUG, INFO, WARNING, ERROR
+LOGGER_LEVELS = {
+    "bahamut_scraper": "WARNING",
+    "fb_scraper": "INFO",
+    "ptt_scraper": "INFO",
+}
