@@ -693,7 +693,8 @@ class ManagementCommands(commands.Cog):
             "購物車交付": {"type": discord.ChannelType.text, "key": "cart_delivery_channel_id", "color": discord.Color.green(), "desc": "購物車交付通知頻道"},
             "官方文章更新": {"type": discord.ChannelType.text, "key": "article_monitor_channel_id", "color": discord.Color.orange(), "desc": "自動發送官方最新文章的頻道"},
             telegram_route_option_label: {"type": discord.ChannelType.text, "key": "telegram_channel_routes", "color": discord.Color.teal(), "desc": "先輸入 Telegram 來源（名稱/chat_id），再綁定 Discord 文字頻道"},
-            "自我介紹頻道": {"type": discord.ChannelType.text, "key": "intro_channel_id", "color": discord.Color.purple(), "desc": "使用者填寫自我介紹的頻道"}
+            "自我介紹頻道": {"type": discord.ChannelType.text, "key": "intro_channel_id", "color": discord.Color.purple(), "desc": "使用者填寫自我介紹的頻道"},
+            "音樂語音頻道": {"type": discord.ChannelType.voice, "key": "music_voice_channel_id", "color": discord.Color.red(), "desc": "音樂機器人掛機與點歌的語音頻道"}
         }
 
         # 創建頻道類型選單
@@ -804,7 +805,7 @@ class ManagementCommands(commands.Cog):
                     label=channel.name,
                     value=str(channel.id),
                     description=f"ID: {channel.id}",
-                    emoji="📝" if channel_info["type"] == discord.ChannelType.text else "📌"
+                    emoji="📝" if channel_info["type"] == discord.ChannelType.text else ("🔊" if channel_info["type"] == discord.ChannelType.voice else "📌")
                 )
                 for channel in channels
             ]

@@ -1,4 +1,4 @@
-discord.py==2.6.4
+discord.py[voice]>=2.6.4
 python-dotenv
 schedule
 requests
@@ -29,3 +29,11 @@ llama-index-embeddings-ollama
 llama-index-vector-stores-postgres
 # 關鍵字檢索
 rank-bm25
+
+# === Music Bot ===
+# 包含 ejs + 2026 YouTube 支援
+yt-dlp[default]
+# discord.py voice 必要
+PyNaCl>=1.5.0
+# DAVE 加密協定（2026-03 Discord 強制要求，解決 4017）
+davey>=0.1.0

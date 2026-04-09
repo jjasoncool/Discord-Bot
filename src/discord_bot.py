@@ -41,16 +41,18 @@ intents.message_content = True
 intents.reactions = True
 intents.members = True  # 啟用成員意圖以獲取成員信息
 intents.presences = True  # 啟用狀態意圖以獲取用戶狀態信息
+intents.voice_states = True
 
 # 指令模組清單
 COMMAND_MODULES = [
-    'commands.test_commands',
-    'commands.trade_commands',
-    'commands.management_commands',
-    'commands.forum_monitor',
-    'commands.user_commands',
     'commands.article_commands',
-    'commands.llm_commands'
+    'commands.forum_monitor',
+    'commands.llm_commands',
+    'commands.management_commands',
+    'commands.music_commands',
+    'commands.trade_commands',
+    'commands.test_commands',
+    'commands.user_commands'
 ]
 
 # 建立機器人實例
@@ -95,7 +97,9 @@ async def on_ready():
         add_reactions=True,
         embed_links=True,
         attach_files=True,
-        read_message_history=True
+        read_message_history=True,
+        connect=True,
+        speak=True,
     )
 
     invite_url = discord.utils.oauth_url(

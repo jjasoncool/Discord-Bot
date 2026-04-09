@@ -97,6 +97,7 @@ last_confirmed: 2026-03-31
 | 主軸 | 狀態 | 進度 | 詳見 |
 |---|---|---:|---|
 | Discord Bot / AI 對話能力 | 已有可用基礎能力 | 70% | [專案架構](#專案-ai-架構總覽) |
+| 點歌機器人（Music Bot） | 核心完成，待部署驗證 | 70% | [點歌機器人](#點歌機器人專區) |
 | 跨來源整合（Article/FB/PTT/TG） | 有方向，尚未全面收斂 | 35% | [跨來源整合](#跨來源整合專區) |
 | Bahamut RAG / AI 整合 | 尚未開始 | 5% | [RAG TODO](#第三階段整合-ai--pgvector--rag) |
 | Discord Bot 管理入口 | 規劃中 | 10% | [管理 TODO](#discord-bot-管理入口與指令整理-todo) |
@@ -213,6 +214,93 @@ last_confirmed: 2026-03-31
 - 已做過 prompt/RAG/模型路由優化仍卡住
 
 否則先不做 SFT，先做產品迭代 + 資料閉環。
+
+---
+
+## 點歌機器人專區
+
+<!-- @meta
+id: music-bot
+type: STATE
+status: confirmed
+depends_on: [project-architecture]
+affects: []
+last_confirmed: 2026-04-09
+-->
+
+### 架構
+
+- 模組位置：`src/music/`（9 個檔案）
+- 入口橋接：`src/commands/music_commands.py` → `MusicCog`
+- Runtime 設定：`src/settings/music_runtime.json`（hot reload，5 秒 polling）
+- 頻道設定入口：`/server_manager` → `頻道設定` → `音樂語音頻道`
+- 依賴：`yt-dlp`、`discord.py[voice]`、`FFmpeg`
+
+### 設計決策
+
+- **只需設定一個語音頻道**：`voice_channel_id` 同時用於加入語音、發送面板、限制指令
+- **語音頻道內建聊天**：Discord 語音頻道自帶文字聊天，與語音頻道共用同一 ID
+- **按鈕面板取代 slash command**：控制面板（點歌/跳過/停止/歌單）在語音頻道聊天內自動 bump
+- **點歌用 Modal**：按「點歌」按鈕 → 彈出輸入框，支援 URL 或關鍵字
+- **無 cookie**：小規模使用不需登入，被擋再加
+- **無本地快取**：串流模式，觀察重複率再決定是否加快取
+
+### 已實作功能
+
+- [x] 按鈕控制面板（點歌 / 跳過 / 停止 / 歌單）— persistent view，重啟後仍可互動
+- [x] 點歌 Modal — 支援 YouTube URL 或關鍵字搜尋（`ytsearch`）
+- [x] 換歌自動 bump：刪舊面板 → 發新面板（「現在播放」embed + 按鈕）
+- [x] 待機面板：無歌曲時顯示待機狀態 + 按鈕
+- [x] 雙佇列：主歌單（循環）+ 插播（優先）
+- [x] 自動加入指定語音頻道並播放預設歌單
+- [x] Runtime 配置 hot reload（`music_runtime.json`）
+- [x] `/server_manager` 頻道設定整合（選語音頻道 → 自動寫入 music_runtime.json）
+- [x] 歌單查看（按鈕，ephemeral 回覆）
+- [x] 播放錯誤 log 與使用者友善提示
+
+### 已修復 Bug（2026-04-09）
+
+- [x] `ytdl.py` 缺少 `import os`（已移除，不再需要）
+- [x] `player.py` 缺少 `import Song`（`models.py`）
+- [x] `_after_play` callback 執行緒安全問題（改用 `asyncio.Event` + `call_soon_threadsafe`）
+- [x] `_play_loop` generic except 未記錄錯誤
+- [x] `extract_info` 回傳型別標註修正（`dict` → `list[dict]`）
+
+### Config 簡化（2026-04-09）
+
+移除的欄位：
+- `text_channel_id` → 由 `voice_channel_id` 推導
+- `allowed_text_channel_ids` → 只允許語音頻道內建聊天
+- `cookies_from_browser` / `cookies_file` → 小規模不需要
+
+現在 `music_runtime.json` 只有：
+```json
+{ "music": { "voice_channel_id": 0, "default_playlist_url": "" } }
+```
+
+### 點歌機器人 TODO
+
+<!-- @meta
+id: music-bot-todo
+type: TODO
+status: confirmed
+last_confirmed: 2026-04-09
+-->
+
+**P0（基本可用）：**
+- [ ] 透過 `/server_manager` 設定語音頻道
+- [ ] 部署驗證：確認 bot 可加入語音頻道並播放
+- [ ] 確認 Docker 容器有 FFmpeg 與 yt-dlp
+
+**P1（體驗優化）：**
+- [ ] `/pause` 與 `/resume` 按鈕
+- [ ] `/volume` 音量控制按鈕
+- [ ] 多歌單管理（切換不同預設歌單）
+
+**P2（進階功能）：**
+- [ ] 歷史播放紀錄
+- [ ] 使用者點歌統計
+- [ ] 本地快取（視重複點歌率決定）
 
 ---
 
