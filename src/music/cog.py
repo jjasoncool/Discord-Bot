@@ -81,19 +81,24 @@ class MusicCog(commands.Cog):
                 logger.warning("[MusicCog] 無法加入語音頻道")
                 return
 
+            # 先啟動播放迴圈和面板，歌單背景載入（不阻塞點歌）
+            await self.player.start_background_loop()
+            await self.announcer.send_idle_panel()
+
             if self.config.default_playlist_url:
-                try:
-                    await self.player.add_to_playlist(self.config.default_playlist_url)
-                    await self.player.start_background_loop()
-                    logger.info("[MusicCog] 預設歌單已載入，開始播放")
-                except Exception as e:
-                    logger.error(f"[MusicCog] 載入歌單失敗: {e}", exc_info=True)
-                    await self.announcer.send_idle_panel()
-            else:
-                await self.announcer.send_idle_panel()
-                logger.info("[MusicCog] 無預設歌單，顯示待機面板")
+                asyncio.create_task(self._load_playlist_background())
         finally:
             self._starting = False
+
+    async def _load_playlist_background(self):
+        """背景載入預設歌單，不阻塞其他操作"""
+        try:
+            logger.info("[MusicCog] 開始背景載入預設歌單...")
+            await self.player.add_to_playlist(self.config.default_playlist_url)
+            count = len(self.player.queue.main_queue)
+            logger.info(f"[MusicCog] 預設歌單已載入（{count} 首可播放）")
+        except Exception as e:
+            logger.error(f"[MusicCog] 載入歌單失敗: {e}", exc_info=True)
 
     async def _on_config_change(self, new_config: MusicConfig):
         """配置變更時處理"""

@@ -32,9 +32,9 @@ class YTDLSource:
         'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
     }
 
-    # 下載到本地快取用
+    # 下載到本地快取用（保留原始品質，不重新編碼）
     DOWNLOAD_OPTIONS = {
-        'format': 'bestaudio/best',
+        'format': 'bestaudio[acodec=opus]/bestaudio/best',  # 優先選 opus 格式避免轉碼
         'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
@@ -43,7 +43,7 @@ class YTDLSource:
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'opus',
-            'preferredquality': '320',
+            'preferredquality': '0',  # 0 = 保留原始品質，不重新編碼
         }],
     }
 

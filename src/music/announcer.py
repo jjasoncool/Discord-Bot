@@ -1,5 +1,7 @@
+import os
 import discord
 from .models import Song
+from .ytdl import YTDLSource
 
 
 class MusicControlView(discord.ui.View):
@@ -28,6 +30,31 @@ class MusicControlView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         self.cog.player.stop()
         await interaction.followup.send("⏹️ 音樂已停止", ephemeral=True)
+
+    @discord.ui.button(label="重播", style=discord.ButtonStyle.secondary, custom_id="music_replay", emoji="🔄")
+    async def replay_song(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        player = self.cog.player
+        if not player.queue.current:
+            await interaction.followup.send("目前沒有在播放", ephemeral=True)
+            return
+
+        song = player.queue.current
+        # 刪除該首歌的快取
+        video_id = YTDLSource._extract_video_id(song.webpage_url)
+        if video_id:
+            cache_path = YTDLSource.get_cache_path(video_id)
+            if cache_path:
+                try:
+                    os.remove(cache_path)
+                except OSError:
+                    pass
+
+        # 設定重播 flag，停止當前播放 → 播放迴圈會重播同一首
+        player._replay = True
+        if player.voice_client and player.voice_client.is_playing():
+            player.voice_client.stop()
+        await interaction.followup.send(f"🔄 重新抓取並播放：**{song.title}**", ephemeral=True)
 
     @discord.ui.button(label="歌單", style=discord.ButtonStyle.secondary, custom_id="music_queue", emoji="📋")
     async def show_queue(self, interaction: discord.Interaction, button: discord.ui.Button):

@@ -21,6 +21,7 @@ class MusicPlayer:
         self._play_lock = asyncio.Lock()
         self._voice_lock = asyncio.Lock()  # 防止重入式 connect/disconnect
         self._task: asyncio.Task | None = None
+        self._replay = False  # 重播當前歌曲（不跳下一首）
 
     def _has_active_voice(self) -> bool:
         return self.voice_client is not None and self.voice_client.is_connected()
@@ -95,19 +96,32 @@ class MusicPlayer:
             if not await self.ensure_voice():
                 return
 
-            is_interrupt_song = self.queue.is_interrupt_active()
-            song = self.queue.get_next()
-            self.queue.current = song
+            # 重播模式：沿用 current，不從佇列取下一首
+            if self._replay and self.queue.current:
+                song = self.queue.current
+                is_interrupt_song = False
+                self._replay = False
+                logger.info(f"[MusicPlayer] 重播: {song.title}")
+            else:
+                is_interrupt_song = self.queue.is_interrupt_active()
+                song = self.queue.get_next()
+                self.queue.current = song
 
             # 檢查本地快取
             video_id = YTDLSource._extract_video_id(song.webpage_url)
             cache_path = YTDLSource.get_cache_path(video_id) if video_id else None
             need_download = False
 
+            # 使用 FFmpegOpusAudio + codec='copy'，全程零重新編碼
+            # YouTube 來源是 opus → ffmpeg copy → Discord 直送，保留原始品質
+
             if cache_path:
-                # 有快取，直接用本地檔案（幾乎零延遲）
+                # 有快取，直接用本地 opus 檔案
                 logger.info(f"[MusicPlayer] 使用快取播放: {song.title}")
-                audio_source = discord.FFmpegPCMAudio(cache_path, options='-vn')
+                audio_source = discord.FFmpegOpusAudio(
+                    cache_path,
+                    codec='copy',
+                )
             else:
                 # 無快取，串流播放 + 背景下載
                 try:
@@ -129,10 +143,10 @@ class MusicPlayer:
                         await self.announcer.send_skipped_notice(song, reason)
                     return
 
-                audio_source = discord.FFmpegPCMAudio(
+                audio_source = discord.FFmpegOpusAudio(
                     info['url'],
                     before_options='-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-                    options='-vn'
+                    codec='copy',
                 )
                 need_download = True
 
