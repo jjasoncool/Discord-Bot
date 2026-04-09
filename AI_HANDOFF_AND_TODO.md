@@ -97,7 +97,7 @@ last_confirmed: 2026-03-31
 | 主軸 | 狀態 | 進度 | 詳見 |
 |---|---|---:|---|
 | Discord Bot / AI 對話能力 | 已有可用基礎能力 | 70% | [專案架構](#專案-ai-架構總覽) |
-| 點歌機器人（Music Bot） | 核心完成，待部署驗證 | 70% | [點歌機器人](#點歌機器人專區) |
+| 點歌機器人（Music Bot） | 已上線運作 | 85% | [點歌機器人](#點歌機器人專區) |
 | 跨來源整合（Article/FB/PTT/TG） | 有方向，尚未全面收斂 | 35% | [跨來源整合](#跨來源整合專區) |
 | Bahamut RAG / AI 整合 | 尚未開始 | 5% | [RAG TODO](#第三階段整合-ai--pgvector--rag) |
 | Discord Bot 管理入口 | 規劃中 | 10% | [管理 TODO](#discord-bot-管理入口與指令整理-todo) |
@@ -225,57 +225,81 @@ type: STATE
 status: confirmed
 depends_on: [project-architecture]
 affects: []
-last_confirmed: 2026-04-09
+last_confirmed: 2026-04-10
 -->
 
 ### 架構
 
 - 模組位置：`src/music/`（9 個檔案）
 - 入口橋接：`src/commands/music_commands.py` → `MusicCog`
-- Runtime 設定：`src/settings/music_runtime.json`（hot reload，5 秒 polling）
-- 頻道設定入口：`/server_manager` → `頻道設定` → `音樂語音頻道`
-- 依賴：`yt-dlp`、`discord.py[voice]`、`FFmpeg`
+- 頻道設定：`config.json` 的 `music_voice_channel_id`（由 `/server_manager` 設定）
+- 歌單設定：`src/settings/music_runtime.json` 的 `default_playlist_url`
+- hot reload watcher：同時監控 `config.json` + `music_runtime.json`，變更後自動重連
+- 依賴：`yt-dlp`、`discord.py[voice]>=2.7.1`、`davey>=0.1.5`（DAVE 加密）、`FFmpeg`
 
 ### 設計決策
 
-- **只需設定一個語音頻道**：`voice_channel_id` 同時用於加入語音、發送面板、限制指令
+- **只需設定一個語音頻道**：`voice_channel_id` 同時用於加入語音、發送面板
 - **語音頻道內建聊天**：Discord 語音頻道自帶文字聊天，與語音頻道共用同一 ID
-- **按鈕面板取代 slash command**：控制面板（點歌/跳過/停止/歌單）在語音頻道聊天內自動 bump
+- **按鈕面板取代 slash command**：控制面板（點歌/跳過/停止/重播/歌單）在語音頻道聊天內自動 bump
 - **點歌用 Modal**：按「點歌」按鈕 → 彈出輸入框，支援 URL 或關鍵字
-- **無 cookie**：小規模使用不需登入，被擋再加
-- **無本地快取**：串流模式，觀察重複率再決定是否加快取
+- **點歌排隊不打斷**：點歌加入插播佇列，當前歌曲播完才播點的歌
+- **停止只清插播**：停止按鈕只清除使用者點的歌，預設歌單保留
+- **本地快取**：首次串流播放 + 背景下載到 `src/music/cache/`，之後從本地播放
+- **快取峰值正規化**：快取播放時掃描峰值，等比例增益對齊 -1dB，保留原始動態
+- **無 cookie**：小規模使用不需登入
+- **FFmpegPCMAudio**：DAVE 加密下最穩定（FFmpegOpusAudio 在 DAVE 下會斷續爆音）
 
 ### 已實作功能
 
-- [x] 按鈕控制面板（點歌 / 跳過 / 停止 / 歌單）— persistent view，重啟後仍可互動
+- [x] 按鈕控制面板（點歌 / 跳過 / 停止 / 重播 / 歌單）— persistent view
 - [x] 點歌 Modal — 支援 YouTube URL 或關鍵字搜尋（`ytsearch`）
-- [x] 換歌自動 bump：刪舊面板 → 發新面板（「現在播放」embed + 按鈕）
-- [x] 待機面板：無歌曲時顯示待機狀態 + 按鈕
-- [x] 雙佇列：主歌單（循環）+ 插播（優先）
-- [x] 自動加入指定語音頻道並播放預設歌單
-- [x] Runtime 配置 hot reload（`music_runtime.json`）
-- [x] `/server_manager` 頻道設定整合（選語音頻道 → 自動寫入 music_runtime.json）
+- [x] 點歌排隊 — 不打斷當前播放，顯示排隊順位
+- [x] 重播按鈕 — 刪除快取 + 重新從 YouTube 抓取並播放當前歌曲
+- [x] 換歌自動 bump — 刪舊面板 → 發新面板（「現在播放」embed + 按鈕 + 縮圖）
+- [x] 待機面板 — 無歌曲時顯示待機狀態 + 按鈕
+- [x] 雙佇列 — 主歌單（循環）+ 插播（優先，不循環）
+- [x] 預設歌單自動載入（`extract_flat` 快速解析，邊載入邊播放）
+- [x] 本地快取（`src/music/cache/`，opus 原始品質，零損失）
+- [x] 快取峰值正規化（`volumedetect` + `volume` 濾鏡，等比例增益）
+- [x] 預先快取（prefetch 接下來 3 首，減少切歌延遲）
+- [x] 下載限速 3MB/s + Semaphore 同時只 1 個下載（避免搶串流頻寬）
+- [x] 版權/私人/已刪除影片自動跳過 + embed 通知 + 從歌單移除
+- [x] Runtime 配置 hot reload（config.json + music_runtime.json）
+- [x] `/server_manager` 頻道設定整合（語音頻道選項）
+- [x] YouTube 縮圖修復（`extract_flat` 模式用 `i.ytimg.com` 組合）
 - [x] 歌單查看（按鈕，ephemeral 回覆）
-- [x] 播放錯誤 log 與使用者友善提示
+- [x] `voice_lock` 防止重入式 connect/disconnect
+- [x] `requeue_song` 播放失敗時歌曲放回佇列前端（防掉歌）
+- [x] DAVE 加密協定支援（davey 0.1.5）
+- [x] 非同步歌單載入（不阻塞點歌）
 
-### 已修復 Bug（2026-04-09）
+### 音訊品質鏈路
 
-- [x] `ytdl.py` 缺少 `import os`（已移除，不再需要）
-- [x] `player.py` 缺少 `import Song`（`models.py`）
-- [x] `_after_play` callback 執行緒安全問題（改用 `asyncio.Event` + `call_soon_threadsafe`）
-- [x] `_play_loop` generic except 未記錄錯誤
-- [x] `extract_info` 回傳型別標註修正（`dict` → `list[dict]`）
+```
+YouTube (opus 160kbps, format 251)
+  ↓ 串流播放：yt-dlp extract_single → ffmpeg PCM 48kHz → discord.py encoder → DAVE → Discord
+  ↓ 快取下載：yt-dlp download (opus copy, 限速 3MB/s) → src/music/cache/{id}.opus
+  ↓ 快取播放：本地 opus → ffmpeg PCM 48kHz + volume 正規化 → discord.py encoder → DAVE → Discord
+```
 
-### Config 簡化（2026-04-09）
+### 已知限制
 
-移除的欄位：
-- `text_channel_id` → 由 `voice_channel_id` 推導
-- `allowed_text_channel_ids` → 只允許語音頻道內建聊天
-- `cookies_from_browser` / `cookies_file` → 小規模不需要
+- **DAVE 加密偶爾造成特定區段短暫加速**：discord.py AudioPlayer 的 20ms frame timing 在 DAVE 加密耗時過長時會追趕（`delay = max(0, ...)`），屬於 library 層級問題，非程式碼可解
+- **YouTube 來源最高 opus 160kbps**：瀏覽器聽到的差異來自客戶端音效處理，非來源品質差異
+- **FFmpegOpusAudio 在 DAVE 下不可用**：會斷續爆音，必須走 FFmpegPCMAudio + discord.py 內建 encoder
+- **歌單中的版權/私人影片**：自動跳過並通知，無法繞過
 
-現在 `music_runtime.json` 只有：
+### Config 說明
+
+頻道 ID 存在 `config.json`（與其他頻道設定一致）：
 ```json
-{ "music": { "voice_channel_id": 0, "default_playlist_url": "" } }
+{ "music_voice_channel_id": 1489909579927257130 }
+```
+
+歌單存在 `src/settings/music_runtime.json`：
+```json
+{ "music": { "default_playlist_url": "https://..." } }
 ```
 
 ### 點歌機器人 TODO
@@ -284,23 +308,23 @@ last_confirmed: 2026-04-09
 id: music-bot-todo
 type: TODO
 status: confirmed
-last_confirmed: 2026-04-09
+last_confirmed: 2026-04-10
 -->
 
-**P0（基本可用）：**
-- [ ] 透過 `/server_manager` 設定語音頻道
-- [ ] 部署驗證：確認 bot 可加入語音頻道並播放
-- [ ] 確認 Docker 容器有 FFmpeg 與 yt-dlp
+**P0（已完成）：**
+- [x] 透過 `/server_manager` 設定語音頻道
+- [x] 部署驗證：bot 可加入語音頻道並播放
+- [x] Docker 容器有 FFmpeg、yt-dlp、davey
 
 **P1（體驗優化）：**
 - [ ] `/pause` 與 `/resume` 按鈕
-- [ ] `/volume` 音量控制按鈕
 - [ ] 多歌單管理（切換不同預設歌單）
+- [ ] 快取空間管理（LRU 清理、磁碟用量監控）
 
 **P2（進階功能）：**
 - [ ] 歷史播放紀錄
 - [ ] 使用者點歌統計
-- [ ] 本地快取（視重複點歌率決定）
+- [ ] DAVE 加速問題追蹤（等 discord.py 後續版本優化）
 
 ---
 

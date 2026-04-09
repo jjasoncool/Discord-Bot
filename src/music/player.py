@@ -1,3 +1,4 @@
+import re
 import asyncio
 import logging
 import discord
@@ -47,7 +48,6 @@ class MusicPlayer:
         if self._has_active_voice():
             if self.voice_client.channel and self.voice_client.channel.id == channel.id:
                 return True
-            # 連到不同頻道，先斷開
             logger.info(f"[MusicPlayer] 從 {self.voice_client.channel} 移到 {channel.name}")
             await self.voice_client.disconnect(force=True)
             self._reset_voice_client()
@@ -71,7 +71,7 @@ class MusicPlayer:
             logger.info(f"[MusicPlayer] 已加入語音頻道: {channel.name}")
             return True
         except Exception as e:
-            self._reset_voice_client()  # 清理半失敗狀態
+            self._reset_voice_client()
             logger.error(f"[MusicPlayer] 加入語音頻道失敗: {e}", exc_info=True)
             return False
 
@@ -112,18 +112,28 @@ class MusicPlayer:
             cache_path = YTDLSource.get_cache_path(video_id) if video_id else None
             need_download = False
 
-            # loudnorm：統一所有歌曲的感知響度（EBU R128，-14 LUFS）
-            LOUDNORM_FILTER = '-af loudnorm=I=-14:TP=-1:LRA=11'
+            # FFmpegPCMAudio + 強制 48kHz PCM（DAVE 下最穩定）
+            PCM_OPTS = '-vn -ar 48000 -ac 2 -f s16le'
+            # thread_queue_size：ffmpeg 內部讀取緩衝，吸收 CPU/IO 微小延遲
+            BUFFER_OPTS = '-thread_queue_size 4096'
 
             if cache_path:
+                # 有快取：峰值正規化（等比例增益，保留動態）
                 logger.info(f"[MusicPlayer] 使用快取播放: {song.title}")
-                audio_source = discord.FFmpegOpusAudio(
+                peak_db = await self._get_peak_db(cache_path)
+                if peak_db is not None and peak_db != 0:
+                    gain = -1.0 - peak_db
+                    options = f'{PCM_OPTS} -af volume={gain:.1f}dB'
+                    logger.info(f"[MusicPlayer] 峰值正規化: peak={peak_db:.1f}dB, gain={gain:.1f}dB")
+                else:
+                    options = PCM_OPTS
+                audio_source = discord.FFmpegPCMAudio(
                     cache_path,
-                    bitrate=320,
-                    options=LOUDNORM_FILTER,
+                    before_options=BUFFER_OPTS,
+                    options=options,
                 )
             else:
-                # 無快取，串流播放 + 背景下載
+                # 無快取，串流播放（不做音量處理）
                 try:
                     info = await YTDLSource.extract_single(song.webpage_url)
                 except Exception as e:
@@ -143,11 +153,10 @@ class MusicPlayer:
                         await self.announcer.send_skipped_notice(song, reason)
                     return
 
-                audio_source = discord.FFmpegOpusAudio(
+                audio_source = discord.FFmpegPCMAudio(
                     info['url'],
-                    before_options='-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-                    bitrate=320,
-                    options=LOUDNORM_FILTER,
+                    before_options=f'-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 {BUFFER_OPTS}',
+                    options=PCM_OPTS,
                 )
                 need_download = True
 
@@ -179,21 +188,90 @@ class MusicPlayer:
             if self.announcer:
                 await self.announcer.send_now_playing(song)
 
-            # 背景下載到快取（不阻塞播放）
+            # 背景下載當前歌曲 + 預先快取接下來 3 首
             if need_download and song.webpage_url:
                 asyncio.create_task(YTDLSource.download_to_cache(song.webpage_url))
+            asyncio.create_task(self._prefetch_upcoming(3))
 
             await play_done.wait()
-            # 不在這裡清 current，讓 _replay 能讀到當前歌曲
             if not self._replay:
                 self.queue.current = None
             await asyncio.sleep(0.5)
 
     async def add_to_playlist(self, url: str):
-        """將 URL（歌單或單曲）加入主佇列"""
-        songs_info = await YTDLSource.extract_info(url)
-        song_list = [Song.from_info(s) for s in songs_info]
-        self.queue.add_to_main(song_list)
+        """將歌單 URL 逐批加入主佇列（邊解析邊播，不等全部完成）"""
+        loop = asyncio.get_event_loop()
+        try:
+            entries = await loop.run_in_executor(
+                None, lambda: YTDLSource._extract_playlist_sync(url)
+            )
+        except Exception as e:
+            logger.error(f"[MusicPlayer] 歌單解析失敗: {e}")
+            return
+
+        batch = []
+        for entry in entries:
+            if not entry:
+                continue
+            song_url = entry.get('url') or entry.get('webpage_url', '')
+            if not song_url:
+                continue
+            video_id = entry.get('id', '')
+            thumbnail = entry.get('thumbnail') or (
+                f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else None
+            )
+            song = Song(
+                title=entry.get('title', 'Unknown'),
+                url=song_url,
+                webpage_url=f"https://www.youtube.com/watch?v={video_id}" if video_id else song_url,
+                duration=int(entry.get('duration', 0) or 0),
+                thumbnail=thumbnail,
+            )
+            batch.append(song)
+
+            # 每 5 首加入一批
+            if len(batch) >= 5:
+                self.queue.add_to_main(batch)
+                logger.info(f"[MusicPlayer] 歌單載入中... 已加入 {len(self.queue.main_queue)} 首")
+                batch = []
+                await asyncio.sleep(0)
+
+        if batch:
+            self.queue.add_to_main(batch)
+        logger.info(f"[MusicPlayer] 歌單載入完成，共 {len(self.queue.main_queue)} 首")
+
+    @staticmethod
+    async def _get_peak_db(file_path: str) -> float | None:
+        """用 ffmpeg 掃描檔案的最大峰值（dB）"""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                'ffmpeg', '-i', file_path, '-af', 'volumedetect', '-f', 'null', '-',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await proc.communicate()
+            match = re.search(r'max_volume:\s*([-\d.]+)\s*dB', stderr.decode())
+            if match:
+                return float(match.group(1))
+        except Exception as e:
+            logger.warning(f"[MusicPlayer] 峰值掃描失敗: {e}")
+        return None
+
+    async def _prefetch_upcoming(self, count: int = 3):
+        """背景預先下載接下來的歌曲到快取"""
+        upcoming = list(self.queue.interrupt_queue)[:count]
+        if len(upcoming) < count:
+            upcoming += list(self.queue.main_queue)[:count - len(upcoming)]
+
+        for song in upcoming:
+            if not song.webpage_url:
+                continue
+            video_id = YTDLSource._extract_video_id(song.webpage_url)
+            if video_id and not YTDLSource.get_cache_path(video_id):
+                try:
+                    await YTDLSource.download_to_cache(song.webpage_url)
+                except Exception:
+                    pass
 
     async def request_song(self, query: str) -> Song:
         """點歌：加入插播佇列排隊，不打斷當前歌曲"""

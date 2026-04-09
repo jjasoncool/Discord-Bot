@@ -1,5 +1,6 @@
 import os
 import re
+import glob
 import logging
 import yt_dlp
 import asyncio
@@ -12,43 +13,47 @@ CACHE_DIR = os.path.join(os.path.dirname(__file__), 'cache')
 
 
 class YTDLSource:
+    # 同時只允許 1 個下載任務，避免多個 yt-dlp 同時搶頻寬/CPU
+    _download_semaphore = asyncio.Semaphore(1)
+
     YTDL_OPTIONS = {
-        'format': 'bestaudio/best',
-        'noplaylist': False,           # 允許歌單
+        'format': '251/bestaudio/best',
+        'noplaylist': False,
         'quiet': True,
         'no_warnings': True,
-        'ignoreerrors': True,          # 跳過無法播放的影片（版權、地區限制等）
+        'ignoreerrors': True,
         'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
-        'sleep_interval': 2,           # 防 rate-limit
+        'sleep_interval': 2,
         'max_sleep_interval': 5,
     }
 
-    # 單首歌播放時用（不展開歌單）
+    # 單首歌播放時用（優先 opus，避免即時轉碼 AAC 的 CPU 開銷）
     SINGLE_OPTIONS = {
-        'format': 'bestaudio/best',
+        'format': '251/bestaudio/best',
         'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
         'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
     }
 
-    # 下載到本地快取用（取最高品質，轉為高位元率 opus）
+    # 下載到本地快取用（統一轉為 opus，限速避免搶頻寬）
     DOWNLOAD_OPTIONS = {
-        'format': 'bestaudio/best',
+        'format': '251/bestaudio/best',
         'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
         'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
         'outtmpl': os.path.join(CACHE_DIR, '%(id)s.%(ext)s'),
+        'ratelimit': 3145728,  # 限速 3MB/s，保留頻寬給串流播放
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'opus',
-            'preferredquality': '320',  # Level 3 支援 384kbps，用 320 確保最佳品質
+            'preferredquality': '0',  # 0 = 來源是 opus 時 codec copy，非 opus 時用最高品質轉檔
         }],
     }
 
     SEARCH_OPTIONS = {
-        'format': 'bestaudio/best',
+        'format': '251/bestaudio/best',
         'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
@@ -74,36 +79,41 @@ class YTDLSource:
 
     @staticmethod
     def get_cache_path(video_id: str) -> str | None:
-        """檢查快取是否存在，回傳檔案路徑"""
-        cache_file = os.path.join(CACHE_DIR, f"{video_id}.opus")
-        if os.path.exists(cache_file) and os.path.getsize(cache_file) > 0:
-            return cache_file
+        """檢查快取是否存在，回傳檔案路徑（支援任何副檔名）"""
+        matches = glob.glob(os.path.join(CACHE_DIR, f"{video_id}.*"))
+        for path in matches:
+            if os.path.getsize(path) > 0:
+                return path
         return None
 
     @staticmethod
     async def download_to_cache(url: str):
-        """背景下載音訊到本地快取"""
+        """背景下載音訊到本地快取，Semaphore 確保同時只有一個下載"""
         video_id = YTDLSource._extract_video_id(url)
         if not video_id:
             return
-        # 已快取就跳過
         if YTDLSource.get_cache_path(video_id):
             return
 
         os.makedirs(CACHE_DIR, exist_ok=True)
         loop = asyncio.get_event_loop()
-        try:
-            await loop.run_in_executor(
-                None,
-                lambda: yt_dlp.YoutubeDL(YTDLSource.DOWNLOAD_OPTIONS).download([url])
-            )
-            logger.info(f"[MusicCache] 已快取: {video_id}")
-        except Exception as e:
-            logger.warning(f"[MusicCache] 下載快取失敗 {video_id}: {e}")
+
+        async with YTDLSource._download_semaphore:
+            # 等待期間可能已被其他任務下載完
+            if YTDLSource.get_cache_path(video_id):
+                return
+            try:
+                await loop.run_in_executor(
+                    None,
+                    lambda: yt_dlp.YoutubeDL(YTDLSource.DOWNLOAD_OPTIONS).download([url])
+                )
+                logger.info(f"[MusicCache] 已快取: {video_id}")
+            except Exception as e:
+                logger.warning(f"[MusicCache] 下載快取失敗 {video_id}: {e}")
 
     @staticmethod
     async def extract_info(url: str) -> list[dict]:
-        """提取 URL 的音訊資訊（支援歌單）"""
+        """提取 URL 的音訊資訊（支援歌單，一次性回傳）"""
         loop = asyncio.get_event_loop()
         try:
             info = await loop.run_in_executor(
@@ -115,6 +125,17 @@ class YTDLSource:
             return [info]
         except Exception as e:
             raise YTDLError(f"yt-dlp 提取失敗: {e}") from e
+
+    @staticmethod
+    def _extract_playlist_sync(url: str):
+        """同步提取歌單，使用 lazy extraction 逐首產出"""
+        ydl_opts = YTDLSource.YTDL_OPTIONS.copy()
+        ydl_opts['extract_flat'] = 'in_playlist'
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if 'entries' not in info:
+                return [info] if info else []
+            return [e for e in info['entries'] if e]
 
     @staticmethod
     async def extract_single(url: str) -> dict:
