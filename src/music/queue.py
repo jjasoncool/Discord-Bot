@@ -41,10 +41,23 @@ class MusicQueue:
         else:
             self.add_main_front(song)
 
+    def remove_song(self, song: Song):
+        """從主歌單中徹底移除（不再循環播放）"""
+        try:
+            self.main_queue.remove(song)
+        except ValueError:
+            pass
+
     def is_interrupt_active(self) -> bool:
         return len(self.interrupt_queue) > 0
 
-    def clear(self):
+    def clear_interrupts(self):
+        """只清除插播佇列，保留預設歌單"""
+        self.interrupt_queue.clear()
+        self.current = None
+
+    def clear_all(self):
+        """清除所有佇列（含預設歌單）"""
         self.main_queue.clear()
         self.interrupt_queue.clear()
         self.current = None

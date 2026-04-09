@@ -138,6 +138,28 @@ class Announcer:
         view = MusicControlView(self.cog)
         self._panel_message = await channel.send(embed=embed, view=view)
 
+    async def send_skipped_notice(self, song: Song, reason: str):
+        """顯示跳過通知（版權、無法播放等），不影響控制面板"""
+        channel = self.bot.get_channel(self.voice_channel_id)
+        if channel is None:
+            return
+
+        embed = discord.Embed(
+            title="⚠️ 無法播放，已跳過",
+            description=f"**{song.title}**",
+            color=0xFF4444
+        )
+        embed.add_field(name="原因", value=reason, inline=False)
+        if song.webpage_url:
+            embed.add_field(name="連結", value=f"[YouTube]({song.webpage_url})", inline=False)
+        embed.set_footer(text="此歌曲已從歌單中移除")
+
+        # 獨立訊息，5 秒後自動刪除
+        try:
+            msg = await channel.send(embed=embed, delete_after=15)
+        except Exception:
+            pass
+
     async def _delete_panel(self):
         """安全刪除舊面板訊息"""
         if self._panel_message:

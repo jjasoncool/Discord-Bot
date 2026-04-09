@@ -99,10 +99,30 @@ class MusicPlayer:
             song = self.queue.get_next()
             self.queue.current = song
 
-            # 提取音源（每次播放時重新取得串流 URL）
-            infos = await YTDLSource.extract_info(song.webpage_url)
+            # 提取音源（每次播放時重新取得新鮮串流 URL，不展開歌單）
+            try:
+                info = await YTDLSource.extract_single(song.webpage_url)
+            except Exception as e:
+                error_msg = str(e)
+                # 判斷錯誤類型，產生友善的原因訊息
+                if 'copyright' in error_msg.lower() or 'blocked' in error_msg.lower():
+                    reason = "版權限制，已被權利方封鎖"
+                elif 'private' in error_msg.lower():
+                    reason = "私人影片，無法存取"
+                elif 'unavailable' in error_msg.lower() or 'not available' in error_msg.lower():
+                    reason = "影片已不存在或被移除"
+                else:
+                    reason = "無法取得串流資訊"
+                logger.warning(f"[MusicPlayer] 跳過無法播放的歌曲: {song.title} ({reason})")
+                # 從主歌單中移除（不放回佇列）
+                self.queue.remove_song(song)
+                self.queue.current = None
+                if self.announcer:
+                    await self.announcer.send_skipped_notice(song, reason)
+                return
+
             audio_source = discord.FFmpegPCMAudio(
-                infos[0]['url'],
+                info['url'],
                 before_options='-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
                 options='-vn'
             )
@@ -154,6 +174,7 @@ class MusicPlayer:
             self.voice_client.stop()
 
     def stop(self):
-        self.queue.clear()
+        """停止播放，只清除插播佇列，保留預設歌單"""
+        self.queue.clear_interrupts()
         if self.voice_client and self.voice_client.is_playing():
             self.voice_client.stop()
