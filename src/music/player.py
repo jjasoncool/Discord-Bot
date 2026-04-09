@@ -99,33 +99,42 @@ class MusicPlayer:
             song = self.queue.get_next()
             self.queue.current = song
 
-            # 提取音源（每次播放時重新取得新鮮串流 URL，不展開歌單）
-            try:
-                info = await YTDLSource.extract_single(song.webpage_url)
-            except Exception as e:
-                error_msg = str(e)
-                # 判斷錯誤類型，產生友善的原因訊息
-                if 'copyright' in error_msg.lower() or 'blocked' in error_msg.lower():
-                    reason = "版權限制，已被權利方封鎖"
-                elif 'private' in error_msg.lower():
-                    reason = "私人影片，無法存取"
-                elif 'unavailable' in error_msg.lower() or 'not available' in error_msg.lower():
-                    reason = "影片已不存在或被移除"
-                else:
-                    reason = "無法取得串流資訊"
-                logger.warning(f"[MusicPlayer] 跳過無法播放的歌曲: {song.title} ({reason})")
-                # 從主歌單中移除（不放回佇列）
-                self.queue.remove_song(song)
-                self.queue.current = None
-                if self.announcer:
-                    await self.announcer.send_skipped_notice(song, reason)
-                return
+            # 檢查本地快取
+            video_id = YTDLSource._extract_video_id(song.webpage_url)
+            cache_path = YTDLSource.get_cache_path(video_id) if video_id else None
+            need_download = False
 
-            audio_source = discord.FFmpegPCMAudio(
-                info['url'],
-                before_options='-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-                options='-vn'
-            )
+            if cache_path:
+                # 有快取，直接用本地檔案（幾乎零延遲）
+                logger.info(f"[MusicPlayer] 使用快取播放: {song.title}")
+                audio_source = discord.FFmpegPCMAudio(cache_path, options='-vn')
+            else:
+                # 無快取，串流播放 + 背景下載
+                try:
+                    info = await YTDLSource.extract_single(song.webpage_url)
+                except Exception as e:
+                    error_msg = str(e)
+                    if 'copyright' in error_msg.lower() or 'blocked' in error_msg.lower():
+                        reason = "版權限制，已被權利方封鎖"
+                    elif 'private' in error_msg.lower():
+                        reason = "私人影片，無法存取"
+                    elif 'unavailable' in error_msg.lower() or 'not available' in error_msg.lower():
+                        reason = "影片已不存在或被移除"
+                    else:
+                        reason = "無法取得串流資訊"
+                    logger.warning(f"[MusicPlayer] 跳過無法播放的歌曲: {song.title} ({reason})")
+                    self.queue.remove_song(song)
+                    self.queue.current = None
+                    if self.announcer:
+                        await self.announcer.send_skipped_notice(song, reason)
+                    return
+
+                audio_source = discord.FFmpegPCMAudio(
+                    info['url'],
+                    before_options='-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+                    options='-vn'
+                )
+                need_download = True
 
             # 播放並等待結束
             play_done = asyncio.Event()
@@ -154,6 +163,10 @@ class MusicPlayer:
             # 通知「現在播放」面板
             if self.announcer:
                 await self.announcer.send_now_playing(song)
+
+            # 背景下載到快取（不阻塞播放）
+            if need_download and song.webpage_url:
+                asyncio.create_task(YTDLSource.download_to_cache(song.webpage_url))
 
             await play_done.wait()
             self.queue.current = None

@@ -2,6 +2,7 @@
 logs/*
 vector_data/*
 __pycache__/
+src/music/cache/
 monitored_channels.json
 src/scraper/data/*.json
 src/scraper/articles.db
