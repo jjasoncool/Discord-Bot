@@ -112,15 +112,15 @@ class MusicPlayer:
             cache_path = YTDLSource.get_cache_path(video_id) if video_id else None
             need_download = False
 
-            # 使用 FFmpegOpusAudio + codec='copy'，全程零重新編碼
-            # YouTube 來源是 opus → ffmpeg copy → Discord 直送，保留原始品質
+            # loudnorm：統一所有歌曲的感知響度（EBU R128，-14 LUFS）
+            LOUDNORM_FILTER = '-af loudnorm=I=-14:TP=-1:LRA=11'
 
             if cache_path:
-                # 有快取，直接用本地 opus 檔案
                 logger.info(f"[MusicPlayer] 使用快取播放: {song.title}")
                 audio_source = discord.FFmpegOpusAudio(
                     cache_path,
-                    codec='copy',
+                    bitrate=320,
+                    options=LOUDNORM_FILTER,
                 )
             else:
                 # 無快取，串流播放 + 背景下載
@@ -146,7 +146,8 @@ class MusicPlayer:
                 audio_source = discord.FFmpegOpusAudio(
                     info['url'],
                     before_options='-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-                    codec='copy',
+                    bitrate=320,
+                    options=LOUDNORM_FILTER,
                 )
                 need_download = True
 
@@ -183,7 +184,9 @@ class MusicPlayer:
                 asyncio.create_task(YTDLSource.download_to_cache(song.webpage_url))
 
             await play_done.wait()
-            self.queue.current = None
+            # 不在這裡清 current，讓 _replay 能讀到當前歌曲
+            if not self._replay:
+                self.queue.current = None
             await asyncio.sleep(0.5)
 
     async def add_to_playlist(self, url: str):
@@ -192,13 +195,11 @@ class MusicPlayer:
         song_list = [Song.from_info(s) for s in songs_info]
         self.queue.add_to_main(song_list)
 
-    async def interrupt_play(self, query: str):
-        """插播：URL 或關鍵字皆可"""
+    async def request_song(self, query: str) -> Song:
+        """點歌：加入插播佇列排隊，不打斷當前歌曲"""
         song = await YTDLSource.create_song(query)
         self.queue.add_interrupt(song)
-        # 如果正在播放，立即停止並切下一首
-        if self.voice_client and self.voice_client.is_playing():
-            self.voice_client.stop()
+        return song
 
     def stop(self):
         """停止播放，只清除插播佇列，保留預設歌單"""

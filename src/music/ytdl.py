@@ -32,9 +32,9 @@ class YTDLSource:
         'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
     }
 
-    # 下載到本地快取用（保留原始品質，不重新編碼）
+    # 下載到本地快取用（取最高品質，轉為高位元率 opus）
     DOWNLOAD_OPTIONS = {
-        'format': 'bestaudio[acodec=opus]/bestaudio/best',  # 優先選 opus 格式避免轉碼
+        'format': 'bestaudio/best',
         'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
@@ -43,7 +43,7 @@ class YTDLSource:
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'opus',
-            'preferredquality': '0',  # 0 = 保留原始品質，不重新編碼
+            'preferredquality': '320',  # Level 3 支援 384kbps，用 320 確保最佳品質
         }],
     }
 

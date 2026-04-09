@@ -101,8 +101,9 @@ class SongRequestModal(discord.ui.Modal):
         await interaction.response.defer(ephemeral=True)
         query = self.query.value.strip()
         try:
-            await self.cog.player.interrupt_play(query)
-            await interaction.followup.send(f"✅ 已加入插播：{query}", ephemeral=True)
+            song = await self.cog.player.request_song(query)
+            queue_pos = len(self.cog.player.queue.interrupt_queue)
+            await interaction.followup.send(f"✅ 已加入排隊：**{song.title}**（第 {queue_pos} 順位）", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ 點歌失敗：{e}", ephemeral=True)
 
