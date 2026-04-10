@@ -1,3 +1,4 @@
+import random
 from collections import deque
 from .models import Song
 from .exceptions import QueueEmptyError
@@ -7,7 +8,9 @@ class MusicQueue:
         self.main_queue: deque[Song] = deque()      # 原本歌單（循環）
         self.interrupt_queue: deque[Song] = deque() # 插播優先 queue
         self.loop = True                            # 預設循環歌單
+        self.shuffle = False                        # 隨機播放
         self.current: Song | None = None
+        self._next_shuffle: Song | None = None      # shuffle 模式下預先決定的下一首
 
     def add_to_main(self, songs: list[Song]):
         self.main_queue.extend(songs)
@@ -26,13 +29,40 @@ class MusicQueue:
 
     def get_next(self) -> Song:
         if self.interrupt_queue:
+            self._next_shuffle = None  # 插播結束後重新隨機
             return self.interrupt_queue.popleft()
         if self.main_queue:
-            song = self.main_queue.popleft()
+            if self.shuffle:
+                # 用預先決定的下一首，或隨機取
+                if self._next_shuffle and self._next_shuffle in self.main_queue:
+                    song = self._next_shuffle
+                    self.main_queue.remove(song)
+                else:
+                    index = random.randint(0, len(self.main_queue) - 1)
+                    song = self.main_queue[index]
+                    del self.main_queue[index]
+                # 預先決定下一首（供 prefetch 使用）
+                if self.main_queue:
+                    self._next_shuffle = random.choice(self.main_queue)
+                else:
+                    self._next_shuffle = song if self.loop else None
+            else:
+                song = self.main_queue.popleft()
+                self._next_shuffle = None
             if self.loop:
-                self.main_queue.append(song)  # 循環放回尾端
+                self.main_queue.append(song)
             return song
         raise QueueEmptyError("Queue is empty")
+
+    def peek_next(self) -> Song | None:
+        """查看下一首要播的歌（不取出），供 prefetch 使用"""
+        if self.interrupt_queue:
+            return self.interrupt_queue[0]
+        if self.main_queue:
+            if self.shuffle and self._next_shuffle:
+                return self._next_shuffle
+            return self.main_queue[0]
+        return None
 
     def requeue_song(self, song: Song, is_interrupt: bool):
         """將歌曲放回對應佇列前端，避免播放失敗時掉歌"""

@@ -31,8 +31,11 @@ class MusicCog(commands.Cog):
         logger.info("[MusicCog] cog_load 完成，等待 on_ready 再連線")
 
     def _init_components(self):
-        """初始化 announcer（不建新 player 除非必要）"""
-        self.announcer = Announcer(self.bot, self.config.voice_channel_id, cog=self)
+        """初始化 announcer 和 player（已存在就複用，避免丟失面板參照）"""
+        if self.announcer is None:
+            self.announcer = Announcer(self.bot, self.config.voice_channel_id, cog=self)
+        else:
+            self.announcer.voice_channel_id = self.config.voice_channel_id
         if self.player is None:
             self.player = MusicPlayer(self.bot, self.config)
         else:
@@ -81,6 +84,9 @@ class MusicCog(commands.Cog):
                 logger.warning("[MusicCog] 無法加入語音頻道")
                 return
 
+            # 清理上次殘留的面板
+            await self.announcer.cleanup_old_panel()
+
             # 先啟動播放迴圈和面板，歌單背景載入（不阻塞點歌）
             await self.player.start_background_loop()
             await self.announcer.send_idle_panel()
@@ -97,6 +103,11 @@ class MusicCog(commands.Cog):
             await self.player.add_to_playlist(self.config.default_playlist_url)
             count = len(self.player.queue.main_queue)
             logger.info(f"[MusicCog] 預設歌單已載入（{count} 首可播放）")
+
+            # 跳到上次播放位置
+            last_vid = MusicPlayer.get_last_position()
+            if last_vid:
+                self.player.skip_to_video_id(last_vid)
         except Exception as e:
             logger.error(f"[MusicCog] 載入歌單失敗: {e}", exc_info=True)
 
@@ -123,6 +134,7 @@ class MusicCog(commands.Cog):
             await asyncio.sleep(3)
 
         self.player = None
+        self.announcer = None  # 頻道變了，重建 announcer
         self._init_components()
         await self._start_if_ready()
 

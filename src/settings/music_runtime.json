@@ -1,5 +1,7 @@
 {
   "music": {
-    "default_playlist_url": "https://www.youtube.com/watch?v=UvAi53lynSc&list=PLiChM2ds0w1eJ7nziZqfJ2GTPuMQmFSsm"
+    "default_playlist_url": "https://www.youtube.com/watch?v=UvAi53lynSc&list=PLiChM2ds0w1eJ7nziZqfJ2GTPuMQmFSsm",
+    "last_video_id": "QcH2ZRe2tjQ",
+    "panel_message_id": 1492257762439200789
   }
 }

@@ -1,4 +1,6 @@
+import os
 import re
+import json
 import asyncio
 import logging
 import discord
@@ -7,7 +9,7 @@ from discord.ext import commands
 logger = logging.getLogger('discord_bot')
 from .queue import MusicQueue
 from .ytdl import YTDLSource
-from .config import MusicConfig
+from .config import MusicConfig, MUSIC_RUNTIME_PATH
 from .models import Song
 from .exceptions import QueueEmptyError
 
@@ -107,6 +109,12 @@ class MusicPlayer:
                 song = self.queue.get_next()
                 self.queue.current = song
 
+            # 記錄當前播放位置（主歌單的歌才記錄，插播不記錄）
+            if not is_interrupt_song:
+                video_id_for_save = YTDLSource._extract_video_id(song.webpage_url)
+                if video_id_for_save:
+                    self._save_last_position(video_id_for_save)
+
             # 檢查本地快取
             video_id = YTDLSource._extract_video_id(song.webpage_url)
             cache_path = YTDLSource.get_cache_path(video_id) if video_id else None
@@ -188,10 +196,10 @@ class MusicPlayer:
             if self.announcer:
                 await self.announcer.send_now_playing(song)
 
-            # 背景下載當前歌曲 + 預先快取接下來 3 首
+            # 背景下載當前歌曲 + 預先快取下一首
             if need_download and song.webpage_url:
                 asyncio.create_task(YTDLSource.download_to_cache(song.webpage_url))
-            asyncio.create_task(self._prefetch_upcoming(3))
+            asyncio.create_task(self._prefetch_next())
 
             await play_done.wait()
             if not self._replay:
@@ -257,25 +265,63 @@ class MusicPlayer:
             logger.warning(f"[MusicPlayer] 峰值掃描失敗: {e}")
         return None
 
-    async def _prefetch_upcoming(self, count: int = 3):
-        """背景預先下載接下來的歌曲到快取"""
-        upcoming = list(self.queue.interrupt_queue)[:count]
-        if len(upcoming) < count:
-            upcoming += list(self.queue.main_queue)[:count - len(upcoming)]
+    async def _prefetch_next(self):
+        """背景預先下載下一首要播的歌"""
+        song = self.queue.peek_next()
+        if not song or not song.webpage_url:
+            return
+        video_id = YTDLSource._extract_video_id(song.webpage_url)
+        if video_id and not YTDLSource.get_cache_path(video_id):
+            try:
+                await YTDLSource.download_to_cache(song.webpage_url)
+            except Exception:
+                pass
 
-        for song in upcoming:
-            if not song.webpage_url:
-                continue
-            video_id = YTDLSource._extract_video_id(song.webpage_url)
-            if video_id and not YTDLSource.get_cache_path(video_id):
-                try:
-                    await YTDLSource.download_to_cache(song.webpage_url)
-                except Exception:
-                    pass
+    @staticmethod
+    def _save_last_position(video_id: str):
+        """記錄當前播放的 video ID 到 music_runtime.json"""
+        try:
+            if os.path.exists(MUSIC_RUNTIME_PATH):
+                with open(MUSIC_RUNTIME_PATH, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            else:
+                data = {"music": {}}
+            data["music"]["last_video_id"] = video_id
+            with open(MUSIC_RUNTIME_PATH, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"[MusicPlayer] 儲存播放位置失敗: {e}")
 
-    async def request_song(self, query: str) -> Song:
+    @staticmethod
+    def get_last_position() -> str | None:
+        """讀取上次播放的 video ID"""
+        try:
+            if os.path.exists(MUSIC_RUNTIME_PATH):
+                with open(MUSIC_RUNTIME_PATH, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                return data.get("music", {}).get("last_video_id")
+        except Exception:
+            pass
+        return None
+
+    def skip_to_video_id(self, target_video_id: str) -> bool:
+        """跳轉主歌單到指定 video ID 的位置"""
+        for i, song in enumerate(self.queue.main_queue):
+            vid = YTDLSource._extract_video_id(song.webpage_url)
+            if vid == target_video_id:
+                # 旋轉 deque，讓目標歌曲排到最前面
+                self.queue.main_queue.rotate(-i)
+                logger.info(f"[MusicPlayer] 跳轉到上次播放位置: {song.title} (index {i})")
+                return True
+        logger.warning(f"[MusicPlayer] 找不到上次播放的歌曲: {target_video_id}")
+        return False
+
+    async def request_song(self, query: str, user: discord.User | discord.Member = None) -> Song:
         """點歌：加入插播佇列排隊，不打斷當前歌曲"""
         song = await YTDLSource.create_song(query)
+        if user:
+            song.requested_by = user.display_name
+            song.requested_by_id = user.id
         self.queue.add_interrupt(song)
         return song
 

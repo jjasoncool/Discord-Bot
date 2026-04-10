@@ -8,6 +8,8 @@ class Song:
     webpage_url: str
     duration: int
     thumbnail: Optional[str] = None
+    requested_by: Optional[str] = None  # Discord user display name
+    requested_by_id: Optional[int] = None  # Discord user ID
 
     @classmethod
     def from_info(cls, info: dict):
