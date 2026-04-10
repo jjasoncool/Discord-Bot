@@ -144,7 +144,8 @@ class FBMonitor(BaseContentMonitor):
         else:
             logger.info(f"FB 貼文 {fb_post.get('id', 'unknown')} 沒有圖片")
 
-        embed.set_footer(text="鳴潮官方 Facebook")
+        fb_id = fb_post.get('id', '?')
+        embed.set_footer(text=f"#{fb_id} 鳴潮官方 Facebook")
         return embed
 
     # ── 發送 ──

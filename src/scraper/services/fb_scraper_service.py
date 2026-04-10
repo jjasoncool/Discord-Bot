@@ -758,9 +758,15 @@ class FBScraperService:
         if not hashtag_map:
             return plain_text
         out = plain_text
-        for tag in sorted(hashtag_map.keys(), key=len, reverse=True):
+        # 長 tag 先替換，用 placeholder 保護已替換內容，避免短 tag 命中已替換的 markdown
+        placeholders: Dict[str, str] = {}
+        for i, tag in enumerate(sorted(hashtag_map.keys(), key=len, reverse=True)):
             url = hashtag_map[tag]
-            out = out.replace(tag, f"[{tag}]({url})")
+            ph = f"\x00HTAG{i}\x00"
+            placeholders[ph] = f"[{tag}]({url})"
+            out = out.replace(tag, ph)
+        for ph, md in placeholders.items():
+            out = out.replace(ph, md)
         return out
 
     def _html_to_text_and_hashtags(self, html_fragment: str, base_url: str) -> Tuple[str, Dict[str, str]]:
