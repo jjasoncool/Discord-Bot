@@ -142,28 +142,35 @@ class MusicPlayer:
             cache_path = YTDLSource.get_cache_path(video_id) if video_id else None
             need_download = False
 
-            # FFmpegPCMAudio + 強制 48kHz PCM（DAVE 下最穩定）
-            PCM_OPTS = '-vn -ar 48000 -ac 2 -f s16le'
-            # thread_queue_size：ffmpeg 內部讀取緩衝，吸收 CPU/IO 微小延遲
+            # 音訊模式：pcm 或 opus（可在 music_runtime.json 的 audio_mode 切換）
+            use_opus = self.config.audio_mode == 'opus'
             BUFFER_OPTS = '-thread_queue_size 4096'
 
             if cache_path:
-                # 有快取：峰值正規化（等比例增益，保留動態）
-                logger.info(f"[MusicPlayer] 使用快取播放: {song.title}")
+                logger.info(f"[MusicPlayer] 使用快取播放 ({self.config.audio_mode}): {song.title}")
                 peak_db = await self._get_peak_db(cache_path)
+                volume_filter = ''
                 if peak_db is not None and peak_db != 0:
                     gain = -1.0 - peak_db
-                    options = f'{PCM_OPTS} -af volume={gain:.1f}dB'
+                    volume_filter = f'-af volume={gain:.1f}dB'
                     logger.info(f"[MusicPlayer] 峰值正規化: peak={peak_db:.1f}dB, gain={gain:.1f}dB")
+
+                if use_opus:
+                    opus_opts = f'-vn {volume_filter}'.strip()
+                    audio_source = await discord.FFmpegOpusAudio.from_probe(
+                        cache_path,
+                        before_options=BUFFER_OPTS,
+                        options=opus_opts,
+                    )
                 else:
-                    options = PCM_OPTS
-                audio_source = discord.FFmpegPCMAudio(
-                    cache_path,
-                    before_options=BUFFER_OPTS,
-                    options=options,
-                )
+                    pcm_opts = f'-vn -ar 48000 -ac 2 -f s16le {volume_filter}'.strip()
+                    audio_source = discord.FFmpegPCMAudio(
+                        cache_path,
+                        before_options=BUFFER_OPTS,
+                        options=pcm_opts,
+                    )
             else:
-                # 無快取，串流播放（不做音量處理）
+                # 無快取，串流播放
                 try:
                     info = await YTDLSource.extract_single(song.webpage_url)
                 except Exception as e:
@@ -183,11 +190,19 @@ class MusicPlayer:
                         await self.announcer.send_skipped_notice(song, reason)
                     return
 
-                audio_source = discord.FFmpegPCMAudio(
-                    info['url'],
-                    before_options=f'-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 {BUFFER_OPTS}',
-                    options=PCM_OPTS,
-                )
+                stream_before = f'-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 {BUFFER_OPTS}'
+                if use_opus:
+                    audio_source = discord.FFmpegOpusAudio(
+                        info['url'],
+                        before_options=stream_before,
+                        options='-vn',
+                    )
+                else:
+                    audio_source = discord.FFmpegPCMAudio(
+                        info['url'],
+                        before_options=stream_before,
+                        options='-vn -ar 48000 -ac 2 -f s16le',
+                    )
                 need_download = True
 
             # 播放並等待結束
@@ -300,19 +315,27 @@ class MusicPlayer:
                 pass
 
     @staticmethod
-    def _save_last_position(video_id: str):
-        """記錄當前播放的 video ID 到 music_runtime.json"""
+    def _save_to_runtime(key: str, value):
+        """寫入 music_runtime.json 的指定欄位"""
         try:
             if os.path.exists(MUSIC_RUNTIME_PATH):
                 with open(MUSIC_RUNTIME_PATH, 'r', encoding='utf-8') as f:
                     data = json.load(f)
             else:
                 data = {"music": {}}
-            data["music"]["last_video_id"] = video_id
+            data["music"][key] = value
             with open(MUSIC_RUNTIME_PATH, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            logger.warning(f"[MusicPlayer] 儲存播放位置失敗: {e}")
+            logger.warning(f"[MusicPlayer] 儲存 {key} 失敗: {e}")
+
+    @staticmethod
+    def _save_last_position(video_id: str):
+        MusicPlayer._save_to_runtime("last_video_id", video_id)
+
+    @staticmethod
+    def _save_shuffle_state(shuffle: bool):
+        MusicPlayer._save_to_runtime("shuffle", shuffle)
 
     @staticmethod
     def get_last_position() -> str | None:

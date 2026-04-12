@@ -16,6 +16,8 @@ MUSIC_RUNTIME_PATH = "settings/music_runtime.json"
 class MusicConfig:
     voice_channel_id: int
     default_playlist_url: str
+    audio_mode: str = 'opus'  # 'pcm' 或 'opus'，可在 music_runtime.json 切換
+    shuffle: bool = False
 
 class RuntimeMusicConfig:
     _instance: Optional['RuntimeMusicConfig'] = None
@@ -60,19 +62,25 @@ class RuntimeMusicConfig:
             cls._config = None
             return False
 
-        # 讀取歌單（from music_runtime.json）
+        # 讀取歌單、音訊模式、shuffle（from music_runtime.json）
         default_playlist_url = ""
+        audio_mode = "pcm"
+        shuffle = False
         if os.path.exists(MUSIC_RUNTIME_PATH):
             try:
                 with open(MUSIC_RUNTIME_PATH, 'r', encoding='utf-8') as f:
                     runtime_data = json.load(f).get("music", {})
                 default_playlist_url = runtime_data.get("default_playlist_url", "")
+                audio_mode = runtime_data.get("audio_mode", "pcm")
+                shuffle = runtime_data.get("shuffle", False)
             except Exception as e:
                 logger.warning(f"[MusicConfig] 讀取 music_runtime.json 失敗: {e}")
 
         cls._config = MusicConfig(
             voice_channel_id=voice_channel_id,
             default_playlist_url=default_playlist_url,
+            audio_mode=audio_mode if audio_mode in ('pcm', 'opus') else 'pcm',
+            shuffle=bool(shuffle),
         )
 
         # 記錄兩個檔案的 mtime

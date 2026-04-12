@@ -108,6 +108,8 @@ class MusicControlView(discord.ui.View):
         queue.shuffle = not queue.shuffle
         status = "開啟" if queue.shuffle else "關閉"
         await interaction.followup.send(f"🔀 隨機播放已 **{status}**", ephemeral=True)
+        # 存檔（重啟後保持狀態）
+        self.cog.player._save_shuffle_state(queue.shuffle)
         if self.cog.player.announcer and self.cog.player.announcer._panel_message:
             await self.cog.player.announcer.refresh_panel()
 

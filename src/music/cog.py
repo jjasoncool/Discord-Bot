@@ -104,6 +104,10 @@ class MusicCog(commands.Cog):
             count = len(self.player.queue.main_queue)
             logger.info(f"[MusicCog] 預設歌單已載入（{count} 首可播放）")
 
+            # 恢復 shuffle 狀態
+            self.player.queue.shuffle = self.config.shuffle
+            logger.info(f"[MusicCog] shuffle: {'開啟' if self.config.shuffle else '關閉'}")
+
             # 跳到上次播放位置
             last_vid = MusicPlayer.get_last_position()
             if last_vid:

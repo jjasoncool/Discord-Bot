@@ -8,9 +8,22 @@ class MusicQueue:
         self.main_queue: deque[Song] = deque()      # 原本歌單（循環）
         self.interrupt_queue: deque[Song] = deque() # 插播優先 queue
         self.loop = True                            # 預設循環歌單
-        self.shuffle = False                        # 隨機播放
+        self._shuffle = False                       # 隨機播放
         self.current: Song | None = None
         self._next_shuffle: Song | None = None      # shuffle 模式下預先決定的下一首
+
+    @property
+    def shuffle(self) -> bool:
+        return self._shuffle
+
+    @shuffle.setter
+    def shuffle(self, value: bool):
+        self._shuffle = value
+        if value and self.main_queue:
+            # 開啟時立刻決定下一首
+            self._next_shuffle = random.choice(self.main_queue)
+        else:
+            self._next_shuffle = None
 
     def add_to_main(self, songs: list[Song]):
         self.main_queue.extend(songs)
