@@ -16,19 +16,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
-import requests
 from bs4 import BeautifulSoup
-from fake_useragent import UserAgent
-from requests.adapters import HTTPAdapter
-from requests.exceptions import ConnectionError, HTTPError, RequestException, SSLError, Timeout
-from urllib3.util.retry import Retry
-
-try:
-    import cloudscraper  # type: ignore
-    CLOUDSCRAPER_AVAILABLE = True
-except Exception:
-    cloudscraper = None
-    CLOUDSCRAPER_AVAILABLE = False
 
 # 讓此檔案可被單檔直接執行（與 ptt_scraper_service.py 一致）
 # python services/bahamut_scraper_service.py 時，將 /app 加入 sys.path
@@ -38,15 +26,17 @@ if SCRAPER_ROOT not in sys.path:
 
 from config import BAHAMUT_CONFIG
 from utils.logger import get_logger
+from utils.request_utils import human_sleep
+from services.base_scraper_client import BaseScraperClient
 
 logger = get_logger("bahamut_scraper")
-from utils.request_utils import human_sleep
 
 
-class BahamutScraperService:
+class BahamutScraperService(BaseScraperClient):
     """Bahamut 爬蟲服務（MVP）"""
 
     def __init__(self, db_manager=None):
+        super().__init__()
         self.logger = get_logger("bahamut_scraper")
         self.db_manager = db_manager
 
@@ -64,47 +54,9 @@ class BahamutScraperService:
         self.page_delay_range = BAHAMUT_CONFIG.get("page_delay_range", (2, 5))
         self.sample_output_dir = BAHAMUT_CONFIG.get("sample_output_dir", "data/bahamut_samples")
 
-        self.ua = self._init_user_agent()
-
-    def _init_user_agent(self):
-        try:
-            return UserAgent()
-        except Exception as e:
-            self.logger.warning(f"初始化 fake-useragent 失敗，改用固定 UA: {e}")
-            return None
-
-    def _get_user_agent(self) -> str:
-        if self.ua:
-            try:
-                return self.ua.random
-            except Exception as e:
-                self.logger.warning(f"取得 fake-useragent 失敗，改用固定 UA: {e}")
-
-        return (
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
-        )
-
     def _build_headers(self, referer: Optional[str] = None) -> Dict[str, str]:
-        headers = {
-            "User-Agent": self._get_user_agent(),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-            # 明確表達要桌面版文件，不要手機版
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-CH-UA": '"Chromium";v="127", "Not;A=Brand";v="24", "Google Chrome";v="127"',
-            "Sec-CH-UA-Mobile": "?0",
-            "Sec-CH-UA-Platform": '"Linux"',
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-        }
-        if referer:
-            headers["Referer"] = referer
-        return headers
+        """巴哈頁面請求 headers（delegate 給 BaseScraperClient）"""
+        return self._build_page_headers(referer=referer)
 
     def _to_desktop_forum_url(self, url: str) -> str:
         """若被導到 m.gamer.com.tw/forum/*，轉回 desktop forum URL。"""
@@ -120,29 +72,11 @@ class BahamutScraperService:
         desktop_path = parsed.path[len("/forum/"):]
         return urlunparse((parsed.scheme, "forum.gamer.com.tw", f"/{desktop_path}", parsed.params, parsed.query, parsed.fragment))
 
-    def _build_session(self) -> requests.Session:
-        if CLOUDSCRAPER_AVAILABLE:
-            session = cloudscraper.create_scraper()
-        else:
-            session = requests.Session()
-
-        retry = Retry(
-            total=3,
-            connect=3,
-            read=3,
-            backoff_factor=1.0,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=frozenset(["GET"]),
-            raise_on_status=False,
-        )
-        adapter = HTTPAdapter(max_retries=retry)
-        session.mount("https://", adapter)
-        session.mount("http://", adapter)
-        return session
+    # _build_session 繼承自 BaseScraperClient（curl_cffi + TLS 指紋模擬）
 
     def _fetch_html(
         self,
-        session: requests.Session,
+        session,
         url: str,
         referer: Optional[str] = None,
     ) -> Tuple[str, str, int]:
@@ -154,15 +88,9 @@ class BahamutScraperService:
                     "Bahamut request start: url=%s referer=%s ua=%s mobile_hint=%s cookies=%s",
                     url,
                     referer,
-                    self._build_headers(referer=referer).get("User-Agent", "")[:80],
-                    self._build_headers(referer=referer).get("Sec-CH-UA-Mobile"),
-                    {
-                        "ckFORUM_VIEW_forum": session.cookies.get("ckFORUM_VIEW", domain="forum.gamer.com.tw"),
-                        "ckFORUM_VIEW_m": session.cookies.get("ckFORUM_VIEW", domain="m.gamer.com.tw"),
-                        "ckMOBILE_gamer": session.cookies.get("ckMOBILE", domain="gamer.com.tw"),
-                        "ckMOBILE_forum": session.cookies.get("ckMOBILE", domain="forum.gamer.com.tw"),
-                        "ckMOBILE_m": session.cookies.get("ckMOBILE", domain="m.gamer.com.tw"),
-                    },
+                    self._current_impersonate,
+                    self._build_headers(referer=referer).get("Sec-CH-UA", "N/A"),
+                    {k: v for k, v in session.cookies.items()},
                 )
 
                 resp = session.get(
@@ -198,10 +126,10 @@ class BahamutScraperService:
                     )
                 )
 
-                had_cknomobile = bool(session.cookies.get("ckNOMOBILE", domain=".gamer.com.tw"))
+                had_cknomobile = bool(session.cookies.get("ckNOMOBILE"))
 
                 if redirected_to_mobile and not had_cknomobile:
-                    session.cookies.set("ckNOMOBILE", "1", domain=".gamer.com.tw", path="/")
+                    session.cookies.set("ckNOMOBILE", "1", domain=".gamer.com.tw")
                     self.logger.info("Bahamut 偵測到 desktop->mobile 302，補寫 cookie: ckNOMOBILE=1")
 
                 desktop_url = self._to_desktop_forum_url(resp.url)
@@ -251,7 +179,7 @@ class BahamutScraperService:
                 if status >= 400:
                     resp.raise_for_status()
                 return resp.text, resp.url, status
-            except (SSLError, ConnectionError, Timeout, HTTPError, RequestException) as e:
+            except Exception as e:
                 last_error = e
                 self.logger.warning(
                     "Bahamut 請求失敗（attempt=%s/3）url=%s err=%s",
@@ -336,7 +264,7 @@ class BahamutScraperService:
             return parts[-1]
         return ""
 
-    def _ensure_board_access(self, session: requests.Session, board_url: str) -> Dict[str, Any]:
+    def _ensure_board_access(self, session, board_url: str) -> Dict[str, Any]:
         """處理進版圖 gate，成功後回傳可用 board html 與 final_url"""
         html, final_url, status = self._fetch_html(session, board_url)
         debug_steps: List[Dict[str, Any]] = [{"url": final_url, "status": status, "is_gate": self._is_gate_page(final_url, html)}]
@@ -665,7 +593,7 @@ class BahamutScraperService:
 
         return merged_comments
 
-    def fetch_board_articles(self, session: requests.Session) -> Dict[str, Any]:
+    def fetch_board_articles(self, session) -> Dict[str, Any]:
         preheat = self._ensure_board_access(session, self.target_board_url)
         if not preheat.get("ok"):
             return {
@@ -895,7 +823,7 @@ class BahamutScraperService:
 
     def _extract_article_blocks(
         self,
-        session: requests.Session,
+        session,
         soup: BeautifulSoup,
         article_url: str,
         final_url: str,
@@ -1017,7 +945,7 @@ class BahamutScraperService:
 
     def _fetch_comments_via_xhr(
         self,
-        session: requests.Session,
+        session,
         bsn: str,
         snb: str,
         referer: str,
@@ -1046,13 +974,7 @@ class BahamutScraperService:
                 resp = session.get(
                     endpoint,
                     params=params,
-                    headers={
-                        "User-Agent": self._get_user_agent(),
-                        "Accept": "application/json, text/javascript, */*; q=0.01",
-                        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
-                        "X-Requested-With": "XMLHttpRequest",
-                        "Referer": referer,
-                    },
+                    headers=self._build_xhr_headers(referer),
                     timeout=self.timeout,
                 )
                 resp.raise_for_status()
@@ -1145,7 +1067,7 @@ class BahamutScraperService:
         query_string = urlencode(query, doseq=True)
         return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, query_string, parsed.fragment))
 
-    def fetch_article_detail(self, session: requests.Session, article_url: str) -> Dict[str, Any]:
+    def fetch_article_detail(self, session, article_url: str) -> Dict[str, Any]:
         fetch_start = datetime.now()
 
         # 第一頁
@@ -1552,11 +1474,11 @@ def main():
     # 通知 Discord Bot
     if result.get("ok") and saved_count > 0:
         try:
-            import requests as req
+            from curl_cffi import requests as curl_req
             payload = {"board_id": BAHAMUT_CONFIG.get("target_board_url", "").split("bsn=")[-1].split("&")[0] or "74934"}
             if target_sn_a:
                 payload["post_id"] = target_sn_a
-            req.post("http://discord-bot:5000/notify/bahamut", json=payload, timeout=10)
+            curl_req.post("http://discord-bot:5000/notify/bahamut", json=payload, timeout=10)
             logger.info("已通知 Discord Bot: %s", payload)
         except Exception as e:
             logger.warning("通知 Discord Bot 失敗（不影響結果）: %s", e)

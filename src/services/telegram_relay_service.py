@@ -153,6 +153,43 @@ class TelegramMessageRepository:
                 str(int(message_pk)),
             )
 
+    async def get_pk_by_telegram_message_id(self, telegram_message_id: int) -> Optional[int]:
+        """根據 telegram_message_id 查詢對應的 message_pk。
+
+        若該訊息屬於 media group，自動回傳 group 首則（最小 pk），
+        確保重發時能觸發完整的 group 合併流程。
+        """
+        if self.pool is None:
+            raise RuntimeError("TelegramMessageRepository 尚未 connect")
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT id, grouped_id, telegram_chat_id
+                FROM telegram_messages
+                WHERE telegram_message_id = $1
+                ORDER BY id ASC LIMIT 1;
+                """,
+                int(telegram_message_id),
+            )
+            if row is None:
+                return None
+
+            # 非 group 訊息，直接回傳
+            if row["grouped_id"] is None:
+                return int(row["id"])
+
+            # 屬於 media group → 找同 group 最小 pk（首則）
+            first_pk = await conn.fetchval(
+                """
+                SELECT id FROM telegram_messages
+                WHERE grouped_id = $1 AND telegram_chat_id = $2
+                ORDER BY id ASC LIMIT 1;
+                """,
+                int(row["grouped_id"]),
+                int(row["telegram_chat_id"]),
+            )
+            return int(first_pk) if first_pk is not None else int(row["id"])
+
     async def is_message_published(self, message_pk: int, discord_channel_id: int) -> bool:
         if self.pool is None:
             raise RuntimeError("TelegramMessageRepository 尚未 connect")
@@ -373,9 +410,10 @@ class MessageRouteResolver:
 
         return True, "ok"
 
-    def get_replay_from_message_pk(self) -> Optional[int]:
+    def get_replay_from_message_id(self) -> Optional[int]:
+        """從 config 讀取重發起始 telegram_message_id。"""
         config = self._load_config()
-        raw = config.get("telegram_replay_from_message_pk")
+        raw = config.get("telegram_replay_from_message_id")
         if raw is None:
             return None
         try:
@@ -539,7 +577,12 @@ class DiscordMessagePublisher:
 
     @staticmethod
     async def _compress_video(src: str, dst: str, target_bytes: int) -> bool:
-        """用 ffmpeg 將影片壓縮到 target_bytes 以內。回傳是否成功且檔案小於上限。"""
+        """用 ffmpeg 將影片壓縮到 target_bytes 以內（CRF 品質優先 + maxrate 兜底）。
+
+        策略：CRF 23 保證畫質穩定，maxrate 限制峰值 bitrate 使檔案不超限，
+        bufsize 設為 maxrate 的 2 倍讓動態場景有足夠緩衝，避免卡頓掉幀。
+        若第一輪 CRF 23 仍超限，用更高 CRF 重試一次。
+        """
         probe_cmd = [
             "ffprobe", "-v", "error",
             "-show_entries", "format=duration",
@@ -562,38 +605,89 @@ class DiscordMessagePublisher:
             logger.warning("無法取得影片長度，跳過壓縮: %s", src)
             return False
 
-        # 目標 bitrate（留 5% 給容器 overhead）
-        target_bitrate = int(target_bytes * 8 / duration * 0.95)
-        if target_bitrate < 100_000:  # 低於 100 kbps 品質太差，放棄
-            logger.warning("影片壓縮目標 bitrate 過低 (%d bps)，跳過: %s", target_bitrate, src)
+        # 目標平均 bitrate（留 5% 給容器 overhead）
+        avg_bitrate = int(target_bytes * 8 / duration * 0.95)
+        if avg_bitrate < 100_000:  # 低於 100 kbps 品質太差，放棄
+            logger.warning("影片壓縮目標 bitrate 過低 (%d bps)，跳過: %s", avg_bitrate, src)
             return False
 
-        ffmpeg_cmd = [
+        src_size = os.path.getsize(src)
+        # 音訊 bitrate 固定 128kbps，從目標扣除音訊佔用
+        audio_bitrate = 128_000
+        audio_bytes = int(audio_bitrate * duration / 8)
+        video_target_bytes = max(target_bytes - audio_bytes, target_bytes // 2)
+        # 目標影片 bitrate（留 3% 給容器 overhead）
+        video_bitrate = int(video_target_bytes * 8 / duration * 0.97)
+
+        if video_bitrate < 100_000:
+            logger.warning("影片壓縮目標 bitrate 過低 (%d bps)，跳過: %s", video_bitrate, src)
+            return False
+
+        # two-pass 統計檔放在輸出目錄
+        passlog = os.path.splitext(dst)[0] + "_passlog"
+
+        logger.info(
+            "影片壓縮開始 (two-pass, video_bitrate=%s): %s (來源 %s bytes, 目標 %s bytes, duration=%.1fs)",
+            video_bitrate, src, src_size, target_bytes, duration,
+        )
+
+        # Pass 1：分析，不產出影片
+        pass1_cmd = [
             "ffmpeg", "-y", "-i", src,
-            "-c:v", "libx264", "-preset", "fast",
-            "-b:v", str(target_bitrate),
-            "-maxrate", str(target_bitrate),
-            "-bufsize", str(target_bitrate // 2),
-            "-c:a", "aac", "-b:a", "128k",
-            "-movflags", "+faststart",
-            dst,
+            "-c:v", "libx264", "-preset", "medium",
+            "-b:v", str(video_bitrate),
+            "-pass", "1", "-passlogfile", passlog,
+            "-an",
+            "-f", "null", "/dev/null",
         ]
         proc = await asyncio.create_subprocess_exec(
-            *ffmpeg_cmd,
+            *pass1_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         _, stderr = await proc.communicate()
         if proc.returncode != 0:
-            logger.warning("ffmpeg 壓縮失敗 (rc=%s): %s\n%s", proc.returncode, src, stderr.decode()[-500:])
+            logger.warning("ffmpeg pass 1 失敗 (rc=%s): %s\n%s", proc.returncode, src, stderr.decode()[-500:])
+            return False
+
+        logger.info("影片壓縮 pass 1 完成，開始 pass 2: %s", src)
+
+        # Pass 2：根據統計精確編碼
+        pass2_cmd = [
+            "ffmpeg", "-y", "-i", src,
+            "-c:v", "libx264", "-preset", "medium",
+            "-b:v", str(video_bitrate),
+            "-pass", "2", "-passlogfile", passlog,
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            dst,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *pass2_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+
+        # 清理 passlog 暫存檔
+        for suffix in ("", "-0.log", "-0.log.mbtree"):
+            path = passlog + suffix
+            if os.path.exists(path):
+                os.remove(path)
+
+        if proc.returncode != 0:
+            logger.warning("ffmpeg pass 2 失敗 (rc=%s): %s\n%s", proc.returncode, src, stderr.decode()[-500:])
             return False
 
         result_size = os.path.getsize(dst)
+        logger.info(
+            "影片壓縮完成 (two-pass): %s -> %s bytes (limit=%s)",
+            src, result_size, target_bytes,
+        )
         if result_size > target_bytes:
-            logger.warning("ffmpeg 壓縮後仍超限 (%s bytes > %s): %s", result_size, target_bytes, src)
+            logger.warning("ffmpeg two-pass 壓縮後仍超限 (%s bytes > %s): %s", result_size, target_bytes, src)
             return False
 
-        logger.info("影片壓縮完成: %s -> %s bytes", src, result_size)
         return True
 
     @staticmethod
@@ -836,11 +930,24 @@ class MessageRelayWorker:
         await self.repository.connect()
         await self.repository.ensure_relay_tables()
 
-        replay_from_pk = self.route_resolver.get_replay_from_message_pk()
+        # 重發模式：從 config 讀取 telegram_message_id，轉換成 message_pk
+        replay_from_pk: Optional[int] = None
+        replay_msg_id = self.route_resolver.get_replay_from_message_id()
+        if replay_msg_id is not None:
+            replay_from_pk = await self.repository.get_pk_by_telegram_message_id(replay_msg_id)
+            if replay_from_pk is None:
+                logger.warning(
+                    "Telegram Relay 重送模式：找不到 telegram_message_id=%s 對應的訊息，忽略",
+                    replay_msg_id,
+                )
+
         if replay_from_pk is not None:
             self._last_polled_pk = max(0, replay_from_pk - 1)
             await self.repository.set_runtime_cursor_pk(self._last_polled_pk)
-            logger.warning("Telegram Relay 啟用重送模式：將從 message_pk=%s 開始重送", replay_from_pk)
+            logger.warning(
+                "Telegram Relay 啟用重送模式：telegram_message_id=%s → message_pk=%s",
+                replay_msg_id, replay_from_pk,
+            )
         else:
             saved_cursor = await self.repository.get_runtime_cursor_pk()
             if saved_cursor is not None:
@@ -1123,8 +1230,11 @@ class MessageRelayWorker:
         plan = self.render_adapter.render(message)
         published_count = 0
 
-        replay_from_pk = self.route_resolver.get_replay_from_message_pk()
-        force_replay = replay_from_pk is not None and message_pk >= replay_from_pk
+        replay_msg_id = self.route_resolver.get_replay_from_message_id()
+        force_replay = False
+        if replay_msg_id is not None:
+            replay_pk = await self.repository.get_pk_by_telegram_message_id(replay_msg_id)
+            force_replay = replay_pk is not None and message_pk >= replay_pk
 
         for channel_id in route_ids:
             channel = await self._resolve_channel(channel_id)

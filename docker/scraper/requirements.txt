@@ -1,9 +1,7 @@
-requests
 python-dotenv
 schedule
 sqlalchemy
 alembic
-fake-useragent
 fastapi
 uvicorn
 pydantic
@@ -11,4 +9,4 @@ selenium
 webdriver-manager
 beautifulsoup4
 python-dateutil
-cloudscraper
+curl_cffi

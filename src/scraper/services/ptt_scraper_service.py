@@ -11,19 +11,7 @@ from datetime import datetime
 from typing import Dict, Any, List
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, unquote_plus
 
-import requests
-from requests.adapters import HTTPAdapter
-from requests.exceptions import RequestException, SSLError, ConnectionError, Timeout, HTTPError
 from bs4 import BeautifulSoup
-from fake_useragent import UserAgent
-from urllib3.util.retry import Retry
-
-try:
-    import cloudscraper  # type: ignore
-    CLOUDSCRAPER_AVAILABLE = True
-except Exception:
-    cloudscraper = None
-    CLOUDSCRAPER_AVAILABLE = False
 
 # 讓此檔案可被「單檔直接執行」
 # python services/ptt_scraper_service.py 時，將 /app 加入 sys.path
@@ -34,6 +22,7 @@ if SCRAPER_ROOT not in sys.path:
 from config import PTT_CONFIG
 from utils.logger import get_logger
 from utils.request_utils import human_sleep
+from services.base_scraper_client import BaseScraperClient
 
 
 class NoOpDatabaseManager:
@@ -49,10 +38,11 @@ class NoOpDatabaseManager:
         return None
 
 
-class PTTScraperService:
+class PTTScraperService(BaseScraperClient):
     """PTT 爬蟲服務（MVP）"""
 
     def __init__(self, db_manager):
+        super().__init__()
         self.logger = get_logger("ptt_scraper")
         self.db_manager = db_manager
         self.target_search_url = PTT_CONFIG["target_search_url"]
@@ -60,7 +50,6 @@ class PTTScraperService:
         self.search_pages = max(1, int(PTT_CONFIG.get("search_pages", 1) or 1))
         self.over18_cookie = PTT_CONFIG.get("over18_cookie", {"over18": "1"})
         self.human_delay_range = PTT_CONFIG.get("human_delay_min", (0.35, 0.9))
-        self.ua = self._init_user_agent()
 
     def _build_search_page_url(self, page: int) -> str:
         """將設定的搜尋 URL 正規化為指定搜尋頁。"""
@@ -112,125 +101,25 @@ class PTTScraperService:
                 continue
         return None
 
-    def _init_user_agent(self):
-        """初始化 fake-useragent，失敗時回傳 None 走 fallback"""
-        try:
-            return UserAgent()
-        except Exception as e:
-            self.logger.warning(f"初始化 fake-useragent 失敗，將使用固定 UA: {e}")
-            return None
-
-    def _get_user_agent(self) -> str:
-        """取得 User-Agent（優先 fake-useragent，失敗則 fallback）"""
-        if self.ua:
-            try:
-                return self.ua.random
-            except Exception as e:
-                self.logger.warning(f"取得 fake-useragent 隨機 UA 失敗，改用固定 UA: {e}")
-
-        return (
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
-        )
+    # _get_user_agent / _build_session 繼承自 BaseScraperClient
 
     def _build_headers(self) -> Dict[str, str]:
-        return {
-            "User-Agent": self._get_user_agent(),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-        }
-
-    def _build_session(self) -> requests.Session:
-        """建立帶有 retry 的 session；優先使用 cloudscraper。"""
-        if CLOUDSCRAPER_AVAILABLE:
-            session = cloudscraper.create_scraper()
-        else:
-            session = requests.Session()
-
-        retry = Retry(
-            total=3,
-            connect=3,
-            read=3,
-            backoff_factor=1.0,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=frozenset(["GET"]),
-            raise_on_status=False,
-        )
-        adapter = HTTPAdapter(max_retries=retry)
-        session.mount("https://", adapter)
-        session.mount("http://", adapter)
-        return session
+        """PTT 頁面請求 headers（delegate 給 BaseScraperClient）"""
+        return self._build_page_headers()
 
     def _fetch_html(self, url: str) -> str:
-        """共用 HTML 抓取"""
-        last_error: Exception | None = None
-        for attempt in range(1, 4):
-            try:
-                with self._build_session() as session:
-                    response = session.get(
-                        url,
-                        headers=self._build_headers(),
-                        cookies=self.over18_cookie,
-                        timeout=self.timeout,
-                    )
-                response.raise_for_status()
-                return response.text
-            except SSLError as e:
-                last_error = e
-                self.logger.warning(
-                    "PTT 請求失敗（TLS/SSL handshake 問題，attempt=%s/3）: url=%s error=%s | 可能是對端在 TLS 階段直接中斷連線，或中間網路節點/防護機制重置連線。",
-                    attempt,
-                    url,
-                    e,
-                )
-                if attempt < 3:
-                    human_sleep(1.0 * attempt, 1.5 * attempt)
-            except ConnectionError as e:
-                last_error = e
-                self.logger.warning(
-                    "PTT 請求失敗（TCP 連線被重置/中斷，attempt=%s/3）: url=%s error=%s | 這通常不是 HTTP 403/429，而是底層連線被對端或中間節點直接切斷。",
-                    attempt,
-                    url,
-                    e,
-                )
-                if attempt < 3:
-                    human_sleep(1.0 * attempt, 1.5 * attempt)
-            except Timeout as e:
-                last_error = e
-                self.logger.warning(
-                    "PTT 請求逾時（attempt=%s/3）: url=%s error=%s",
-                    attempt,
-                    url,
-                    e,
-                )
-                if attempt < 3:
-                    human_sleep(1.0 * attempt, 1.5 * attempt)
-            except HTTPError as e:
-                last_error = e
-                status = getattr(getattr(e, 'response', None), 'status_code', 'unknown')
-                self.logger.warning(
-                    "PTT HTTP 層回應錯誤（attempt=%s/3）: url=%s status=%s error=%s | 這代表伺服器有正式回應拒絕，而不是單純 TCP/TLS reset。",
-                    attempt,
-                    url,
-                    status,
-                    e,
-                )
-                if attempt < 3:
-                    human_sleep(1.0 * attempt, 1.5 * attempt)
-            except RequestException as e:
-                last_error = e
-                self.logger.warning(
-                    "PTT 請求失敗（一般 requests 例外，attempt=%s/3）: url=%s error=%s",
-                    attempt,
-                    url,
-                    e,
-                )
-                if attempt < 3:
-                    human_sleep(1.0 * attempt, 1.5 * attempt)
-
-        raise RuntimeError(f"PTT HTML 抓取失敗（重試耗盡）: {url} err={last_error}")
+        """共用 HTML 抓取（使用 BaseScraperClient 的 session + retry）"""
+        with self._build_session() as session:
+            resp = self._fetch_with_retry(
+                session,
+                url,
+                headers=self._build_headers(),
+                cookies=self.over18_cookie,
+                timeout=self.timeout,
+                source_name="PTT",
+            )
+            resp.raise_for_status()
+            return resp.text
 
     def _trim_article_tail(self, content: str) -> str:
         """去除 PTT 文章尾段（簽名/發信站），優先依明確站方標記裁切。"""

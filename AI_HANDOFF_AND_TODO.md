@@ -272,6 +272,7 @@ last_confirmed: 2026-04-10
 - [x] 歌單查看（按鈕，ephemeral 回覆）
 - [x] `voice_lock` 防止重入式 connect/disconnect
 - [x] `requeue_song` 播放失敗時歌曲放回佇列前端（防掉歌）
+- [x] voice reconnect 死循環修復（guild.voice_client 認領機制，防止 Already connected 無限 error loop 灌爆 Docker log，2026-04-12）
 - [x] DAVE 加密協定支援（davey 0.1.5）
 - [x] 非同步歌單載入（不阻塞點歌）
 
@@ -337,7 +338,7 @@ type: STATE
 status: confirmed
 depends_on: [project-architecture]
 affects: []
-last_confirmed: 2026-04-11
+last_confirmed: 2026-04-12
 -->
 
 ### 架構
@@ -349,7 +350,8 @@ last_confirmed: 2026-04-11
 
 ### 設計決策
 
-- **每日抽 10 人**：UTC+8 14:00 自動執行
+- **每 7 天抽 10 人**：UTC+8 14:00 自動執行，`PICK_INTERVAL_DAYS=7`
+- **手動/自動點名分開記錄**：手動點名記 `last_manual_rollcall_date`（不推遲自動排程），自動點名記 `last_rollcall_date`；同日有手動點名時自動排程跳過，避免重複（2026-04-12 修復）
 - **7 天回覆期限**：逾期自動踢除
 - **30 天豁免期**：通過點名後 30 天內不再被抽到，期滿後重新進入抽選池
 - **排除管理員與 Bot**：不會被抽到
@@ -423,6 +425,7 @@ last_confirmed: 2026-04-03
 **目前風險**
 1. `snB == sn` 高度吻合但未 100% 證明
 2. HTML 結構若再變，`section.c-section` / `Commendlist_*` selector 可能失效
+3. 巴哈 `moreCommend.php` XHR 留言端點有反爬偵測（403），已透過 `BaseScraperClient` + `curl_cffi` 修復（2026-04-12）
 
 #### BAHAMUT.NEXT
 
@@ -438,6 +441,38 @@ last_confirmed: 2026-04-03
 2. 正式 DB migration（Alembic）
 3. 跨來源整合（base_monitor 共用層擴展）
 4. RAG ingestion
+
+### 反爬基礎設施（BaseScraperClient）
+
+<!-- @meta
+id: scraper-anti-detect
+type: STATE
+status: confirmed
+depends_on: [bahamut-risk-formal]
+affects: [bahamut-todo]
+last_confirmed: 2026-04-12
+-->
+
+**起因：** 巴哈 `moreCommend.php` XHR 留言端點回 403，根因為 TLS 指紋 + XHR headers 不完整被反爬偵測。
+
+**新增元件：**
+- `src/scraper/services/base_scraper_client.py` — 反爬 HTTP client 基底類別
+  - `curl_cffi` Session 建立（TLS 指紋模擬 Chrome 127）
+  - `_build_page_headers()` — 一般頁面請求（Sec-Fetch-Mode: navigate）
+  - `_build_xhr_headers()` — AJAX 請求（Sec-Fetch-Mode: cors, Origin, Sec-CH-UA）
+  - `_fetch_with_retry()` — 共用 GET + 指數退避 retry
+  - 統一 User-Agent（與 impersonate 版本對齊）
+
+**套件變更：**
+- 移除 `cloudscraper`（已停止維護，Cloudflare 繞過失效）
+- 新增 `curl_cffi`（TLS JA3/JA4 指紋模擬，API 與 requests 相容）
+- 保留 `requests`（PTT scraper 尚未遷移）
+
+**整合狀態：**
+- [x] Phase 1：`BahamutScraperService` 繼承 `BaseScraperClient`，XHR headers 修復
+- [x] Phase 2：`PTTScraperService` 接上 `BaseScraperClient`
+- [x] Phase 3：`APIService`（鳴潮）接上 `BaseScraperClient`，`main.py` 改用 `curl_cffi`
+- [x] 清理：移除 `requests`、`fake-useragent`、`cloudscraper` 依賴，scraper 容器統一只用 `curl_cffi`
 
 ### 已歸檔設計文件（移至 TODO-completed.md）
 

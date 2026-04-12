@@ -6,7 +6,7 @@
 import schedule
 import time
 import threading
-import requests
+from curl_cffi import requests
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import uvicorn
