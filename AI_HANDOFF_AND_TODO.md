@@ -100,6 +100,7 @@ last_confirmed: 2026-03-31
 | 點歌機器人（Music Bot） | 已上線運作 | 85% | [點歌機器人](#點歌機器人專區) |
 | 跨來源整合（Article/FB/PTT/TG） | 有方向，尚未全面收斂 | 35% | [跨來源整合](#跨來源整合專區) |
 | Bahamut RAG / AI 整合 | 尚未開始 | 5% | [RAG TODO](#第三階段整合-ai--pgvector--rag) |
+| 幽靈點名系統（Roll Call） | 已實作，待部署驗證 | 80% | [幽靈點名](#幽靈點名系統專區) |
 | Discord Bot 管理入口 | 規劃中 | 10% | [管理 TODO](#discord-bot-管理入口與指令整理-todo) |
 
 ---
@@ -325,6 +326,74 @@ last_confirmed: 2026-04-10
 - [ ] 歷史播放紀錄
 - [ ] 使用者點歌統計
 - [ ] DAVE 加速問題追蹤（等 discord.py 後續版本優化）
+
+---
+
+## 幽靈點名系統專區
+
+<!-- @meta
+id: rollcall-system
+type: STATE
+status: confirmed
+depends_on: [project-architecture]
+affects: []
+last_confirmed: 2026-04-11
+-->
+
+### 架構
+
+- 服務層：`src/services/rollcall_service.py`（抽選、到期掃描、踢除、豁免）
+- Cog 層：`src/commands/rollcall_commands.py`（persistent views + `/rollcall_panel` 指令）
+- Runtime 狀態：`src/settings/rollcall_runtime.json`（pending、immunity、stats、panel message ID）
+- Config 欄位：`config.json` 的 `rollcall_channel_id`、`rollcall_target_role_ids`
+
+### 設計決策
+
+- **每日抽 10 人**：UTC+8 14:00 自動執行
+- **7 天回覆期限**：逾期自動踢除
+- **30 天豁免期**：通過點名後 30 天內不再被抽到，期滿後重新進入抽選池
+- **排除管理員與 Bot**：不會被抽到
+- **排除已 pending / 豁免中成員**：不重複點名
+- **persistent view**：Bot 重啟後按鈕仍可用
+- **管理面板**：在指定頻道放置控制面板，管理員可開關自動點名、手動發動、查看待回覆清單
+
+### 管理面板按鈕
+
+| 按鈕 | 功能 |
+|---|---|
+| ✅ 開啟 | 啟用自動每日點名 |
+| ❌ 關閉 | 停用自動每日點名 |
+| 🎲 手動點名 | 立即抽選 10 人 |
+| 📋 待回覆清單 | 查看所有待回覆的成員與剩餘天數 |
+| 🔄 刷新狀態 | 更新面板顯示 |
+
+### 使用方式
+
+1. 在 `config.json` 設定 `rollcall_channel_id`（點名訊息頻道）和 `rollcall_target_role_ids`（目標身份組 ID 陣列）
+2. 管理員在想要放置控制面板的頻道執行 `/rollcall_panel`
+3. 透過面板按鈕開啟/關閉自動點名，或手動發動
+
+### 幽靈點名 TODO
+
+<!-- @meta
+id: rollcall-todo
+type: TODO
+status: confirmed
+last_confirmed: 2026-04-11
+-->
+
+**P0（核心）：**
+- [x] 每日自動抽選 + 點名訊息發送
+- [x] 「我是活人」按鈕回覆處理
+- [x] 7 天逾期自動踢除
+- [x] 30 天豁免期管理
+- [x] 管理員控制面板（開/關/手動/查看）
+- [x] persistent view（重啟後按鈕仍可用）
+- [ ] 部署驗證
+
+**P1（體驗優化）：**
+- [ ] `/server_manager` 整合（透過下拉選單設定頻道與身份組）
+- [ ] 踢除前 DM 最後警告
 
 ---
 

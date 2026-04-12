@@ -46,6 +46,8 @@ class MusicPlayer:
             logger.warning(f"[MusicPlayer] 頻道 {self.config.voice_channel_id} 不是語音頻道")
             return False
 
+        guild = channel.guild
+
         # 已連線到同一頻道，直接複用
         if self._has_active_voice():
             if self.voice_client.channel and self.voice_client.channel.id == channel.id:
@@ -58,12 +60,23 @@ class MusicPlayer:
             logger.warning("[MusicPlayer] 偵測到失效的 voice_client，將重新建立連線")
             self._reset_voice_client()
 
-        # guild 有殘留的 voice client（非我們的），清理
-        guild = channel.guild
-        if guild.voice_client and guild.voice_client.is_connected() and guild.voice_client != self.voice_client:
+        # guild 層級已有連線（gateway reconnect / voice server migration 後常見）
+        # 直接認領，不要嘗試重新 connect
+        existing_vc = guild.voice_client
+        if existing_vc is not None:
+            if existing_vc.is_connected() and getattr(existing_vc.channel, 'id', None) == channel.id:
+                logger.info("[MusicPlayer] 認領 guild 殘留語音連線（同頻道）")
+                self.voice_client = existing_vc
+                return True
+            # 不同頻道或已斷線，強制清理
             logger.info("[MusicPlayer] 清理 guild 殘留語音連線")
             try:
-                await guild.voice_client.disconnect(force=True)
+                await existing_vc.disconnect(force=True)
+            except Exception:
+                pass
+            # 確保 discord.py 內部狀態也清乾淨
+            try:
+                guild._voice_client = None
             except Exception:
                 pass
             await asyncio.sleep(3)
@@ -72,6 +85,15 @@ class MusicPlayer:
             self.voice_client = await channel.connect(self_deaf=True, timeout=60)
             logger.info(f"[MusicPlayer] 已加入語音頻道: {channel.name}")
             return True
+        except discord.ClientException:
+            # connect 仍失敗（內部狀態殘留），最後嘗試認領
+            if guild.voice_client and guild.voice_client.is_connected():
+                logger.warning("[MusicPlayer] connect 失敗但 guild 有活躍連線，強制認領")
+                self.voice_client = guild.voice_client
+                return True
+            self._reset_voice_client()
+            logger.error("[MusicPlayer] 加入語音頻道失敗: Already connected 且無法認領")
+            return False
         except Exception as e:
             self._reset_voice_client()
             logger.error(f"[MusicPlayer] 加入語音頻道失敗: {e}", exc_info=True)

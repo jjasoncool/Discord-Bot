@@ -21,3 +21,4 @@ src/telegram_scraper/session/
 src/telegram_scraper/media/
 src/services/sent_articles.db
 src/settings/music_runtime.json
+src/settings/rollcall_runtime.json

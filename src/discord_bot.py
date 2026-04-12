@@ -50,6 +50,7 @@ COMMAND_MODULES = [
     'commands.llm_commands',
     'commands.management_commands',
     'commands.music_commands',
+    'commands.rollcall_commands',
     'commands.trade_commands',
     'commands.test_commands',
     'commands.user_commands'
