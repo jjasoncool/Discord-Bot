@@ -103,10 +103,10 @@ class YTDLSource:
             if YTDLSource.get_cache_path(video_id):
                 return
             try:
-                await loop.run_in_executor(
-                    None,
-                    lambda: yt_dlp.YoutubeDL(YTDLSource.DOWNLOAD_OPTIONS).download([url])
-                )
+                def _download():
+                    with yt_dlp.YoutubeDL(YTDLSource.DOWNLOAD_OPTIONS) as ydl:
+                        ydl.download([url])
+                await loop.run_in_executor(None, _download)
                 logger.info(f"[MusicCache] 已快取: {video_id}")
             except Exception as e:
                 logger.warning(f"[MusicCache] 下載快取失敗 {video_id}: {e}")
@@ -116,10 +116,10 @@ class YTDLSource:
         """提取 URL 的音訊資訊（支援歌單，一次性回傳）"""
         loop = asyncio.get_event_loop()
         try:
-            info = await loop.run_in_executor(
-                None,
-                lambda: yt_dlp.YoutubeDL(YTDLSource.YTDL_OPTIONS).extract_info(url, download=False)
-            )
+            def _extract():
+                with yt_dlp.YoutubeDL(YTDLSource.YTDL_OPTIONS) as ydl:
+                    return ydl.extract_info(url, download=False)
+            info = await loop.run_in_executor(None, _extract)
             if 'entries' in info:
                 return [e for e in info['entries'] if e]
             return [info]
@@ -142,10 +142,10 @@ class YTDLSource:
         """取得單首歌的串流資訊（不展開歌單）"""
         loop = asyncio.get_event_loop()
         try:
-            info = await loop.run_in_executor(
-                None,
-                lambda: yt_dlp.YoutubeDL(YTDLSource.SINGLE_OPTIONS).extract_info(url, download=False)
-            )
+            def _extract():
+                with yt_dlp.YoutubeDL(YTDLSource.SINGLE_OPTIONS) as ydl:
+                    return ydl.extract_info(url, download=False)
+            info = await loop.run_in_executor(None, _extract)
             if 'entries' in info:
                 entries = [e for e in info['entries'] if e]
                 if entries:
@@ -159,10 +159,10 @@ class YTDLSource:
         """關鍵字搜尋，回傳第一筆結果"""
         loop = asyncio.get_event_loop()
         try:
-            info = await loop.run_in_executor(
-                None,
-                lambda: yt_dlp.YoutubeDL(YTDLSource.SEARCH_OPTIONS).extract_info(query, download=False)
-            )
+            def _search():
+                with yt_dlp.YoutubeDL(YTDLSource.SEARCH_OPTIONS) as ydl:
+                    return ydl.extract_info(query, download=False)
+            info = await loop.run_in_executor(None, _search)
             if 'entries' in info:
                 entries = [e for e in info['entries'] if e]
                 if not entries:

@@ -100,6 +100,18 @@ class RuntimeMusicConfig:
         cls._watch_task = asyncio.create_task(cls._watch_loop())
 
     @classmethod
+    async def stop_watcher(cls):
+        """停止背景 watcher"""
+        if cls._watch_task and not cls._watch_task.done():
+            cls._watch_task.cancel()
+            try:
+                await cls._watch_task
+            except asyncio.CancelledError:
+                pass
+        cls._watch_task = None
+        cls._on_change_callback = None
+
+    @classmethod
     async def _watch_loop(cls):
         while True:
             try:

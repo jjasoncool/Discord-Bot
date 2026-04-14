@@ -24,6 +24,7 @@ class MusicPlayer:
         self._play_lock = asyncio.Lock()
         self._voice_lock = asyncio.Lock()  # 防止重入式 connect/disconnect
         self._task: asyncio.Task | None = None
+        self._bg_tasks: set[asyncio.Task] = set()  # 追蹤背景下載 tasks
         self._replay = False  # 重播當前歌曲（不跳下一首）
 
     def _has_active_voice(self) -> bool:
@@ -99,6 +100,39 @@ class MusicPlayer:
             logger.error(f"[MusicPlayer] 加入語音頻道失敗: {e}", exc_info=True)
             return False
 
+    def _track_task(self, coro) -> asyncio.Task:
+        """建立背景 task 並自動追蹤，完成後從 set 移除"""
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return task
+
+    async def cleanup(self):
+        """停止播放、取消所有背景 tasks、斷開語音"""
+        # 取消播放主迴圈
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+
+        # 取消所有背景下載/prefetch tasks
+        for task in list(self._bg_tasks):
+            task.cancel()
+        self._bg_tasks.clear()
+
+        # 停止目前播放並斷開語音
+        if self.voice_client:
+            if self.voice_client.is_playing():
+                self.voice_client.stop()
+            if self.voice_client.is_connected():
+                await self.voice_client.disconnect(force=True)
+            self._reset_voice_client()
+
+        self.queue.current = None
+
     async def start_background_loop(self):
         """背景播放主迴圈"""
         if self._task and not self._task.done():
@@ -145,6 +179,8 @@ class MusicPlayer:
             # 音訊模式：pcm 或 opus（可在 music_runtime.json 的 audio_mode 切換）
             use_opus = self.config.audio_mode == 'opus'
             BUFFER_OPTS = '-thread_queue_size 4096'
+            # Discord voice 固定 48kHz stereo；opus frame_duration 20ms 最穩定
+            OPUS_ENCODE = '-c:a libopus -b:a 384k -ar 48000 -ac 2 -frame_duration 20 -application audio'
 
             if cache_path:
                 logger.info(f"[MusicPlayer] 使用快取播放 ({self.config.audio_mode}): {song.title}")
@@ -156,11 +192,13 @@ class MusicPlayer:
                     logger.info(f"[MusicPlayer] 峰值正規化: peak={peak_db:.1f}dB, gain={gain:.1f}dB")
 
                 if use_opus:
-                    opus_opts = f'-vn {volume_filter}'.strip()
-                    audio_source = await discord.FFmpegOpusAudio.from_probe(
+                    # 統一走解碼→filter→重新編碼，避免 codec copy 與 volume filter 衝突
+                    opus_opts = f'-vn {volume_filter} {OPUS_ENCODE} -f opus'.strip()
+                    audio_source = discord.FFmpegOpusAudio(
                         cache_path,
                         before_options=BUFFER_OPTS,
                         options=opus_opts,
+                        codec='copy',  # 告訴 discord.py 資料已是 opus，直接送出不再轉碼
                     )
                 else:
                     pcm_opts = f'-vn -ar 48000 -ac 2 -f s16le {volume_filter}'.strip()
@@ -190,16 +228,20 @@ class MusicPlayer:
                         await self.announcer.send_skipped_notice(song, reason)
                     return
 
+                stream_url = info['url']
+                del info  # 釋放 yt-dlp 的大型 metadata dict
+
                 stream_before = f'-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 {BUFFER_OPTS}'
                 if use_opus:
                     audio_source = discord.FFmpegOpusAudio(
-                        info['url'],
+                        stream_url,
                         before_options=stream_before,
-                        options='-vn',
+                        options=f'-vn {OPUS_ENCODE} -f opus',
+                        codec='copy',
                     )
                 else:
                     audio_source = discord.FFmpegPCMAudio(
-                        info['url'],
+                        stream_url,
                         before_options=stream_before,
                         options='-vn -ar 48000 -ac 2 -f s16le',
                     )
@@ -235,8 +277,8 @@ class MusicPlayer:
 
             # 背景下載當前歌曲 + 預先快取下一首
             if need_download and song.webpage_url:
-                asyncio.create_task(YTDLSource.download_to_cache(song.webpage_url))
-            asyncio.create_task(self._prefetch_next())
+                self._track_task(YTDLSource.download_to_cache(song.webpage_url))
+            self._track_task(self._prefetch_next())
 
             await play_done.wait()
             if not self._replay:

@@ -17,6 +17,7 @@ class MusicCog(commands.Cog):
         self.announcer = None
         self._starting = False
         self._view_registered = False
+        self._playlist_task: asyncio.Task | None = None
 
     async def cog_load(self):
         """Cog 載入（由 add_cog 自動呼叫，只做輕量初始化）"""
@@ -29,6 +30,28 @@ class MusicCog(commands.Cog):
 
         self._init_components()
         logger.info("[MusicCog] cog_load 完成，等待 on_ready 再連線")
+
+    async def cog_unload(self):
+        """Cog 卸載時清理所有資源"""
+        logger.info("[MusicCog] cog_unload: 開始清理資源")
+
+        # 取消歌單載入 task
+        if self._playlist_task and not self._playlist_task.done():
+            self._playlist_task.cancel()
+            self._playlist_task = None
+
+        # 停止 config watcher
+        await RuntimeMusicConfig.stop_watcher()
+
+        # 清理 player（背景 tasks、語音連線等）
+        if self.player:
+            await self.player.cleanup()
+
+        # 清理面板訊息引用
+        if self.announcer:
+            self.announcer._panel_message = None
+
+        logger.info("[MusicCog] cog_unload: 清理完成")
 
     def _init_components(self):
         """初始化 announcer 和 player（已存在就複用，避免丟失面板參照）"""
@@ -92,7 +115,7 @@ class MusicCog(commands.Cog):
             await self.announcer.send_idle_panel()
 
             if self.config.default_playlist_url:
-                asyncio.create_task(self._load_playlist_background())
+                self._playlist_task = asyncio.create_task(self._load_playlist_background())
         finally:
             self._starting = False
 
