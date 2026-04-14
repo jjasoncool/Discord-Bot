@@ -737,7 +737,12 @@ class FBScraperService:
             u = m.group(0)
             try:
                 p = urlparse(u)
-                return urlunparse((p.scheme or "https", p.netloc, p.path.rstrip("/"), "", "", ""))
+                path = p.path.rstrip("/")
+                # Facebook 動態 pfbid：每次載入頁面都會產生不同的 pfbid，
+                # 將 /posts/pfbidXXX 正規化為 /posts/ 避免同文不同 hash
+                if p.netloc and "facebook.com" in p.netloc:
+                    path = re.sub(r"/posts/pfbid[^/]*", "/posts", path)
+                return urlunparse((p.scheme or "https", p.netloc, path, "", "", ""))
             except Exception:
                 return u
         out = re.sub(r'https?://[^\s)]+', repl, text, flags=re.IGNORECASE)

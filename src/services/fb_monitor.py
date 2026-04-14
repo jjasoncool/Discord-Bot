@@ -43,18 +43,27 @@ class FBMonitor(BaseContentMonitor):
         return urlunparse((parsed.scheme or "https", "www.facebook.com", clean_path, "", "", ""))
 
     def _sanitize_fb_text_md_for_discord(self, text_md: str) -> str:
-        """清洗 Discord 顯示用的 FB hashtag markdown link，不改動資料來源。"""
+        """清洗 Discord 顯示用的 FB markdown，不改動資料來源。
+        1. hashtag URL 去追蹤參數
+        2. 純文字 URL → [連結](URL)
+        """
         if not text_md:
             return ""
 
-        def _replace(match: re.Match) -> str:
+        # 1) 清洗 hashtag markdown link
+        def _replace_hashtag(match: re.Match) -> str:
             label = match.group(1)
             url = match.group(2)
             sanitized_url = self._sanitize_fb_hashtag_url(url)
             return f"[{label}]({sanitized_url})"
 
-        pattern = re.compile(r"\[(#[^\]]+)\]\((https?://[^)]+)\)")
-        return pattern.sub(_replace, text_md)
+        hashtag_pattern = re.compile(r"\[(#[^\]]+)\]\((https?://[^)]+)\)")
+        result = hashtag_pattern.sub(_replace_hashtag, text_md)
+
+        # 2) 純文字 URL → [連結](URL)（不處理已在 markdown 中的 URL）
+        result = re.sub(r"(?<!\()(https?://[^\s\n\)]+)", r"[連結](\1)", result)
+
+        return result
 
     # ── API 呼叫 ──
 
@@ -109,7 +118,7 @@ class FBMonitor(BaseContentMonitor):
         description_text = fb_post.get('text_md') or fb_post.get('text', '')
         if fb_post.get('text_md'):
             description_text = self._sanitize_fb_text_md_for_discord(description_text)
-        description = description_text[:2000] if description_text else ''
+        description = description_text[:4000] if description_text else ''
 
         # 優先使用 url 欄位，如果 url 是空的則使用 pfbid_url
         embed_url = fb_post.get('url') or fb_post.get('pfbid_url')
