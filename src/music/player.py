@@ -178,7 +178,7 @@ class MusicPlayer:
 
             # 音訊模式：pcm 或 opus（可在 music_runtime.json 的 audio_mode 切換）
             use_opus = self.config.audio_mode == 'opus'
-            BUFFER_OPTS = '-thread_queue_size 4096'
+            BUFFER_OPTS = '-thread_queue_size 4096 -fflags +genpts'
             # Discord voice 固定 48kHz stereo；opus frame_duration 20ms 最穩定
             OPUS_ENCODE = '-c:a libopus -b:a 384k -ar 48000 -ac 2 -frame_duration 20 -application audio'
 
@@ -231,7 +231,7 @@ class MusicPlayer:
                 stream_url = info['url']
                 del info  # 釋放 yt-dlp 的大型 metadata dict
 
-                stream_before = f'-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 {BUFFER_OPTS}'
+                stream_before = f'-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -re {BUFFER_OPTS}'
                 if use_opus:
                     audio_source = discord.FFmpegOpusAudio(
                         stream_url,
