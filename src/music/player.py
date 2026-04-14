@@ -180,7 +180,7 @@ class MusicPlayer:
             use_opus = self.config.audio_mode == 'opus'
             BUFFER_OPTS = '-thread_queue_size 4096 -fflags +genpts'
             # Discord voice 固定 48kHz stereo；opus frame_duration 20ms 最穩定
-            OPUS_ENCODE = '-c:a libopus -b:a 384k -ar 48000 -ac 2 -frame_duration 20 -application audio'
+            OPUS_ENCODE = '-c:a libopus -b:a 192k -ar 48000 -ac 2 -frame_duration 20 -application audio'
 
             if cache_path:
                 logger.info(f"[MusicPlayer] 使用快取播放 ({self.config.audio_mode}): {song.title}")
@@ -193,7 +193,7 @@ class MusicPlayer:
 
                 if use_opus:
                     # 統一走解碼→filter→重新編碼，避免 codec copy 與 volume filter 衝突
-                    opus_opts = f'-vn {volume_filter} {OPUS_ENCODE} -f opus'.strip()
+                    opus_opts = f'-vn {volume_filter} {OPUS_ENCODE} -flush_packets 0 -f opus'.strip()
                     audio_source = discord.FFmpegOpusAudio(
                         cache_path,
                         before_options=BUFFER_OPTS,
@@ -263,7 +263,7 @@ class MusicPlayer:
                 return
 
             try:
-                self.voice_client.play(audio_source, after=after_callback)
+                self.voice_client.play(audio_source, after=after_callback, bitrate=192)
             except discord.ClientException as e:
                 logger.warning(f"[MusicPlayer] play() 時 voice 已失效，歌曲將回佇列重試: {e}")
                 self._reset_voice_client()
