@@ -126,9 +126,49 @@ async def on_ready():
                     await flush_buffer()
                 except Exception as exc:
                     logger.warning("定期 flush 聊天 buffer 失敗: %s", exc)
-        asyncio.create_task(_periodic_flush())
+        bot._chat_persist_task = asyncio.create_task(_periodic_flush())
         bot._chat_persist_task_started = True
         logger.info("聊天訊息定期持久化已啟動（每 %d 秒）", FLUSH_INTERVAL_SECONDS)
+
+    # 啟動人格萃取定期排程
+    if not getattr(bot, '_personality_task_started', False):
+        from datetime import datetime, timezone, timedelta
+        TAIPEI_TZ = timezone(timedelta(hours=8))
+
+        async def _personality_schedule():
+            # 啟動後等 60 秒再開始，讓其他服務先就緒
+            await asyncio.sleep(60)
+            while True:
+                try:
+                    now = datetime.now(TAIPEI_TZ)
+                    # 計算到下一個 04:00 的秒數
+                    target = now.replace(hour=4, minute=0, second=0, microsecond=0)
+                    if now >= target:
+                        target += timedelta(days=1)
+                    wait_seconds = (target - now).total_seconds()
+                    logger.info("人格萃取排程：下次執行 %s（等待 %.0f 秒）", target.isoformat(), wait_seconds)
+                    await asyncio.sleep(wait_seconds)
+
+                    # 執行萃取（取第一個 guild）
+                    guild = bot.guilds[0] if bot.guilds else None
+                    if guild:
+                        from llm.personality_extractor import run_personality_extraction
+                        results = await run_personality_extraction(
+                            guild=guild,
+                            days=14,
+                            model='qwen2.5:14b',
+                        )
+                        logger.info("人格萃取排程完成：萃取 %d 位使用者", len(results))
+                    else:
+                        logger.warning("人格萃取排程：無可用 guild")
+                except Exception as exc:
+                    logger.error("人格萃取排程失敗: %s", exc, exc_info=True)
+                    # 失敗後等 1 小時再試
+                    await asyncio.sleep(3600)
+
+        bot._personality_task = asyncio.create_task(_personality_schedule())
+        bot._personality_task_started = True
+        logger.info("人格萃取定期排程已啟動（每日 04:00 UTC+8）")
 
     # 自動啟動官方文章更新
     await auto_start_article_monitor(bot)

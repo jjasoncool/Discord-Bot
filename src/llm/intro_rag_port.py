@@ -57,6 +57,16 @@ class IntroRAGPort(Protocol):
     ) -> None:
         """將他人印象資料寫入 RAG/向量資料庫。"""
 
+    async def index_auto_personality(
+        self,
+        *,
+        guild_id: int,
+        author_id: int,
+        alias: str,
+        personality: str,
+    ) -> None:
+        """將 LLM 自動萃取的人格描述寫入 RAG/向量資料庫。"""
+
 
 class NullIntroRAGPort:
     """預設 no-op 串接，尚未接真正向量庫前使用。"""
@@ -96,6 +106,16 @@ class NullIntroRAGPort:
             impression,
             moderation_metadata,
         )
+
+    async def index_auto_personality(
+        self,
+        *,
+        guild_id: int,
+        author_id: int,
+        alias: str,
+        personality: str,
+    ) -> None:
+        _ = (guild_id, author_id, alias, personality)
 
 
 class PgVectorIntroRAGPort:
@@ -346,3 +366,32 @@ class PgVectorIntroRAGPort:
             self._insert(doc_id=doc_id, text=text, metadata=metadata)
         except Exception as exc:
             logger.error("寫入 member impression 至 pgvector 失敗: %s", exc, exc_info=True)
+
+    async def index_auto_personality(
+        self,
+        *,
+        guild_id: int,
+        author_id: int,
+        alias: str,
+        personality: str,
+    ) -> None:
+        if not self._dependencies_ready():
+            return
+
+        try:
+            text = (
+                f"[Auto Personality]\n"
+                f"alias: {alias or '-'}\n"
+                f"personality: {personality or '-'}"
+            )
+            metadata = {
+                "doc_type": "member_profile",
+                "profile_kind": "auto_personality",
+                "guild_id": str(guild_id),
+                "author_id": str(author_id),
+                "alias": alias or "",
+            }
+            doc_id = f"auto_personality:{guild_id}:{author_id}"
+            self._insert(doc_id=doc_id, text=text, metadata=metadata)
+        except Exception as exc:
+            logger.error("寫入 auto personality 至 pgvector 失敗: %s", exc, exc_info=True)

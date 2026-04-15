@@ -26,6 +26,8 @@ class RuntimeMusicConfig:
     _last_mtime_runtime: float = 0
     _watch_task: asyncio.Task | None = None
     _on_change_callback: Callable[['MusicConfig'], Awaitable[None]] | None = None
+    # 只監控這些欄位的變化，忽略 last_video_id / panel_message_id
+    _watched_keys: tuple = ('default_playlist_url', 'audio_mode', 'shuffle')
 
     def __new__(cls):
         if cls._instance is None:
@@ -112,21 +114,32 @@ class RuntimeMusicConfig:
         cls._on_change_callback = None
 
     @classmethod
+    def _get_watched_snapshot(cls) -> dict:
+        """取得需要監控的欄位快照"""
+        snapshot = {}
+        try:
+            if os.path.exists(CONFIG_JSON_PATH):
+                with open(CONFIG_JSON_PATH, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                snapshot['voice_channel_id'] = data.get('music_voice_channel_id', 0)
+            if os.path.exists(MUSIC_RUNTIME_PATH):
+                with open(MUSIC_RUNTIME_PATH, 'r', encoding='utf-8') as f:
+                    runtime_data = json.load(f).get('music', {})
+                for key in cls._watched_keys:
+                    snapshot[key] = runtime_data.get(key)
+        except Exception:
+            pass
+        return snapshot
+
+    @classmethod
     async def _watch_loop(cls):
+        last_snapshot = cls._get_watched_snapshot()
         while True:
             try:
-                changed = False
-                if os.path.exists(CONFIG_JSON_PATH):
-                    mtime = os.path.getmtime(CONFIG_JSON_PATH)
-                    if mtime > cls._last_mtime_config:
-                        changed = True
-                if os.path.exists(MUSIC_RUNTIME_PATH):
-                    mtime = os.path.getmtime(MUSIC_RUNTIME_PATH)
-                    if mtime > cls._last_mtime_runtime:
-                        changed = True
-
-                if changed:
-                    logger.info("🔄 [MusicConfig] 偵測到配置變更 → 熱重載")
+                current_snapshot = cls._get_watched_snapshot()
+                if current_snapshot != last_snapshot:
+                    logger.info(f"🔄 [MusicConfig] 偵測到配置變更 → 熱重載")
+                    last_snapshot = current_snapshot
                     cls._load_config()
                     if cls._on_change_callback and cls._config:
                         try:

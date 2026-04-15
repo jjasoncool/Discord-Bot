@@ -51,7 +51,7 @@ def load_system_prompt() -> str:
 
 
 def askai_cooldown(interaction: discord.Interaction):
-    """管理員免冷卻、一般成員 5 分鐘一次"""
+    """管理員免冷卻、一般成員 3 分鐘一次"""
     if interaction.guild and interaction.user.guild_permissions.administrator:
         return None
     return app_commands.Cooldown(
@@ -99,6 +99,48 @@ def append_askai_response_log(
     response_logger.info(json.dumps(record, ensure_ascii=False))
 
 
+class _AskaiCancelButton(discord.ui.View):
+    """AI 思考中的取消按鈕。"""
+
+    def __init__(self, user_id: int, cancel_event: asyncio.Event):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.cancel_event = cancel_event
+
+    @discord.ui.button(label="取消", style=discord.ButtonStyle.danger)
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            try:
+                await interaction.response.send_message("只有發問者可以取消。", ephemeral=True)
+            except Exception:
+                pass
+            return
+        # 先觸發取消（讓 asyncio.wait 盡快醒來）
+        self.cancel_event.set()
+        # 更新按鈕狀態
+        button.disabled = True
+        button.label = "已取消"
+        # 嘗試多種方式回應（ephemeral followup 的交互行為不一致）
+        try:
+            await interaction.response.edit_message(content="❌ 已取消 AI 回覆。", view=self)
+        except (discord.NotFound, discord.HTTPException):
+            try:
+                await interaction.followup.edit_message(
+                    interaction.message.id,
+                    content="❌ 已取消 AI 回覆。",
+                    view=self,
+                )
+            except Exception:
+                pass
+        self.stop()
+
+    async def on_timeout(self) -> None:
+        """超時後停用按鈕。"""
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+
+
 class LLMCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -129,14 +171,15 @@ class LLMCommands(commands.Cog):
 
         loop = asyncio.get_running_loop()
         completion = loop.create_future()
-        queue_item = (interaction, question, image, completion)
+        cancel_event = asyncio.Event()
+        queue_item = (interaction, question, image, completion, cancel_event)
 
         # 將請求加入佇列以避免阻塞主執行緒
-        await ASKAI_QUEUE.put(queue_item)
         queue_size = ASKAI_QUEUE.qsize()
+        await ASKAI_QUEUE.put(queue_item)
         await safe_send_interaction_message(
             interaction,
-            f"🧾 已加入 AI 排隊（目前排隊人數：{queue_size}）。請稍候...",
+            f"🧾 已加入 AI 排隊（前面排隊人數：{queue_size}）。請稍候...",
             ephemeral=True
         )
 
@@ -145,11 +188,18 @@ class LLMCommands(commands.Cog):
     async def _askai_worker(self) -> None:
         """背景任務：依序從佇列中取出請求並處理"""
         while True:
-            interaction, question, image, completion = await ASKAI_QUEUE.get()
+            interaction, question, image, completion, cancel_event = await ASKAI_QUEUE.get()
             try:
-                await self._handle_askai_request(interaction, question, image)
+                if cancel_event.is_set():
+                    if not completion.done():
+                        completion.set_result("cancelled")
+                    continue
+                await self._handle_askai_request(interaction, question, image, cancel_event)
                 if not completion.done():
-                    completion.set_result(True)
+                    if cancel_event.is_set():
+                        completion.set_result("cancelled")
+                    else:
+                        completion.set_result(True)
             except Exception as exc:
                 logger.error("/askai 排隊處理失敗: %s", exc, exc_info=True)
                 if not completion.done():
@@ -162,13 +212,20 @@ class LLMCommands(commands.Cog):
         interaction: discord.Interaction,
         question: str,
         image: discord.Attachment | None,
+        cancel_event: asyncio.Event | None = None,
     ):
         """實際處理 AI 回覆流程（在隊列鎖內執行）"""
         system_prompt = load_system_prompt()
 
-        await interaction.followup.send(
+        cancel_view = None
+        if cancel_event:
+            cancel_view = _AskaiCancelButton(interaction.user.id, cancel_event)
+
+        thinking_msg = await interaction.followup.send(
             "🔄 AI 思考中，請耐心等候...",
-            ephemeral=True
+            ephemeral=True,
+            view=cancel_view,
+            wait=True,
         )
 
         # 取得歷史聊天上下文（統一契約：list[dict[str, str]]）
@@ -204,13 +261,17 @@ class LLMCommands(commands.Cog):
                 participant_user_ids.append(int(author_id_raw))
         participant_user_ids = list(dict.fromkeys(participant_user_ids))
 
-        rag_context, rag_meta = await llm.retrieve_rag_context(
-            question=question,
-            guild_id=interaction.guild.id if interaction.guild else None,
-            requester_user_id=interaction.user.id if interaction.user else None,
-            participant_user_ids=participant_user_ids,
-            logger=logger,
-            top_k=5,
+        # retrieve_rag_context 內部呼叫 LlamaIndex 同步 API（embedding + pgvector），
+        # 在 executor 中執行以避免阻塞 event loop（影響語音 heartbeat 等）。
+        rag_context, rag_meta = await asyncio.get_running_loop().run_in_executor(
+            None,
+            llm.retrieve_rag_context_sync,
+            question,
+            interaction.guild.id if interaction.guild else None,
+            interaction.user.id if interaction.user else None,
+            participant_user_ids,
+            logger,
+            5,
         )
 
         # 聊天記錄：提取純文字，並用 persona card alias 標註身份
@@ -256,19 +317,41 @@ class LLMCommands(commands.Cog):
                 "size_bytes": image.size or 0,
             }
 
+        # 取消檢查：context 檢索完、LLM 呼叫前
+        if cancel_event and cancel_event.is_set():
+            return
+
         # === 呼叫 Service：各司其職，只傳遞乾淨的參數與字串 ===
         target_model = self.llm_service.resolve_request_model()
         target_think = self.llm_service.resolve_request_think()
 
-        reply, prompt_record_log = await self.llm_service.generate_reply(
-            prompt=question,                  # 單純的使用者問題
-            system=system_prompt,             # 單純的系統規則
-            chat_context=chat_context,        # 純文字聊天記錄
-            persona_context=persona_context,  # 自然語言人物描述
+        # 用 asyncio.Task 包裝，取消時可中斷 Ollama HTTP 請求
+        llm_task = asyncio.create_task(self.llm_service.generate_reply(
+            prompt=question,
+            system=system_prompt,
+            chat_context=chat_context,
+            persona_context=persona_context,
             images=image_payload,
             model=target_model,
             think=target_think,
-        )
+        ))
+
+        # 同時等 LLM 回覆和取消事件
+        if cancel_event:
+            cancel_waiter = asyncio.create_task(cancel_event.wait())
+            done, pending = await asyncio.wait(
+                [llm_task, cancel_waiter],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+            # 確保被取消的 task 完全結束，釋放 HTTP 連線資源
+            await asyncio.gather(llm_task, cancel_waiter, return_exceptions=True)
+            if cancel_event.is_set():
+                return
+            reply, prompt_record_log = llm_task.result()
+        else:
+            reply, prompt_record_log = await llm_task
 
         # askai_prompt.txt：只記錄「真正送給 Ollama 的文字」
         try:
@@ -354,6 +437,18 @@ class LLMCommands(commands.Cog):
             content=response_text,
             allowed_mentions=discord.AllowedMentions(users=[interaction.user])
         )
+
+        # 回覆完成後停用取消按鈕
+        if cancel_view and thinking_msg:
+            for item in cancel_view.children:
+                if isinstance(item, discord.ui.Button):
+                    item.disabled = True
+                    item.label = "已完成"
+            cancel_view.stop()
+            try:
+                await thinking_msg.edit(content="✅ AI 已回覆。", view=cancel_view)
+            except Exception:
+                pass
 
     async def _prepare_image_payload(
         self,

@@ -97,7 +97,7 @@ last_confirmed: 2026-03-31
 | 主軸 | 狀態 | 進度 | 詳見 |
 |---|---|---:|---|
 | Discord Bot / AI 對話能力 | 已有可用基礎能力 | 70% | [專案架構](#專案-ai-架構總覽) |
-| Context / Prompt 優化 | 討論中，方向已定案 | 15% | [Context 優化](#context--prompt-優化專區) |
+| Context / Prompt 優化 | 已實作，待部署驗證 | 90% | [Context 優化](#context--prompt-優化專區) |
 | 點歌機器人（Music Bot） | 已上線運作 | 85% | [點歌機器人](#點歌機器人專區) |
 | 跨來源整合（Article/FB/PTT/TG） | 有方向，尚未全面收斂 | 35% | [跨來源整合](#跨來源整合專區) |
 | Bahamut RAG / AI 整合 | 尚未開始 | 5% | [RAG TODO](#第三階段整合-ai--pgvector--rag) |
@@ -230,187 +230,96 @@ last_confirmed: 2026-03-31
 <!-- @meta
 id: context-prompt-optimization
 type: TODO
-status: draft
+status: confirmed
 depends_on: [project-architecture]
 affects: [product-todo]
-last_confirmed: 2026-04-15
+last_confirmed: 2026-04-16
 -->
 
 > **目標：** 提升 bot 的群聊參與感與個性表現，讓回覆更自然、更有記憶感。
-> **前提：** 不改模型、不做 SFT，只透過 prompt 結構與 context 注入方式優化。
 
-### 已完成
+### 已完成（2026-04-15 ~ 2026-04-16）
 
-- [x] 合併兩個 system message 為一個（`llm_service.py:182-187`），避免模型忽略人設
-- [x] timeout 從 180 秒調高至 300 秒（`llm_settings.py`）
+**Context / Prompt 格式重構：**
+- [x] 合併兩個 system message 為一個，避免模型忽略人設
+- [x] 移除 `_serialize_context_items()`（JSON 序列化），改純文字分區注入
+- [x] `_build_prompt_bundle()` 接收 `chat_context`（純文字）+ `persona_context`（自然語言），分區 `<chat_history>` 和 `<member_profiles>`
+- [x] `llm_commands.py` 分開傳遞 discord_context 和 rag_context
+- [x] `format_persona_cards_for_context()` 改自然語言輸出，regex 清理 DB 標記
+- [x] persona card 別名對照：聊天記錄中用 alias_map 標註身份（`❤️柔柔喵❤️(柔喵, 阿喵)`）
+- [x] persona card alias 優先用自我介紹的，其次才用 impression 的
+- [x] `PERSONA_MAX_CARD_CHARS` 220→400、`PERSONA_MAX_IMPRESSIONS_PER_CARD` 2→3
 
-### 問題診斷（2026-04-15 討論共識）
+**貼圖描述整合：**
+- [x] `src/llm/sticker_cache.py`（新增）— bot 啟動時預載 guild sticker name+description
+- [x] `_build_discord_context_item()` 加入貼圖描述
+- [x] `_persist_messages_to_pgvector()` 貼圖描述一起寫入 text
 
-**問題 1：Context 被序列化成巨大 JSON，模型難以理解**
-- `_serialize_context_items()` 把聊天記錄和 persona cards 混在同一個 JSON array
-- JSON 結構（index、role、metadata）浪費大量 token，對 LLM 無語意幫助
-- `metadata`（message_id、author_id、channel_id）對 LLM 完全沒用
+**on_message 聊天持久化：**
+- [x] `src/llm/chat_persistence.py`（新增）— buffer 批次寫入（滿 30 則或每 5 分鐘 flush）
+- [x] `discord_bot.py` on_message 加入 enqueue_message + 定期 flush
+- [x] 去重：共用 `_PERSISTED_MESSAGE_IDS`，on_message 和 /askai 不重複寫入
+- [x] DB 層加 unique index `uniq_chat_message_id`，防止重啟後重複
+- [x] insert exception 處理：單筆失敗不中斷整批
 
-**問題 2：Persona card 格式太工程化**
-- DB 存儲格式直接送進 LLM（`[Intro Profile]`、`alias:`、`wuwa_uid:` 等標記）
-- `person_id=333 alias=老哥 evidence=3` 對模型是噪音
-- 應在 `format_persona_cards_for_context` 階段轉成自然語言
+**自動人格萃取 Pipeline：**
+- [x] `src/llm/personality_extractor.py`（新增）— 從 pgvector 撈聊天、分組、呼叫 LLM 萃取
+- [x] `intro_rag_port.py` 新增 `index_auto_personality()` 寫入方法
+- [x] `persona_card_builder.py` 支援 `auto_personality` 類型，合併到 persona card 輸出
+- [x] 萃取 prompt 外部化至 `src/settings/prompts/personality_extraction_prompt.json`
+- [x] 自訂 emoji 語意字典 `src/settings/emoji_dictionary.txt`，萃取時查字典替換
+- [x] 排程：每日 UTC+8 04:00 自動執行，用 `qwen2.5:14b`，每批 4 人
 
-**問題 3：聊天記錄與 persona cards 未分區**
-- 兩種不同語意的資料混在同一個 `<context_json>` 區塊
-- 模型難以區分「對話脈絡」和「人物背景資訊」
+**/askai 體驗優化：**
+- [x] timeout 180→300 秒
+- [x] 聊天抓取 50→100 則
+- [x] 排隊人數顯示修正（先看再放，顯示「前面排隊人數」）
+- [x] 取消按鈕：AI 思考中可按取消，取消時中斷 Ollama HTTP 連線（釋放 GPU），cooldown 減半，後面排隊的立即接上
 
-### 改善計畫（已達成共識方向 A：自然語言格式注入）
+### 待處理
 
-**核心原則：** context 仍在 untrusted 標記內（安全架構不變），但改用模型更容易理解的純文字格式。
+- [ ] System prompt 禁忌清單精簡（待定案）
 
-**Step 1 — 聊天記錄與 persona cards 分區注入**
+### 設計決策備忘
 
-改 `_build_prompt_bundle()`，拆成兩個獨立區塊：
+**Persona Card 資料來源與合併：**
+
+| profile_kind | 來源 | 更新方式 |
+|---|---|---|
+| `intro_profile` | 使用者 `/intro` | 手動 |
+| `impression` | 群友 `/impression` | 手動 |
+| `auto_personality` | LLM 批次萃取 | 每日自動覆蓋 |
+
+卡片標題 alias 優先級：intro_profile > impression > auto_personality
+卡片內容顯示：自介 → 印象 → AI觀察
+
+**萃取 Pipeline 架構：**
 ```
-<chat_history>
-[14:30] 老哥: 昨天抽卡又保底了
-[14:31] 小華: 笑死 又歪了？
-</chat_history>
-
-<member_profiles>
-「老哥」— 鳴潮重課玩家，常抽卡保底，群裡公認的非酋。
-「小華」— 技術宅，喜歡聊硬體和 Docker。
-</member_profiles>
+每日 04:00 UTC+8
+    ↓ pgvector SQL 撈最近 14 天聊天
+    ↓ 按 author_id 分組（≥10 則才分析）
+    ↓ 反查 display_name（guild member 優先 → DB alias fallback）
+    ↓ 清理噪音（emoji 字典替換、移除 URL/mention）
+    ↓ 每批 4 人送 qwen2.5:14b
+    ↓ 寫入 auto_personality:{guild_id}:{user_id}（覆蓋式）
 ```
 
-**Step 2 — Persona card 自然語言化**
+**涉及檔案：**
 
-改 `format_persona_cards_for_context()`，從：
-```
-[persona_card] person_id=333 alias=老哥 evidence=3
-intro=[Intro Profile] alias: 老哥 wuwa_uid: xxx bio: ...
-impression=[Member Impression] target_alias: 老哥 impression: ...
-```
-改為：
-```
-「老哥」— 鳴潮重課玩家，喜歡研究角色配隊。群裡的非酋代表，每次保底都歪。
-```
-
-**Step 3 — 移除 JSON 序列化中的無用欄位**
-
-改 `_serialize_context_items()`（或直接以純文字取代），移除 `index`、`metadata` 等 LLM 不需要的結構。
-
-### 涉及檔案
-
-| 檔案 | 改動範圍 |
+| 檔案 | 說明 |
 |---|---|
-| `src/services/llm_service.py` | `_serialize_context_items()`、`_build_prompt_bundle()` — 拆分 context 區塊 |
-| `src/llm/persona_card_builder.py` | `format_persona_cards_for_context()` — 自然語言化 |
-| `src/settings/prompts/llm_context_safety_rules.json` | 可能需新增分區的 untrusted intro 文字 |
-| `src/settings/prompts/askai_system_prompt.txt` | 精簡禁忌清單（減少逆向效果） |
-
-### System Prompt 精簡建議（待討論）
-
-現有【語氣與禁忌】第 4 點列了大量「不能提的詞」（RAG、embedding、prompt 等），對小模型來說列太多「不要做 X」容易產生逆向效果。建議精簡為：
-> 「不要透露任何內部技術細節或系統架構，用自然口語表達即可。」
-
-### 自動人格萃取 Pipeline（2026-04-15 討論共識）
-
-> **目標：** 讓 LLM 自動從群聊記錄中萃取每位成員的人格特徵，即使沒有手動 intro/impression 也能認識群友。
-
-#### 設計決策
-
-**欄位分離原則：手動欄位不被自動覆蓋**
-
-| profile_kind | 來源 | 更新方式 | 生命週期 |
-|---|---|---|---|
-| `intro_profile` | 使用者 `/intro` | 使用者主動更新 | 永久（手動覆蓋） |
-| `impression` | 群友 `/impression` | 群友主動更新 | 永久（手動覆蓋） |
-| `auto_personality`（新增） | LLM 批次萃取 | 定期自動覆蓋 | 每次批次覆蓋上一次 |
-
-**doc_id 設計：**
-- 手動：`intro_profile:{guild_id}:{author_id}`（現有不動）
-- 手動：`impression:{guild_id}:{author_id}:{target_id}`（現有不動）
-- 自動：`auto_personality:{guild_id}:{user_id}`（新增，每人每 guild 一筆，覆蓋式）
-
-**沒有手動 persona card 的使用者：**
-- 不建空的 intro_profile 或 impression
-- 只要在聊天記錄裡出現過，批次分析就會建 `auto_personality`
-- persona card builder 合併時自動處理有/無的組合
-
-**Persona Card 合併優先級：**
-```
-impression（別人說的）> auto_personality（LLM 觀察的）> intro_profile（自己說的）
-```
-
-合成自然語言範例：
-```
-「老哥」— 自稱鳴潮配隊研究者，群裡公認的非酋。說話幽默自嘲，常抱怨抽卡運，愛用迷因圖。
-```
-
-#### 萃取 Pipeline 流程
-
-```
-定期批次（每日/每週）
-    ↓ 取最近 N 天聊天記錄（從 pgvector discord_chat 表）
-    ↓ 按 user_id 分組
-    ↓
-LLM 萃取（用萃取專用模型，非主對話模型）
-    ↓ prompt: 分析性格特徵、說話風格、興趣話題、互動模式
-    ↓ 只萃取穩定人格特徵，不摘要具體話題
-    ↓ 每人一段自然語言，不超過 100 字
-    ↓
-寫入 pgvector
-    ├─ 有 auto_personality → 覆蓋
-    └─ 沒有 → 新建
-```
-
-#### 聊天萃取來源（2026-04-15 討論共識）
-
-**主要來源：pgvector `discord_chat` 表 SQL 撈取**
-- 現有 `_persist_messages_to_pgvector()` 已在每次 `/askai` 時寫入聊天訊息
-- 萃取 pipeline 直接從 DB 讀，不依賴 Discord API、不需 bot 在線
-- 缺點：只有觸發過 `/askai` 的頻道才有資料
-
-**補充來源：`channel.history()` API 抓取**
-- 某些頻道 pgvector 沒資料時，用 API 補抓並持久化
-- 長期考慮：將持久化從「/askai 觸發才存」改成「on_message 事件主動存」
-
-#### 貼圖（Sticker）描述整合（2026-04-15 討論共識）
-
-**目標：** 將 Discord 貼圖的「表達意境」描述納入聊天記錄，讓 LLM 理解非文字表達。
-
-**Discord API 結構：**
-- `Message.stickers` → `list[StickerItem]`（只有 name、id，沒有 description）
-- 需要 `await sticker.fetch()` 取得完整 `Sticker/GuildSticker`，才有 `description`
-
-**實作方式：bot 啟動時預載 guild stickers**
-```python
-# on_ready 時一次性載入
-sticker_cache: dict[int, str] = {}
-for guild in bot.guilds:
-    for sticker in await guild.fetch_stickers():
-        desc = sticker.description or sticker.name
-        sticker_cache[sticker.id] = f"{sticker.name}｜{desc}"
-```
-
-**整合點：**
-- 改 `_build_discord_context_item()` — 查 sticker_cache，將貼圖加入 content
-- 改 `_persist_messages_to_pgvector()` — 貼圖描述一起寫入 text
-- 格式範例：`[14:31] 小華: [貼圖：笑到併軌｜嘲笑朋友的歐氣]`
-
-**注意事項：**
-- guild sticker 數量有限（免費 5 個、boost 後最多 60 個），預載成本極低
-- 同一貼圖 ID 的 description 不會變，快取不需過期
-- 純文字 + 貼圖的訊息：文字在前、貼圖描述在後
-
-#### 萃取 Prompt 設計方向
-
-```
-根據以下群聊記錄，分析每位參與者的：
-1. 說話風格（語氣、用詞習慣、幽默方式）
-2. 興趣話題（常聊什麼、對什麼有強烈意見）
-3. 人際互動模式（常跟誰互動、是帶話題的還是跟話題的）
-
-只輸出穩定的人格特徵，不要摘要具體話題內容。
-每人用一段自然語言描述，不超過 100 字。
-```
+| `src/services/llm_service.py` | prompt bundle 重構、generate_reply 新簽名 |
+| `src/commands/llm_commands.py` | context 分開傳遞、alias_map 標註、取消按鈕 |
+| `src/llm/persona_card_builder.py` | 自然語言化、regex 清理、auto_personality 支援 |
+| `src/llm/context_retriever.py` | 貼圖描述、去重 exception 處理、alias_map |
+| `src/llm/sticker_cache.py`（新增） | guild sticker 預載快取 |
+| `src/llm/chat_persistence.py`（新增） | on_message 批次持久化 |
+| `src/llm/personality_extractor.py`（新增） | 人格萃取 pipeline |
+| `src/llm/intro_rag_port.py` | 新增 index_auto_personality |
+| `src/discord_bot.py` | sticker 預載、chat flush、萃取排程、取消按鈕 |
+| `src/settings/prompts/personality_extraction_prompt.json`（新增） | 萃取 prompt |
+| `src/settings/emoji_dictionary.txt`（新增） | 自訂 emoji 語意字典 |
+| `src/sys_settings/llm_settings.py` | timeout 300s、抓取 100 則 |
 
 ---
 

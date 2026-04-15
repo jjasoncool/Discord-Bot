@@ -75,7 +75,7 @@ def build_persona_cards(
         md = doc.get("metadata") or {}
         profile_kind = str(md.get("profile_kind", ""))
         person_id = ""
-        if profile_kind == "intro_profile":
+        if profile_kind in ("intro_profile", "auto_personality"):
             person_id = str(md.get("author_id", "")).strip()
         elif profile_kind == "impression":
             person_id = str(md.get("target_user_id", "")).strip()
@@ -94,6 +94,7 @@ def build_persona_cards(
                 "other_aliases": set(),
                 "intro_texts": [],
                 "impression_texts": [],
+                "auto_personality_texts": [],
                 "sources": set(),
                 "evidence_count": 0,
             },
@@ -109,6 +110,8 @@ def build_persona_cards(
             card["intro_texts"].append(text)
         elif profile_kind == "impression" and text:
             card["impression_texts"].append(text)
+        elif profile_kind == "auto_personality" and text:
+            card["auto_personality_texts"].append(text)
 
     cards: list[dict[str, Any]] = []
     requester = str(requester_user_id) if requester_user_id is not None else ""
@@ -116,6 +119,7 @@ def build_persona_cards(
     for person_id, card in grouped.items():
         intro_summary = "；".join(card["intro_texts"][:1])
         impression_summary = "；".join(card["impression_texts"][:PERSONA_MAX_IMPRESSIONS_PER_CARD])
+        auto_personality_summary = "；".join(card["auto_personality_texts"][:1])
         # 優先用自我介紹的 alias，其次才用 impression 的
         primary_alias = card["intro_alias"]
         if not primary_alias:
@@ -144,6 +148,7 @@ def build_persona_cards(
                 "alias": primary_alias,
                 "intro_summary": intro_summary[:PERSONA_MAX_CARD_CHARS],
                 "impression_summary": impression_summary[:PERSONA_MAX_CARD_CHARS],
+                "auto_personality_summary": auto_personality_summary[:PERSONA_MAX_CARD_CHARS],
                 "evidence_count": card["evidence_count"],
                 "score": score,
             }
@@ -222,6 +227,25 @@ def _clean_impression_text(raw: str) -> str:
     return " ".join(result.split()).strip()
 
 
+def _clean_auto_personality_text(raw: str) -> str:
+    """從 auto_personality 的 DB 原始 text 中提取人格描述。
+
+    DB 格式：
+        [Auto Personality]
+        alias: 柔喵
+        personality: 說話幽默自嘲...
+    """
+    text = re.sub(r"\[Auto Personality\]\s*", "", raw)
+    text = re.sub(r"alias:.*?(?=\n|personality:|$)", "", text, flags=re.DOTALL)
+    result = ""
+    p_match = re.search(r"personality:\s*(.+?)$", text, re.DOTALL)
+    if p_match:
+        result = p_match.group(1).strip()
+    if not result:
+        result = " ".join(text.split()).strip()
+    return result
+
+
 def format_persona_cards_for_context(cards: list[dict[str, Any]]) -> list[dict[str, str]]:
     """將 persona cards 格式化為自然語言描述，供 LLM 理解群友人物背景。
 
@@ -247,11 +271,17 @@ def format_persona_cards_for_context(cards: list[dict[str, Any]]) -> list[dict[s
         # 清理 impression（群友印象）
         impression = _clean_impression_text(card.get("impression_summary") or "")
 
+        # 清理 auto_personality（AI 觀察）
+        auto_personality = _clean_auto_personality_text(card.get("auto_personality_summary") or "")
+
+        # 合併：impression > auto_personality > intro
         parts: list[str] = []
         if intro:
             parts.append(f"自介：{intro}")
         if impression:
             parts.append(f"印象：{impression}")
+        if auto_personality:
+            parts.append(f"AI觀察：{auto_personality}")
 
         if parts:
             description = "。".join(parts)

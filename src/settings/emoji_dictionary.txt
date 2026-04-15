@@ -1,0 +1,107 @@
+# Discord 自訂 Emoji 語意字典
+# 格式：emoji_name = 語意描述
+# 空值或以 # 開頭的行會被忽略（該 emoji 在萃取時會被移除）
+#
+# 填寫指南：
+# - 用簡短的中文描述這個 emoji 表達的情緒或意圖
+# - 不需要太詳細，5~15 字即可
+# - 不確定的就留空，萃取時會自動忽略
+
+# === 蛙蛙系列 ===
+frog_angry = 生氣
+frogangry = 生氣
+frogAngry = 生氣
+frog_hehe = 嘿嘿偷笑
+frog_look = 偷看
+frog_rignt = 沒錯、認同
+frog_Shh = 噓、安靜
+Frog_WorryThinkMath = 思考
+wfrogAngry = 生氣
+wfrogbaby = 寶寶
+wfrogbrain = 動腦思考
+wfrog_cute = 可愛
+wfrog_dab_sad = 難過
+wfrog_heart = 愛心、喜歡
+wfrog_heart_broken_angry = 心碎又生氣
+wfrog_hehe = 嘿嘿偷笑
+wfroghide = 躲起來
+wfrog_knife = 拿刀威脅、不爽
+wfrog_notlikethis = 不是這樣啊
+wfrog_ok = OK、沒問題
+wfrog_popcorn = 吃瓜看戲
+wfrog_right = 沒錯、認同
+wfrogropesad = 極度難過絕望
+wfrog_sausage = 香腸、暗示
+wfrog_shh = 噓、安靜
+wfrog_sleep = 想睡、無聊
+wfrog_tea_strange = 喝茶看戲、覺得怪
+wfrog_thunbsup = 讚、很棒
+wfrogthunder = 被雷到、震驚
+wforg_cry = 哭哭難過
+
+# === 貓/狗/動物 ===
+catcry = 貓咪哭哭
+catcry2 = 貓咪哭哭
+dogehehe = 狗狗壞笑
+dog_speechless = 狗狗無言
+saddog = 難過的狗
+ShibaInu = 柴犬
+
+# === 遊戲角色（鳴潮等） ===
+changli_ = 長離表情
+changlisurp = 長離驚訝
+danjinlick = 丹瑾舔舔
+encorecrazy = 安可瘋狂
+jinshiCC = 今汐CC
+nanamiOMG = 七海驚訝
+yangyang_ = 泱泱表情
+yangyangthink = 泱泱思考
+yc_scare = 害怕
+phoebe_nod = 菲比點頭
+
+# === 遊戲角色（戰雙等） ===
+KagaSumireA = 加賀堇驚訝
+KagaSumirekusa = 加賀堇草
+KagaSumiremmmmm = 加賀堇嗯嗯
+KagaSumirewww = 加賀堇笑
+Katja_hi = 卡提亞打招呼
+PGR_LivRub = 麗芙摸摸
+PGR_LivStare = 麗芙盯著看
+PGR_LuciaIceHurt = 露西亞受傷
+
+# === 人物/梗圖 ===
+buddha = 佛祖保佑
+chikayanMelt = 融化、害羞
+Marik = 馬利克壞笑
+pepeclown = 小丑、自嘲
+pepecry = 難過哭哭
+pepesusthink = 懷疑思考
+Poinko_shock = 驚嚇
+Poinko_shock2 = 驚嚇
+pooh_Read = 維尼看書、審視
+umaru_ = 小埋耍廢
+worryPray = 擔心祈禱
+
+# === Drake meme ===
+drake_no = 不要、拒絕
+drake_yes = 要、認同
+
+# === 情緒/狀態 ===
+booboo = 受傷痛痛
+clean = 乾淨、清白
+facepalmtears = 無語到哭
+feed = 餵食
+gay = 搞基
+good_job = 做得好、讚
+lie = 說謊、騙人
+Lick_r = 舔、色色
+me = 是我
+none = 無
+Nupalopalo =
+pure = 純潔
+QQ_question = 疑惑、困惑
+rich = 有錢、壕
+sointeresting = 真有趣（反諷）
+UN_Love = 愛心
+UN_Noted = 已noted、收到
+want = 想要、渴望

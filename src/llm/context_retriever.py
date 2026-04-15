@@ -476,8 +476,8 @@ async def retrieve_discord_context(
 
         debug["question_tokens"] = tokens_for_debug(question)
 
-        # 將最近聊天訊息寫入 pgvector（最佳努力，不影響主流程）
-        _persist_messages_to_pgvector(messages=ordered_messages, logger=logger)
+        # 聊天持久化已改由 on_message buffer 機制處理（chat_persistence.py）
+        # 不再在 /askai 流程中同步寫入，避免阻塞 event loop
 
         bm25_rank = _build_bm25_rank(question=question, messages=ordered_messages)
         vector_rank = _build_vector_rank(
@@ -597,7 +597,46 @@ async def retrieve_discord_context(
     return context, meta
 
 
+def retrieve_rag_context_sync(
+    question: str,
+    guild_id: int | None,
+    requester_user_id: int | None,
+    participant_user_ids: list[int] | None,
+    logger: logging.Logger,
+    top_k: int = 5,
+) -> tuple[list[dict[str, str]], dict[str, int | bool | str]]:
+    """同步版本，供 run_in_executor 呼叫。"""
+    return _retrieve_rag_context_impl(
+        question=question,
+        guild_id=guild_id,
+        requester_user_id=requester_user_id,
+        participant_user_ids=participant_user_ids,
+        logger=logger,
+        top_k=top_k,
+    )
+
+
 async def retrieve_rag_context(
+    *,
+    question: str,
+    guild_id: int | None,
+    requester_user_id: int | None,
+    participant_user_ids: list[int] | None,
+    logger: logging.Logger,
+    top_k: int = 5,
+) -> tuple[list[dict[str, str]], dict[str, int | bool | str]]:
+    """async 版本（向後相容），內部直接呼叫同步實作。"""
+    return _retrieve_rag_context_impl(
+        question=question,
+        guild_id=guild_id,
+        requester_user_id=requester_user_id,
+        participant_user_ids=participant_user_ids,
+        logger=logger,
+        top_k=top_k,
+    )
+
+
+def _retrieve_rag_context_impl(
     *,
     question: str,
     guild_id: int | None,
