@@ -26,7 +26,7 @@ class LLMServiceSettings(BaseSettings):
         validation_alias="OLLAMA_MODEL",
     )
     ollama_timeout: int = Field(
-        default=180,
+        default=300,
         validation_alias="OLLAMA_TIMEOUT",
     )
     pgvector_host: str = Field(
@@ -116,7 +116,7 @@ class OllamaRuntimeConfig(BaseModel):
 class AskAICommandSettings(BaseSettings):
     """/askai 指令相關設定（集中常數來源，不使用 env 覆寫）。"""
 
-    max_context_messages: int = 50
+    max_context_messages: int = 100
     max_context_to_send: int = 20
     min_recent_context: int = 15
     max_relevant_context: int = 14

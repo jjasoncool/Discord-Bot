@@ -112,6 +112,24 @@ async def on_ready():
     logger.info(f"邀請連結: {invite_url}")
     logger.info("如果斜線命令未顯示，請使用上面的連結重新邀請機器人，確保包含應用程序命令權限")
 
+    # 預載貼圖描述快取
+    from llm.sticker_cache import load_guild_stickers
+    await load_guild_stickers(bot)
+
+    # 啟動聊天訊息定期持久化 flush
+    from llm.chat_persistence import flush_buffer, FLUSH_INTERVAL_SECONDS
+    if not getattr(bot, '_chat_persist_task_started', False):
+        async def _periodic_flush():
+            while True:
+                await asyncio.sleep(FLUSH_INTERVAL_SECONDS)
+                try:
+                    await flush_buffer()
+                except Exception as exc:
+                    logger.warning("定期 flush 聊天 buffer 失敗: %s", exc)
+        asyncio.create_task(_periodic_flush())
+        bot._chat_persist_task_started = True
+        logger.info("聊天訊息定期持久化已啟動（每 %d 秒）", FLUSH_INTERVAL_SECONDS)
+
     # 自動啟動官方文章更新
     await auto_start_article_monitor(bot)
     await auto_start_telegram_relay(bot)
@@ -195,6 +213,13 @@ async def on_message(message):
     if message.stickers:
         for sticker in message.stickers:
             logger.debug(f'包含貼圖: {sticker.name} (ID: {sticker.id}, 頻道: {message.channel.name} [ID: {message.channel.id}])')
+
+    # 將訊息加入持久化 buffer（非 bot 訊息、有內容或貼圖）
+    if not message.author.bot and (message.content or message.stickers):
+        from llm.chat_persistence import enqueue_message, flush_buffer, buffer_size, FLUSH_THRESHOLD
+        enqueue_message(message)
+        if buffer_size() >= FLUSH_THRESHOLD:
+            asyncio.create_task(flush_buffer())
 
     # 繼續處理命令
     await bot.process_commands(message)

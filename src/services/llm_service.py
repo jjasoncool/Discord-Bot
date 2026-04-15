@@ -5,7 +5,6 @@ Ollama LLM 服務模組
 from __future__ import annotations
 
 import logging
-import json
 from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Optional
@@ -123,48 +122,44 @@ class OllamaService:
 
         return True
 
-    def _serialize_context_items(self, items: List[dict[str, str]]) -> str:
-        """將 context 安全序列化為 JSON 字串，避免標記邊界被輸入破壞。"""
-        safe_items: list[dict[str, object]] = []
-        for idx, item in enumerate(items):
-            if not isinstance(item, dict):
-                continue
-
-            role = str(item.get("role", "user"))
-            content = str(item.get("content", "")).replace("\x00", "")
-            metadata = {
-                str(k): str(v)
-                for k, v in item.items()
-                if k not in {"role", "content"} and v is not None
-            }
-            safe_items.append(
-                {
-                    "index": idx,
-                    "role": role,
-                    "content": content,
-                    "metadata": metadata,
-                }
-            )
-        return json.dumps(safe_items, ensure_ascii=False)
+    @staticmethod
+    def _sanitize_text(text: str) -> str:
+        """移除可能破壞標記邊界的字元。"""
+        return text.replace("\x00", "")
 
     def _build_prompt_bundle(
         self,
         *,
         system: Optional[str],
         user_query_text: str,
-        context_items: Optional[List[dict[str, str]]] = None,
+        chat_context: Optional[List[str]] = None,
+        persona_context: Optional[List[str]] = None,
         images: Optional[List[str]] = None,
     ) -> PromptBundle:
-        """建立同源 prompt bundle（給 Ollama 與給 log 共用）。"""
+        """建立同源 prompt bundle（給 Ollama 與給 log 共用）。
+
+        chat_context: 純文字聊天記錄（每則一個字串，例如 "[14:30] 老哥: 昨天抽卡又保底了"）
+        persona_context: 自然語言人物描述（每人一個字串，例如 "「老哥」— 群裡的非酋代表"）
+        """
         composed_user_prompt = ""
-        if context_items:
-            serialized_context = self._serialize_context_items(context_items)
+
+        has_context = bool(chat_context or persona_context)
+        if has_context:
             composed_user_prompt += (
-                f"{self.context_safety_rules.untrusted_context_intro}\n"
-                f"{self.settings.context_open_tag}\n"
-                f"{serialized_context}\n"
-                f"{self.settings.context_close_tag}\n\n"
+                f"{self.context_safety_rules.untrusted_context_intro}\n\n"
             )
+
+        if chat_context:
+            composed_user_prompt += "<chat_history>\n"
+            for line in chat_context:
+                composed_user_prompt += f"{self._sanitize_text(line)}\n"
+            composed_user_prompt += "</chat_history>\n\n"
+
+        if persona_context:
+            composed_user_prompt += "<member_profiles>\n"
+            for line in persona_context:
+                composed_user_prompt += f"{self._sanitize_text(line)}\n"
+            composed_user_prompt += "</member_profiles>\n\n"
 
         if images:
             composed_user_prompt += (
@@ -180,14 +175,11 @@ class OllamaService:
         )
 
         messages: list[dict[str, object]] = []
+        system_parts: list[str] = []
         if system:
-            messages.append({"role": "system", "content": system})
-        messages.append(
-            {
-                "role": "system",
-                "content": self.context_safety_rules.system_safety_prompt,
-            }
-        )
+            system_parts.append(system)
+        system_parts.append(self.context_safety_rules.system_safety_prompt)
+        messages.append({"role": "system", "content": "\n\n".join(system_parts)})
 
         user_message: dict[str, object] = {"role": "user", "content": composed_user_prompt}
         if images:
@@ -196,8 +188,9 @@ class OllamaService:
 
         parts: list[str] = []
         if system:
-            parts.extend(["<system>", system])
-        parts.extend(["<system_safety>", self.context_safety_rules.system_safety_prompt])
+            parts.extend(["<system>", system, "", self.context_safety_rules.system_safety_prompt])
+        else:
+            parts.extend(["<system>", self.context_safety_rules.system_safety_prompt])
         parts.extend(["<user_message>", composed_user_prompt])
         prompt_record_log = "\n".join(parts)
         return PromptBundle(messages=messages, prompt_record_log=prompt_record_log)
@@ -206,7 +199,8 @@ class OllamaService:
         self,
         prompt: str,
         system: Optional[str] = None,
-        context_items: Optional[List[dict[str, str]]] = None,
+        chat_context: Optional[List[str]] = None,
+        persona_context: Optional[List[str]] = None,
         images: Optional[List[str]] = None,
         model: Optional[str] = None,
         think: Optional[bool] = None,
@@ -233,7 +227,8 @@ class OllamaService:
         bundle = self._build_prompt_bundle(
             system=system,
             user_query_text=user_query_text,
-            context_items=context_items,
+            chat_context=chat_context,
+            persona_context=persona_context,
             images=images,
         )
 

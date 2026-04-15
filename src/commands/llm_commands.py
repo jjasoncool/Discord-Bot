@@ -213,8 +213,33 @@ class LLMCommands(commands.Cog):
             top_k=5,
         )
 
-        # 統一把多來源 context 合併後交給 Service 層做安全序列化
-        context_items = [*discord_context, *rag_context] if (discord_context or rag_context) else None
+        # 聊天記錄：提取純文字，並用 persona card alias 標註身份
+        alias_map: dict[str, str] = rag_meta.get("alias_map", {})
+        chat_context: list[str] | None = None
+        if discord_context:
+            lines: list[str] = []
+            for item in discord_context:
+                content = item.get("content", "")
+                if not content:
+                    continue
+                # 如果這個人有 persona card，在 display_name 後標註 alias
+                author_id = item.get("author_id", "")
+                card_alias = alias_map.get(author_id, "")
+                if card_alias and card_alias not in content:
+                    # content 格式: "[14:30] ❤️柔柔喵❤️: 內容"
+                    # 改成:        "[14:30] ❤️柔柔喵❤️(喵董): 內容"
+                    content = content.replace(": ", f"({card_alias}): ", 1)
+                lines.append(content)
+            chat_context = lines or None
+
+        # 人物描述：由 persona card builder 產出的自然語言
+        persona_context: list[str] | None = None
+        if rag_context:
+            persona_context = [
+                item["content"]
+                for item in rag_context
+                if item.get("content") and item.get("metadata") != "persona_card_header"
+            ] or None
 
         image_payload = None
         if image:
@@ -236,9 +261,10 @@ class LLMCommands(commands.Cog):
         target_think = self.llm_service.resolve_request_think()
 
         reply, prompt_record_log = await self.llm_service.generate_reply(
-            prompt=question,              # 單純的使用者問題
-            system=system_prompt,         # 單純的系統規則
-            context_items=context_items,  # 結構化上下文（由 Service 層統一安全封裝）
+            prompt=question,                  # 單純的使用者問題
+            system=system_prompt,             # 單純的系統規則
+            chat_context=chat_context,        # 純文字聊天記錄
+            persona_context=persona_context,  # 自然語言人物描述
             images=image_payload,
             model=target_model,
             think=target_think,

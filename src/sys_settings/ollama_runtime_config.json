@@ -1,5 +1,5 @@
 {
-  "model": "gemma4:31B",
+  "model": "gemma4:31b",
   "embed_model": "bge-m3:latest",
   "moderation_model": "qwen2.5:7b",
   "think": false

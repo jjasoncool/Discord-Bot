@@ -10,8 +10,8 @@ from llm.tokenization import tokens_for_debug
 # Persona RAG 預算與關聯控制（避免 token 爆量）
 PERSONA_MAX_PARTICIPANTS = 5
 PERSONA_MAX_CARDS = 3
-PERSONA_MAX_CARD_CHARS = 220
-PERSONA_MAX_IMPRESSIONS_PER_CARD = 2
+PERSONA_MAX_CARD_CHARS = 400
+PERSONA_MAX_IMPRESSIONS_PER_CARD = 3
 
 # Alias 正規化映射（可持續擴充）
 ALIAS_SYNONYM_MAP: dict[str, tuple[str, ...]] = {
@@ -90,7 +90,8 @@ def build_persona_cards(
             person_id,
             {
                 "person_id": person_id,
-                "aliases": set(),
+                "intro_alias": "",
+                "other_aliases": set(),
                 "intro_texts": [],
                 "impression_texts": [],
                 "sources": set(),
@@ -98,7 +99,10 @@ def build_persona_cards(
             },
         )
         if alias:
-            card["aliases"].add(alias)
+            if profile_kind == "intro_profile" and not card["intro_alias"]:
+                card["intro_alias"] = alias
+            else:
+                card["other_aliases"].add(alias)
         card["sources"].add(source)
         card["evidence_count"] += 1
         if profile_kind == "intro_profile" and text:
@@ -112,8 +116,11 @@ def build_persona_cards(
     for person_id, card in grouped.items():
         intro_summary = "；".join(card["intro_texts"][:1])
         impression_summary = "；".join(card["impression_texts"][:PERSONA_MAX_IMPRESSIONS_PER_CARD])
-        alias_list = sorted(card["aliases"])
-        primary_alias = alias_list[0] if alias_list else ""
+        # 優先用自我介紹的 alias，其次才用 impression 的
+        primary_alias = card["intro_alias"]
+        if not primary_alias:
+            other = sorted(card["other_aliases"])
+            primary_alias = other[0] if other else ""
 
         score = int(card["evidence_count"])
         source_bonus = {
@@ -146,29 +153,112 @@ def build_persona_cards(
     return cards[:max_cards]
 
 
+def _clean_intro_text(raw: str) -> str:
+    """從 intro_profile 的 DB 原始 text 中提取有用資訊。
+
+    DB 格式：
+        [Intro Profile]
+        alias: 柔喵, 阿喵
+        wuwa_uid: 800680956
+        bio: 普通人，曾經當過巴哈鳴潮板主...
+        message_to_all: 不要再80我了...
+    """
+    # 移除標題行
+    text = re.sub(r"\[Intro Profile\]\s*", "", raw)
+    # 提取 alias（別名，供 LLM 對照聊天記錄中的 display_name）
+    alias_str = ""
+    alias_match = re.search(r"alias:\s*(.+?)(?=\n|wuwa_uid:|bio:|message_to_all:|$)", text, re.DOTALL)
+    if alias_match:
+        alias_val = alias_match.group(1).strip()
+        if alias_val and alias_val != "-":
+            alias_str = f"別名：{alias_val}"
+    # 提取各欄位
+    uid = ""
+    uid_match = re.search(r"wuwa_uid:\s*(.+?)(?=\n|bio:|message_to_all:|$)", text, re.DOTALL)
+    if uid_match:
+        uid_val = uid_match.group(1).strip()
+        if uid_val and uid_val != "-":
+            uid = f"鳴潮UID:{uid_val}"
+    bio = ""
+    bio_match = re.search(r"bio:\s*(.+?)(?=message_to_all:|$)", text, re.DOTALL)
+    if bio_match:
+        bio = bio_match.group(1).strip()
+    msg = ""
+    msg_match = re.search(r"message_to_all:\s*(.+?)$", text, re.DOTALL)
+    if msg_match:
+        msg = msg_match.group(1).strip()
+    # 合併
+    parts = [p for p in [alias_str, uid, bio, msg] if p and p != "-"]
+    result = "；".join(parts) if parts else ""
+    return " ".join(result.split()).strip()
+
+
+def _clean_impression_text(raw: str) -> str:
+    """從 impression 的 DB 原始 text 中提取有用資訊。
+
+    DB 格式：
+        [Member Impression]
+        target_user_id: 468158509297434635
+        target_alias: 阿喵
+        target_habit: 最純淨的色慾化身
+        impression: 本群最富不容質疑...
+    """
+    # 移除標題行與 metadata 欄位
+    text = re.sub(r"\[Member Impression\]\s*", "", raw)
+    text = re.sub(r"target_user_id:\s*\d+\s*", "", text)
+    text = re.sub(r"target_alias:.*?(?=\n|target_habit:|impression:|$)", "", text, flags=re.DOTALL)
+    # 提取 habit 和 impression 的值
+    habit = ""
+    imp = ""
+    habit_match = re.search(r"target_habit:\s*(.+?)(?=impression:|$)", text, re.DOTALL)
+    if habit_match:
+        habit = habit_match.group(1).strip()
+    imp_match = re.search(r"impression:\s*(.+?)$", text, re.DOTALL)
+    if imp_match:
+        imp = imp_match.group(1).strip()
+    # 合併
+    parts = [p for p in [habit, imp] if p and p != "-"]
+    result = "；".join(parts) if parts else ""
+    return " ".join(result.split()).strip()
+
+
 def format_persona_cards_for_context(cards: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """將 persona cards 格式化為自然語言描述，供 LLM 理解群友人物背景。
+
+    回傳格式不變（list[dict[str, str]]），但 content 改為自然語言。
+    header 保留 metadata="persona_card_header" 供呼叫端過濾。
+    """
     context_items: list[dict[str, str]] = []
     if not cards:
         return context_items
     context_items.append(
         {
             "role": "system",
-            "content": "--- 以下為 Persona Cards（同 guild 範圍，僅供語意參考）---",
+            "content": "",
             "metadata": "persona_card_header",
         }
     )
     for card in cards:
-        intro = card.get("intro_summary") or "-"
-        impression = card.get("impression_summary") or "-"
-        context_items.append(
-            {
-                "role": "user",
-                "content": (
-                    f"[persona_card] person_id={card['person_id']} alias={card.get('alias') or '-'} "
-                    f"evidence={card.get('evidence_count', 0)}\n"
-                    f"intro={intro}\n"
-                    f"impression={impression}"
-                ),
-            }
-        )
+        alias = card.get("alias") or "未知"
+
+        # 清理 intro（自我介紹）
+        intro = _clean_intro_text(card.get("intro_summary") or "")
+
+        # 清理 impression（群友印象）
+        impression = _clean_impression_text(card.get("impression_summary") or "")
+
+        parts: list[str] = []
+        if intro:
+            parts.append(f"自介：{intro}")
+        if impression:
+            parts.append(f"印象：{impression}")
+
+        if parts:
+            description = "。".join(parts)
+            context_items.append(
+                {
+                    "role": "user",
+                    "content": f"「{alias}」— {description}",
+                }
+            )
     return context_items

@@ -11,6 +11,7 @@ from typing import Any
 
 import discord
 
+from llm.sticker_cache import get_sticker_text
 from llm.tokenization import tokenize_for_retrieval, tokens_for_debug
 from llm.persona_card_builder import (
     PERSONA_MAX_PARTICIPANTS,
@@ -330,6 +331,18 @@ def _persist_messages_to_pgvector(
 
         for msg in messages:
             raw_text = (msg.content or "").strip()
+
+            # 貼圖描述一起寫入，讓 embedding 包含語意
+            if msg.stickers:
+                sticker_texts = []
+                for sticker in msg.stickers:
+                    sticker_text = get_sticker_text(sticker)
+                    if sticker_text:
+                        sticker_texts.append(sticker_text)
+                if sticker_texts:
+                    sticker_part = " ".join(sticker_texts)
+                    raw_text = f"{raw_text} {sticker_part}" if raw_text else sticker_part
+
             message_id = str(msg.id)
 
             # 擴充接口：
@@ -346,19 +359,23 @@ def _persist_messages_to_pgvector(
 
             text = _redact_text_for_persist(raw_text)
 
-            doc = Document(
-                text=text,
-                doc_id=message_id,
-                metadata={
-                    "message_id": message_id,
-                    "author_id": str(msg.author.id),
-                    "channel_id": str(msg.channel.id),
-                    "timestamp": msg.created_at.isoformat(),
-                    "doc_type": "discord_chat",
-                },
-            )
-            index.insert(doc)
-            _PERSISTED_MESSAGE_IDS.add(message_id)
+            try:
+                doc = Document(
+                    text=text,
+                    doc_id=message_id,
+                    metadata={
+                        "message_id": message_id,
+                        "author_id": str(msg.author.id),
+                        "channel_id": str(msg.channel.id),
+                        "timestamp": msg.created_at.isoformat(),
+                        "doc_type": "discord_chat",
+                    },
+                )
+                index.insert(doc)
+                _PERSISTED_MESSAGE_IDS.add(message_id)
+            except Exception:
+                # unique index 重複或其他單筆錯誤，跳過繼續
+                _PERSISTED_MESSAGE_IDS.add(message_id)
     except Exception as exc:
         logger.warning("寫入 pgvector 失敗（不中斷主流程）: %s", exc)
 
@@ -372,7 +389,18 @@ def _build_discord_context_item(msg: discord.Message, tz: timezone) -> dict[str,
     time_str = msg.created_at.astimezone(tz).strftime("%Y-%m-%d %H:%M")
     compact_content = " ".join(msg.content.split())
 
-    # 產出格式範例：[2026-02-26 14:30] 老哥: 昨天抽卡又保底了
+    # 加入貼圖描述
+    if msg.stickers:
+        sticker_texts = []
+        for sticker in msg.stickers:
+            sticker_text = get_sticker_text(sticker)
+            if sticker_text:
+                sticker_texts.append(sticker_text)
+        if sticker_texts:
+            sticker_part = " ".join(sticker_texts)
+            compact_content = f"{compact_content} {sticker_part}" if compact_content else sticker_part
+
+    # 產出格式範例：[2026-02-26 14:30] 老哥: 昨天抽卡又保底了 [貼圖：哭哭貓｜難過想哭的心情]
     # author_id 保留在 metadata，避免 content 重複佔用 token。
     formatted_text = f"[{time_str}] {display_name}: {compact_content}"
 
@@ -850,8 +878,17 @@ async def retrieve_rag_context(
     )
     meta["cards_generated"] = len(persona_cards)
 
+    # 建立 person_id → alias 對照表，供聊天記錄標註使用
+    alias_map: dict[str, str] = {}
+    for card in persona_cards:
+        pid = card.get("person_id", "")
+        alias = card.get("alias", "")
+        if pid and alias:
+            alias_map[pid] = alias
+
     rag_context = format_persona_cards_for_context(persona_cards)
     meta["cards_sent"] = max(0, len(rag_context) - 1 if rag_context else 0)
+    meta["alias_map"] = alias_map
 
     meta["selected_count_before_trim"] = len(rag_context)
     card_budget = min(max(1, top_k), PERSONA_MAX_CARDS)
