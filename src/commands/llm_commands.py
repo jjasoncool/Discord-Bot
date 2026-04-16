@@ -3,6 +3,7 @@ from pathlib import Path
 import asyncio
 import json
 from datetime import datetime, timezone, timedelta
+from typing import NamedTuple
 import base64
 import discord
 from discord import app_commands
@@ -21,8 +22,45 @@ TAIPEI_TZ = timezone(timedelta(hours=ASKAI_SETTINGS.taipei_utc_offset_hours))
 PROMPT_FILE_PATH = Path(ASKAI_SETTINGS.prompt_file_path)
 PROMPT_LOG_PATH = Path(ASKAI_SETTINGS.prompt_log_path)
 RESPONSE_LOG_PATH = Path(ASKAI_SETTINGS.response_log_path)
-ASKAI_QUEUE = asyncio.Queue()
 MAX_IMAGE_SIZE_BYTES = ASKAI_SETTINGS.max_image_size_bytes
+
+
+class _AskaiQueueItem(NamedTuple):
+    interaction: discord.Interaction
+    question: str
+    image: discord.Attachment | None
+    completion: asyncio.Future
+    cancel_event: asyncio.Event
+
+
+class _AskaiQueue:
+    """封裝 asyncio.Queue，提供 pending 狀態查詢而不依賴私有屬性。"""
+
+    def __init__(self) -> None:
+        self._queue: asyncio.Queue[_AskaiQueueItem] = asyncio.Queue()
+        self._pending: list[_AskaiQueueItem] = []
+
+    async def put(self, item: _AskaiQueueItem) -> None:
+        self._pending.append(item)
+        await self._queue.put(item)
+
+    async def get(self) -> _AskaiQueueItem:
+        item = await self._queue.get()
+        try:
+            self._pending.remove(item)
+        except ValueError:
+            pass
+        return item
+
+    def task_done(self) -> None:
+        self._queue.task_done()
+
+    def pending_summaries(self) -> list[str]:
+        """回傳目前排隊中的問題摘要。"""
+        return [item.question[:30] for item in self._pending]
+
+
+ASKAI_QUEUE = _AskaiQueue()
 
 
 def _format_log_block(*, title: str, body: str) -> str:
@@ -172,23 +210,26 @@ class LLMCommands(commands.Cog):
         loop = asyncio.get_running_loop()
         completion = loop.create_future()
         cancel_event = asyncio.Event()
-        queue_item = (interaction, question, image, completion, cancel_event)
+        queue_item = _AskaiQueueItem(interaction, question, image, completion, cancel_event)
 
-        # 將請求加入佇列以避免阻塞主執行緒
-        queue_size = ASKAI_QUEUE.qsize()
+        # 顯示排隊狀態（put 之前，pending 裡的都是排在前面的）
+        pending = ASKAI_QUEUE.pending_summaries()
         await ASKAI_QUEUE.put(queue_item)
-        await safe_send_interaction_message(
-            interaction,
-            f"🧾 已加入 AI 排隊（前面排隊人數：{queue_size}）。請稍候...",
-            ephemeral=True
-        )
+
+        if pending:
+            pending_list = "\n".join(f"  • {q}" for q in pending)
+            queue_msg = f"🧾 已加入 AI 排隊。前面排隊中的問題：\n{pending_list}"
+        else:
+            queue_msg = "🧾 已加入 AI 排隊。請稍候..."
+        await safe_send_interaction_message(interaction, queue_msg, ephemeral=True)
 
         await completion
 
     async def _askai_worker(self) -> None:
         """背景任務：依序從佇列中取出請求並處理"""
         while True:
-            interaction, question, image, completion, cancel_event = await ASKAI_QUEUE.get()
+            item = await ASKAI_QUEUE.get()
+            interaction, question, image, completion, cancel_event = item
             try:
                 if cancel_event.is_set():
                     if not completion.done():
@@ -243,9 +284,23 @@ class LLMCommands(commands.Cog):
             max_relevant_context = min(max_relevant_context, 5)
             max_context_to_send = 5
 
-        discord_context, discord_meta = await llm.retrieve_discord_context(
+        mentioned_user_ids = llm.extract_mentioned_user_ids(question)
+
+        # 將 <@id> 解析為顯示名稱，讓 LLM 能自然關聯問題中的人與聊天記錄
+        resolved_question = question
+        if mentioned_user_ids and interaction.guild:
+            for uid_str in mentioned_user_ids:
+                member = interaction.guild.get_member(int(uid_str))
+                if member:
+                    resolved_question = resolved_question.replace(
+                        f"<@{uid_str}>", member.display_name
+                    ).replace(
+                        f"<@!{uid_str}>", member.display_name
+                    )
+
+        discord_context, bot_history_context, discord_meta = await llm.retrieve_discord_context(
             interaction,
-            question,
+            resolved_question,
             max_context_messages=max_context_messages,
             min_recent_context=min_recent_context,
             max_relevant_context=max_relevant_context,
@@ -266,7 +321,7 @@ class LLMCommands(commands.Cog):
         rag_context, rag_meta = await asyncio.get_running_loop().run_in_executor(
             None,
             llm.retrieve_rag_context_sync,
-            question,
+            resolved_question,
             interaction.guild.id if interaction.guild else None,
             interaction.user.id if interaction.user else None,
             participant_user_ids,
@@ -292,6 +347,14 @@ class LLMCommands(commands.Cog):
                     content = content.replace(": ", f"({card_alias}): ", 1)
                 lines.append(content)
             chat_context = lines or None
+
+        # Bot 自身回覆歷史（獨立於 chat_history 額度外）
+        bot_history: list[str] | None = None
+        if bot_history_context:
+            bot_history = [
+                item["content"] for item in bot_history_context
+                if item.get("content")
+            ] or None
 
         # 人物描述：由 persona card builder 產出的自然語言
         persona_context: list[str] | None = None
@@ -327,9 +390,10 @@ class LLMCommands(commands.Cog):
 
         # 用 asyncio.Task 包裝，取消時可中斷 Ollama HTTP 請求
         llm_task = asyncio.create_task(self.llm_service.generate_reply(
-            prompt=question,
+            prompt=resolved_question,
             system=system_prompt,
             chat_context=chat_context,
+            bot_history=bot_history,
             persona_context=persona_context,
             images=image_payload,
             model=target_model,

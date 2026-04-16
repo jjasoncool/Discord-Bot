@@ -1,6 +1,7 @@
 {
-  "model": "gemma4:31b",
+  "model": "gemma4:26b",
   "embed_model": "bge-m3:latest",
   "moderation_model": "qwen2.5:7b",
+  "personality_model": "qwen2.5:14b",
   "think": false
 }

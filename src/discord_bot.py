@@ -156,7 +156,6 @@ async def on_ready():
                         results = await run_personality_extraction(
                             guild=guild,
                             days=14,
-                            model='qwen2.5:14b',
                         )
                         logger.info("人格萃取排程完成：萃取 %d 位使用者", len(results))
                     else:
@@ -263,6 +262,17 @@ async def on_message(message):
 
     # 繼續處理命令
     await bot.process_commands(message)
+
+@bot.event
+async def on_message_edit(before, after):
+    if after.author.bot:
+        return
+    # 只在內容實際變更時處理（非 embed/pin 等觸發）
+    if before.content == after.content:
+        return
+    if after.content or after.stickers:
+        from llm.chat_persistence import enqueue_message_edit
+        enqueue_message_edit(after)
 
 async def auto_start_article_monitor(bot):
     """自動啟動官方文章更新功能"""

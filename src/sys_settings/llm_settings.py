@@ -110,6 +110,7 @@ class OllamaRuntimeConfig(BaseModel):
     model: str
     embed_model: str
     moderation_model: str | None = None
+    personality_model: str | None = None
     think: bool = True
 
 

@@ -211,7 +211,7 @@ async def extract_personalities(
     messages: list[dict[str, str]],
     user_groups: dict[str, list[dict[str, str]]],
     user_aliases: dict[str, str],
-    model: str | None = None,
+    model: str,
 ) -> dict[str, dict[str, str]]:
     """呼叫 LLM 萃取人格特徵。
 
@@ -219,8 +219,6 @@ async def extract_personalities(
     """
     import aiohttp
     settings = LLMServiceSettings()
-    runtime_config = load_ollama_runtime_config(settings.ollama_runtime_model_path)
-    target_model = model or "qwen2.5:14b"
     base_url = settings.ollama_base_url
 
     user_ids = list(user_groups.keys())
@@ -261,7 +259,7 @@ async def extract_personalities(
         )
 
         payload = {
-            "model": target_model,
+            "model": model,
             "messages": [
                 {"role": "system", "content": prompts["system_prompt"]},
                 {"role": "user", "content": user_prompt},
@@ -381,6 +379,13 @@ async def run_personality_extraction(
     回傳 {author_id: {"alias": str, "personality": str}}
     """
     from llm.intro_rag_port import PgVectorIntroRAGPort
+
+    # 解析模型：呼叫端指定 > config personality_model > config 主 model
+    if not model:
+        settings = LLMServiceSettings()
+        runtime_config = load_ollama_runtime_config(settings.ollama_runtime_model_path)
+        model = runtime_config.personality_model or runtime_config.model
+    logger.info("人格萃取：使用模型 %s", model)
 
     # 1. 撈聊天記錄
     messages = fetch_recent_messages(days=days, channel_ids=channel_ids)

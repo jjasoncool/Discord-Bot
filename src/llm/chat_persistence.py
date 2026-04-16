@@ -24,6 +24,7 @@ MIN_TEXT_LENGTH = 2
 
 # 全域 buffer
 _buffer: list[dict] = []
+_edit_buffer: list[dict] = []
 _buffer_lock = asyncio.Lock()
 
 # 去重集合：與 context_retriever._PERSISTED_MESSAGE_IDS 共用，避免重複寫入
@@ -88,22 +89,59 @@ def enqueue_message(msg: discord.Message) -> None:
     })
 
 
+def enqueue_message_edit(after: discord.Message) -> None:
+    """處理訊息編輯：更新 buffer 內已暫存的項目，或排隊等待 pgvector 更新。"""
+    if after.author.bot:
+        return
+    message_id = str(after.id)
+    text = _build_persist_text(after)
+    if len(text) < MIN_TEXT_LENGTH:
+        return
+
+    # 還在新增 buffer 裡 → 直接更新文字
+    for item in _buffer:
+        if item["message_id"] == message_id:
+            item["text"] = text
+            return
+
+    # 已持久化到 pgvector → 加入編輯 buffer
+    if message_id not in _get_persisted_ids():
+        return
+    for item in _edit_buffer:
+        if item["message_id"] == message_id:
+            item["text"] = text
+            return
+    _edit_buffer.append({
+        "message_id": message_id,
+        "text": text,
+        "author_id": str(after.author.id),
+        "channel_id": str(after.channel.id),
+        "guild_id": str(after.guild.id) if after.guild else "",
+        "timestamp": after.created_at.isoformat(),
+    })
+
+
 async def flush_buffer() -> int:
-    """將 buffer 中的訊息批次寫入 pgvector，回傳寫入數量。"""
-    if not _buffer:
+    """將 buffer 中的訊息批次寫入/更新 pgvector，回傳處理數量。"""
+    if not _buffer and not _edit_buffer:
         return 0
     if not _check_flush_deps():
         return 0
 
     async with _buffer_lock:
-        if not _buffer:
+        if not _buffer and not _edit_buffer:
             return 0
-        batch = list(_buffer)
+        insert_batch = list(_buffer)
         _buffer.clear()
+        update_batch = list(_edit_buffer)
+        _edit_buffer.clear()
 
-    # 在 executor 中執行同步的 pgvector 寫入
     loop = asyncio.get_running_loop()
-    count = await loop.run_in_executor(None, _sync_write_batch, batch)
+    count = 0
+    if insert_batch:
+        count += await loop.run_in_executor(None, _sync_write_batch, insert_batch)
+    if update_batch:
+        count += await loop.run_in_executor(None, _sync_update_batch, update_batch)
     return count
 
 
@@ -159,14 +197,76 @@ def _sync_write_batch(batch: list[dict]) -> int:
                 index.insert(doc)
                 persisted_ids.add(mid)
                 written += 1
-            except Exception:
-                # unique index 重複或其他單筆錯誤，跳過繼續
-                persisted_ids.add(mid)
+            except Exception as exc:
+                exc_str = str(exc).lower()
+                if "duplicate" in exc_str or "unique" in exc_str:
+                    persisted_ids.add(mid)
+                else:
+                    logger.warning("on_message 單筆寫入失敗（將重試）: mid=%s err=%s", mid, exc)
 
         logger.info("on_message 批次寫入 pgvector: %d 則", written)
         return written
     except Exception as exc:
         logger.warning("on_message 批次寫入 pgvector 失敗: %s", exc)
+        return 0
+
+
+def _sync_update_batch(batch: list[dict]) -> int:
+    """同步更新已持久化的訊息（delete + re-insert 以刷新 embedding）。"""
+    from llama_index.core import Document, VectorStoreIndex
+    from llama_index.vector_stores.postgres import PGVectorStore
+    from sys_settings.llm_settings import LLMServiceSettings, load_ollama_runtime_config
+    from llama_index.embeddings.ollama import OllamaEmbedding
+    from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
+
+    settings = LLMServiceSettings()
+    try:
+        runtime_config = load_ollama_runtime_config(settings.ollama_runtime_model_path)
+        embed_model = OllamaEmbedding(
+            model_name=runtime_config.embed_model,
+            base_url=settings.ollama_base_url,
+            request_timeout=settings.ollama_timeout,
+        )
+        vector_store = PGVectorStore.from_params(
+            database=settings.pgvector_db,
+            host=settings.pgvector_host,
+            password=settings.pgvector_password,
+            port=settings.pgvector_port,
+            user=settings.pgvector_user,
+            table_name=HYBRID_RETRIEVAL_SETTINGS.get_chat_table_name(),
+            embed_dim=HYBRID_RETRIEVAL_SETTINGS.pgvector_embed_dim,
+            hybrid_search=True,
+        )
+        index = VectorStoreIndex.from_vector_store(
+            vector_store=vector_store,
+            embed_model=embed_model,
+        )
+
+        updated = 0
+        for item in batch:
+            mid = item["message_id"]
+            try:
+                index.delete_ref_doc(mid)
+                doc = Document(
+                    text=item["text"],
+                    doc_id=mid,
+                    metadata={
+                        "message_id": mid,
+                        "author_id": item["author_id"],
+                        "channel_id": item["channel_id"],
+                        "timestamp": item["timestamp"],
+                        "doc_type": "discord_chat",
+                    },
+                )
+                index.insert(doc)
+                updated += 1
+            except Exception as exc:
+                logger.warning("on_message_edit 單筆更新失敗: mid=%s err=%s", mid, exc)
+
+        logger.info("on_message_edit 批次更新 pgvector: %d 則", updated)
+        return updated
+    except Exception as exc:
+        logger.warning("on_message_edit 批次更新 pgvector 失敗: %s", exc)
         return 0
 
 

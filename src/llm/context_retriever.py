@@ -423,8 +423,11 @@ async def retrieve_discord_context(
     max_context_to_send: int,
     taipei_tz: timezone,
     logger: logging.Logger,
-) -> tuple[list[dict[str, str]], dict[str, int]]:
-    """從 Discord 歷史訊息檢索上下文：近期保底 + Hybrid 關聯檢索。"""
+) -> tuple[list[dict[str, str]], list[dict[str, str]], dict[str, int]]:
+    """從 Discord 歷史訊息檢索上下文：近期保底 + Hybrid 關聯檢索。
+
+    回傳 (chat_context, bot_context, meta)。
+    """
     # === 核心流程導讀（學習/除錯用） ===
     # 1) 抓歷史訊息（max_context_messages）
     # 2) 先保底最近 N 則（min_recent_context）避免漏掉剛講完的上下文
@@ -439,6 +442,7 @@ async def retrieve_discord_context(
     # - Vector 可能把「Maple 活動加倍時間」這類語意接近訊息排前面
     # - RRF 融合後，兩者都高的訊息通常會浮到前面
     context: list[dict[str, str]] = []
+    bot_context: list[dict[str, str]] = []
     meta = {
         "fetched_count": 0,
         "recent_selected_count": 0,
@@ -446,6 +450,7 @@ async def retrieve_discord_context(
         "selected_count_before_trim": 0,
         "trimmed_count": 0,
         "sent_count": 0,
+        "bot_history_count": 0,
     }
     debug = {
         "question_tokens": [],
@@ -456,13 +461,28 @@ async def retrieve_discord_context(
 
     try:
         if not isinstance(interaction.channel, (discord.TextChannel, discord.Thread)):
-            return context, meta
+            return context, bot_context, meta
 
-        history_messages = [
+        bot_user_id = interaction.client.user.id if interaction.client.user else None
+        all_messages = [
             msg
             async for msg in interaction.channel.history(limit=max_context_messages)
-            if not msg.author.bot
         ]
+        history_messages = [msg for msg in all_messages if not msg.author.bot]
+        # 自己的回覆：從最近 10 則中用 BM25 挑最相關的 3 則
+        bot_candidates = [
+            msg for msg in all_messages
+            if msg.author.id == bot_user_id and msg.content and msg.content.strip()
+        ][:10] if bot_user_id else []
+        if bot_candidates and len(bot_candidates) > 3:
+            bot_ordered = list(reversed(bot_candidates))  # 舊 -> 新
+            bot_bm25 = _build_bm25_rank(question=question, messages=bot_ordered)
+            # 取 BM25 rank 最小（最相關）的 3 個 message_id
+            top_bot_ids = set(sorted(bot_bm25, key=bot_bm25.get)[:3])
+            # 保持時序輸出
+            bot_messages = [msg for msg in bot_ordered if str(msg.id) in top_bot_ids]
+        else:
+            bot_messages = list(reversed(bot_candidates)) if bot_candidates else []
         meta["fetched_count"] = len(history_messages)
         ordered_messages = list(reversed(history_messages))  # 舊 -> 新
 
@@ -590,11 +610,19 @@ async def retrieve_discord_context(
             meta["trimmed_count"], meta["sent_count"],
             len(bm25_rank), len(vector_rank), len(fused_scores)
         )
+        # Bot 自身回覆（獨立於 chat_history 額度外）
+        if bot_messages:
+            bot_context.extend(
+                _build_discord_context_item(msg, taipei_tz)
+                for msg in reversed(bot_messages)  # 舊 -> 新
+            )
+            meta["bot_history_count"] = len(bot_context)
+
     except Exception as exc:
         logger.warning("讀取聊天上下文失敗: %s", exc)
 
     meta["retrieval_debug"] = debug
-    return context, meta
+    return context, bot_context, meta
 
 
 def retrieve_rag_context_sync(
@@ -911,6 +939,7 @@ def _retrieve_rag_context_impl(
         docs=dedup_docs,
         requester_user_id=requester_user_id,
         participant_user_ids=participant_ids,
+        mentioned_user_ids=mentioned_user_ids,
         intent=intent,
         alias_hints=alias_hints,
         max_cards=min(max(1, top_k), PERSONA_MAX_CARDS),

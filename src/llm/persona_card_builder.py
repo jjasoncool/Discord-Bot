@@ -65,6 +65,7 @@ def build_persona_cards(
     docs: list[dict[str, Any]],
     requester_user_id: int | None,
     participant_user_ids: list[str],
+    mentioned_user_ids: list[str] | None = None,
     intent: str,
     alias_hints: list[str],
     max_cards: int,
@@ -139,6 +140,8 @@ def build_persona_cards(
             score += 50
         if person_id in participant_user_ids:
             score += 25
+        if mentioned_user_ids and person_id in mentioned_user_ids:
+            score += 35
         if primary_alias and any(h in normalize_alias_text(primary_alias) for h in alias_hints):
             score += 20
 

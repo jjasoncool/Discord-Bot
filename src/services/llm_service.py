@@ -133,17 +133,19 @@ class OllamaService:
         system: Optional[str],
         user_query_text: str,
         chat_context: Optional[List[str]] = None,
+        bot_history: Optional[List[str]] = None,
         persona_context: Optional[List[str]] = None,
         images: Optional[List[str]] = None,
     ) -> PromptBundle:
         """建立同源 prompt bundle（給 Ollama 與給 log 共用）。
 
         chat_context: 純文字聊天記錄（每則一個字串，例如 "[14:30] 老哥: 昨天抽卡又保底了"）
+        bot_history: Bot 自身先前的回覆（獨立於 chat_history 額度外）
         persona_context: 自然語言人物描述（每人一個字串，例如 "「老哥」— 群裡的非酋代表"）
         """
         composed_user_prompt = ""
 
-        has_context = bool(chat_context or persona_context)
+        has_context = bool(chat_context or bot_history or persona_context)
         if has_context:
             composed_user_prompt += (
                 f"{self.context_safety_rules.untrusted_context_intro}\n\n"
@@ -154,6 +156,12 @@ class OllamaService:
             for line in chat_context:
                 composed_user_prompt += f"{self._sanitize_text(line)}\n"
             composed_user_prompt += "</chat_history>\n\n"
+
+        if bot_history:
+            composed_user_prompt += "<bot_history>\n"
+            for line in bot_history:
+                composed_user_prompt += f"{self._sanitize_text(line)}\n"
+            composed_user_prompt += "</bot_history>\n\n"
 
         if persona_context:
             composed_user_prompt += "<member_profiles>\n"
@@ -200,6 +208,7 @@ class OllamaService:
         prompt: str,
         system: Optional[str] = None,
         chat_context: Optional[List[str]] = None,
+        bot_history: Optional[List[str]] = None,
         persona_context: Optional[List[str]] = None,
         images: Optional[List[str]] = None,
         model: Optional[str] = None,
@@ -228,6 +237,7 @@ class OllamaService:
             system=system,
             user_query_text=user_query_text,
             chat_context=chat_context,
+            bot_history=bot_history,
             persona_context=persona_context,
             images=images,
         )
