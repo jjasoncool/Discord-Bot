@@ -1794,6 +1794,17 @@ class FBScraperService:
                 except Exception:
                     pass
 
+            # ★ 偵測 FB 錯誤頁面，跳過不寫入
+            _FB_ERROR_MARKERS = [
+                "We're working on getting this fixed",
+                "Sorry, something went wrong",
+                "This content isn't available",
+                "This page isn't available",
+            ]
+            if text and any(marker in text for marker in _FB_ERROR_MARKERS):
+                self.logger.warning(f"偵測到 FB 錯誤頁面，跳過此貼文：{text[:100]}")
+                return {"url": "", "pfbid_url": "", "text": "", "text_md": "", "images": [], "timestamp": None, "content_hash": None}
+
             content_hash = self._build_content_hash(text, images)
 
             data = {

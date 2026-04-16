@@ -1082,6 +1082,8 @@ class BahamutScraperService(BaseScraperClient):
         all_blocks = self._extract_article_blocks(session, soup, article_url, final_url, bsn)
         blocks_per_page = [len(all_blocks)]
         failed_pages: List[int] = []
+        consecutive_failures = 0
+        max_consecutive_failures = 5
 
         # 後續頁面（第 2 頁起）
         for page in range(2, total_pages + 1):
@@ -1093,6 +1095,7 @@ class BahamutScraperService(BaseScraperClient):
                 page_blocks = self._extract_article_blocks(session, page_soup, page_url, page_final_url, bsn)
                 all_blocks.extend(page_blocks)
                 blocks_per_page.append(len(page_blocks))
+                consecutive_failures = 0
                 self.logger.info(
                     "Bahamut 文章分頁進度: snA=%s page %s/%s, 本頁 %s blocks",
                     parse_qs(urlparse(article_url).query).get("snA", [""])[0],
@@ -1101,10 +1104,19 @@ class BahamutScraperService(BaseScraperClient):
             except Exception as e:
                 blocks_per_page.append(0)
                 failed_pages.append(page)
+                consecutive_failures += 1
                 self.logger.warning(
                     "Bahamut 文章分頁抓取失敗: page=%s/%s url=%s err=%s",
                     page, total_pages, page_url, e,
                 )
+                if consecutive_failures >= max_consecutive_failures:
+                    self.logger.warning(
+                        "Bahamut 連續 %s 頁失敗，提前中止分頁抓取: snA=%s 已完成 %s/%s 頁",
+                        max_consecutive_failures,
+                        parse_qs(urlparse(article_url).query).get("snA", [""])[0],
+                        page, total_pages,
+                    )
+                    break
 
         root_post = all_blocks[0] if all_blocks else {}
         replies = all_blocks[1:] if len(all_blocks) > 1 else []
