@@ -118,9 +118,9 @@ class AskAICommandSettings(BaseSettings):
     """/askai 指令相關設定（集中常數來源，不使用 env 覆寫）。"""
 
     max_context_messages: int = 100
-    max_context_to_send: int = 20
-    min_recent_context: int = 15
-    max_relevant_context: int = 14
+    max_context_to_send: int = 50
+    min_recent_context: int = 25
+    max_relevant_context: int = 25
     taipei_utc_offset_hours: int = 8
 
     discord_context_begin: str = "<context:discord_chat_begin>"

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import logging
 import json
 import re
@@ -36,11 +38,10 @@ except Exception:  # pragma: no cover - 依賴可能在部份環境尚未安裝
     BM25Okapi = None
 
 try:
-    from llama_index.core import Document, VectorStoreIndex
+    from llama_index.core import VectorStoreIndex
     from llm.safe_ollama_embedding import SafeOllamaEmbedding as OllamaEmbedding
     from llama_index.vector_stores.postgres import PGVectorStore
 except Exception:  # pragma: no cover - 依賴可能在部份環境尚未安裝
-    Document = None
     VectorStoreIndex = None
     OllamaEmbedding = None
     PGVectorStore = None
@@ -258,58 +259,83 @@ def _build_vector_rank(
     candidate_pool: int,
     logger: logging.Logger,
 ) -> dict[str, int]:
-    """建立向量檢索排名（message_id -> rank）。"""
-    # 設計意圖：BM25 負責字面，Vector 負責語意；兩路結果交給 RRF 融合。
-    # 這裡刻意用 in-memory index 跑「當輪訊息」語意排序，避免依賴外部索引同步延遲。
-    if Document is None or VectorStoreIndex is None:
+    """建立向量檢索排名（message_id -> rank）— 查詢持久化 pgvector。
+
+    設計意圖：BM25 負責字面，Vector 負責語意；兩路結果交給 RRF 融合。
+    讀取 `chat_persistence` 寫入端累積的既有 embedding，避免每次 /askai 都重跑
+    100 則訊息的 in-memory embedding（GIL 佔用 + Ollama HTTP 爆量）。
+
+    Buffer gap：`chat_persistence` 有 30 筆/5 分鐘 buffer，極新的訊息可能尚未
+    flush 到 pgvector，會缺 vector rank。但 `min_recent_context` 會無條件把
+    最近 N 則選進 context，BM25 rank 也會補，整體召回影響可接受。
+    """
+    if psycopg2 is None:
         return {}
 
     embed_model = _get_embed_model(logger)
     if embed_model is None:
         return {}
 
-    try:
-        docs: list[Document] = []
-        for msg in messages:
-            # 與 BM25 一致：先排除空內容，避免把無訊號樣本送入向量檢索。
-            text = (msg.content or "").strip()
-            if not text:
-                continue
-            docs.append(
-                Document(
-                    text=text,
-                    doc_id=str(msg.id),
-                    metadata={
-                        "message_id": str(msg.id),
-                        "author_id": str(msg.author.id),
-                        "channel_id": str(msg.channel.id),
-                        "timestamp": msg.created_at.isoformat(),
-                        "doc_type": "discord_chat",
-                    },
-                )
-            )
-
-        # 沒有可索引文件時直接回空，保持降級可預期。
-        if not docs:
-            return {}
-
-        # similarity_top_k 上限受 candidate_pool 與 docs 數量共同約束，
-        # 避免請求超出資料集大小。
-        index = VectorStoreIndex.from_documents(docs, embed_model=embed_model)
-        retriever = index.as_retriever(similarity_top_k=max(1, min(candidate_pool, len(docs))))
-        nodes = retriever.retrieve(question)
-
-        vector_rank: dict[str, int] = {}
-        for rank, node in enumerate(nodes, start=1):
-            # 只接受可對映回原訊息的 node（有 message_id 才能進融合）。
-            node_message_id = str(node.metadata.get("message_id", "")).strip()
-            if not node_message_id:
-                continue
-            vector_rank[node_message_id] = rank
-        return vector_rank
-    except Exception as exc:
-        logger.warning("In-memory 向量檢索失敗，改用 BM25: %s", exc)
+    message_ids = [
+        str(msg.id)
+        for msg in messages
+        if msg.content and msg.content.strip()
+    ]
+    if not message_ids:
         return {}
+
+    try:
+        query_embedding = embed_model.get_query_embedding(question)
+    except Exception as exc:
+        logger.warning("pgvector vector rank 嵌入問題失敗（降級為 BM25-only）: %s", exc)
+        return {}
+
+    if not query_embedding:
+        return {}
+
+    try:
+        table_name = HYBRID_RETRIEVAL_SETTINGS.get_chat_table_name()
+    except Exception as exc:
+        logger.warning("取得 chat table name 失敗: %s", exc)
+        return {}
+
+    physical_table = f"data_{re.sub(r'[^a-zA-Z0-9_]', '', table_name)}"
+    limit = max(1, min(candidate_pool, len(message_ids)))
+
+    # pgvector 的向量 literal 需以 '[v1,v2,...]' 字串形式帶入再 cast 成 vector。
+    vector_literal = "[" + ",".join(f"{float(v):.6f}" for v in query_embedding) + "]"
+
+    try:
+        with psycopg2.connect(
+            host=LLM_SETTINGS.pgvector_host,
+            port=LLM_SETTINGS.pgvector_port,
+            dbname=LLM_SETTINGS.pgvector_db,
+            user=LLM_SETTINGS.pgvector_user,
+            password=LLM_SETTINGS.pgvector_password,
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT metadata_->>'message_id' AS mid
+                    FROM {physical_table}
+                    WHERE metadata_->>'doc_type' = 'discord_chat'
+                      AND metadata_->>'message_id' = ANY(%s)
+                      AND embedding IS NOT NULL
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    (message_ids, vector_literal, limit),
+                )
+                rows = cur.fetchall()
+    except Exception as exc:
+        logger.warning("pgvector vector rank 查詢失敗（降級為 BM25-only）: %s", exc)
+        return {}
+
+    vector_rank: dict[str, int] = {}
+    for rank, (mid,) in enumerate(rows, start=1):
+        if mid:
+            vector_rank[str(mid)] = rank
+    return vector_rank
 
 
 def _build_discord_context_item(msg: discord.Message, tz: timezone) -> dict[str, str]:
@@ -432,12 +458,29 @@ async def retrieve_discord_context(
         # 聊天持久化已改由 on_message buffer 機制處理（chat_persistence.py）
         # 不再在 /askai 流程中同步寫入，避免阻塞 event loop
 
-        bm25_rank = _build_bm25_rank(question=question, messages=ordered_messages)
-        vector_rank = _build_vector_rank(
-            question=question,
-            messages=ordered_messages,
-            candidate_pool=HYBRID_RETRIEVAL_SETTINGS.hybrid_candidate_pool,
-            logger=logger,
+        # BM25（純 Python CPU 運算，佔 GIL）與 vector（1 次 Ollama embed + pgvector SQL）
+        # 都是同步函式；丟到 executor 避免阻塞 event loop（語音 heartbeat / 其他 /askai
+        # 會被連累）。asyncio.gather 讓兩者在 thread pool 並行跑。
+        loop = asyncio.get_running_loop()
+        bm25_rank, vector_rank = await asyncio.gather(
+            loop.run_in_executor(
+                None,
+                functools.partial(
+                    _build_bm25_rank,
+                    question=question,
+                    messages=ordered_messages,
+                ),
+            ),
+            loop.run_in_executor(
+                None,
+                functools.partial(
+                    _build_vector_rank,
+                    question=question,
+                    messages=ordered_messages,
+                    candidate_pool=HYBRID_RETRIEVAL_SETTINGS.hybrid_candidate_pool,
+                    logger=logger,
+                ),
+            ),
         )
         bm25_weight, vector_weight = HYBRID_RETRIEVAL_SETTINGS.resolve_fusion_weights()
 

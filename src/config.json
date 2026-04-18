@@ -22,7 +22,8 @@
   "music_voice_channel_id": 1489909579927257130,
   "rollcall_channel_id": 1492294877042708600,
   "rollcall_target_role_ids": [
-    1276463862677241867
+    1276463862677241867,
+    1491218038547021875
   ],
   "rollcall_exclude_role_ids": [
     1417164337436692531,

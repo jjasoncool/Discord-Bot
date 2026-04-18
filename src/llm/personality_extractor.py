@@ -156,7 +156,7 @@ _EMOJI_DICT_PATH = "/app/settings/emoji_dictionary.txt"
 
 
 def _load_emoji_dict() -> dict[str, str]:
-    """載入 emoji 語意字典（快取）。"""
+    """載入 emoji 語意字典（快取）。只收錄有描述的項目，空值佔位會被忽略。"""
     global _emoji_dict
     if _emoji_dict is not None:
         return _emoji_dict
@@ -181,6 +181,75 @@ def _load_emoji_dict() -> dict[str, str]:
     except Exception as exc:
         logger.warning("載入 emoji 字典失敗: %s", exc)
     return _emoji_dict
+
+
+def _load_all_emoji_names_from_file() -> set[str]:
+    """讀檔，回傳所有已登記的 emoji name（含空值佔位），用於判斷是否需要新增。"""
+    from pathlib import Path
+    names: set[str] = set()
+    path = Path(_EMOJI_DICT_PATH)
+    if not path.exists():
+        return names
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name = line.split("=", 1)[0].strip()
+            if name:
+                names.add(name)
+    except Exception as exc:
+        logger.warning("讀取 emoji 字典失敗: %s", exc)
+    return names
+
+
+def refresh_emoji_dictionary(guild) -> int:
+    """掃描 guild.emojis，把字典沒有的 emoji name 以空值 append 到檔案尾端。
+
+    只處理本 guild 擁有的 emoji（guild.emojis 自然只列本伺服器自訂 emoji；
+    其他伺服器的引用不會出現在這裡）。新項目以空值佔位寫入，萃取邏輯會自動
+    忽略無描述的 emoji，等管理員手動填寫語意後才真正生效。
+
+    回傳新增的項目數。
+    """
+    from datetime import datetime
+    from pathlib import Path
+
+    existing_names = _load_all_emoji_names_from_file()
+    guild_emoji_names = {e.name for e in guild.emojis}
+    new_names = sorted(guild_emoji_names - existing_names)
+    if not new_names:
+        logger.info(
+            "emoji 字典無新項目（本 guild 共 %d 個自訂 emoji，全部已記錄）",
+            len(guild_emoji_names),
+        )
+        return 0
+
+    path = Path(_EMOJI_DICT_PATH)
+    today = datetime.now().strftime("%Y-%m-%d")
+    block = [
+        "",
+        f"# === 自動偵測 {today}（待填寫） ===",
+        *[f"{name} =" for name in new_names],
+        "",
+    ]
+    try:
+        with path.open("a", encoding="utf-8") as f:
+            f.write("\n".join(block))
+    except Exception as exc:
+        logger.warning("寫入 emoji 字典失敗: %s", exc)
+        return 0
+
+    # 清快取，下次 _load_emoji_dict 重讀（新項目空值仍會被 filter 忽略）
+    global _emoji_dict
+    _emoji_dict = None
+
+    logger.info(
+        "emoji 字典新增 %d 個待填項目（前 10：%s）",
+        len(new_names),
+        new_names[:10],
+    )
+    return len(new_names)
 
 
 def _replace_custom_emoji(match) -> str:
@@ -236,9 +305,11 @@ async def extract_personalities(
 
     回傳 {author_id: {"alias": str, "personality": str}}
     """
-    import aiohttp
-    settings = LLMServiceSettings()
-    base_url = settings.ollama_base_url
+    # 走共用 OllamaService.chat_raw（不重複一套 aiohttp 實作）
+    # 本函式自組 messages list，走底層 chat_raw 而非 generate_reply 比較語意乾淨
+    # （generate_reply 是 /askai 專用的 prompt bundle 組裝流程）。
+    from services.llm_service import OllamaAPIError, OllamaService
+    service = OllamaService()
 
     user_ids = list(user_groups.keys())
     results: dict[str, dict[str, str]] = {}
@@ -299,32 +370,20 @@ async def extract_personalities(
             .replace("{chat_log}", chat_log)
         )
 
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": prompts["system_prompt"]},
-                {"role": "user", "content": user_prompt},
-            ],
-            "stream": False,
-            "options": {
-                "temperature": 0.3,
-                "top_p": 0.8,
-                "num_ctx": 32768,
-            },
-        }
-
         try:
-            url = f"{base_url}/api/chat"
-            timeout = aiohttp.ClientTimeout(total=600)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(url, json=payload) as response:
-                    if response.status != 200:
-                        detail = await response.text()
-                        logger.error("人格萃取 LLM 回應失敗: %s - %s", response.status, detail)
-                        continue
-
-                    data = await response.json()
-                    content = data.get("message", {}).get("content", "")
+            content = await service.chat_raw(
+                model=model,
+                messages=[
+                    {"role": "system", "content": prompts["system_prompt"]},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.3,
+                top_p=0.8,
+                num_ctx=32768,
+                timeout=600,  # 人格萃取單批可能跑很久，覆蓋預設 300s
+                # 排程在 4am 一次跑完所有 batch，結束後不需再駐留；30 分鐘緩衝後釋放 VRAM
+                keep_alive="30m",
+            )
 
             # 解析 JSON 結果
             parsed = _extract_json_from_response(content)
@@ -355,8 +414,16 @@ async def extract_personalities(
                     current_batch=current_batch,
                     total_batches=total_batches,
                 )
+        except OllamaAPIError as exc:
+            if exc.status is not None:
+                logger.error("人格萃取 LLM 回應失敗: %s - %s", exc.status, exc.detail)
+            else:
+                logger.error("人格萃取 LLM 回應格式異常: %s", exc.detail)
         except Exception as exc:
-            logger.error("人格萃取呼叫失敗: %s", exc, exc_info=True)
+            logger.error(
+                "人格萃取呼叫失敗: %s: %s",
+                type(exc).__name__, exc, exc_info=True,
+            )
 
     if progress_callback:
         progress_callback(

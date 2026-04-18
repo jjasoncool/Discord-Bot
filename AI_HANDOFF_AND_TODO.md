@@ -30,23 +30,12 @@
 - 2026-04-06：Telegram embed title 來源頻道名稱修正，已歸檔至 `TODO-completed.md`。
 - 2026-04-07：Telegram media group 合併（grouped_id + 多圖合併為單則 Discord 訊息），已歸檔至 `TODO-completed.md`。
 - 2026-04-07：FB 貼文改推送模式 + 圖片 URL 刷新機制（詳見跨來源整合專區）。
-- 2026-04-17：補記 `/askai` 與 `/personality_extract` 的 ephemeral 互動特性、`寫入 RAG` 卡住感來源，並新增背景寫入 + ephemeral 通知待辦。
-- 2026-04-17：手動「寫入 RAG」加上 ephemeral 進度訊息（每 3 筆刷新，完成後 edit 成 ✅），`save_personality_results` 新增 `progress_callback`；寫入仍為前景流程，背景 task 化仍待辦。
-- 2026-04-17：`PgVectorIntroRAGPort` 的 3 個 `index_*` 方法全面改走 `_ainsert`（executor thread），解除 `_insert` 內部 embedding HTTP + pgvector IO 對 event loop 的阻塞；`_get_index` 首次 init 加 `threading.Lock` 防止 executor 多 thread race。
-- 2026-04-17：補 `_get_embed_model` 的 thread-safety（原本只靠 caller 隱藏契約）— 把 `_index_lock` 改為 `RLock`，`_get_embed_model` 自身也用 `with self._index_lock:` 包 mutation 區塊（fast path 仍無鎖）。解除「caller 必須先拿 lock」的隱藏契約。
-- 2026-04-17：`chat_persistence._sync_write_batch` log 加診斷資訊 — 從「新寫入 X 則」改為「新寫入 X / 已存在跳過 Y / 共 N」，方便觀察 `/askai` 路徑與 flush 路徑的 dedup 情況。
-- 2026-04-17：Ollama server 的 `bge-m3:latest` 所屬 llama runner 載入即崩潰（`llama runner process has terminated: %!w(<nil>)`），直接 curl 繞過 Python 也重現；同 Ollama 的 `qwen2.5:7b` 生成 / embed 均正常，確認是 bge-m3 單一 model 的問題（blob 損壞或 Ollama 0.20.7 與 bert 架構相容性）。切換 embed model 至 `qwen3-embedding:0.6b`（1024-dim，跟 bge-m3 相同，pgvector schema 不動）。新增 `scripts/reembed_pgvector.py` 重建既有 7261 筆向量（messages 7226 + member_profiles 35）。
-- 2026-04-17：**先前判斷「model 壞」可能是誤判**。實際根因是 **Windows ephemeral port 池耗盡** — Ollama 主 process 連自己 runner subprocess 走 localhost HTTP，每次請求開新 socket，累積到 TIME_WAIT 把 port 池塞滿，runner 看起來就像「隨機崩潰」。觸發證據：使用者 Windows 主機 `ollama pull` 回 `Only one usage of each socket address ...`。切 embed model 為 `snowflake-arctic-embed2:568m`（暫定），等 Ollama 主機 4 分鐘 TIME_WAIT 清除後再測。
-- 2026-04-17：針對 Ollama Windows embedding bug (GitHub #7288 `GGML_ASSERT(i01 >= 0 && i01 < ne01) failed`) 加空格 perturbation workaround：
-  - 實驗證實 crash 跟簡繁字無關、跟長度/truncate/context 無關，是 **特定 tokenized 序列**觸發 GGML 越界。加尾/前空格會改變 token 序列即可繞過，語意影響極小。
-  - 新增 `src/llm/safe_ollama_embedding.py`：`SafeOllamaEmbedding(OllamaEmbedding)` 包起 `_get_text_embedding` / `_get_query_embedding` / `_get_text_embeddings`（及 async 版本），失敗時自動加空格 retry。
-  - `src/llm/chat_persistence.py` / `src/llm/intro_rag_port.py` / `src/llm/context_retriever.py` 改用 `SafeOllamaEmbedding`（context_retriever 用 import alias 最小改動）。
-  - `src/scripts/reembed_pgvector.py` 同樣加空格 perturbation fallback。
-- 2026-04-17：Client 端全面加 HTTP connection 重用，降低短連線量：
-  - `src/scripts/reembed_pgvector.py`：整個 run 共用一個 `requests.Session()`。
-  - `src/llm/intro_rag_port.py`：新增 module-level singleton `get_pgvector_intro_rag_port()`，原本 `personality_extractor` / `management_commands` 每次都 `PgVectorIntroRAGPort()` 新建 index + embed_model，改成共用單例；內部已有 `_index_lock` (RLock) 保護。
-  - `src/llm/chat_persistence.py`：新增 `_get_chat_index()` 跨 `_sync_write_batch` / `_sync_update_batch` 共用 VectorStoreIndex，僅在 `embed_model` 名稱變更時重建（runtime 熱切換仍生效）。
-  - `src/llm/context_retriever.py`：新增 `_get_or_build_vector_index(table_name, logger)` + `_VECTOR_INDEX_CACHE` 跨 `/askai` 呼叫共用；取代 `_persist_messages_to_pgvector`（askai 路徑順手 persist）與 `_retrieve_rag_context_impl`（askai 的 persona card 檢索）原本每次 new PGVectorStore + VectorStoreIndex 的寫法。key 為 `(table_name, embed_model_name)`，embed 換掉時自動重建。
+- 2026-04-18：Context/Prompt 完整重構 + askai 身份感（2026-04-15 ~ 2026-04-18 整串工作）全數歸檔至 `TODO-completed.md`，包含 on_message 持久化、自動人格萃取、LLM 服務穩定性修復、askai 排隊顯示修正、Bahamut 主文 `author_id` 修復、Bahamut 增量更新 429 治本（per-message 冷卻）、askai 發問者身份注入（asker_profile + 撞名偵測 + persona 拆分 + safety rules 修飾）。
+- 2026-04-18：新增主線「Reaction 統計與社群互動玩法」TODO，規劃 Phase 1 基礎統計（/askai 整合前置）→ Phase 2 askai 整合（殺手級應用）→ Phase 3 強化人格萃取。詳見對應區塊。
+- 2026-04-18：點歌機器人與幽靈點名系統的架構、設計決策、已實作功能、音訊鏈路、管理面板、使用方式等完整內容歸檔至 `TODO-completed.md`；handoff 僅保留專區錨點 + 未完 TODO（音樂 P1/P2、點名部署驗證 + P1）。
+- 2026-04-18：/askai 效能調優三連。①context 量上調（`max_context_to_send` 20→50、`min_recent_context` 15→25、`max_relevant_context` 14→25），覆蓋典型 ~50 則討論。②Plan C：`_build_vector_rank` 改查持久化 pgvector（既有 `chat_persistence` 寫入端），/askai 的 embed 呼叫從「100 則 in-memory」降到「1 次問題」。③修 BM25 tokenization TF bug（`tokenize_for_retrieval` 回傳 `set`→`list`），保留重複 token 讓 BM25 能用詞頻。附帶清掉無用的 in-memory VectorStoreIndex LRU cache。`_EMBED_CONCURRENCY` 2→1 對齊 server 端 `OLLAMA_NUM_PARALLEL=1`，避免 AMD Vulkan KV cache 倍增風險。音樂機器人播音斷斷續續的根因是 default ThreadPoolExecutor 被 BM25+embedding 佔用 + GIL 爭用，此三項改動後預期大幅緩解。
+- 2026-04-19：Ollama chat 呼叫統一化 Stage 1 完成。`OllamaService` 新增 `chat_raw()` 底層方法（純 HTTP + payload 組裝，raise `OllamaAPIError` / `aiohttp.ClientError`），`generate_reply()` 改為高階封裝（prompt bundle + context 注入 + 錯誤字串化）；`chat_raw` 新增 `timeout` 參數讓 caller 覆蓋預設。`personality_extractor.extract_personalities` 從自寫 aiohttp 遷移到 `service.chat_raw(timeout=600, num_ctx=32768, temperature=0.3, top_p=0.8)`，消除唯一一處 /api/chat 重複實作。附帶修掉「Ollama 呼叫發生未預期錯誤: （空字串）」log 診斷困難（加 `type(exc).__name__`，例：`TimeoutError: `）。
+- 2026-04-19：`chat_raw` / `generate_reply` 新增 `keep_alive` 參數，caller 按用途傳不同值。/askai 傳 `"1h"`（連續互動期間 chat model 常駐）、moderation 傳 `"30m"`（間歇性任務）、personality_extractor 傳 `"30m"`（4am 排程跑完 30 分鐘後釋放）。payload 策略：caller 明確傳值才加 `keep_alive` 欄位，否則沿用 server 端全域 `OLLAMA_KEEP_ALIVE`，不覆蓋；embed 模型目前還是走 server 全域設定（沒動 LlamaIndex 層），待後續需要時再做 Stage 2。
 
 ---
 
@@ -113,8 +102,9 @@ last_confirmed: 2026-03-31
 
 | 主軸 | 狀態 | 進度 | 詳見 |
 |---|---|---:|---|
-| Discord Bot / AI 對話能力 | 已有可用基礎能力 | 70% | [專案架構](#專案-ai-架構總覽) |
-| Context / Prompt 優化 | 已實作，待部署驗證 | 90% | [Context 優化](#context--prompt-優化專區) |
+| Discord Bot / AI 對話能力 | 已有可用基礎能力 | 75% | [專案架構](#專案-ai-架構總覽) |
+| Context / Prompt 優化 | 已實作（含 askai 身份感），待部署驗證 | 95% | [Context 優化](#context--prompt-優化專區) |
+| Reaction 統計 / 社群互動玩法 | 規劃中 | 5% | [Reaction TODO](#reaction-統計與社群互動玩法) |
 | 點歌機器人（Music Bot） | 已上線運作 | 85% | [點歌機器人](#點歌機器人專區) |
 | 跨來源整合（Article/FB/PTT/TG） | 有方向，尚未全面收斂 | 35% | [跨來源整合](#跨來源整合專區) |
 | Bahamut RAG / AI 整合 | 尚未開始 | 5% | [RAG TODO](#第三階段整合-ai--pgvector--rag) |
@@ -255,59 +245,21 @@ last_confirmed: 2026-04-17
 
 > **目標：** 提升 bot 的群聊參與感與個性表現，讓回覆更自然、更有記憶感。
 
-### 已完成（2026-04-15 ~ 2026-04-16）
+### 已完成（2026-04-15 ~ 2026-04-18）
 
-**Context / Prompt 格式重構：**
-- [x] 合併兩個 system message 為一個，避免模型忽略人設
-- [x] 移除 `_serialize_context_items()`（JSON 序列化），改純文字分區注入
-- [x] `_build_prompt_bundle()` 接收 `chat_context`（純文字）+ `persona_context`（自然語言），分區 `<chat_history>` 和 `<member_profiles>`
-- [x] `llm_commands.py` 分開傳遞 discord_context 和 rag_context
-- [x] `format_persona_cards_for_context()` 改自然語言輸出，regex 清理 DB 標記
-- [x] persona card 別名對照：聊天記錄中用 alias_map 標註身份（`❤️柔柔喵❤️(柔喵, 阿喵)`）
-- [x] persona card alias 優先用自我介紹的，其次才用 impression 的
-- [x] `PERSONA_MAX_CARD_CHARS` 220→400、`PERSONA_MAX_IMPRESSIONS_PER_CARD` 2→3
-
-**貼圖描述整合：**
-- [x] `src/llm/sticker_cache.py`（新增）— bot 啟動時預載 guild sticker name+description
-- [x] `_build_discord_context_item()` 加入貼圖描述
-- [x] `_persist_messages_to_pgvector()` 貼圖描述一起寫入 text
-
-**on_message 聊天持久化：**
-- [x] `src/llm/chat_persistence.py`（新增）— buffer 批次寫入（滿 30 則或每 5 分鐘 flush）
-- [x] `discord_bot.py` on_message 加入 enqueue_message + 定期 flush
-- [x] 去重：共用 `_PERSISTED_MESSAGE_IDS`，on_message 和 /askai 不重複寫入
-- [x] DB 層加 unique index `uniq_chat_message_id`，防止重啟後重複
-- [x] insert exception 處理：單筆失敗不中斷整批
-
-**自動人格萃取 Pipeline：**
-- [x] `src/llm/personality_extractor.py`（新增）— 從 pgvector 撈聊天、分組、呼叫 LLM 萃取
-- [x] `intro_rag_port.py` 新增 `index_auto_personality()` 寫入方法
-- [x] `persona_card_builder.py` 支援 `auto_personality` 類型，合併到 persona card 輸出
-- [x] 萃取 prompt 外部化至 `src/settings/prompts/personality_extraction_prompt.json`
-- [x] 自訂 emoji 語意字典 `src/settings/emoji_dictionary.txt`，萃取時查字典替換
-- [x] 排程：每日 UTC+8 04:00 自動執行，用 `qwen2.5:14b`，每批 4 人
-
-**/askai 體驗優化：**
-- [x] timeout 180→300 秒
-- [x] 聊天抓取 50→100 則
-- [x] 排隊人數顯示修正（先看再放，顯示「前面排隊人數」）
-- [x] 取消按鈕：AI 思考中可按取消，取消時中斷 Ollama HTTP 連線（釋放 GPU），cooldown 減半，後面排隊的立即接上
-
-**2026-04-17 補充共識（互動 UI / 人格萃取寫入）：**
-- [x] 已確認 `/askai` 排隊/思考中提示、`/personality_extract` 啟動提示/查看結果/結果分頁，目前皆以 `ephemeral=True` 發送，因此 Discord 客戶端上看起來會「消失」屬正常互動訊息特性，不是聊天紀錄被清除。
-- [x] 已確認手動人格萃取的「寫入 RAG」按鈕目前為前景同步流程：按下後直接 `await save_personality_results(...)`，UI 只會停在「⏳ 正在寫入 RAG...」，沒有中途進度。
-- [x] 2026-04-17：「寫入 RAG」加上 ephemeral 進度訊息 — 按下後先 edit 原 pager（「⏳ 正在寫入 RAG...」），再新送一筆 ephemeral `⏳ 正在寫入 RAG（0/N）`，`save_personality_results` 新增 `progress_callback`，每寫 3 筆刷新該訊息，最後 edit 成 `✅ 已寫入 RAG：X 筆`（edit 失敗 fallback 到 followup.send）。前景流程未動。
-- [x] 已確認 `save_personality_results()` 會逐筆串行呼叫 `PgVectorIntroRAGPort.index_auto_personality()`；每筆都可能觸發 embedding 計算、刪除舊文件、`index.insert(doc)` 寫入 pgvector，因此人數多時容易有「卡住」體感。
-- [x] 已確認目前成功路徑缺少逐筆成功 log；使用者只看到 `Intro RAG schema constraints ready` 後無後續訊息時，最可能是卡在第一筆或某幾筆 `index.insert(doc)`，不一定代表流程壞掉。
-- [x] 2026-04-17：`PgVectorIntroRAGPort._insert` 為同步（embedding HTTP + pgvector DELETE/INSERT），原先直接 await 會阻塞 event loop（影響語音 heartbeat、其他 callback）。已新增 `_ainsert` helper 用 `asyncio.run_in_executor` 包裝，3 個 `index_*`（intro_profile / impression / auto_personality）全改走 `_ainsert`。另加 `self._index_lock = threading.Lock()` + `_get_index` double-checked locking，防止未來多 thread 首次 init 時重複建立 `VectorStoreIndex`。呼叫端不用改（原本就是 `await rag_port.index_*(...)`）。
+> 詳細項目已歸檔至 `TODO-completed.md` 的「Context/Prompt 完整重構 + askai 身份感（歸檔 2026-04-18）」。
+> 摘要：context/prompt 格式重構、貼圖描述、on_message 持久化、自動人格萃取 pipeline、/askai 體驗優化（timeout / 抓取量 / 取消 / 排隊顯示）、LLM 服務穩定性修復（SafeOllamaEmbedding + HTTP 連線重用 + thread-safety）、/askai 發問者身份注入（`<asker_profile>` + `<latest_user_message from=...>` + persona 拆分 + 撞名偵測 `#xxxx` + safety rules 修飾）。
 
 ### 待處理
 
 - [ ] System prompt 禁忌清單精簡（待定案）
 - [ ] `/personality_extract` 的「寫入 RAG」改為背景 task：按鈕按下後先立即回應，避免 interaction 長時間停在 loading。（目前仍在前景等完，但已加進度訊息降低體感不安。）
-- [x] 背景寫入啟動後，額外發送新的 ephemeral 進度/完成通知（不是只改原本那筆）。— 2026-04-17 完成 ephemeral 進度訊息（前景流程）；背景 task 化仍待辦。
 - [ ] 若背景寫入超時或 followup 失敗，規劃 fallback（例如 DM 或至少補 log / 狀態查詢入口）。
 - [ ] 為 `save_personality_results()` / `index_auto_personality()` 補上逐筆或批次成功 log 與耗時統計，方便判斷卡點是在 embedding、delete、還是 pgvector insert。
+- [ ] `asker_profile` 的 `roles` 欄位目前為 `(未啟用)`，未來視需求再填：可選混合 Discord 身份組名稱 + 權限層級（admin/moderator/member）。
+- [ ] 部署後觀察 /askai 回覆是否正確認出發問者；若發現「撞名誤判」或 `asker_profile` 洩漏 user_id 等問題，回到 prompt/safety rules 調整。
+- [ ] **Windows Ollama server 待調整**（使用者本機設定，AI 無法直接改）：`OLLAMA_KEEP_ALIVE=24h`（原 5m，每 5 分鐘反覆 unload/reload 是 Windows `wsarecv` / ephemeral port 耗盡主因）。`OLLAMA_MAX_LOADED_MODELS=2` 已設好（chat + embed 各一條 runner）、`OLLAMA_NUM_PARALLEL=1` 已設好。改完重啟 Ollama 後驗證 `server.log` 不再出現 5 分鐘一次的 `load request`。AMD 顯卡維持 `OLLAMA_VULKAN=true`。
+- [ ] 觀察 /askai 執行時音樂機器人是否還會斷音。Plan C + `_EMBED_CONCURRENCY=1` 後理論上 default ThreadPoolExecutor 爭用大幅下降；若仍斷音，考慮將 BM25/embedding 隔離到獨立 ThreadPoolExecutor（治標），或改 `ProcessPoolExecutor` 脫離 GIL（治本但 IPC overhead 高）。
 
 ### 設計決策備忘
 
@@ -339,22 +291,88 @@ last_confirmed: 2026-04-17
 - 若改成背景 task，使用者偏好方案是：**額外發一筆新的 ephemeral** 當作「已開始寫入 / 完成通知」，而不是只 edit 原本那筆。
 - 風險提醒：新的 ephemeral followup 仍受 interaction token / webhook 時效限制，不適合無上限超長任務；若要更穩，後續仍需保留 fallback 機制。
 
-**涉及檔案：**
+**涉及檔案（設計參考）：**
 
-| 檔案 | 說明 |
+完整檔案清單見 `TODO-completed.md` 對應歸檔。重要入口：
+
+| 檔案 | 角色 |
 |---|---|
-| `src/services/llm_service.py` | prompt bundle 重構、generate_reply 新簽名 |
-| `src/commands/llm_commands.py` | context 分開傳遞、alias_map 標註、取消按鈕 |
-| `src/llm/persona_card_builder.py` | 自然語言化、regex 清理、auto_personality 支援 |
-| `src/llm/context_retriever.py` | 貼圖描述、去重 exception 處理、alias_map |
-| `src/llm/sticker_cache.py`（新增） | guild sticker 預載快取 |
-| `src/llm/chat_persistence.py`（新增） | on_message 批次持久化 |
-| `src/llm/personality_extractor.py`（新增） | 人格萃取 pipeline |
-| `src/llm/intro_rag_port.py` | 新增 index_auto_personality |
-| `src/discord_bot.py` | sticker 預載、chat flush、萃取排程、取消按鈕 |
-| `src/settings/prompts/personality_extraction_prompt.json`（新增） | 萃取 prompt |
-| `src/settings/emoji_dictionary.txt`（新增） | 自訂 emoji 語意字典 |
-| `src/sys_settings/llm_settings.py` | timeout 300s、抓取 100 則 |
+| `src/services/llm_service.py` | prompt bundle、`asker_profile` 參數、generate_reply |
+| `src/commands/llm_commands.py` | context 分離、asker_profile 組裝、撞名偵測 |
+| `src/llm/persona_card_builder.py` | 自然語言化、`person_id` 保留 |
+| `src/llm/context_retriever.py` | discord_context item（含 `display_name`）、vector index cache |
+| `src/llm/chat_persistence.py` | buffer 批次寫入、SafeOllamaEmbedding |
+| `src/llm/personality_extractor.py` | 人格萃取 pipeline |
+| `src/llm/intro_rag_port.py` | `index_auto_personality`、`_ainsert`、singleton |
+| `src/settings/prompts/askai_system_prompt.txt` | 人設 prompt |
+| `src/settings/prompts/llm_context_safety_rules.json` | untrusted intro + asker_profile 白名單 |
+
+---
+
+## Reaction 統計與社群互動玩法
+
+<!-- @meta
+id: reaction-stats-todo
+type: TODO
+status: draft
+depends_on: [project-architecture]
+affects: [product-todo, context-prompt-optimization]
+last_confirmed: 2026-04-18
+-->
+
+> **目標：** 用 Discord reaction 統計把群內互動量化，餵回 `/askai` 與人格萃取，讓 bot 更有「社群感」。
+
+### 現況
+- `intents.reactions = True` 已開（`src/discord_bot.py:43`）
+- 僅 `src/commands/forum_monitor.py:123` 在監聽 `on_raw_reaction_add`（論壇管理用途）
+- **尚無任何「某 user 的訊息被按了多少表情」的累積統計**
+
+### Phase 1 — 基礎統計 + 公開玩法（共用一組 DB）
+
+- [ ] 在 `discord_bot.py` 註冊全域 `on_raw_reaction_add` / `on_raw_reaction_remove` 監聽
+- [ ] `state_db` 新增 `message_reactions` 表：欄位至少含 `message_id`, `message_author_id`, `guild_id`, `channel_id`, `emoji`, `reactor_id`, `added_at`；索引 `(message_author_id, emoji)`、`(message_id)`
+- [ ] 排除機器人自己按的 reaction（避免污染）
+- [ ] emoji normalize：unicode emoji vs custom emoji（`<:name:id>`）統一比對鍵
+- [ ] **每週金句頒獎**：排程每週日發佈過去 7 天 top 3 reacted 訊息到指定頻道
+- [ ] **神級發言名人堂**：訊息 reaction 數達門檻（預設 10）自動複製到 `#hall-of-fame` 頻道
+- [ ] **個人招牌 emoji**：新增 `/my_emoji` 查被按最多的 emoji、top N 送反應的人
+
+### Phase 2 — /askai 整合（殺手級應用）
+
+- [ ] `_handle_askai_request` 查詢 asker 近 N 天 reaction 熱點（top 1~3 熱門發言 + 招牌 emoji）
+- [ ] 在 `asker_profile` 下方新增 `<asker_recent_highlights>` 區塊餵給 LLM
+- [ ] LLM 能自然帶出「你上週說的那句 XXX 大家反應很好」等社群感回答
+- [ ] 記得 safety rules 中標為「可信」並提醒不要直接引述完整原文以免尷尬
+
+### Phase 3 — 強化人格萃取
+
+- [ ] `personality_extractor` prompt 餵入該使用者的 reaction-received 模式（常收到哪類 emoji → 推論人格面向）
+- [ ] 設計加權規則：例如收到 🤣 多 → 加權「幽默感」；收到 😢 多 → 加權「共感」
+- [ ] 跟 `emoji_dictionary.txt` 聯動，把 emoji 語意轉成自然語言特徵
+
+### 設計備忘
+
+- **歷史回補**（批次掃 `channel.history()` 抓既有 reaction）**不納入 Phase 1**；先跑一段時間累積自然資料，有需要再做
+- Discord 只會回傳「目前還存在的 reaction」，撤回的無法回補
+- 大群 `channel.history` 有 rate limit，需批次 + 退避
+- 隱私：使用者退群後的 reaction 記錄保留政策待定（預設保留，需評估）
+- reaction vs /askai 整合可能加 context token 成本，需在 Phase 2 實測並設上限
+
+### 建議實作順序
+
+**先 Phase 1 全做完**（事件收集 + DB + 三個玩法）→ **再 Phase 2**（用 Phase 1 累積資料 + askai 整合）→ **最後 Phase 3**（人格萃取加權）。
+Phase 1 三個玩法**共用同一張 DB**，不要拆開做。
+
+### 涉及檔案（預估）
+
+| 檔案 | 角色 |
+|---|---|
+| `src/discord_bot.py` | 註冊 reaction 事件監聽 |
+| `src/services/state_db.py` | 新增 `message_reactions` 表 + 查詢 API |
+| `src/services/reaction_stats_service.py`（新增） | 聚合查詢、排程邏輯 |
+| `src/commands/reaction_commands.py`（新增） | `/my_emoji`、每週金句公告 |
+| `src/commands/llm_commands.py` | Phase 2：組 `asker_recent_highlights` |
+| `src/llm/personality_extractor.py` | Phase 3：萃取時加權 reaction 訊號 |
 
 ---
 
@@ -366,83 +384,11 @@ type: STATE
 status: confirmed
 depends_on: [project-architecture]
 affects: []
-last_confirmed: 2026-04-10
+last_confirmed: 2026-04-18
 -->
 
-### 架構
-
-- 模組位置：`src/music/`（9 個檔案）
-- 入口橋接：`src/commands/music_commands.py` → `MusicCog`
-- 頻道設定：`config.json` 的 `music_voice_channel_id`（由 `/server_manager` 設定）
-- 歌單設定：`src/settings/music_runtime.json` 的 `default_playlist_url`
-- hot reload watcher：同時監控 `config.json` + `music_runtime.json`，變更後自動重連
-- 依賴：`yt-dlp`、`discord.py[voice]>=2.7.1`、`davey>=0.1.5`（DAVE 加密）、`FFmpeg`
-
-### 設計決策
-
-- **只需設定一個語音頻道**：`voice_channel_id` 同時用於加入語音、發送面板
-- **語音頻道內建聊天**：Discord 語音頻道自帶文字聊天，與語音頻道共用同一 ID
-- **按鈕面板取代 slash command**：控制面板（點歌/跳過/停止/重播/歌單）在語音頻道聊天內自動 bump
-- **點歌用 Modal**：按「點歌」按鈕 → 彈出輸入框，支援 URL 或關鍵字
-- **點歌排隊不打斷**：點歌加入插播佇列，當前歌曲播完才播點的歌
-- **停止只清插播**：停止按鈕只清除使用者點的歌，預設歌單保留
-- **本地快取**：首次串流播放 + 背景下載到 `src/music/cache/`，之後從本地播放
-- **快取峰值正規化**：快取播放時掃描峰值，等比例增益對齊 -1dB，保留原始動態
-- **無 cookie**：小規模使用不需登入
-- **FFmpegPCMAudio**：DAVE 加密下最穩定（FFmpegOpusAudio 在 DAVE 下會斷續爆音）
-
-### 已實作功能
-
-- [x] 按鈕控制面板（點歌 / 跳過 / 停止 / 重播 / 歌單）— persistent view
-- [x] 點歌 Modal — 支援 YouTube URL 或關鍵字搜尋（`ytsearch`）
-- [x] 點歌排隊 — 不打斷當前播放，顯示排隊順位
-- [x] 重播按鈕 — 刪除快取 + 重新從 YouTube 抓取並播放當前歌曲
-- [x] 換歌自動 bump — 刪舊面板 → 發新面板（「現在播放」embed + 按鈕 + 縮圖）
-- [x] 待機面板 — 無歌曲時顯示待機狀態 + 按鈕
-- [x] 雙佇列 — 主歌單（循環）+ 插播（優先，不循環）
-- [x] 預設歌單自動載入（`extract_flat` 快速解析，邊載入邊播放）
-- [x] 本地快取（`src/music/cache/`，opus 原始品質，零損失）
-- [x] 快取峰值正規化（`volumedetect` + `volume` 濾鏡，等比例增益）
-- [x] 預先快取（prefetch 接下來 3 首，減少切歌延遲）
-- [x] 下載限速 3MB/s + Semaphore 同時只 1 個下載（避免搶串流頻寬）
-- [x] 版權/私人/已刪除影片自動跳過 + embed 通知 + 從歌單移除
-- [x] Runtime 配置 hot reload（config.json + music_runtime.json）
-- [x] `/server_manager` 頻道設定整合（語音頻道選項）
-- [x] YouTube 縮圖修復（`extract_flat` 模式用 `i.ytimg.com` 組合）
-- [x] 歌單查看（按鈕，ephemeral 回覆）
-- [x] `voice_lock` 防止重入式 connect/disconnect
-- [x] `requeue_song` 播放失敗時歌曲放回佇列前端（防掉歌）
-- [x] voice reconnect 死循環修復（guild.voice_client 認領機制，防止 Already connected 無限 error loop 灌爆 Docker log，2026-04-12）
-- [x] DAVE 加密協定支援（davey 0.1.5）
-- [x] 非同步歌單載入（不阻塞點歌）
-
-### 音訊品質鏈路
-
-```
-YouTube (opus 160kbps, format 251)
-  ↓ 串流播放：yt-dlp extract_single → ffmpeg PCM 48kHz → discord.py encoder → DAVE → Discord
-  ↓ 快取下載：yt-dlp download (opus copy, 限速 3MB/s) → src/music/cache/{id}.opus
-  ↓ 快取播放：本地 opus → ffmpeg PCM 48kHz + volume 正規化 → discord.py encoder → DAVE → Discord
-```
-
-### 已知限制
-
-- **DAVE 加密偶爾造成特定區段短暫加速**：discord.py AudioPlayer 的 20ms frame timing 在 DAVE 加密耗時過長時會追趕（`delay = max(0, ...)`），屬於 library 層級問題，非程式碼可解
-- **YouTube 來源最高 opus 160kbps**：瀏覽器聽到的差異來自客戶端音效處理，非來源品質差異
-- **FFmpegOpusAudio 在 DAVE 下不可用**：會斷續爆音，必須走 FFmpegPCMAudio + discord.py 內建 encoder
-- **歌單中的版權/私人影片**：自動跳過並通知，無法繞過
-
-### Config 說明
-
-頻道 ID 存在 `config.json`（與其他頻道設定一致）：
-```json
-{ "music_voice_channel_id": 1489909579927257130 }
-```
-
-歌單存在 `src/settings/music_runtime.json`：
-```json
-{ "music": { "default_playlist_url": "https://..." } }
-```
+> 核心 P0 + P1 主體已完成並上線運作。
+> **完整架構 / 設計決策 / 已實作功能 / 音訊鏈路 / 已知限制 / Config 已歸檔至 `TODO-completed.md` 的「點歌機器人 Music Bot 完整實作（歸檔 2026-04-18）」。**
 
 ### 點歌機器人 TODO
 
@@ -450,13 +396,8 @@ YouTube (opus 160kbps, format 251)
 id: music-bot-todo
 type: TODO
 status: confirmed
-last_confirmed: 2026-04-10
+last_confirmed: 2026-04-18
 -->
-
-**P0（已完成）：**
-- [x] 透過 `/server_manager` 設定語音頻道
-- [x] 部署驗證：bot 可加入語音頻道並播放
-- [x] Docker 容器有 FFmpeg、yt-dlp、davey
 
 **P1（體驗優化）：**
 - [ ] `/pause` 與 `/resume` 按鈕
@@ -478,42 +419,11 @@ type: STATE
 status: confirmed
 depends_on: [project-architecture]
 affects: []
-last_confirmed: 2026-04-12
+last_confirmed: 2026-04-18
 -->
 
-### 架構
-
-- 服務層：`src/services/rollcall_service.py`（抽選、到期掃描、踢除、豁免）
-- Cog 層：`src/commands/rollcall_commands.py`（persistent views + `/rollcall_panel` 指令）
-- Runtime 狀態：`src/settings/rollcall_runtime.json`（pending、immunity、stats、panel message ID）
-- Config 欄位：`config.json` 的 `rollcall_channel_id`、`rollcall_target_role_ids`
-
-### 設計決策
-
-- **每 7 天抽 10 人**：UTC+8 14:00 自動執行，`PICK_INTERVAL_DAYS=7`
-- **手動/自動點名分開記錄**：手動點名記 `last_manual_rollcall_date`（不推遲自動排程），自動點名記 `last_rollcall_date`；同日有手動點名時自動排程跳過，避免重複（2026-04-12 修復）
-- **7 天回覆期限**：逾期自動踢除
-- **30 天豁免期**：通過點名後 30 天內不再被抽到，期滿後重新進入抽選池
-- **排除管理員與 Bot**：不會被抽到
-- **排除已 pending / 豁免中成員**：不重複點名
-- **persistent view**：Bot 重啟後按鈕仍可用
-- **管理面板**：在指定頻道放置控制面板，管理員可開關自動點名、手動發動、查看待回覆清單
-
-### 管理面板按鈕
-
-| 按鈕 | 功能 |
-|---|---|
-| ✅ 開啟 | 啟用自動每日點名 |
-| ❌ 關閉 | 停用自動每日點名 |
-| 🎲 手動點名 | 立即抽選 10 人 |
-| 📋 待回覆清單 | 查看所有待回覆的成員與剩餘天數 |
-| 🔄 刷新狀態 | 更新面板顯示 |
-
-### 使用方式
-
-1. 在 `config.json` 設定 `rollcall_channel_id`（點名訊息頻道）和 `rollcall_target_role_ids`（目標身份組 ID 陣列）
-2. 管理員在想要放置控制面板的頻道執行 `/rollcall_panel`
-3. 透過面板按鈕開啟/關閉自動點名，或手動發動
+> 核心 P0 已實作完成（除部署驗證外）。
+> **完整架構 / 設計決策 / 管理面板 / 使用方式已歸檔至 `TODO-completed.md` 的「幽靈點名系統核心實作（歸檔 2026-04-18）」。**
 
 ### 幽靈點名 TODO
 
@@ -521,17 +431,11 @@ last_confirmed: 2026-04-12
 id: rollcall-todo
 type: TODO
 status: confirmed
-last_confirmed: 2026-04-11
+last_confirmed: 2026-04-18
 -->
 
 **P0（核心）：**
-- [x] 每日自動抽選 + 點名訊息發送
-- [x] 「我是活人」按鈕回覆處理
-- [x] 7 天逾期自動踢除
-- [x] 30 天豁免期管理
-- [x] 管理員控制面板（開/關/手動/查看）
-- [x] persistent view（重啟後按鈕仍可用）
-- [ ] 部署驗證
+- [ ] 部署驗證（其餘 P0 已完成，歸檔於 TODO-completed.md）
 
 **P1（體驗優化）：**
 - [ ] `/server_manager` 整合（透過下拉選單設定頻道與身份組）

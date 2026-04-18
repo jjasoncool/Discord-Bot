@@ -459,6 +459,9 @@ class LLMCommands(commands.Cog):
             think=target_think,
             asker_profile=asker_profile_text,
             asker_display_name=asker_display_name,
+            # chat model 在最後一次 /askai 後 1h 內保持常駐，避開反覆 unload/reload
+            # 觸發的 Windows ephemeral port 與 runner crash；閒置超過 1h 才釋放 VRAM
+            keep_alive="1h",
         ))
 
         # 同時等 LLM 回覆和取消事件

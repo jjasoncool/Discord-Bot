@@ -137,6 +137,9 @@ class ImpressionModerationService:
             top_p=0.2,
             repeat_penalty=1.05,
             num_ctx=2048,
+            # moderation 是 /impression 觸發的間歇性任務：最後一次後 30 分鐘 unload，
+            # 節省 VRAM 但不會太短導致頻繁 reload
+            keep_alive="30m",
         )
 
         parsed = _extract_json_object(reply_text)

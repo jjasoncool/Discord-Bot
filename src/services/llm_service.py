@@ -29,6 +29,20 @@ class PromptBundle:
     prompt_record_log: str
 
 
+class OllamaAPIError(Exception):
+    """Ollama /api/chat 非 200 或回應格式異常。
+
+    與 `aiohttp.ClientError`（連線層）區分：
+      - `status is not None` → HTTP 非 200（含 detail 原文）
+      - `status is None`     → 200 但回應 JSON 沒有預期的 content
+    """
+
+    def __init__(self, message: str, *, status: int | None = None, detail: str = "") -> None:
+        super().__init__(message)
+        self.status = status
+        self.detail = detail
+
+
 class OllamaService:
     """Ollama LLM 服務封裝"""
 
@@ -218,6 +232,92 @@ class OllamaService:
         prompt_record_log = "\n".join(parts)
         return PromptBundle(messages=messages, prompt_record_log=prompt_record_log)
 
+    async def chat_raw(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, object]],
+        think: Optional[bool] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        repeat_penalty: Optional[float] = None,
+        num_ctx: Optional[int] = None,
+        timeout: Optional[int] = None,
+        keep_alive: Optional[str] = None,
+    ) -> str:
+        """底層 Ollama /api/chat：caller 自組 messages，回傳 assistant content。
+
+        與 `generate_reply` 的分工：
+        - `chat_raw` 只負責 HTTP、payload 組裝與錯誤分類（raise 例外）
+        - `generate_reply` 負責 /askai 的 prompt bundle、context 注入與錯誤字串化
+
+        使用時機：
+        - /askai 流程透過 `generate_reply`（包好 bundle 後內部呼叫 `chat_raw`）
+        - 已有自組 messages 的 caller（如 personality_extractor）直接呼叫此方法
+
+        參數 `timeout`：None → 沿用 `self.timeout`（settings.ollama_timeout，預設 300s）。
+        長任務（如人格萃取）傳較大值覆蓋。
+
+        參數 `keep_alive`：None → 沿用 server 端 `OLLAMA_KEEP_ALIVE` 預設；傳值則覆蓋。
+        支援格式：`"1h"`、`"30m"`、`"24h"`、整數秒、`"-1"`（永不 unload）、`"0"`（立即釋放）。
+        以 per-request 控制 chat model 在 VRAM 的駐留時間，避免頻繁 unload/reload
+        觸發 Windows ephemeral port 耗盡與 runner crash。
+
+        Raises:
+            OllamaAPIError: HTTP 非 200 或回應格式異常
+            aiohttp.ClientError: 連線失敗
+        """
+        effective_temperature = (
+            temperature if temperature is not None
+            else self.settings.default_temperature
+        )
+        effective_top_p = top_p if top_p is not None else self.settings.default_top_p
+        effective_repeat_penalty = (
+            repeat_penalty if repeat_penalty is not None
+            else self.settings.default_repeat_penalty
+        )
+        effective_num_ctx = num_ctx if num_ctx is not None else self.settings.default_num_ctx
+        effective_timeout = timeout if timeout is not None else self.timeout
+
+        payload: dict[str, object] = {
+            "model": model,
+            "messages": messages,
+            "options": {
+                "temperature": effective_temperature,
+                "top_p": effective_top_p,
+                "repeat_penalty": effective_repeat_penalty,
+                "num_ctx": effective_num_ctx,
+            },
+            "stream": False,
+        }
+        # think 只在 caller 明確指定時才放入 payload，避免覆蓋各 model 預設行為
+        # (personality_extractor 原本就沒帶 think，遷移後保持一致)
+        if think is not None:
+            payload["think"] = think
+        # keep_alive 同理：只有 caller 明確指定時才覆蓋 server 端全域設定。
+        if keep_alive is not None:
+            payload["keep_alive"] = keep_alive
+
+        url = f"{self.base_url}/api/chat"
+        client_timeout = aiohttp.ClientTimeout(total=effective_timeout)
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with session.post(url, json=payload) as response:
+                if response.status != 200:
+                    detail = await response.text()
+                    raise OllamaAPIError(
+                        f"HTTP {response.status}",
+                        status=response.status,
+                        detail=detail,
+                    )
+                data = await response.json()
+                content = (data.get("message") or {}).get("content")
+                if not content:
+                    raise OllamaAPIError(
+                        "回應格式異常",
+                        detail=str(data)[:500],
+                    )
+                return content
+
     async def generate_reply(
         self,
         prompt: str,
@@ -234,25 +334,17 @@ class OllamaService:
         num_ctx: Optional[int] = None,
         asker_profile: Optional[str] = None,
         asker_display_name: Optional[str] = None,
+        keep_alive: Optional[str] = None,
     ) -> tuple[str, str]:
-        """呼叫 Ollama 並回傳 (reply, prompt_record_log)。"""
-        temperature = (
-            temperature
-            if temperature is not None
-            else self.settings.default_temperature
-        )
-        top_p = top_p if top_p is not None else self.settings.default_top_p
-        repeat_penalty = (
-            repeat_penalty
-            if repeat_penalty is not None
-            else self.settings.default_repeat_penalty
-        )
-        num_ctx = num_ctx if num_ctx is not None else self.settings.default_num_ctx
+        """/askai 專用：組 prompt bundle → 呼叫 `chat_raw` → 回 (reply, prompt_record_log)。
 
-        user_query_text = prompt
+        將 Ollama 各類例外翻譯成使用者友善的 ⚠️ 訊息，caller 收到字串即可。
+
+        `keep_alive` 轉交給 `chat_raw`；不同 caller（/askai / moderation）可獨立設值。
+        """
         bundle = self._build_prompt_bundle(
             system=system,
-            user_query_text=user_query_text,
+            user_query_text=prompt,
             chat_context=chat_context,
             bot_history=bot_history,
             persona_context=persona_context,
@@ -263,40 +355,32 @@ class OllamaService:
 
         target_model = self._resolve_runtime_model(model)
         target_think = self.resolve_request_think(think)
-        payload = {
-            "model": target_model,
-            "messages": bundle.messages,
-            "think": target_think,
-            "options": {
-                "temperature": temperature,
-                "top_p": top_p,
-                "repeat_penalty": repeat_penalty,
-                "num_ctx": num_ctx,
-            },
-            "stream": False,
-        }
 
-        url = f"{self.base_url}/api/chat"
         try:
-            timeout = aiohttp.ClientTimeout(total=self.timeout)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(url, json=payload) as response:
-                    if response.status != 200:
-                        detail = await response.text()
-                        logger.error("Ollama 回應失敗: %s - %s", response.status, detail)
-                        return "⚠️ LLM 回應失敗，請稍後再試。", bundle.prompt_record_log
-
-                    data = await response.json()
-                    message = data.get("message", {})
-                    content = message.get("content")
-                    if not content:
-                        logger.error("Ollama 回應格式異常: %s", data)
-                        return "⚠️ LLM 回應格式異常，請稍後再試。", bundle.prompt_record_log
-                    return content, bundle.prompt_record_log
-
+            reply = await self.chat_raw(
+                model=target_model,
+                messages=bundle.messages,
+                think=target_think,
+                temperature=temperature,
+                top_p=top_p,
+                repeat_penalty=repeat_penalty,
+                num_ctx=num_ctx,
+                keep_alive=keep_alive,
+            )
+            return reply, bundle.prompt_record_log
+        except OllamaAPIError as exc:
+            if exc.status is not None:
+                logger.error("Ollama 回應失敗: %s - %s", exc.status, exc.detail)
+                return "⚠️ LLM 回應失敗，請稍後再試。", bundle.prompt_record_log
+            logger.error("Ollama 回應格式異常: %s", exc.detail)
+            return "⚠️ LLM 回應格式異常，請稍後再試。", bundle.prompt_record_log
         except aiohttp.ClientError as exc:
             logger.error("Ollama 連線失敗: %s", exc)
             return "⚠️ 無法連線到 LLM 服務。", bundle.prompt_record_log
         except Exception as exc:
-            logger.error("Ollama 呼叫發生未預期錯誤: %s", exc, exc_info=True)
+            # 過去這條訊息經常出現空字串 exc（asyncio.TimeoutError 類），加上型別名避免診斷困難
+            logger.error(
+                "Ollama 呼叫發生未預期錯誤: %s: %s",
+                type(exc).__name__, exc, exc_info=True,
+            )
             return "⚠️ LLM 發生未預期錯誤。", bundle.prompt_record_log

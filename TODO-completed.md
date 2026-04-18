@@ -6,6 +6,9 @@
 
 | 日期 | 區塊 | 關鍵字 |
 |---|---|---|
+| 2026-04-18 | [Context/Prompt 完整重構 + askai 身份感](#contextprompt-完整重構--askai-身份感歸檔2026-04-18) | askai, asker_profile, persona_card, 人格萃取, 撞名偵測, 429 治本, bahamut author_id |
+| 2026-04-18 | [點歌機器人 Music Bot 完整實作](#點歌機器人-music-bot-完整實作歸檔2026-04-18) | music, yt-dlp, DAVE, 按鈕面板, 快取, 音訊鏈路 |
+| 2026-04-18 | [幽靈點名系統核心實作](#幽靈點名系統核心實作歸檔2026-04-18) | rollcall, 抽選, 豁免期, 自動踢除, persistent view, 管理面板 |
 | 2026-04-07 | [Telegram media group 合併](#telegram-media-group-合併歸檔2026-04-07) | grouped_id, media group, 多圖合併, Discord 單則 |
 | 2026-04-06 | [Telegram embed title 修正](#telegram-embed-title-來源頻道名稱修正歸檔2026-04-06) | chat_title, embed title, 轉發頻道名稱 |
 | 2026-04-05 | [Bahamut 續文/多圖/並行/子看板等](#bahamut-續文多圖並行子看板等完成歸檔2026-04-05) | 續文, 多圖分批, semaphore, subbsn, category 黑名單 |
@@ -16,6 +19,254 @@
 | 2026-03-26 | [Telegram 已解決問題集](#telegram-relay-通道連線問題2026-03-26-已解決) | 通道連線, 媒體重複, 時序, 副檔名, route key |
 | 2026-03-25 | [Telegram Relay 設計定案](#telegram-relay-設計定案--架構設定相容流程盤點2026-03-25已完成歸檔) | 架構, config, 路由, 六層設計 |
 | 2026-03-22 | [Telegram Scraper 專案交接](#telegram-scraper-專案交接2026-03-22已完成歸檔) | Docker, 模組化, forward 過濾, session |
+
+---
+
+## Context/Prompt 完整重構 + askai 身份感（歸檔 2026-04-18）
+
+### 涵蓋範圍
+
+2026-04-15 ~ 2026-04-18 跨多輪會話完成：context/prompt 格式重構、on_message 持久化、自動人格萃取 pipeline、askai 體驗優化、LLM 服務穩定性修復、askai 發問者身份注入，以及 Bahamut relay 相關小修。
+
+### Context / Prompt 格式重構（2026-04-15 ~ 2026-04-16）
+
+**核心變更：**
+- 合併兩個 system message 為一個，避免部分模型只認最後一個 system
+- 移除 `_serialize_context_items()`（JSON 序列化），改純文字分區注入
+- `_build_prompt_bundle()` 接收 `chat_context`（純文字）+ `persona_context`（自然語言），分區 `<chat_history>` 和 `<other_member_profiles>`（後更名）
+- `llm_commands.py` 分開傳遞 discord_context 和 rag_context
+- `format_persona_cards_for_context()` 改自然語言輸出，regex 清理 DB 標記
+- persona card 別名對照：聊天記錄中用 alias_map 標註身份（`❤️柔柔喵❤️(柔喵, 阿喵)`）
+- persona card alias 優先用自我介紹的，其次才用 impression 的
+- `PERSONA_MAX_CARD_CHARS` 220→400、`PERSONA_MAX_IMPRESSIONS_PER_CARD` 2→3
+
+**貼圖描述整合：**
+- `src/llm/sticker_cache.py`（新增）— bot 啟動時預載 guild sticker name+description
+- `_build_discord_context_item()` 加入貼圖描述
+- `_persist_messages_to_pgvector()` 貼圖描述一起寫入 text
+
+**on_message 聊天持久化：**
+- `src/llm/chat_persistence.py`（新增）— buffer 批次寫入（滿 30 則或每 5 分鐘 flush）
+- `discord_bot.py` on_message 加入 enqueue_message + 定期 flush
+- 去重：共用 `_PERSISTED_MESSAGE_IDS`，on_message 和 /askai 不重複寫入
+- DB 層加 unique index `uniq_chat_message_id`，防止重啟後重複
+- insert exception 處理：單筆失敗不中斷整批
+
+**自動人格萃取 Pipeline：**
+- `src/llm/personality_extractor.py`（新增）— 從 pgvector 撈聊天、分組、呼叫 LLM 萃取
+- `intro_rag_port.py` 新增 `index_auto_personality()`
+- `persona_card_builder.py` 支援 `auto_personality` 類型
+- 萃取 prompt 外部化至 `src/settings/prompts/personality_extraction_prompt.json`
+- 自訂 emoji 語意字典 `src/settings/emoji_dictionary.txt`
+- 排程：每日 UTC+8 04:00 自動執行，用 `qwen2.5:14b`，每批 4 人
+
+**/askai 體驗優化：**
+- timeout 180→300 秒
+- 聊天抓取 50→100 則
+- 排隊人數顯示邏輯改為「先看再放」
+- 取消按鈕：AI 思考中可按取消，中斷 Ollama HTTP（釋放 GPU），cooldown 減半，後面排隊立即接上
+
+### 互動 UI / 人格萃取寫入（2026-04-17）
+
+- 確認 `/askai` 排隊/思考中提示、`/personality_extract` 啟動提示/查看結果/結果分頁皆為 ephemeral（屬正常互動訊息特性，不是聊天紀錄被清除）
+- 「寫入 RAG」加 ephemeral 進度訊息：每 3 筆刷新，完成後 edit 成 `✅ 已寫入 RAG：X 筆`；`save_personality_results` 新增 `progress_callback`；前景流程未動
+- `PgVectorIntroRAGPort` 3 個 `index_*` 改走 `_ainsert`（executor thread），解除 embedding HTTP + pgvector IO 對 event loop 的阻塞
+- `_get_index` 首次 init 加 `threading.Lock` 防 executor 多 thread race
+- `_get_embed_model` thread-safety：`_index_lock` 改 RLock，`_get_embed_model` 自身也上鎖（fast path 仍無鎖）
+
+### LLM 服務穩定性修復（2026-04-17）
+
+**Ollama embedding 崩潰溯源：**
+- 先判斷為 `bge-m3:latest` 模型壞 → 切換至 `qwen3-embedding:0.6b`（1024-dim 相同，pgvector schema 不動）
+- 後確認根因是 **Windows ephemeral port 池耗盡**（Ollama 主 process 連 runner subprocess 走 localhost HTTP，累積 TIME_WAIT 塞滿 port 池）
+- 針對 GitHub issue #7288 `GGML_ASSERT` 越界 bug：
+  - `src/llm/safe_ollama_embedding.py`（新增）：`SafeOllamaEmbedding(OllamaEmbedding)` 失敗時自動加空格 retry
+  - `chat_persistence` / `intro_rag_port` / `context_retriever` 全面改用 `SafeOllamaEmbedding`
+  - `scripts/reembed_pgvector.py` 同樣加空格 perturbation fallback
+
+**HTTP connection 重用：**
+- `reembed_pgvector.py`：整個 run 共用一個 `requests.Session()`
+- `intro_rag_port.py`：新增 module-level singleton `get_pgvector_intro_rag_port()`
+- `chat_persistence.py`：新增 `_get_chat_index()` 跨 `_sync_write_batch` / `_sync_update_batch` 共用 VectorStoreIndex
+- `context_retriever.py`：新增 `_get_or_build_vector_index(table_name, logger)` + `_VECTOR_INDEX_CACHE` 跨 `/askai` 共用，取代每次 new PGVectorStore + VectorStoreIndex
+
+**chat_persistence log 強化：**
+- `_sync_write_batch` log 從「新寫入 X 則」改為「新寫入 X / 已存在跳過 Y / 共 N」
+
+### askai 發問者身份注入 + Bahamut 相關修復（2026-04-18）
+
+**/askai 排隊顯示修正（前面 0 則 bug）：**
+- 原本只追蹤 queue 內 pending，忽略正在 GPU 執行的 item
+- `_AskaiQueue` 新增 `_processing` 欄位追蹤「已 get 但未 task_done」
+- `pending_summaries()` 把 `_processing` 納入：GPU 閒置 → 0；計算中 → ≥1
+
+**Bahamut 主文 `author_id` 修復：**
+- `fetch_bahamut_articles_with_content` 補 `article["author_id"] = detail.get("author_id") or article.get("author_id", "")`
+- 列表頁給的 key 是 `author_user_id`（不是 `author_id`），detail 補欄位時漏補 → 主文小屋連結消失
+- DB 既有 13590 筆空 author_id 會在文章下次有內容更新時自然補回並觸發 Discord edit 補上連結；冷門文維持現狀（已與使用者取得共識）
+
+**Bahamut 增量更新 429 治本（per-message 冷卻）：**
+- `_edit_with_cooldown(msg, **kwargs)` + 模組級 `_last_edit_ts: dict[int, float]`
+- 同一訊息兩次 edit 間隔強制 ≥ `MIN_EDIT_INTERVAL = 1.5s`（Discord per-message PATCH 限制約 5/5s）
+- 全檔 11 處 `.edit()` 全走 helper（主文、回覆、留言格、溢出格、續文、導航連結）
+
+**/askai 發問者身份注入：**
+- `_build_prompt_bundle` 新增 `asker_profile`（system block，可信）+ `asker_display_name`（`<latest_user_message from="...">` 屬性）
+- `_handle_askai_request` 組出 `<asker_profile>`，欄位含 display_name / user_id / `roles: (未啟用)` / persona_summary / current_time / guild_name / channel_name
+- persona_card 拆分：發問者本人的卡進 `asker_profile` 的 persona_summary，其餘進 `<other_member_profiles>`（標籤自 `<member_profiles>` 更名）
+- 撞名偵測：同 display_name 對多 author_id 時，chat_history 與 asker_profile display_name 尾加 `#xxxx`（user_id 末 4 碼）；不衝突零成本
+- `persona_card_builder.format_persona_cards_for_context` 每 item 保留 `person_id` 以供下游過濾
+- `context_retriever._build_discord_context_item` 回傳 dict 新增 `display_name` 欄位，避免下游從 content 字串 parse
+
+**Safety rules 與 askai system prompt 同步修飾：**
+- `untrusted_context_intro` 移除「JSON 格式」錯誤描述（實際是 XML 風格）
+- `system_safety_prompt` 補 `<asker_profile>` 白名單與 `<latest_user_message>` from 屬性說明
+- 禁詞「使用者ID」→「對外揭露的使用者ID」，避免與內部注入衝突
+
+### 涉及檔案
+
+| 檔案 | 角色 |
+|---|---|
+| `src/services/llm_service.py` | prompt bundle 重構、asker_profile 參數 |
+| `src/commands/llm_commands.py` | context 分離、asker_profile 組裝、撞名偵測、排隊顯示修正、取消按鈕 |
+| `src/llm/persona_card_builder.py` | 自然語言化、person_id 保留 |
+| `src/llm/context_retriever.py` | 貼圖描述、display_name 保留、vector index cache |
+| `src/llm/chat_persistence.py` | buffer 批次寫入、SafeOllamaEmbedding |
+| `src/llm/intro_rag_port.py` | _ainsert、singleton、index_auto_personality |
+| `src/llm/personality_extractor.py` | 人格萃取 pipeline |
+| `src/llm/sticker_cache.py` | guild sticker 預載 |
+| `src/llm/safe_ollama_embedding.py` | Ollama 空格 perturbation fallback |
+| `src/discord_bot.py` | sticker 預載、chat flush、萃取排程 |
+| `src/services/bahamut_monitor.py` | _edit_with_cooldown、per-message 冷卻 |
+| `src/scraper/services/bahamut_scraper_service.py` | 主文 author_id 補欄位 |
+| `src/settings/prompts/askai_system_prompt.txt` | 禁詞修飾 |
+| `src/settings/prompts/llm_context_safety_rules.json` | untrusted intro + asker_profile 白名單 |
+| `src/settings/prompts/personality_extraction_prompt.json` | 萃取 prompt |
+| `src/settings/emoji_dictionary.txt` | emoji 語意字典 |
+| `src/sys_settings/llm_settings.py` | timeout、抓取數量 |
+| `src/scripts/reembed_pgvector.py` | 重新嵌入既有向量（加空格 fallback + session 重用） |
+
+---
+
+## 點歌機器人 Music Bot 完整實作（歸檔 2026-04-18）
+
+> 核心功能已上線運作（P0 完成、P1 主體完成），部署後持續運行中。
+> 剩餘 P1 體驗優化（pause/resume、多歌單、快取 LRU）與 P2 進階功能（播放紀錄、點歌統計、DAVE 加速追蹤）仍保留在 handoff `點歌機器人 TODO` 區塊。
+
+### 架構
+
+- 模組位置：`src/music/`（9 個檔案）
+- 入口橋接：`src/commands/music_commands.py` → `MusicCog`
+- 頻道設定：`config.json` 的 `music_voice_channel_id`（由 `/server_manager` 設定）
+- 歌單設定：`src/settings/music_runtime.json` 的 `default_playlist_url`
+- hot reload watcher：同時監控 `config.json` + `music_runtime.json`，變更後自動重連
+- 依賴：`yt-dlp`、`discord.py[voice]>=2.7.1`、`davey>=0.1.5`（DAVE 加密）、`FFmpeg`
+
+### 設計決策
+
+- **只需設定一個語音頻道**：`voice_channel_id` 同時用於加入語音、發送面板
+- **語音頻道內建聊天**：Discord 語音頻道自帶文字聊天，與語音頻道共用同一 ID
+- **按鈕面板取代 slash command**：控制面板（點歌/跳過/停止/重播/歌單）在語音頻道聊天內自動 bump
+- **點歌用 Modal**：按「點歌」按鈕 → 彈出輸入框，支援 URL 或關鍵字
+- **點歌排隊不打斷**：點歌加入插播佇列，當前歌曲播完才播點的歌
+- **停止只清插播**：停止按鈕只清除使用者點的歌，預設歌單保留
+- **本地快取**：首次串流播放 + 背景下載到 `src/music/cache/`，之後從本地播放
+- **快取峰值正規化**：快取播放時掃描峰值，等比例增益對齊 -1dB，保留原始動態
+- **無 cookie**：小規模使用不需登入
+- **FFmpegPCMAudio**：DAVE 加密下最穩定（FFmpegOpusAudio 在 DAVE 下會斷續爆音）
+
+### 已實作功能
+
+- 按鈕控制面板（點歌 / 跳過 / 停止 / 重播 / 歌單）— persistent view
+- 點歌 Modal — 支援 YouTube URL 或關鍵字搜尋（`ytsearch`）
+- 點歌排隊 — 不打斷當前播放，顯示排隊順位
+- 重播按鈕 — 刪除快取 + 重新從 YouTube 抓取並播放當前歌曲
+- 換歌自動 bump — 刪舊面板 → 發新面板（「現在播放」embed + 按鈕 + 縮圖）
+- 待機面板 — 無歌曲時顯示待機狀態 + 按鈕
+- 雙佇列 — 主歌單（循環）+ 插播（優先，不循環）
+- 預設歌單自動載入（`extract_flat` 快速解析，邊載入邊播放）
+- 本地快取（`src/music/cache/`，opus 原始品質，零損失）
+- 快取峰值正規化（`volumedetect` + `volume` 濾鏡，等比例增益）
+- 預先快取（prefetch 接下來 3 首，減少切歌延遲）
+- 下載限速 3MB/s + Semaphore 同時只 1 個下載（避免搶串流頻寬）
+- 版權/私人/已刪除影片自動跳過 + embed 通知 + 從歌單移除
+- Runtime 配置 hot reload（config.json + music_runtime.json）
+- `/server_manager` 頻道設定整合（語音頻道選項）
+- YouTube 縮圖修復（`extract_flat` 模式用 `i.ytimg.com` 組合）
+- 歌單查看（按鈕，ephemeral 回覆）
+- `voice_lock` 防止重入式 connect/disconnect
+- `requeue_song` 播放失敗時歌曲放回佇列前端（防掉歌）
+- voice reconnect 死循環修復（guild.voice_client 認領機制，防止 Already connected 無限 error loop 灌爆 Docker log，2026-04-12）
+- DAVE 加密協定支援（davey 0.1.5）
+- 非同步歌單載入（不阻塞點歌）
+
+### 音訊品質鏈路
+
+```
+YouTube (opus 160kbps, format 251)
+  ↓ 串流播放：yt-dlp extract_single → ffmpeg PCM 48kHz → discord.py encoder → DAVE → Discord
+  ↓ 快取下載：yt-dlp download (opus copy, 限速 3MB/s) → src/music/cache/{id}.opus
+  ↓ 快取播放：本地 opus → ffmpeg PCM 48kHz + volume 正規化 → discord.py encoder → DAVE → Discord
+```
+
+### 已知限制
+
+- **DAVE 加密偶爾造成特定區段短暫加速**：discord.py AudioPlayer 的 20ms frame timing 在 DAVE 加密耗時過長時會追趕（`delay = max(0, ...)`），屬於 library 層級問題，非程式碼可解
+- **YouTube 來源最高 opus 160kbps**：瀏覽器聽到的差異來自客戶端音效處理，非來源品質差異
+- **FFmpegOpusAudio 在 DAVE 下不可用**：會斷續爆音，必須走 FFmpegPCMAudio + discord.py 內建 encoder
+- **歌單中的版權/私人影片**：自動跳過並通知，無法繞過
+
+### Config 說明
+
+頻道 ID 存在 `config.json`（與其他頻道設定一致）：
+```json
+{ "music_voice_channel_id": 1489909579927257130 }
+```
+
+歌單存在 `src/settings/music_runtime.json`：
+```json
+{ "music": { "default_playlist_url": "https://..." } }
+```
+
+---
+
+## 幽靈點名系統核心實作（歸檔 2026-04-18）
+
+> 核心 P0 已實作（除部署驗證外全部完成）。剩餘 P0 部署驗證 + P1 體驗優化（`/server_manager` 整合、踢除前 DM 警告）仍保留在 handoff `幽靈點名 TODO` 區塊。
+
+### 架構
+
+- 服務層：`src/services/rollcall_service.py`（抽選、到期掃描、踢除、豁免）
+- Cog 層：`src/commands/rollcall_commands.py`（persistent views + `/rollcall_panel` 指令）
+- Runtime 狀態：`src/settings/rollcall_runtime.json`（pending、immunity、stats、panel message ID）
+- Config 欄位：`config.json` 的 `rollcall_channel_id`、`rollcall_target_role_ids`
+
+### 設計決策
+
+- **每 7 天抽 10 人**：UTC+8 14:00 自動執行，`PICK_INTERVAL_DAYS=7`
+- **手動/自動點名分開記錄**：手動點名記 `last_manual_rollcall_date`（不推遲自動排程），自動點名記 `last_rollcall_date`；同日有手動點名時自動排程跳過，避免重複（2026-04-12 修復）
+- **7 天回覆期限**：逾期自動踢除
+- **30 天豁免期**：通過點名後 30 天內不再被抽到，期滿後重新進入抽選池
+- **排除管理員與 Bot**：不會被抽到
+- **排除已 pending / 豁免中成員**：不重複點名
+- **persistent view**：Bot 重啟後按鈕仍可用
+- **管理面板**：在指定頻道放置控制面板，管理員可開關自動點名、手動發動、查看待回覆清單
+
+### 管理面板按鈕
+
+| 按鈕 | 功能 |
+|---|---|
+| ✅ 開啟 | 啟用自動每日點名 |
+| ❌ 關閉 | 停用自動每日點名 |
+| 🎲 手動點名 | 立即抽選 10 人 |
+| 📋 待回覆清單 | 查看所有待回覆的成員與剩餘天數 |
+| 🔄 刷新狀態 | 更新面板顯示 |
+
+### 使用方式
+
+1. 在 `config.json` 設定 `rollcall_channel_id`（點名訊息頻道）和 `rollcall_target_role_ids`（目標身份組 ID 陣列）
+2. 管理員在想要放置控制面板的頻道執行 `/rollcall_panel`
+3. 透過面板按鈕開啟/關閉自動點名，或手動發動
 
 ---
 

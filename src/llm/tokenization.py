@@ -13,29 +13,32 @@ def _normalize_retrieval_text(text: str) -> str:
     return " ".join(normalized.split())
 
 
-def tokenize_for_retrieval(text: str) -> set[str]:
-    """簡易分詞：中英數混合 + 中文 n-gram，供 BM25 使用。"""
+def tokenize_for_retrieval(text: str) -> list[str]:
+    """簡易分詞：中英數混合 + 中文 n-gram，供 BM25 使用。
+
+    回傳 list 而非 set，保留重複 token。BM25 的 TF 分量依賴重複次數，
+    若去重會讓長訊息的 term frequency 一律視為 1，排名偏弱。
+    """
     normalized = _normalize_retrieval_text(text)
-    tokens: set[str] = set()
+    tokens: list[str] = []
 
     # 英數 token
-    tokens.update(re.findall(r"[a-z0-9_]{2,}", normalized))
+    tokens.extend(re.findall(r"[a-z0-9_]{2,}", normalized))
 
     # 中文片段 token + bi/tri-gram
     zh_chunks = re.findall(r"[\u4e00-\u9fff]+", normalized)
     for chunk in zh_chunks:
         if len(chunk) >= 2:
-            tokens.add(chunk)
-        if len(chunk) >= 2:
+            tokens.append(chunk)
             for i in range(len(chunk) - 1):
-                tokens.add(chunk[i:i + 2])
+                tokens.append(chunk[i:i + 2])
         if len(chunk) >= 3:
             for i in range(len(chunk) - 2):
-                tokens.add(chunk[i:i + 3])
+                tokens.append(chunk[i:i + 3])
 
-    return {t for t in tokens if len(t) >= 2}
+    return [t for t in tokens if len(t) >= 2]
 
 
 def tokens_for_debug(text: str) -> list[str]:
-    """回傳排序後 token，供檢索除錯輸出使用。"""
-    return sorted(tokenize_for_retrieval(text))
+    """回傳去重後排序的 token，供檢索除錯輸出使用。"""
+    return sorted(set(tokenize_for_retrieval(text)))

@@ -13,6 +13,7 @@ Workaround：若 embedding 呼叫失敗，把 text 加一個空格（尾或前�
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Callable, TypeVar
 
 from llama_index.embeddings.ollama import OllamaEmbedding
@@ -22,6 +23,14 @@ logger = logging.getLogger("discord_bot")
 # 繞過順序：先試尾空格（多數狀況能救），再試前空格
 _PERTURBATION_SUFFIXES: tuple[str, ...] = (" ",)
 _PERTURBATION_PREFIXES: tuple[str, ...] = (" ",)
+
+# 全域 embedding 並發上限（client 端序列化）。
+# 對齊 OLLAMA_NUM_PARALLEL=1：兩邊一致避免 queue 堆到 server 端。AMD Vulkan backend
+# 在 KV cache 倍增時容易觸發 allocator fragmentation → runner crash，此處保守化。
+# Plan C 後 /askai 只需 1 次 embed（問題），on_message flush 本來就 sequential，1 足夠。
+# 若 server 端  OLLAMA_NUM_PARALLEL 升級，請同步調整此值。
+_EMBED_CONCURRENCY = 1
+_EMBED_SEMAPHORE = threading.Semaphore(_EMBED_CONCURRENCY)
 
 _T = TypeVar("_T")
 
@@ -76,49 +85,53 @@ def embed_with_perturbation_retry(
 
 
 class SafeOllamaEmbedding(OllamaEmbedding):
-    """OllamaEmbedding + 空格 perturbation retry。內部轉用共用 `embed_with_perturbation_retry` helper。"""
+    """OllamaEmbedding + 空格 perturbation retry + 全域並發上限（semaphore）。
+
+    所有 embed 呼叫都經過 `_EMBED_SEMAPHORE` 限流，同時最多 N 個 request 打 Ollama。
+    batch 方法（`_get_text_embeddings`）只在最外層 acquire 一次，避免巢狀持鎖。
+    """
 
     def _get_text_embedding(self, text: str) -> list[float]:
-        return embed_with_perturbation_retry(
-            super()._get_text_embedding, text,
-            context_label="SafeOllamaEmbedding.text",
-        )
+        with _EMBED_SEMAPHORE:
+            return embed_with_perturbation_retry(
+                super()._get_text_embedding, text,
+                context_label="SafeOllamaEmbedding.text",
+            )
 
     def _get_query_embedding(self, query: str) -> list[float]:
-        return embed_with_perturbation_retry(
-            super()._get_query_embedding, query,
-            context_label="SafeOllamaEmbedding.query",
-        )
+        with _EMBED_SEMAPHORE:
+            return embed_with_perturbation_retry(
+                super()._get_query_embedding, query,
+                context_label="SafeOllamaEmbedding.query",
+            )
 
     def _get_text_embeddings(self, texts: list[str]) -> list[list[float]]:
-        try:
-            return super()._get_text_embeddings(texts)
-        except Exception as exc:
-            logger.warning(
-                "SafeOllamaEmbedding: batch 失敗（size=%d），改逐筆 + perturbation: %s",
-                len(texts), exc,
-            )
-            return [self._get_text_embedding(t) for t in texts]
+        # batch 層持鎖一次；batch 失敗走逐筆 fallback 時，我們先釋放再讓內層 acquire，
+        # 避免同一執行緒重入 semaphore（threading.Semaphore 非 reentrant）。
+        with _EMBED_SEMAPHORE:
+            try:
+                return super()._get_text_embeddings(texts)
+            except Exception as exc:
+                logger.warning(
+                    "SafeOllamaEmbedding: batch 失敗（size=%d），改逐筆 + perturbation: %s",
+                    len(texts), exc,
+                )
+        return [self._get_text_embedding(t) for t in texts]
 
     async def _aget_text_embedding(self, text: str) -> list[float]:
         try:
             return await super()._aget_text_embedding(text)
         except Exception:
-            # async fallback 直接走 sync helper（Ollama 崩潰場景本來就無法 async 快速恢復，
-            # 切 sync retry 避免重複實作兩套 perturbation 邏輯）
-            return embed_with_perturbation_retry(
-                super()._get_text_embedding, text,
-                context_label="SafeOllamaEmbedding.async_text",
-            )
+            # async fallback 走 sync helper（Ollama 崩潰場景本來就無法 async 快速恢復，
+            # 切 sync retry 避免重複實作兩套 perturbation 邏輯）。
+            # 這裡直接呼叫 self._get_text_embedding 取得 semaphore 限流。
+            return self._get_text_embedding(text)
 
     async def _aget_query_embedding(self, query: str) -> list[float]:
         try:
             return await super()._aget_query_embedding(query)
         except Exception:
-            return embed_with_perturbation_retry(
-                super()._get_query_embedding, query,
-                context_label="SafeOllamaEmbedding.async_query",
-            )
+            return self._get_query_embedding(query)
 
     def _get_agg_embedding_from_queries(
         self, queries: list[str], agg_fn: Any = None,

@@ -154,6 +154,13 @@ async def on_ready():
                     # 執行萃取（取第一個 guild）
                     guild = bot.guilds[0] if bot.guilds else None
                     if guild:
+                        # 先掃本 guild 的 custom emoji，補齊字典待填項目
+                        try:
+                            from llm.personality_extractor import refresh_emoji_dictionary
+                            refresh_emoji_dictionary(guild)
+                        except Exception as exc:
+                            logger.warning("emoji 字典自動更新失敗: %s", exc)
+
                         from llm.personality_extractor import run_personality_extraction
                         results = await run_personality_extraction(
                             guild=guild,
