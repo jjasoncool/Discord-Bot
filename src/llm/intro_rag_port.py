@@ -5,8 +5,10 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import threading
 from typing import Protocol, runtime_checkable
 
 from sys_settings.llm_settings import LLMServiceSettings, load_ollama_runtime_config
@@ -16,12 +18,12 @@ import psycopg2
 
 try:
     from llama_index.core import Document, VectorStoreIndex
-    from llama_index.embeddings.ollama import OllamaEmbedding
     from llama_index.vector_stores.postgres import PGVectorStore
+    from llm.safe_ollama_embedding import SafeOllamaEmbedding
 except Exception:  # pragma: no cover - 依賴可能在部份環境尚未安裝
     Document = None
     VectorStoreIndex = None
-    OllamaEmbedding = None
+    SafeOllamaEmbedding = None
     PGVectorStore = None
 
 
@@ -134,6 +136,9 @@ class PgVectorIntroRAGPort:
         self._embed_model_name: str | None = None
         self._index = None
         self._schema_ready = False
+        # 保護 _get_index / _get_embed_model 的 lazy init 與熱切換，避免多 thread race。
+        # 用 RLock 允許 _get_index 持有 lock 時呼叫 _get_embed_model（後者也會 acquire 同一把）。
+        self._index_lock = threading.RLock()
 
     def _get_physical_table_name(self) -> str:
         """LlamaIndex PGVectorStore 的實體表名稱通常為 data_<table_name>。"""
@@ -236,7 +241,7 @@ class PgVectorIntroRAGPort:
             logger.error("刪除舊 Intro RAG 文件失敗: doc_id=%s err=%s", doc_id, exc, exc_info=True)
 
     def _dependencies_ready(self) -> bool:
-        if any(dep is None for dep in (Document, VectorStoreIndex, OllamaEmbedding, PGVectorStore)):
+        if any(dep is None for dep in (Document, VectorStoreIndex, SafeOllamaEmbedding, PGVectorStore)):
             logger.warning("Intro RAG 依賴未就緒，略過 pgvector 寫入。")
             return False
         return True
@@ -244,39 +249,51 @@ class PgVectorIntroRAGPort:
     def _get_embed_model(self):
         runtime_config = load_ollama_runtime_config(self.settings.ollama_runtime_model_path)
         embed_model_name = runtime_config.embed_model
+        # Fast path：model 沒變直接返回，不進 lock
         if self._embed_model is not None and self._embed_model_name == embed_model_name:
             return self._embed_model
 
-        self._embed_model = OllamaEmbedding(
-            model_name=embed_model_name,
-            base_url=self.settings.ollama_base_url,
-            request_timeout=self.settings.ollama_timeout,
-        )
-        self._embed_model_name = embed_model_name
-        self._index = None
-        return self._embed_model
+        # 首次 init 或 runtime 熱切換 → 進 lock 保護 mutation
+        # （self._embed_model / self._embed_model_name / self._index 三個欄位）
+        with self._index_lock:
+            if self._embed_model is not None and self._embed_model_name == embed_model_name:
+                return self._embed_model
+            self._embed_model = SafeOllamaEmbedding(
+                model_name=embed_model_name,
+                base_url=self.settings.ollama_base_url,
+                request_timeout=self.settings.ollama_timeout,
+            )
+            self._embed_model_name = embed_model_name
+            self._index = None
+            return self._embed_model
 
     def _get_index(self):
+        # Fast path：已 init 過直接返回，不進 lock
         if self._index is not None:
             return self._index
 
-        embed_model = self._get_embed_model()
-        vector_store = PGVectorStore.from_params(
-            database=self.settings.pgvector_db,
-            host=self.settings.pgvector_host,
-            password=self.settings.pgvector_password,
-            port=self.settings.pgvector_port,
-            user=self.settings.pgvector_user,
-            table_name=self.table_name,
-            embed_dim=self.embed_dim,
-            hybrid_search=True,
-        )
-        self._index = VectorStoreIndex.from_vector_store(
-            vector_store=vector_store,
-            embed_model=embed_model,
-        )
-        self._ensure_schema_constraints()
-        return self._index
+        # 首次 init 由 lock 保護；double-checked 避免 lock 釋放後重複建立
+        with self._index_lock:
+            if self._index is not None:
+                return self._index
+
+            embed_model = self._get_embed_model()
+            vector_store = PGVectorStore.from_params(
+                database=self.settings.pgvector_db,
+                host=self.settings.pgvector_host,
+                password=self.settings.pgvector_password,
+                port=self.settings.pgvector_port,
+                user=self.settings.pgvector_user,
+                table_name=self.table_name,
+                embed_dim=self.embed_dim,
+                hybrid_search=True,
+            )
+            self._index = VectorStoreIndex.from_vector_store(
+                vector_store=vector_store,
+                embed_model=embed_model,
+            )
+            self._ensure_schema_constraints()
+            return self._index
 
     def _insert(self, *, doc_id: str, text: str, metadata: dict[str, str]) -> None:
         index = self._get_index()
@@ -288,6 +305,18 @@ class PgVectorIntroRAGPort:
             metadata=metadata,
         )
         index.insert(doc)
+
+    async def _ainsert(self, *, doc_id: str, text: str, metadata: dict[str, str]) -> None:
+        """把同步 _insert 丟到 executor thread，避免阻塞 event loop。
+
+        _insert 內含 embedding HTTP + pgvector DELETE/INSERT 皆為同步 IO，
+        直接 await 會讓整個 event loop 停住（影響語音 heartbeat / 其他 callback）。
+        """
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: self._insert(doc_id=doc_id, text=text, metadata=metadata),
+        )
 
     async def index_intro_profile(
         self,
@@ -321,7 +350,7 @@ class PgVectorIntroRAGPort:
                 "wuwa_uid": wuwa_uid or "",
             }
             doc_id = f"intro_profile:{guild_id}:{author_id}"
-            self._insert(doc_id=doc_id, text=text, metadata=metadata)
+            await self._ainsert(doc_id=doc_id, text=text, metadata=metadata)
         except Exception as exc:
             logger.error("寫入 intro profile 至 pgvector 失敗: %s", exc, exc_info=True)
 
@@ -363,7 +392,7 @@ class PgVectorIntroRAGPort:
                         continue
                     metadata[str(key)] = str(value)
             doc_id = f"impression:{guild_id}:{author_id}:{target_user_id}"
-            self._insert(doc_id=doc_id, text=text, metadata=metadata)
+            await self._ainsert(doc_id=doc_id, text=text, metadata=metadata)
         except Exception as exc:
             logger.error("寫入 member impression 至 pgvector 失敗: %s", exc, exc_info=True)
 
@@ -392,6 +421,27 @@ class PgVectorIntroRAGPort:
                 "alias": alias or "",
             }
             doc_id = f"auto_personality:{guild_id}:{author_id}"
-            self._insert(doc_id=doc_id, text=text, metadata=metadata)
+            await self._ainsert(doc_id=doc_id, text=text, metadata=metadata)
         except Exception as exc:
             logger.error("寫入 auto personality 至 pgvector 失敗: %s", exc, exc_info=True)
+
+
+# --- module-level singleton ---
+# 為什麼：原本每個呼叫端 (`personality_extractor`, `management_commands`)
+# 都 new 一個 PgVectorIntroRAGPort，每個 instance 有自己的 _index / embed_model，
+# 每次呼叫 index.insert 都會開新的 HTTP 連線打 Ollama；
+# 大量請求下會塞爆 Windows ephemeral port 池（TIME_WAIT socket 累積）。
+# 改為全 process 共用單一 instance，內部 index 物件被 LlamaIndex 的 HTTP client 重用。
+_pgvector_intro_rag_port_singleton: PgVectorIntroRAGPort | None = None
+_singleton_lock = threading.Lock()
+
+
+def get_pgvector_intro_rag_port() -> PgVectorIntroRAGPort:
+    """取得 PgVectorIntroRAGPort 單例。"""
+    global _pgvector_intro_rag_port_singleton
+    if _pgvector_intro_rag_port_singleton is not None:
+        return _pgvector_intro_rag_port_singleton
+    with _singleton_lock:
+        if _pgvector_intro_rag_port_singleton is None:
+            _pgvector_intro_rag_port_singleton = PgVectorIntroRAGPort()
+        return _pgvector_intro_rag_port_singleton

@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Any
+from typing import Any, Awaitable, Callable, Protocol
 
 import psycopg2
 
@@ -17,14 +17,34 @@ from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
 
 logger = logging.getLogger("discord_bot")
 
+
+class PersonalityExtractionInProgressError(RuntimeError):
+    """已有其他人格萃取流程正在執行。"""
+
+
+class PersonalityExtractionProgressCallback(Protocol):
+    """人格萃取進度回報 callback。"""
+
+    def __call__(
+        self,
+        *,
+        stage: str,
+        model: str,
+        total_users: int,
+        completed_users: int,
+        current_batch: int,
+        total_batches: int,
+    ) -> None: ...
+
 # 萃取設定
 EXTRACT_DAYS = 14  # 取最近幾天的聊天
 MIN_MESSAGES_PER_USER = 10  # 低於此數的使用者不分析
-BATCH_SIZE = 4  # 每批送幾個人給 LLM
+BATCH_SIZE = 3  # 每批送幾個人給 LLM
 MAX_PERSONALITY_CHARS = 100  # 每人描述上限
 
 _EXTRACT_PROMPT_PATH = "/app/settings/prompts/personality_extraction_prompt.json"
 _extract_prompts: dict[str, str] | None = None
+_extraction_running = False  # 防止同時跑多個人格萃取（僅限單一 process）
 
 
 def _load_extract_prompts() -> dict[str, str]:
@@ -178,10 +198,8 @@ def _clean_text_for_extraction(text: str) -> str:
     import re
     # Discord 自訂 emoji：查字典替換，沒有的移除
     text = re.sub(r"<a?:(\w+):\d+>", _replace_custom_emoji, text)
-    # 移除 Discord CDN URL
-    text = re.sub(r"https?://(?:cdn\.)?discord(?:app)?\.com/\S+", "", text)
-    # 移除其他 URL
-    text = re.sub(r"https?://\S+", "[連結]", text)
+    # 移除所有 URL（對人格分析無用，且模型容易誤判為「分享音樂/資訊」）
+    text = re.sub(r"https?://\S+", "", text)
     # 移除 Discord mention <@id> 保留可讀形式
     text = re.sub(r"<@!?(\d+)>", "@某人", text)
     # 壓縮空白
@@ -212,6 +230,7 @@ async def extract_personalities(
     user_groups: dict[str, list[dict[str, str]]],
     user_aliases: dict[str, str],
     model: str,
+    progress_callback: PersonalityExtractionProgressCallback | None = None,
 ) -> dict[str, dict[str, str]]:
     """呼叫 LLM 萃取人格特徵。
 
@@ -223,10 +242,32 @@ async def extract_personalities(
 
     user_ids = list(user_groups.keys())
     results: dict[str, dict[str, str]] = {}
+    total_batches = (len(user_ids) + BATCH_SIZE - 1) // BATCH_SIZE if user_ids else 0
+
+    if progress_callback:
+        progress_callback(
+            stage="preparing",
+            model=model,
+            total_users=len(user_ids),
+            completed_users=0,
+            current_batch=0,
+            total_batches=total_batches,
+        )
 
     for batch_start in range(0, len(user_ids), BATCH_SIZE):
         batch_ids = user_ids[batch_start:batch_start + BATCH_SIZE]
         batch_id_set = set(batch_ids)
+        current_batch = batch_start // BATCH_SIZE + 1
+
+        if progress_callback:
+            progress_callback(
+                stage="calling_llm",
+                model=model,
+                total_users=len(user_ids),
+                completed_users=len(results),
+                current_batch=current_batch,
+                total_batches=total_batches,
+            )
 
         # 收集這批人的所有訊息（保持時序）
         batch_messages = [
@@ -301,12 +342,31 @@ async def extract_personalities(
 
             logger.info(
                 "人格萃取批次完成: batch=%d/%d, extracted=%d",
-                batch_start // BATCH_SIZE + 1,
-                (len(user_ids) + BATCH_SIZE - 1) // BATCH_SIZE,
+                current_batch,
+                total_batches,
                 len([uid for uid in batch_ids if uid in results]),
             )
+            if progress_callback:
+                progress_callback(
+                    stage="batch_done",
+                    model=model,
+                    total_users=len(user_ids),
+                    completed_users=len(results),
+                    current_batch=current_batch,
+                    total_batches=total_batches,
+                )
         except Exception as exc:
             logger.error("人格萃取呼叫失敗: %s", exc, exc_info=True)
+
+    if progress_callback:
+        progress_callback(
+            stage="finished",
+            model=model,
+            total_users=len(user_ids),
+            completed_users=len(results),
+            current_batch=total_batches,
+            total_batches=total_batches,
+        )
 
     return results
 
@@ -372,20 +432,53 @@ async def run_personality_extraction(
     days: int = EXTRACT_DAYS,
     channel_ids: list[str] | None = None,
     model: str | None = None,
+    write_rag: bool = True,
+    progress_callback: PersonalityExtractionProgressCallback | None = None,
 ) -> dict[str, dict[str, str]]:
-    """完整的萃取流程：撈資料 → 分組 → 萃取 → 寫入 RAG。
+    """完整的人格萃取流程：撈資料 → 分組 → 萃取 → 寫入 RAG。
 
     guild: discord.Guild 物件，用於反查 display_name
     回傳 {author_id: {"alias": str, "personality": str}}
     """
-    from llm.intro_rag_port import PgVectorIntroRAGPort
+    global _extraction_running
+    if _extraction_running:
+        logger.warning("人格萃取：已有萃取正在執行，拒絕重複啟動")
+        raise PersonalityExtractionInProgressError("人格萃取正在執行中")
+    _extraction_running = True
 
+    try:
+        return await _run_personality_extraction_impl(
+            guild=guild, days=days, channel_ids=channel_ids,
+            model=model, write_rag=write_rag, progress_callback=progress_callback,
+        )
+    finally:
+        _extraction_running = False
+
+
+async def _run_personality_extraction_impl(
+    *,
+    guild: Any,
+    days: int = EXTRACT_DAYS,
+    channel_ids: list[str] | None = None,
+    model: str | None = None,
+    write_rag: bool = True,
+    progress_callback: PersonalityExtractionProgressCallback | None = None,
+) -> dict[str, dict[str, str]]:
     # 解析模型：呼叫端指定 > config personality_model > config 主 model
     if not model:
         settings = LLMServiceSettings()
         runtime_config = load_ollama_runtime_config(settings.ollama_runtime_model_path)
         model = runtime_config.personality_model or runtime_config.model
     logger.info("人格萃取：使用模型 %s", model)
+    if progress_callback:
+        progress_callback(
+            stage="initializing",
+            model=model,
+            total_users=0,
+            completed_users=0,
+            current_batch=0,
+            total_batches=0,
+        )
 
     # 1. 撈聊天記錄
     messages = fetch_recent_messages(days=days, channel_ids=channel_ids)
@@ -400,18 +493,47 @@ async def run_personality_extraction(
         logger.info("人格萃取：無符合門檻的使用者（最少 %d 則）", MIN_MESSAGES_PER_USER)
         return {}
     logger.info("人格萃取：%d 位使用者符合分析門檻", len(user_groups))
+    if progress_callback:
+        total_batches = (len(user_groups) + BATCH_SIZE - 1) // BATCH_SIZE if user_groups else 0
+        progress_callback(
+            stage="grouped",
+            model=model,
+            total_users=len(user_groups),
+            completed_users=0,
+            current_batch=0,
+            total_batches=total_batches,
+        )
 
-    # 3. 反查 display_name（guild member 優先，fallback 到 DB alias）
+    # 3. 反查 display_name（cache 優先，miss 再並行打 API，最後 fallback DB alias）
     user_aliases: dict[str, str] = {}
     db_aliases = _fetch_aliases_from_db()
+    missing_uids: list[str] = []
     for uid in user_groups:
         member = guild.get_member(int(uid)) if guild else None
         if member:
             user_aliases[uid] = getattr(member, "display_name", member.name)
-        elif uid in db_aliases:
-            user_aliases[uid] = db_aliases[uid]
         else:
-            user_aliases[uid] = f"user_{uid[-4:]}"
+            missing_uids.append(uid)
+
+    if guild and missing_uids:
+        import asyncio as _aio
+        sem = _aio.Semaphore(5)
+
+        async def _fetch_one(uid: str):
+            async with sem:
+                try:
+                    return uid, await guild.fetch_member(int(uid))
+                except Exception:
+                    return uid, None
+
+        fetched = await _aio.gather(*[_fetch_one(uid) for uid in missing_uids])
+        for uid, member in fetched:
+            if member:
+                user_aliases[uid] = getattr(member, "display_name", member.name)
+
+    for uid in user_groups:
+        if uid not in user_aliases:
+            user_aliases[uid] = db_aliases.get(uid, f"user_{uid[-4:]}")
 
     # 4. 呼叫 LLM 萃取
     results = await extract_personalities(
@@ -419,24 +541,47 @@ async def run_personality_extraction(
         user_groups=user_groups,
         user_aliases=user_aliases,
         model=model,
+        progress_callback=progress_callback,
     )
     logger.info("人格萃取：成功萃取 %d / %d 位使用者", len(results), len(user_groups))
 
-    # 5. 寫入 RAG
-    if results and guild:
-        rag_port = PgVectorIntroRAGPort()
-        written = 0
-        for uid, data in results.items():
-            try:
-                await rag_port.index_auto_personality(
-                    guild_id=guild.id,
-                    author_id=int(uid),
-                    alias=data["alias"],
-                    personality=data["personality"],
-                )
-                written += 1
-            except Exception as exc:
-                logger.error("寫入 auto_personality 失敗: uid=%s err=%s", uid, exc)
+    # 5. 寫入 RAG（可透過 write_rag=False 跳過，供預覽用）
+    if write_rag and results and guild:
+        written = await save_personality_results(guild_id=guild.id, results=results)
         logger.info("人格萃取：寫入 RAG %d 筆", written)
 
     return results
+
+
+async def save_personality_results(
+    *,
+    guild_id: int,
+    results: dict[str, dict[str, str]],
+    progress_callback: Callable[[int, int], Awaitable[None]] | None = None,
+) -> int:
+    """將萃取結果寫入 RAG，回傳寫入數量。
+
+    progress_callback: 每寫完一筆（不論成功/失敗）呼叫一次，收到 (written_success, total)。
+    callback 內的例外會被吞掉，避免拖累寫入主流程。
+    """
+    from llm.intro_rag_port import get_pgvector_intro_rag_port
+    rag_port = get_pgvector_intro_rag_port()
+    written = 0
+    total = len(results)
+    for uid, data in results.items():
+        try:
+            await rag_port.index_auto_personality(
+                guild_id=guild_id,
+                author_id=int(uid),
+                alias=data["alias"],
+                personality=data["personality"],
+            )
+            written += 1
+        except Exception as exc:
+            logger.error("寫入 auto_personality 失敗: uid=%s err=%s", uid, exc)
+        if progress_callback:
+            try:
+                await progress_callback(written, total)
+            except Exception as exc:
+                logger.warning("save_personality_results progress_callback 失敗: %s", exc)
+    return written

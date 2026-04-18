@@ -8,6 +8,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
+from sys_settings.llm_settings import LLMServiceSettings, load_ollama_runtime_config
 from utils.logger_config import get_discord_bot_logger
 from utils.utils import safe_send_interaction_message
 from services.telegram_relay_service import (
@@ -25,6 +26,7 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 
 # 設置日誌系統（使用統一配置）
 logger = get_discord_bot_logger()
+LLM_SETTINGS = LLMServiceSettings()
 
 # 記錄環境變數和系統信息（安全方式）
 logger.info(f"Discord 機器人啟動於 {time.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -157,6 +159,16 @@ async def on_ready():
                             guild=guild,
                             days=14,
                         )
+                        personality_cog = bot.get_cog("PersonalityCommands")
+                        if personality_cog:
+                            runtime_config = load_ollama_runtime_config(LLM_SETTINGS.ollama_runtime_model_path)
+                            scheduled_model = runtime_config.personality_model or runtime_config.model
+                            personality_cog.register_scheduled_result(
+                                guild_id=guild.id,
+                                results=results,
+                                model=scheduled_model,
+                                days=14,
+                            )
                         logger.info("人格萃取排程完成：萃取 %d 位使用者", len(results))
                     else:
                         logger.warning("人格萃取排程：無可用 guild")
@@ -267,11 +279,14 @@ async def on_message(message):
 async def on_message_edit(before, after):
     if after.author.bot:
         return
-    # 只在內容實際變更時處理（非 embed/pin 等觸發）
-    if before.content == after.content:
+    from llm.chat_persistence import enqueue_message_edit
+    # 情況 1：使用者修改了訊息內容
+    if before.content != after.content:
+        if after.content or after.stickers:
+            enqueue_message_edit(after)
         return
-    if after.content or after.stickers:
-        from llm.chat_persistence import enqueue_message_edit
+    # 情況 2：Discord 載入了連結預覽（content 沒變但 embeds 新增了）
+    if not before.embeds and after.embeds:
         enqueue_message_edit(after)
 
 async def auto_start_article_monitor(bot):

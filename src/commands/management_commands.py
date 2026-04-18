@@ -19,7 +19,7 @@ from services.intro_profile_service import (
     IntroProfileService,
 )
 from services.impression_moderation_service import ImpressionModerationService
-from llm.intro_rag_port import PgVectorIntroRAGPort
+from llm.intro_rag_port import get_pgvector_intro_rag_port
 from telegram_scraper.tg_config import normalize_channel_identifier
 
 # 獲取 logger
@@ -475,7 +475,7 @@ class ManagementCommands(commands.Cog):
     def __init__(self, bot, intro_profile_service: Optional[IntroProfileServiceProtocol] = None):
         self.bot = bot
         self.intro_profile_service: IntroProfileServiceProtocol = (
-            intro_profile_service or IntroProfileService(rag_port=PgVectorIntroRAGPort())
+            intro_profile_service or IntroProfileService(rag_port=get_pgvector_intro_rag_port())
         )
 
     async def cog_load(self):

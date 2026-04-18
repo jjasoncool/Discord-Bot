@@ -1190,6 +1190,7 @@ class BahamutScraperService(BaseScraperClient):
 
                     article["title"] = detail.get("title") or article.get("title")
                     article["author"] = detail.get("author") or article.get("author")
+                    article["author_id"] = detail.get("author_id") or article.get("author_id", "")
                     article["ip"] = detail.get("ip", "")
                     article["area"] = detail.get("area", "")
                     article["gp_count"] = detail.get("gp_count", 0)

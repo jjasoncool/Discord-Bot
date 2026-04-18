@@ -30,6 +30,23 @@
 - 2026-04-06：Telegram embed title 來源頻道名稱修正，已歸檔至 `TODO-completed.md`。
 - 2026-04-07：Telegram media group 合併（grouped_id + 多圖合併為單則 Discord 訊息），已歸檔至 `TODO-completed.md`。
 - 2026-04-07：FB 貼文改推送模式 + 圖片 URL 刷新機制（詳見跨來源整合專區）。
+- 2026-04-17：補記 `/askai` 與 `/personality_extract` 的 ephemeral 互動特性、`寫入 RAG` 卡住感來源，並新增背景寫入 + ephemeral 通知待辦。
+- 2026-04-17：手動「寫入 RAG」加上 ephemeral 進度訊息（每 3 筆刷新，完成後 edit 成 ✅），`save_personality_results` 新增 `progress_callback`；寫入仍為前景流程，背景 task 化仍待辦。
+- 2026-04-17：`PgVectorIntroRAGPort` 的 3 個 `index_*` 方法全面改走 `_ainsert`（executor thread），解除 `_insert` 內部 embedding HTTP + pgvector IO 對 event loop 的阻塞；`_get_index` 首次 init 加 `threading.Lock` 防止 executor 多 thread race。
+- 2026-04-17：補 `_get_embed_model` 的 thread-safety（原本只靠 caller 隱藏契約）— 把 `_index_lock` 改為 `RLock`，`_get_embed_model` 自身也用 `with self._index_lock:` 包 mutation 區塊（fast path 仍無鎖）。解除「caller 必須先拿 lock」的隱藏契約。
+- 2026-04-17：`chat_persistence._sync_write_batch` log 加診斷資訊 — 從「新寫入 X 則」改為「新寫入 X / 已存在跳過 Y / 共 N」，方便觀察 `/askai` 路徑與 flush 路徑的 dedup 情況。
+- 2026-04-17：Ollama server 的 `bge-m3:latest` 所屬 llama runner 載入即崩潰（`llama runner process has terminated: %!w(<nil>)`），直接 curl 繞過 Python 也重現；同 Ollama 的 `qwen2.5:7b` 生成 / embed 均正常，確認是 bge-m3 單一 model 的問題（blob 損壞或 Ollama 0.20.7 與 bert 架構相容性）。切換 embed model 至 `qwen3-embedding:0.6b`（1024-dim，跟 bge-m3 相同，pgvector schema 不動）。新增 `scripts/reembed_pgvector.py` 重建既有 7261 筆向量（messages 7226 + member_profiles 35）。
+- 2026-04-17：**先前判斷「model 壞」可能是誤判**。實際根因是 **Windows ephemeral port 池耗盡** — Ollama 主 process 連自己 runner subprocess 走 localhost HTTP，每次請求開新 socket，累積到 TIME_WAIT 把 port 池塞滿，runner 看起來就像「隨機崩潰」。觸發證據：使用者 Windows 主機 `ollama pull` 回 `Only one usage of each socket address ...`。切 embed model 為 `snowflake-arctic-embed2:568m`（暫定），等 Ollama 主機 4 分鐘 TIME_WAIT 清除後再測。
+- 2026-04-17：針對 Ollama Windows embedding bug (GitHub #7288 `GGML_ASSERT(i01 >= 0 && i01 < ne01) failed`) 加空格 perturbation workaround：
+  - 實驗證實 crash 跟簡繁字無關、跟長度/truncate/context 無關，是 **特定 tokenized 序列**觸發 GGML 越界。加尾/前空格會改變 token 序列即可繞過，語意影響極小。
+  - 新增 `src/llm/safe_ollama_embedding.py`：`SafeOllamaEmbedding(OllamaEmbedding)` 包起 `_get_text_embedding` / `_get_query_embedding` / `_get_text_embeddings`（及 async 版本），失敗時自動加空格 retry。
+  - `src/llm/chat_persistence.py` / `src/llm/intro_rag_port.py` / `src/llm/context_retriever.py` 改用 `SafeOllamaEmbedding`（context_retriever 用 import alias 最小改動）。
+  - `src/scripts/reembed_pgvector.py` 同樣加空格 perturbation fallback。
+- 2026-04-17：Client 端全面加 HTTP connection 重用，降低短連線量：
+  - `src/scripts/reembed_pgvector.py`：整個 run 共用一個 `requests.Session()`。
+  - `src/llm/intro_rag_port.py`：新增 module-level singleton `get_pgvector_intro_rag_port()`，原本 `personality_extractor` / `management_commands` 每次都 `PgVectorIntroRAGPort()` 新建 index + embed_model，改成共用單例；內部已有 `_index_lock` (RLock) 保護。
+  - `src/llm/chat_persistence.py`：新增 `_get_chat_index()` 跨 `_sync_write_batch` / `_sync_update_batch` 共用 VectorStoreIndex，僅在 `embed_model` 名稱變更時重建（runtime 熱切換仍生效）。
+  - `src/llm/context_retriever.py`：新增 `_get_or_build_vector_index(table_name, logger)` + `_VECTOR_INDEX_CACHE` 跨 `/askai` 呼叫共用；取代 `_persist_messages_to_pgvector`（askai 路徑順手 persist）與 `_retrieve_rag_context_impl`（askai 的 persona card 檢索）原本每次 new PGVectorStore + VectorStoreIndex 的寫法。key 為 `(table_name, embed_model_name)`，embed 換掉時自動重建。
 
 ---
 
@@ -233,7 +250,7 @@ type: TODO
 status: confirmed
 depends_on: [project-architecture]
 affects: [product-todo]
-last_confirmed: 2026-04-16
+last_confirmed: 2026-04-17
 -->
 
 > **目標：** 提升 bot 的群聊參與感與個性表現，讓回覆更自然、更有記憶感。
@@ -276,9 +293,21 @@ last_confirmed: 2026-04-16
 - [x] 排隊人數顯示修正（先看再放，顯示「前面排隊人數」）
 - [x] 取消按鈕：AI 思考中可按取消，取消時中斷 Ollama HTTP 連線（釋放 GPU），cooldown 減半，後面排隊的立即接上
 
+**2026-04-17 補充共識（互動 UI / 人格萃取寫入）：**
+- [x] 已確認 `/askai` 排隊/思考中提示、`/personality_extract` 啟動提示/查看結果/結果分頁，目前皆以 `ephemeral=True` 發送，因此 Discord 客戶端上看起來會「消失」屬正常互動訊息特性，不是聊天紀錄被清除。
+- [x] 已確認手動人格萃取的「寫入 RAG」按鈕目前為前景同步流程：按下後直接 `await save_personality_results(...)`，UI 只會停在「⏳ 正在寫入 RAG...」，沒有中途進度。
+- [x] 2026-04-17：「寫入 RAG」加上 ephemeral 進度訊息 — 按下後先 edit 原 pager（「⏳ 正在寫入 RAG...」），再新送一筆 ephemeral `⏳ 正在寫入 RAG（0/N）`，`save_personality_results` 新增 `progress_callback`，每寫 3 筆刷新該訊息，最後 edit 成 `✅ 已寫入 RAG：X 筆`（edit 失敗 fallback 到 followup.send）。前景流程未動。
+- [x] 已確認 `save_personality_results()` 會逐筆串行呼叫 `PgVectorIntroRAGPort.index_auto_personality()`；每筆都可能觸發 embedding 計算、刪除舊文件、`index.insert(doc)` 寫入 pgvector，因此人數多時容易有「卡住」體感。
+- [x] 已確認目前成功路徑缺少逐筆成功 log；使用者只看到 `Intro RAG schema constraints ready` 後無後續訊息時，最可能是卡在第一筆或某幾筆 `index.insert(doc)`，不一定代表流程壞掉。
+- [x] 2026-04-17：`PgVectorIntroRAGPort._insert` 為同步（embedding HTTP + pgvector DELETE/INSERT），原先直接 await 會阻塞 event loop（影響語音 heartbeat、其他 callback）。已新增 `_ainsert` helper 用 `asyncio.run_in_executor` 包裝，3 個 `index_*`（intro_profile / impression / auto_personality）全改走 `_ainsert`。另加 `self._index_lock = threading.Lock()` + `_get_index` double-checked locking，防止未來多 thread 首次 init 時重複建立 `VectorStoreIndex`。呼叫端不用改（原本就是 `await rag_port.index_*(...)`）。
+
 ### 待處理
 
 - [ ] System prompt 禁忌清單精簡（待定案）
+- [ ] `/personality_extract` 的「寫入 RAG」改為背景 task：按鈕按下後先立即回應，避免 interaction 長時間停在 loading。（目前仍在前景等完，但已加進度訊息降低體感不安。）
+- [x] 背景寫入啟動後，額外發送新的 ephemeral 進度/完成通知（不是只改原本那筆）。— 2026-04-17 完成 ephemeral 進度訊息（前景流程）；背景 task 化仍待辦。
+- [ ] 若背景寫入超時或 followup 失敗，規劃 fallback（例如 DM 或至少補 log / 狀態查詢入口）。
+- [ ] 為 `save_personality_results()` / `index_auto_personality()` 補上逐筆或批次成功 log 與耗時統計，方便判斷卡點是在 embedding、delete、還是 pgvector insert。
 
 ### 設計決策備忘
 
@@ -303,6 +332,12 @@ last_confirmed: 2026-04-16
     ↓ 每批 4 人送 qwen2.5:14b
     ↓ 寫入 auto_personality:{guild_id}:{user_id}（覆蓋式）
 ```
+
+**手動人格萃取 UI / 寫入流程現況（2026-04-17 確認）：**
+- `/personality_extract` 啟動訊息與「查看結果」按鈕為 ephemeral；結果分頁與「寫入 RAG / 捨棄」按鈕也為 ephemeral。
+- 「寫入 RAG」按下後目前會先把原 ephemeral 訊息改成 `⏳ 正在寫入 RAG...`，再同步執行整個寫入流程；完成後才 followup 一則 `✅ 已寫入 RAG：X 筆`。
+- 若改成背景 task，使用者偏好方案是：**額外發一筆新的 ephemeral** 當作「已開始寫入 / 完成通知」，而不是只 edit 原本那筆。
+- 風險提醒：新的 ephemeral followup 仍受 interaction token / webhook 時效限制，不適合無上限超長任務；若要更穩，後續仍需保留 fallback 機制。
 
 **涉及檔案：**
 

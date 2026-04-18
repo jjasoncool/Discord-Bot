@@ -3,6 +3,7 @@ from pathlib import Path
 import asyncio
 import json
 from datetime import datetime, timezone, timedelta
+from dataclasses import dataclass
 from typing import NamedTuple
 import base64
 import discord
@@ -39,6 +40,7 @@ class _AskaiQueue:
     def __init__(self) -> None:
         self._queue: asyncio.Queue[_AskaiQueueItem] = asyncio.Queue()
         self._pending: list[_AskaiQueueItem] = []
+        self._processing: _AskaiQueueItem | None = None
 
     async def put(self, item: _AskaiQueueItem) -> None:
         self._pending.append(item)
@@ -50,14 +52,20 @@ class _AskaiQueue:
             self._pending.remove(item)
         except ValueError:
             pass
+        self._processing = item
         return item
 
     def task_done(self) -> None:
+        self._processing = None
         self._queue.task_done()
 
     def pending_summaries(self) -> list[str]:
-        """回傳目前排隊中的問題摘要。"""
-        return [item.question[:30] for item in self._pending]
+        """回傳目前排隊中的問題摘要，包含正在處理的項目。"""
+        summaries: list[str] = []
+        if self._processing is not None:
+            summaries.append(self._processing.question[:30])
+        summaries.extend(item.question[:30] for item in self._pending)
+        return summaries
 
 
 ASKAI_QUEUE = _AskaiQueue()
@@ -218,9 +226,9 @@ class LLMCommands(commands.Cog):
 
         if pending:
             pending_list = "\n".join(f"  • {q}" for q in pending)
-            queue_msg = f"🧾 已加入 AI 排隊。前面排隊中的問題：\n{pending_list}"
+            queue_msg = f"🧾 已加入 AI 排隊（前面 {len(pending)} 則）"
         else:
-            queue_msg = "🧾 已加入 AI 排隊。請稍候..."
+            queue_msg = "🧾 已加入 AI 排隊（前面 0 則），馬上處理..."
         await safe_send_interaction_message(interaction, queue_msg, ephemeral=True)
 
         await completion
@@ -508,6 +516,7 @@ class LLMCommands(commands.Cog):
                 if isinstance(item, discord.ui.Button):
                     item.disabled = True
                     item.label = "已完成"
+                    item.style = discord.ButtonStyle.success
             cancel_view.stop()
             try:
                 await thinking_msg.edit(content="✅ AI 已回覆。", view=cancel_view)
@@ -557,5 +566,428 @@ class LLMCommands(commands.Cog):
         return [image_b64]
 
 
+class _PersonalityResultPagerView(discord.ui.View):
+    """人格萃取結果分頁 + 寫入/捨棄按鈕。"""
+
+    def __init__(
+        self,
+        *,
+        user_id: int,
+        guild_id: int,
+        results: dict,
+        embeds: list[discord.Embed],
+        job: "_PersonalityExtractJob | None" = None,
+        message: discord.Message | None = None,
+    ):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.results = results
+        self.embeds = embeds
+        self.job = job
+        self.message: discord.Message | None = message
+        self.current_page = 0
+        self._refresh_buttons()
+
+    def _refresh_buttons(self) -> None:
+        self.prev_button.disabled = self.current_page <= 0
+        self.next_button.disabled = self.current_page >= len(self.embeds) - 1
+
+    def _disable_all(self) -> None:
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+
+    @discord.ui.button(label="上一頁", style=discord.ButtonStyle.primary)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("只有執行者可以操作。", ephemeral=True)
+            return
+        self.current_page = max(0, self.current_page - 1)
+        self._refresh_buttons()
+        await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
+
+    @discord.ui.button(label="下一頁", style=discord.ButtonStyle.primary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("只有執行者可以操作。", ephemeral=True)
+            return
+        self.current_page = min(len(self.embeds) - 1, self.current_page + 1)
+        self._refresh_buttons()
+        await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
+
+    @discord.ui.button(label="寫入 RAG", style=discord.ButtonStyle.success)
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("只有執行者可以操作。", ephemeral=True)
+            return
+        self._disable_all()
+        await interaction.response.edit_message(content="⏳ 正在寫入 RAG...", embed=None, view=self)
+
+        total = len(self.results)
+        progress_msg = await interaction.followup.send(
+            f"⏳ 正在寫入 RAG（0/{total}）",
+            ephemeral=True,
+            wait=True,
+        )
+
+        last_reported = 0
+
+        async def _report(written: int, tot: int) -> None:
+            # 每 3 筆刷新一次，最後一筆由外層處理成 ✅
+            nonlocal last_reported
+            if written >= tot or written - last_reported < 3:
+                return
+            last_reported = written
+            try:
+                await progress_msg.edit(content=f"⏳ 正在寫入 RAG（{written}/{tot}）")
+            except Exception as exc:
+                logger.warning("更新寫入 RAG 進度訊息失敗: %s", exc)
+
+        from llm.personality_extractor import save_personality_results
+        written = await save_personality_results(
+            guild_id=self.guild_id,
+            results=self.results,
+            progress_callback=_report,
+        )
+        if self.job:
+            self.job.status = "written"
+        final_text = f"✅ 已寫入 RAG：{written} 筆"
+        try:
+            await progress_msg.edit(content=final_text)
+        except Exception as exc:
+            logger.warning("最終寫入 RAG 結果訊息 edit 失敗，改用 followup send: %s", exc)
+            await interaction.followup.send(final_text, ephemeral=True)
+        self.stop()
+
+    @discord.ui.button(label="捨棄", style=discord.ButtonStyle.secondary)
+    async def discard_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("只有執行者可以操作。", ephemeral=True)
+            return
+        self._disable_all()
+        if self.job:
+            self.job.status = "discarded"
+        await interaction.response.edit_message(content="🗑️ 已捨棄，不寫入 RAG。", embed=None, view=self)
+        self.stop()
+
+    async def on_timeout(self):
+        self._disable_all()
+        if self.message:
+            try:
+                await self.message.edit(content="⏰ 已逾時，未寫入 RAG。", embed=None, view=self)
+            except Exception:
+                pass
+
+
+@dataclass
+class _PersonalityExtractJob:
+    """手動人格萃取工作的暫存狀態。"""
+
+    user_id: int
+    guild_id: int
+    model: str | None
+    days: int
+    status: str = "running"  # running | done | empty | error
+    results: dict[str, dict[str, str]] | None = None
+    error_message: str | None = None
+    created_at: datetime | None = None
+    current_stage: str | None = None
+    current_model: str | None = None
+    total_users: int = 0
+    completed_users: int = 0
+    current_batch: int = 0
+    total_batches: int = 0
+
+
+class _ExtractStatusView(discord.ui.View):
+    """人格萃取啟動後附帶的「查看結果」按鈕。"""
+
+    def __init__(self, cog: "PersonalityCommands", job_key: tuple[int, int], user_id: int):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.job_key = job_key
+        self.user_id = user_id
+
+    @staticmethod
+    def _build_result_embeds(job: "_PersonalityExtractJob") -> list[discord.Embed]:
+        """將人格萃取結果切成多篇 embed。"""
+        title = f"🧪 人格萃取預覽（模型：{job.model or '預設'}，天數：{job.days}，共 {len(job.results or {})} 人）"
+        chunks: list[str] = []
+        current = ""
+
+        for uid, data in (job.results or {}).items():
+            alias = data.get("alias", uid)
+            personality = data.get("personality", "")
+            block = f"**{alias}**\n{personality}\n\n"
+            if current and len(current) + len(block) > 4000:
+                chunks.append(current.rstrip())
+                current = block
+            else:
+                current += block
+
+        if current:
+            chunks.append(current.rstrip())
+
+        if not chunks:
+            chunks = ["(無結果)"]
+
+        embeds: list[discord.Embed] = []
+        total = len(chunks)
+        for index, chunk in enumerate(chunks, start=1):
+            embed = discord.Embed(
+                title=title if index == 1 else f"🧪 人格萃取預覽（第 {index}/{total} 篇）",
+                description=chunk,
+                color=discord.Color.blurple(),
+            )
+            embed.set_footer(text=f"第 {index}/{total} 篇")
+            embeds.append(embed)
+        return embeds
+
+    async def _show_status(self, interaction: discord.Interaction) -> None:
+        job = self.cog._extract_jobs.get(self.job_key)
+        if not job:
+            await interaction.response.send_message("ℹ️ 找不到對應的萃取工作。", ephemeral=True)
+            return
+
+        time_str = ""
+        if job.created_at:
+            elapsed = datetime.now(timezone.utc) - job.created_at
+            minutes = int(elapsed.total_seconds() // 60)
+            time_str = f"，啟動於 {minutes} 分鐘前" if minutes > 0 else "，剛啟動"
+
+        if job.status == "running":
+            progress_bits: list[str] = []
+            if job.total_batches > 0:
+                progress_bits.append(f"batch {job.current_batch}/{job.total_batches}")
+            if job.total_users > 0:
+                progress_bits.append(f"已完成 {job.completed_users}/{job.total_users} 位使用者")
+            if job.current_model:
+                progress_bits.append(f"目前模型：{job.current_model}")
+            if job.current_stage:
+                progress_bits.append(f"階段：{job.current_stage}")
+            progress_text = "\n" + "\n".join(f"- {item}" for item in progress_bits) if progress_bits else ""
+            await interaction.response.send_message(
+                f"⏳ 人格萃取仍在進行中（模型：{job.model or '預設'}，天數：{job.days}{time_str}）。請稍後再按一次。{progress_text}",
+                ephemeral=True,
+            )
+            return
+
+        if job.status == "error":
+            await interaction.response.send_message(
+                f"❌ 人格萃取失敗{time_str}：{job.error_message or '未知錯誤'}",
+                ephemeral=True,
+            )
+            return
+
+        if job.status in ("written", "discarded"):
+            label = "已寫入 RAG" if job.status == "written" else "已捨棄"
+            await interaction.response.send_message(
+                f"ℹ️ 此次萃取結果{label}。如需重新萃取，請再次執行 `/personality_extract`。",
+                ephemeral=True,
+            )
+            return
+
+        if job.status == "empty" or not job.results:
+            await interaction.response.send_message(
+                f"⚠️ 人格萃取結果為空{time_str}，可能是訊息不足或模型錯誤。",
+                ephemeral=True,
+            )
+            return
+
+        embeds = self._build_result_embeds(job)
+
+        pager_view = _PersonalityResultPagerView(
+            user_id=self.user_id,
+            guild_id=self.job_key[0],
+            results=job.results,
+            embeds=embeds,
+            job=job,
+        )
+        await interaction.response.send_message(
+            embed=embeds[0],
+            ephemeral=True,
+            view=pager_view,
+        )
+        msg = await interaction.original_response()
+        pager_view.message = msg
+
+    @discord.ui.button(label="查看結果", style=discord.ButtonStyle.primary)
+    async def check_status(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("只有執行者可以操作。", ephemeral=True)
+            return
+        await self._show_status(interaction)
+
+
+class PersonalityCommands(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self._extract_jobs: dict[tuple[int, int], _PersonalityExtractJob] = {}
+        self._extract_tasks: set[asyncio.Task] = set()
+
+    def _track_task(self, task: asyncio.Task) -> None:
+        self._extract_tasks.add(task)
+
+        def _cleanup(done_task: asyncio.Task) -> None:
+            self._extract_tasks.discard(done_task)
+
+        task.add_done_callback(_cleanup)
+
+    def register_scheduled_result(
+        self,
+        *,
+        guild_id: int,
+        results: dict[str, dict[str, str]],
+        model: str | None,
+        days: int,
+    ) -> None:
+        """將排程執行的人格萃取結果寫入記憶體，供查詢指令讀取。"""
+        job_key = (guild_id, 0)
+        self._extract_jobs[job_key] = _PersonalityExtractJob(
+            user_id=0,
+            guild_id=guild_id,
+            model=model,
+            days=days,
+            status="done" if results else "empty",
+            results=results,
+            created_at=datetime.now(timezone.utc),
+            current_stage="排程完成",
+            current_model=model,
+            total_users=len(results),
+            completed_users=len(results),
+            current_batch=0,
+            total_batches=0,
+        )
+
+    @app_commands.command(name="personality_extract_status", description="查看人格萃取進度或結果（管理員限定）")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def personality_extract_status_cmd(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await safe_send_interaction_message(interaction, "⚠️ 僅限伺服器內使用。", ephemeral=True)
+            return
+
+        user_id = interaction.user.id
+        guild_id = interaction.guild.id
+        job_key = (guild_id, user_id)
+        if job_key not in self._extract_jobs:
+            scheduled_key = (guild_id, 0)
+            if scheduled_key in self._extract_jobs:
+                job_key = scheduled_key
+                user_id = interaction.user.id
+            else:
+                await safe_send_interaction_message(
+                    interaction,
+                    "ℹ️ 目前沒有可查看的人格萃取工作，請先執行 `/personality_extract` 或等待排程完成。",
+                    ephemeral=True,
+                )
+                return
+
+        status_view = _ExtractStatusView(cog=self, job_key=job_key, user_id=user_id)
+        await status_view._show_status(interaction)
+
+    @app_commands.command(name="personality_extract", description="手動執行人格萃取（管理員限定）")
+    @app_commands.describe(
+        model="指定模型（不填則用 config 設定）",
+        days="分析天數（預設 14）",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def personality_extract_cmd(
+        self,
+        interaction: discord.Interaction,
+        model: str | None = None,
+        days: int = 14,
+    ):
+        if not interaction.guild:
+            await safe_send_interaction_message(
+                interaction,
+                "⚠️ 僅限伺服器內使用。",
+                ephemeral=True,
+            )
+            return
+
+        from llm.personality_extractor import (
+            PersonalityExtractionInProgressError,
+            run_personality_extraction,
+        )
+        guild = interaction.guild
+        user_id = interaction.user.id
+        guild_id = interaction.guild.id
+        job_key = (guild_id, user_id)
+
+        job = _PersonalityExtractJob(
+            user_id=user_id,
+            guild_id=guild_id,
+            model=model,
+            days=days,
+            status="running",
+            created_at=datetime.now(timezone.utc),
+        )
+        self._extract_jobs[job_key] = job
+
+        status_view = _ExtractStatusView(cog=self, job_key=job_key, user_id=user_id)
+        await safe_send_interaction_message(
+            interaction,
+            f"🔄 已啟動人格萃取工作（模型：{model or '預設'}，天數：{days}）。\n"
+            "完成後請按下方按鈕查看結果；若按鈕失效，也可以使用 `/personality_extract_status`。",
+            ephemeral=True,
+            view=status_view,
+        )
+
+        async def _run_and_report():
+            def _update_progress(
+                *,
+                stage: str,
+                model: str,
+                total_users: int,
+                completed_users: int,
+                current_batch: int,
+                total_batches: int,
+            ) -> None:
+                stage_map = {
+                    "initializing": "初始化中",
+                    "grouped": "已完成分組",
+                    "preparing": "準備批次資料",
+                    "calling_llm": "正在呼叫 LLM",
+                    "batch_done": "批次完成",
+                    "finished": "全部完成",
+                }
+                job.current_stage = stage_map.get(stage, stage)
+                job.current_model = model
+                job.total_users = total_users
+                job.completed_users = completed_users
+                job.current_batch = current_batch
+                job.total_batches = total_batches
+
+            try:
+                results = await run_personality_extraction(
+                    guild=guild,
+                    days=days,
+                    model=model,
+                    write_rag=False,
+                    progress_callback=_update_progress,
+                )
+            except PersonalityExtractionInProgressError:
+                job.status = "error"
+                job.error_message = "目前已有一個人格萃取流程正在執行，請稍後再試。"
+                return
+            except Exception as exc:
+                logger.error("人格萃取指令失敗: %s", exc, exc_info=True)
+                job.status = "error"
+                job.error_message = str(exc)
+                return
+
+            if not results:
+                job.status = "empty"
+                return
+
+            job.status = "done"
+            job.results = results
+
+        task = asyncio.create_task(_run_and_report())
+        self._track_task(task)
+
+
 async def setup(bot):
     await bot.add_cog(LLMCommands(bot))
+    await bot.add_cog(PersonalityCommands(bot))

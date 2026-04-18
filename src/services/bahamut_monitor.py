@@ -12,6 +12,7 @@ import aiohttp
 import json
 import logging
 import io
+import time
 import discord
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
@@ -55,6 +56,9 @@ BAHAMUT_FORUM_TAG_NAME = "巴哈"
 COMMENT_SLOT_PLACEHOLDER = "💬 預留留言區（等待更新中...）"
 # 每則 Discord 訊息之間的延遲（秒），避免 rate limit
 SEND_DELAY = 0.8
+# 同一則訊息兩次 edit 之間的最小間隔（秒）
+# Discord 對單一訊息 PATCH 限制約 5 次 / 5 秒，留安全餘裕
+MIN_EDIT_INTERVAL = 1.5
 # 巴哈小屋個人頁 URL 模板
 BAHAMUT_PROFILE_URL = "https://home.gamer.com.tw/profile/index.php?owner={user_id}"
 
@@ -72,6 +76,17 @@ def _author_link(name: str, user_id: str) -> str:
 _thread_locks: Dict[str, asyncio.Lock] = {}
 # 全域並行上限：同時最多處理 N 篇文章（避免 rate limit 和資源搶奪）
 _concurrency_semaphore = asyncio.Semaphore(3)
+# 每則訊息最後一次 edit 的 monotonic 時戳，用於強制 per-message 冷卻
+_last_edit_ts: Dict[int, float] = {}
+
+
+async def _edit_with_cooldown(msg: discord.Message, **kwargs) -> None:
+    """對同一則訊息的 edit 強制冷卻，主動避開 Discord 429。"""
+    elapsed = time.monotonic() - _last_edit_ts.get(msg.id, 0.0)
+    if elapsed < MIN_EDIT_INTERVAL:
+        await asyncio.sleep(MIN_EDIT_INTERVAL - elapsed)
+    await msg.edit(**kwargs)
+    _last_edit_ts[msg.id] = time.monotonic()
 
 
 def _get_thread_lock(content_key: str) -> asyncio.Lock:
@@ -593,7 +608,7 @@ class BahamutMonitor(BaseContentMonitor):
                         logger.debug("增量更新：主文首次寫入 hash sn=%s", main_sn)
                     elif new_hash != old_hash:
                         main_msg = await thread.fetch_message(main_post_state["msg_id"])
-                        await main_msg.edit(embed=updated_embed)
+                        await _edit_with_cooldown(main_msg, embed=updated_embed)
                         await asyncio.sleep(SEND_DELAY)
                         await self._update_continuations(thread, cont_chunks, color, main_post_state)
                         main_post_state["content_hash"] = new_hash
@@ -623,7 +638,7 @@ class BahamutMonitor(BaseContentMonitor):
                             logger.debug("增量更新：回覆首次寫入 hash sn=%s", reply_sn)
                         elif new_hash != old_hash:
                             reply_msg = await thread.fetch_message(reply_state["msg_id"])
-                            await reply_msg.edit(embed=updated_embed)
+                            await _edit_with_cooldown(reply_msg, embed=updated_embed)
                             await asyncio.sleep(SEND_DELAY)
                             await self._update_continuations(thread, cont_chunks, color, reply_state)
                             reply_state["content_hash"] = new_hash
@@ -688,7 +703,7 @@ class BahamutMonitor(BaseContentMonitor):
                             logger.debug("增量更新：留言格首次寫入 hash sn=%s slot=%s", sn, i)
                         elif new_hash != old_hash:
                             msg = await thread.fetch_message(slot["msg_id"])
-                            await msg.edit(embed=embed)
+                            await _edit_with_cooldown(msg, embed=embed)
                             await asyncio.sleep(SEND_DELAY)
                             slot["used_chars"] = used_chars
                             slot["content_hash"] = new_hash
@@ -727,7 +742,7 @@ class BahamutMonitor(BaseContentMonitor):
                                 logger.debug("增量更新：溢出格首次寫入 hash sn=%s overflow=%s", sn, i)
                             elif new_hash != old_hash:
                                 msg = await thread.fetch_message(overflow_slot["msg_id"])
-                                await msg.edit(embed=embed)
+                                await _edit_with_cooldown(msg, embed=embed)
                                 await asyncio.sleep(SEND_DELAY)
                                 overflow_slot["used_chars"] = used_chars
                                 overflow_slot["content_hash"] = new_hash
@@ -767,7 +782,7 @@ class BahamutMonitor(BaseContentMonitor):
                         description = "\n".join(lines)
                         if len(description) > EMBED_DESC_LIMIT:
                             description = description[:EMBED_DESC_LIMIT - 20] + "\n\n⋯（已截斷）"
-                        await prev_msg.edit(embed=discord.Embed(description=description, color=COLOR_COMMENTS))
+                        await _edit_with_cooldown(prev_msg, embed=discord.Embed(description=description, color=COLOR_COMMENTS))
 
                         prev_msg = overflow_msg
                         last_comments = overflow_comments
@@ -848,7 +863,7 @@ class BahamutMonitor(BaseContentMonitor):
                     old_desc = prev_cont_msg.embeds[0].description if prev_cont_msg.embeds else ""
                     new_desc = old_desc + f"\n\n⬇️ [更多內文...]({nav_link})"
                     if len(new_desc) <= EMBED_DESC_LIMIT:
-                        await prev_cont_msg.edit(embed=discord.Embed(description=new_desc, color=color))
+                        await _edit_with_cooldown(prev_cont_msg, embed=discord.Embed(description=new_desc, color=color))
                         await asyncio.sleep(SEND_DELAY)
                 except Exception as e:
                     logger.warning("續文導航連結添加失敗: %s", e)
@@ -881,12 +896,12 @@ class BahamutMonitor(BaseContentMonitor):
                 if i < len(new_chunks):
                     # 有對應的新內容 → edit
                     new_embed = discord.Embed(description=new_chunks[i], color=color)
-                    await cont_msg.edit(embed=new_embed)
+                    await _edit_with_cooldown(cont_msg, embed=new_embed)
                     await asyncio.sleep(SEND_DELAY)
                 else:
                     # 多出來 → edit 為佔位文字
                     cleared_embed = discord.Embed(description=CONTINUATION_REMOVED_PLACEHOLDER, color=0x808080)
-                    await cont_msg.edit(embed=cleared_embed)
+                    await _edit_with_cooldown(cont_msg, embed=cleared_embed)
                     await asyncio.sleep(SEND_DELAY)
             except Exception as e:
                 logger.warning("增量更新：edit 續文失敗 cont_id=%s: %s", cont_id, e)
@@ -911,7 +926,7 @@ class BahamutMonitor(BaseContentMonitor):
                     try:
                         reuse_msg = await thread.fetch_message(updated_ids[i])
                         new_embed = discord.Embed(description=new_chunks[i], color=color)
-                        await reuse_msg.edit(embed=new_embed)
+                        await _edit_with_cooldown(reuse_msg, embed=new_embed)
                         await asyncio.sleep(SEND_DELAY)
                         prev_msg = reuse_msg
                         continue
@@ -930,7 +945,7 @@ class BahamutMonitor(BaseContentMonitor):
                     prev_desc = prev_msg.embeds[0].description if prev_msg.embeds else ""
                     new_desc = prev_desc + f"\n\n⬇️ [更多內文...]({nav_link})"
                     if len(new_desc) <= EMBED_DESC_LIMIT:
-                        await prev_msg.edit(embed=discord.Embed(description=new_desc, color=color))
+                        await _edit_with_cooldown(prev_msg, embed=discord.Embed(description=new_desc, color=color))
                         await asyncio.sleep(SEND_DELAY)
                 except Exception as e:
                     logger.warning("續文導航連結添加失敗: %s", e)
@@ -1054,7 +1069,7 @@ class BahamutMonitor(BaseContentMonitor):
                 description = "\n".join(lines)
                 if len(description) > EMBED_DESC_LIMIT:
                     description = description[:EMBED_DESC_LIMIT - 20] + "\n\n⋯（已截斷）"
-                await prev_msg.edit(embed=discord.Embed(description=description, color=COLOR_COMMENTS))
+                await _edit_with_cooldown(prev_msg, embed=discord.Embed(description=description, color=COLOR_COMMENTS))
 
                 # 推進：當前格變成下一輪的「前一格」
                 prev_msg = overflow_msg

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from typing import Optional
 
 import discord
@@ -26,6 +27,13 @@ MIN_TEXT_LENGTH = 2
 _buffer: list[dict] = []
 _edit_buffer: list[dict] = []
 _buffer_lock = asyncio.Lock()
+
+# 跨批次共用的 LlamaIndex chat index，避免每次 flush 都 new 新 OllamaEmbedding / PGVectorStore；
+# 大量短連線會塞滿 Windows ephemeral port 池。
+# 只在 embed_model 換掉時重建；runtime config 熱切換仍會被感知。
+_chat_index_cache: tuple[str, object] | None = None  # (embed_model_name, VectorStoreIndex)
+# 多個 flush_buffer 可能在 executor threads 同時呼叫 _get_chat_index，加鎖防止重複 init
+_chat_index_lock = threading.Lock()
 
 # 去重集合：與 context_retriever._PERSISTED_MESSAGE_IDS 共用，避免重複寫入
 def _get_persisted_ids() -> set[str]:
@@ -52,7 +60,7 @@ def _check_flush_deps() -> bool:
 
 
 def _build_persist_text(msg: discord.Message) -> str:
-    """組裝要寫入 pgvector 的文字（含貼圖描述）。"""
+    """組裝要寫入 pgvector 的文字（含貼圖描述、連結預覽）。"""
     text = (msg.content or "").strip()
     if msg.stickers:
         sticker_texts = []
@@ -63,6 +71,20 @@ def _build_persist_text(msg: discord.Message) -> str:
         if sticker_texts:
             sticker_part = " ".join(sticker_texts)
             text = f"{text} {sticker_part}" if text else sticker_part
+    # 附加 Discord 抓取的連結預覽（標題/描述）
+    if msg.embeds:
+        embed_parts = []
+        for embed in msg.embeds:
+            parts = []
+            if embed.title:
+                parts.append(embed.title)
+            if embed.description:
+                parts.append(embed.description[:100])
+            if parts:
+                embed_parts.append(" - ".join(parts))
+        if embed_parts:
+            embed_text = " ".join(f"[預覽：{p}]" for p in embed_parts)
+            text = f"{text} {embed_text}" if text else embed_text
     return text
 
 
@@ -145,19 +167,33 @@ async def flush_buffer() -> int:
     return count
 
 
-def _sync_write_batch(batch: list[dict]) -> int:
-    """同步寫入一批訊息到 pgvector（在 executor 中執行）。"""
-    from llama_index.core import Document, VectorStoreIndex
+def _get_chat_index():
+    """取得跨批次共用的 chat pgvector VectorStoreIndex（快取機制）。
+
+    只在 embed_model 名稱改變時才重建，避免每次 flush 都 new 新 embed / vector store，
+    造成大量 Ollama HTTP 短連線耗盡 Windows ephemeral port。
+    """
+    global _chat_index_cache
+
+    from llama_index.core import VectorStoreIndex
     from llama_index.vector_stores.postgres import PGVectorStore
+    from llm.safe_ollama_embedding import SafeOllamaEmbedding
     from sys_settings.llm_settings import LLMServiceSettings, load_ollama_runtime_config
-    from llama_index.embeddings.ollama import OllamaEmbedding
     from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
 
     settings = LLMServiceSettings()
-    try:
-        runtime_config = load_ollama_runtime_config(settings.ollama_runtime_model_path)
-        embed_model = OllamaEmbedding(
-            model_name=runtime_config.embed_model,
+    runtime_config = load_ollama_runtime_config(settings.ollama_runtime_model_path)
+    embed_model_name = runtime_config.embed_model
+
+    # Fast path：無鎖 double-check
+    if _chat_index_cache is not None and _chat_index_cache[0] == embed_model_name:
+        return _chat_index_cache[1]
+
+    with _chat_index_lock:
+        if _chat_index_cache is not None and _chat_index_cache[0] == embed_model_name:
+            return _chat_index_cache[1]
+        embed_model = SafeOllamaEmbedding(
+            model_name=embed_model_name,
             base_url=settings.ollama_base_url,
             request_timeout=settings.ollama_timeout,
         )
@@ -175,12 +211,25 @@ def _sync_write_batch(batch: list[dict]) -> int:
             vector_store=vector_store,
             embed_model=embed_model,
         )
+        _chat_index_cache = (embed_model_name, index)
+        logger.info("chat_persistence: 建立新 VectorStoreIndex（embed_model=%s）", embed_model_name)
+        return index
+
+
+def _sync_write_batch(batch: list[dict]) -> int:
+    """同步寫入一批訊息到 pgvector（在 executor 中執行）。"""
+    from llama_index.core import Document
+
+    try:
+        index = _get_chat_index()
 
         persisted_ids = _get_persisted_ids()
         written = 0
+        skipped = 0
         for item in batch:
             mid = item["message_id"]
             if mid in persisted_ids:
+                skipped += 1
                 continue
             try:
                 doc = Document(
@@ -201,10 +250,14 @@ def _sync_write_batch(batch: list[dict]) -> int:
                 exc_str = str(exc).lower()
                 if "duplicate" in exc_str or "unique" in exc_str:
                     persisted_ids.add(mid)
+                    skipped += 1
                 else:
                     logger.warning("on_message 單筆寫入失敗（將重試）: mid=%s err=%s", mid, exc)
 
-        logger.info("on_message 批次寫入 pgvector: %d 則", written)
+        logger.info(
+            "on_message 批次處理 pgvector: 新寫入 %d / 已存在跳過 %d / 共 %d",
+            written, skipped, len(batch),
+        )
         return written
     except Exception as exc:
         logger.warning("on_message 批次寫入 pgvector 失敗: %s", exc)
@@ -213,34 +266,10 @@ def _sync_write_batch(batch: list[dict]) -> int:
 
 def _sync_update_batch(batch: list[dict]) -> int:
     """同步更新已持久化的訊息（delete + re-insert 以刷新 embedding）。"""
-    from llama_index.core import Document, VectorStoreIndex
-    from llama_index.vector_stores.postgres import PGVectorStore
-    from sys_settings.llm_settings import LLMServiceSettings, load_ollama_runtime_config
-    from llama_index.embeddings.ollama import OllamaEmbedding
-    from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
+    from llama_index.core import Document
 
-    settings = LLMServiceSettings()
     try:
-        runtime_config = load_ollama_runtime_config(settings.ollama_runtime_model_path)
-        embed_model = OllamaEmbedding(
-            model_name=runtime_config.embed_model,
-            base_url=settings.ollama_base_url,
-            request_timeout=settings.ollama_timeout,
-        )
-        vector_store = PGVectorStore.from_params(
-            database=settings.pgvector_db,
-            host=settings.pgvector_host,
-            password=settings.pgvector_password,
-            port=settings.pgvector_port,
-            user=settings.pgvector_user,
-            table_name=HYBRID_RETRIEVAL_SETTINGS.get_chat_table_name(),
-            embed_dim=HYBRID_RETRIEVAL_SETTINGS.pgvector_embed_dim,
-            hybrid_search=True,
-        )
-        index = VectorStoreIndex.from_vector_store(
-            vector_store=vector_store,
-            embed_model=embed_model,
-        )
+        index = _get_chat_index()
 
         updated = 0
         for item in batch:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import json
 import re
+import threading
 from collections import defaultdict
 from datetime import timezone
 from typing import Any
@@ -36,7 +37,7 @@ except Exception:  # pragma: no cover - 依賴可能在部份環境尚未安裝
 
 try:
     from llama_index.core import Document, VectorStoreIndex
-    from llama_index.embeddings.ollama import OllamaEmbedding
+    from llm.safe_ollama_embedding import SafeOllamaEmbedding as OllamaEmbedding
     from llama_index.vector_stores.postgres import PGVectorStore
 except Exception:  # pragma: no cover - 依賴可能在部份環境尚未安裝
     Document = None
@@ -55,13 +56,12 @@ _EMBED_MODEL: Any | None = None
 _EMBED_MODEL_NAME: str | None = None
 _PERSISTED_MESSAGE_IDS: set[str] = set()
 
-# === Persist 過濾擴充介面（預設保守，不改現行行為） ===
-# 1) 最小長度門檻：設定 > 0 才啟用
-PERSIST_MIN_TEXT_LENGTH = 0
-# 2) 語言/垃圾內容過濾：目前僅保留 hook（未啟用）
-ENABLE_PERSIST_LOW_SIGNAL_FILTER = False
-# 3) 敏感資訊遮罩：目前僅保留 hook（未啟用）
-ENABLE_PERSIST_REDACTION = False
+# 跨呼叫共用的 pgvector index。key=(table_name, embed_model_name)。
+# 原本 _retrieve_rag_context_impl 每次呼叫都 new PGVectorStore + VectorStoreIndex，
+# 造成 /askai 每次都重開 Ollama HTTP 連線；高頻互動下累積到 Windows ephemeral port 池會塞爆。
+_VECTOR_INDEX_CACHE: dict[tuple[str, str], Any] = {}
+# retrieve_rag_context_sync 走 run_in_executor，多個 /askai 並發可能競爭 index cache init
+_vector_index_lock = threading.Lock()
 
 
 def _load_embed_model_name() -> str:
@@ -96,40 +96,60 @@ def _get_embed_model(logger: logging.Logger) -> Any | None:
     return _EMBED_MODEL
 
 
-def _is_low_signal_text_for_persist(text: str) -> bool:
-    """低訊號內容過濾擴充點（未啟用時固定 False）。"""
-    if not ENABLE_PERSIST_LOW_SIGNAL_FILTER:
-        return False
+def _get_or_build_vector_index(table_name: str, logger: logging.Logger) -> Any | None:
+    """取得跨呼叫共用的 pgvector VectorStoreIndex。
 
-    # TODO: 可在這裡加入 URL-only、emoji-only、重複字元噪音等規則。
-    _ = text
-    return False
+    key = (table_name, embed_model_name)；embed model 換掉時自動重建。
+    原本 /askai 每次檢索都 new PGVectorStore + VectorStoreIndex，每次都開新的
+    Ollama HTTP 連線；高頻互動會塞爆 Windows ephemeral port 池。
+    """
+    if VectorStoreIndex is None or PGVectorStore is None:
+        return None
 
+    embed_model = _get_embed_model(logger)
+    if embed_model is None:
+        return None
 
-def _redact_text_for_persist(text: str) -> str:
-    """敏感資訊遮罩擴充點（未啟用時原樣返回）。"""
-    if not ENABLE_PERSIST_REDACTION:
-        return text
+    cache_key = (table_name, _EMBED_MODEL_NAME or "")
+    # Fast path：無鎖 double-check
+    cached = _VECTOR_INDEX_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
-    # TODO: 可在這裡加入 email/phone/token 等遮罩規則。
-    return text
+    with _vector_index_lock:
+        cached = _VECTOR_INDEX_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
 
+        # embed_model 名稱變了，清掉同 table 的舊 key
+        for key in list(_VECTOR_INDEX_CACHE.keys()):
+            if key[0] == table_name and key[1] != (_EMBED_MODEL_NAME or ""):
+                _VECTOR_INDEX_CACHE.pop(key, None)
 
-def _should_skip_persist_message(*, message_id: str, text: str) -> tuple[bool, str]:
-    """統一判斷是否跳過寫入 pgvector，回傳 (should_skip, reason)。"""
-    if not text:
-        return True, "empty_text"
-
-    if message_id in _PERSISTED_MESSAGE_IDS:
-        return True, "duplicate_in_process"
-
-    if PERSIST_MIN_TEXT_LENGTH > 0 and len(text) < PERSIST_MIN_TEXT_LENGTH:
-        return True, "too_short"
-
-    if _is_low_signal_text_for_persist(text):
-        return True, "low_signal"
-
-    return False, ""
+        try:
+            vector_store = PGVectorStore.from_params(
+                database=LLM_SETTINGS.pgvector_db,
+                host=LLM_SETTINGS.pgvector_host,
+                password=LLM_SETTINGS.pgvector_password,
+                port=LLM_SETTINGS.pgvector_port,
+                user=LLM_SETTINGS.pgvector_user,
+                table_name=table_name,
+                embed_dim=HYBRID_RETRIEVAL_SETTINGS.pgvector_embed_dim,
+                hybrid_search=True,
+            )
+            index = VectorStoreIndex.from_vector_store(
+                vector_store=vector_store,
+                embed_model=embed_model,
+            )
+            _VECTOR_INDEX_CACHE[cache_key] = index
+            logger.info(
+                "context_retriever: 建立 VectorStoreIndex table=%s embed_model=%s",
+                table_name, _EMBED_MODEL_NAME,
+            )
+            return index
+        except Exception as exc:
+            logger.warning("建立 VectorStoreIndex 失敗 table=%s: %s", table_name, exc)
+            return None
 
 
 def _rrf_score(rank: int, *, weight: float, rrf_k: int) -> float:
@@ -290,94 +310,6 @@ def _build_vector_rank(
     except Exception as exc:
         logger.warning("In-memory 向量檢索失敗，改用 BM25: %s", exc)
         return {}
-
-
-def _persist_messages_to_pgvector(
-    *,
-    messages: list[discord.Message],
-    logger: logging.Logger,
-) -> None:
-    """將聊天訊息寫入 pgvector（最佳努力，不阻斷主流程）。"""
-    # 設計重點：best effort（最佳努力）
-    # - 寫入成功：可累積長期知識
-    # - 寫入失敗：不中斷問答主流程
-    #
-    # 理由：查詢回覆優先，儲存是附加價值，不能讓使用者等待或失敗。
-    if not HYBRID_RETRIEVAL_SETTINGS.persist_chat_to_pgvector:
-        return
-
-    if Document is None or VectorStoreIndex is None or PGVectorStore is None:
-        return
-
-    embed_model = _get_embed_model(logger)
-    if embed_model is None:
-        return
-
-    try:
-        vector_store = PGVectorStore.from_params(
-            database=LLM_SETTINGS.pgvector_db,
-            host=LLM_SETTINGS.pgvector_host,
-            password=LLM_SETTINGS.pgvector_password,
-            port=LLM_SETTINGS.pgvector_port,
-            user=LLM_SETTINGS.pgvector_user,
-            table_name=HYBRID_RETRIEVAL_SETTINGS.get_chat_table_name(),
-            embed_dim=HYBRID_RETRIEVAL_SETTINGS.pgvector_embed_dim,
-            hybrid_search=True,
-        )
-        index = VectorStoreIndex.from_vector_store(
-            vector_store=vector_store,
-            embed_model=embed_model,
-        )
-
-        for msg in messages:
-            raw_text = (msg.content or "").strip()
-
-            # 貼圖描述一起寫入，讓 embedding 包含語意
-            if msg.stickers:
-                sticker_texts = []
-                for sticker in msg.stickers:
-                    sticker_text = get_sticker_text(sticker)
-                    if sticker_text:
-                        sticker_texts.append(sticker_text)
-                if sticker_texts:
-                    sticker_part = " ".join(sticker_texts)
-                    raw_text = f"{raw_text} {sticker_part}" if raw_text else sticker_part
-
-            message_id = str(msg.id)
-
-            # 擴充接口：
-            # - _should_skip_persist_message: 長度/噪音/去重等過濾策略
-            # - _redact_text_for_persist: 敏感資訊遮罩策略
-            should_skip, skip_reason = _should_skip_persist_message(
-                message_id=message_id,
-                text=raw_text,
-            )
-            if should_skip:
-                if skip_reason != "duplicate_in_process":
-                    logger.debug("略過 pgvector 寫入: message_id=%s reason=%s", message_id, skip_reason)
-                continue
-
-            text = _redact_text_for_persist(raw_text)
-
-            try:
-                doc = Document(
-                    text=text,
-                    doc_id=message_id,
-                    metadata={
-                        "message_id": message_id,
-                        "author_id": str(msg.author.id),
-                        "channel_id": str(msg.channel.id),
-                        "timestamp": msg.created_at.isoformat(),
-                        "doc_type": "discord_chat",
-                    },
-                )
-                index.insert(doc)
-                _PERSISTED_MESSAGE_IDS.add(message_id)
-            except Exception:
-                # unique index 重複或其他單筆錯誤，跳過繼續
-                _PERSISTED_MESSAGE_IDS.add(message_id)
-    except Exception as exc:
-        logger.warning("寫入 pgvector 失敗（不中斷主流程）: %s", exc)
 
 
 def _build_discord_context_item(msg: discord.Message, tz: timezone) -> dict[str, str]:
@@ -860,22 +792,8 @@ def _retrieve_rag_context_impl(
     vector_nodes: list[Any] = []
     if VectorStoreIndex is not None and PGVectorStore is not None:
         try:
-            embed_model = _get_embed_model(logger)
-            if embed_model is not None:
-                vector_store = PGVectorStore.from_params(
-                    database=LLM_SETTINGS.pgvector_db,
-                    host=LLM_SETTINGS.pgvector_host,
-                    password=LLM_SETTINGS.pgvector_password,
-                    port=LLM_SETTINGS.pgvector_port,
-                    user=LLM_SETTINGS.pgvector_user,
-                    table_name=table_name,
-                    embed_dim=HYBRID_RETRIEVAL_SETTINGS.pgvector_embed_dim,
-                    hybrid_search=True,
-                )
-                index = VectorStoreIndex.from_vector_store(
-                    vector_store=vector_store,
-                    embed_model=embed_model,
-                )
+            index = _get_or_build_vector_index(table_name, logger)
+            if index is not None:
                 retriever = index.as_retriever(
                     similarity_top_k=max(top_k * 2, HYBRID_RETRIEVAL_SETTINGS.hybrid_candidate_pool // 2)
                 )
