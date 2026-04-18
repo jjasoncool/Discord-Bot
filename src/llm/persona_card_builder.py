@@ -292,6 +292,7 @@ def format_persona_cards_for_context(cards: list[dict[str, Any]]) -> list[dict[s
                 {
                     "role": "user",
                     "content": f"「{alias}」— {description}",
+                    "person_id": card.get("person_id", ""),
                 }
             )
     return context_items

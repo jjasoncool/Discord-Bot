@@ -341,6 +341,7 @@ def _build_discord_context_item(msg: discord.Message, tz: timezone) -> dict[str,
         "content": formatted_text,
         "message_id": str(msg.id),
         "author_id": str(msg.author.id),
+        "display_name": display_name,
         "channel_id": str(msg.channel.id)
     }
 

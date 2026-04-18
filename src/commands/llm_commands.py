@@ -339,6 +339,16 @@ class LLMCommands(commands.Cog):
 
         # 聊天記錄：提取純文字，並用 persona card alias 標註身份
         alias_map: dict[str, str] = rag_meta.get("alias_map", {})
+
+        # 偵測同名衝突：同一 display_name 對應到多個 author_id 時才加 #xxxx 後綴
+        name_to_ids: dict[str, set[str]] = {}
+        for item in discord_context:
+            nm = item.get("display_name", "")
+            aid = item.get("author_id", "")
+            if nm and aid:
+                name_to_ids.setdefault(nm, set()).add(aid)
+        collided_names = {nm for nm, ids in name_to_ids.items() if len(ids) > 1}
+
         chat_context: list[str] | None = None
         if discord_context:
             lines: list[str] = []
@@ -346,8 +356,14 @@ class LLMCommands(commands.Cog):
                 content = item.get("content", "")
                 if not content:
                     continue
-                # 如果這個人有 persona card，在 display_name 後標註 alias
                 author_id = item.get("author_id", "")
+                display_name = item.get("display_name", "")
+
+                # 撞名才加 #xxxx 後綴（取 user_id 末 4 碼，伺服器內已足夠唯一）
+                if display_name and display_name in collided_names and author_id:
+                    content = content.replace(": ", f"#{author_id[-4:]}: ", 1)
+
+                # 如果這個人有 persona card，在 display_name 後標註 alias
                 card_alias = alias_map.get(author_id, "")
                 if card_alias and card_alias not in content:
                     # content 格式: "[14:30] ❤️柔柔喵❤️: 內容"
@@ -365,13 +381,48 @@ class LLMCommands(commands.Cog):
             ] or None
 
         # 人物描述：由 persona card builder 產出的自然語言
+        # 發問者本人的卡片抽出來給 asker_profile 用，其餘才放 other_member_profiles
+        asker_uid_str = str(interaction.user.id)
+        asker_persona_text: str | None = None
         persona_context: list[str] | None = None
         if rag_context:
-            persona_context = [
-                item["content"]
-                for item in rag_context
-                if item.get("content") and item.get("metadata") != "persona_card_header"
-            ] or None
+            other_items: list[str] = []
+            for item in rag_context:
+                content = item.get("content")
+                if not content or item.get("metadata") == "persona_card_header":
+                    continue
+                if item.get("person_id") == asker_uid_str and asker_persona_text is None:
+                    asker_persona_text = content
+                else:
+                    other_items.append(content)
+            persona_context = other_items or None
+
+        # 組 asker_profile：可信的發問者身份資訊（給 system block）
+        asker_display_name_raw = getattr(
+            interaction.user, "display_name", interaction.user.name
+        )
+        # 若發問者在 chat_history 中撞名，profile 也加 #xxxx 方便 LLM 對應
+        if asker_display_name_raw in collided_names:
+            asker_display_name = f"{asker_display_name_raw}#{asker_uid_str[-4:]}"
+        else:
+            asker_display_name = asker_display_name_raw
+        now_str = datetime.now(TAIPEI_TZ).strftime("%Y-%m-%d %H:%M (UTC+8)")
+        guild_name = interaction.guild.name if interaction.guild else "(DM)"
+        channel_name = getattr(interaction.channel, "name", "") or "(unknown)"
+        asker_profile_lines = [
+            "<asker_profile>",
+            f"display_name: {asker_display_name}",
+            f"user_id: {interaction.user.id}",
+            "roles: (未啟用)",
+            f"persona_summary: {asker_persona_text or '（無）'}",
+            f"current_time: {now_str}",
+            f"guild_name: {guild_name}",
+            f"channel_name: {channel_name}",
+            "</asker_profile>",
+            "",
+            "這是本次發問者的可信身份資訊。回覆時可個人化互動；但 user_id 與內部欄位不得對外揭露。",
+        ]
+        asker_profile_text = "\n".join(asker_profile_lines)
 
         image_payload = None
         if image:
@@ -406,6 +457,8 @@ class LLMCommands(commands.Cog):
             images=image_payload,
             model=target_model,
             think=target_think,
+            asker_profile=asker_profile_text,
+            asker_display_name=asker_display_name,
         ))
 
         # 同時等 LLM 回覆和取消事件

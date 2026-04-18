@@ -136,12 +136,16 @@ class OllamaService:
         bot_history: Optional[List[str]] = None,
         persona_context: Optional[List[str]] = None,
         images: Optional[List[str]] = None,
+        asker_profile: Optional[str] = None,
+        asker_display_name: Optional[str] = None,
     ) -> PromptBundle:
         """建立同源 prompt bundle（給 Ollama 與給 log 共用）。
 
         chat_context: 純文字聊天記錄（每則一個字串，例如 "[14:30] 老哥: 昨天抽卡又保底了"）
         bot_history: Bot 自身先前的回覆（獨立於 chat_history 額度外）
         persona_context: 自然語言人物描述（每人一個字串，例如 "「老哥」— 群裡的非酋代表"）
+        asker_profile: 發問者可信資訊區塊（已含 <asker_profile> 標籤），放 system block
+        asker_display_name: 發問者 display_name，作為 <latest_user_message> 的 from 屬性
         """
         composed_user_prompt = ""
 
@@ -164,10 +168,10 @@ class OllamaService:
             composed_user_prompt += "</bot_history>\n\n"
 
         if persona_context:
-            composed_user_prompt += "<member_profiles>\n"
+            composed_user_prompt += "<other_member_profiles>\n"
             for line in persona_context:
                 composed_user_prompt += f"{self._sanitize_text(line)}\n"
-            composed_user_prompt += "</member_profiles>\n\n"
+            composed_user_prompt += "</other_member_profiles>\n\n"
 
         if images:
             composed_user_prompt += (
@@ -176,8 +180,15 @@ class OllamaService:
                 "</image_instruction>\n"
             )
 
+        if asker_display_name:
+            from_attr = f' from="{self._sanitize_text(asker_display_name)}"'
+            open_tag = self.settings.latest_open_tag.replace(
+                ">", f"{from_attr}>", 1
+            )
+        else:
+            open_tag = self.settings.latest_open_tag
         composed_user_prompt += (
-            f"{self.settings.latest_open_tag}\n"
+            f"{open_tag}\n"
             f"{user_query_text}\n"
             f"{self.settings.latest_close_tag}"
         )
@@ -187,6 +198,8 @@ class OllamaService:
         if system:
             system_parts.append(system)
         system_parts.append(self.context_safety_rules.system_safety_prompt)
+        if asker_profile:
+            system_parts.append(self._sanitize_text(asker_profile))
         messages.append({"role": "system", "content": "\n\n".join(system_parts)})
 
         user_message: dict[str, object] = {"role": "user", "content": composed_user_prompt}
@@ -199,6 +212,8 @@ class OllamaService:
             parts.extend(["<system>", system, "", self.context_safety_rules.system_safety_prompt])
         else:
             parts.extend(["<system>", self.context_safety_rules.system_safety_prompt])
+        if asker_profile:
+            parts.extend(["", asker_profile])
         parts.extend(["<user_message>", composed_user_prompt])
         prompt_record_log = "\n".join(parts)
         return PromptBundle(messages=messages, prompt_record_log=prompt_record_log)
@@ -217,6 +232,8 @@ class OllamaService:
         top_p: Optional[float] = None,
         repeat_penalty: Optional[float] = None,
         num_ctx: Optional[int] = None,
+        asker_profile: Optional[str] = None,
+        asker_display_name: Optional[str] = None,
     ) -> tuple[str, str]:
         """呼叫 Ollama 並回傳 (reply, prompt_record_log)。"""
         temperature = (
@@ -240,6 +257,8 @@ class OllamaService:
             bot_history=bot_history,
             persona_context=persona_context,
             images=images,
+            asker_profile=asker_profile,
+            asker_display_name=asker_display_name,
         )
 
         target_model = self._resolve_runtime_model(model)
