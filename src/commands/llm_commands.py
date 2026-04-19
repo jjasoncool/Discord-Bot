@@ -447,6 +447,13 @@ class LLMCommands(commands.Cog):
         target_model = self.llm_service.resolve_request_model()
         target_think = self.llm_service.resolve_request_think()
 
+        # Bot 自身身份：伺服器暱稱優先 → 全域 username → None（僅極端情境）
+        bot_display_name = None
+        if interaction.guild and interaction.guild.me:
+            bot_display_name = interaction.guild.me.display_name
+        elif interaction.client.user:
+            bot_display_name = interaction.client.user.name
+
         # 用 asyncio.Task 包裝，取消時可中斷 Ollama HTTP 請求
         llm_task = asyncio.create_task(self.llm_service.generate_reply(
             prompt=resolved_question,
@@ -459,6 +466,7 @@ class LLMCommands(commands.Cog):
             think=target_think,
             asker_profile=asker_profile_text,
             asker_display_name=asker_display_name,
+            bot_display_name=bot_display_name,
             # chat model 在最後一次 /askai 後 1h 內保持常駐，避開反覆 unload/reload
             # 觸發的 Windows ephemeral port 與 runner crash；閒置超過 1h 才釋放 VRAM
             keep_alive="1h",

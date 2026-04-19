@@ -5,6 +5,7 @@
 - sent_content：所有來源的已發送去重
 - forum_thread_state：PTT / Bahamut 等 forum 來源的 thread 追蹤
 - bahamut_post_state / bahamut_comment_slot / bahamut_synced_comment：巴哈明細
+- community_lookup_threads：社群 ID 查詢（PTT / 巴哈）的 thread 追蹤（日期 hybrid section）
 """
 import asyncio
 import aiosqlite
@@ -69,6 +70,19 @@ CREATE TABLE IF NOT EXISTS bahamut_synced_comment (
     sn TEXT NOT NULL,
     comment_id TEXT NOT NULL,
     PRIMARY KEY (sn, comment_id)
+);
+
+-- 社群 ID 查詢：每 (guild, source, lookup_id) 唯一 thread，採「日期 hybrid」
+CREATE TABLE IF NOT EXISTS community_lookup_threads (
+    guild_id              INTEGER NOT NULL,
+    source                TEXT NOT NULL,              -- 'ptt' | 'bahamut'
+    lookup_id             TEXT NOT NULL,              -- PTT 帳號 或 巴哈 user_id
+    thread_id             INTEGER NOT NULL,
+    control_msg_id        INTEGER,                    -- 底部控制訊息（[🔄 更新]）的 msg_id
+    last_section_date     TEXT,                       -- 'YYYY-MM-DD'：判斷同日 edit / 跨日 append
+    last_section_slots    TEXT,                       -- JSON: {header_msg_id, post_slot_msg_ids, comment_slot_msg_ids}
+    last_updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (guild_id, source, lookup_id)
 );
 """
 
@@ -284,6 +298,80 @@ class StateDB:
                     (sn, str(comment_id)),
                 )
 
+        await self.db.commit()
+
+    # ── 社群 ID 查詢：community_lookup_threads ──
+
+    async def get_community_lookup_thread(
+        self, guild_id: int, source: str, lookup_id: str
+    ) -> Optional[Dict]:
+        """取得社群 ID 查詢 thread 狀態。"""
+        async with self.db.execute(
+            """SELECT thread_id, control_msg_id, last_section_date,
+                      last_section_slots, last_updated_at
+               FROM community_lookup_threads
+               WHERE guild_id=? AND source=? AND lookup_id=?""",
+            (guild_id, source, str(lookup_id)),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "thread_id": row[0],
+            "control_msg_id": row[1],
+            "last_section_date": row[2],
+            "last_section_slots": json.loads(row[3]) if row[3] else {},
+            "last_updated_at": row[4],
+        }
+
+    async def upsert_community_lookup_thread(
+        self,
+        guild_id: int,
+        source: str,
+        lookup_id: str,
+        *,
+        thread_id: int,
+        control_msg_id: Optional[int] = None,
+        last_section_date: Optional[str] = None,
+        last_section_slots: Optional[Dict] = None,
+    ) -> None:
+        """新增或更新 community lookup thread 狀態。
+
+        未傳的欄位在 UPDATE 時保留既有值（COALESCE），
+        INSERT 時則使用 NULL（首次建立可能尚無 section / control_msg_id）。
+        """
+        slots_json = json.dumps(last_section_slots) if last_section_slots is not None else None
+        await self.db.execute(
+            """INSERT INTO community_lookup_threads
+               (guild_id, source, lookup_id, thread_id, control_msg_id,
+                last_section_date, last_section_slots, last_updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(guild_id, source, lookup_id) DO UPDATE SET
+                   thread_id=excluded.thread_id,
+                   control_msg_id=COALESCE(excluded.control_msg_id, community_lookup_threads.control_msg_id),
+                   last_section_date=COALESCE(excluded.last_section_date, community_lookup_threads.last_section_date),
+                   last_section_slots=COALESCE(excluded.last_section_slots, community_lookup_threads.last_section_slots),
+                   last_updated_at=CURRENT_TIMESTAMP""",
+            (
+                guild_id,
+                source,
+                str(lookup_id),
+                thread_id,
+                control_msg_id,
+                last_section_date,
+                slots_json,
+            ),
+        )
+        await self.db.commit()
+
+    async def delete_community_lookup_thread(
+        self, guild_id: int, source: str, lookup_id: str
+    ) -> None:
+        """刪除對應紀錄（thread 被手動刪除或失效時呼叫）。"""
+        await self.db.execute(
+            "DELETE FROM community_lookup_threads WHERE guild_id=? AND source=? AND lookup_id=?",
+            (guild_id, source, str(lookup_id)),
+        )
         await self.db.commit()
 
     # ── JSON 匯入 ──

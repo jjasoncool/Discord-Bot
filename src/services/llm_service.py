@@ -157,6 +157,7 @@ class OllamaService:
         images: Optional[List[str]] = None,
         asker_profile: Optional[str] = None,
         asker_display_name: Optional[str] = None,
+        bot_display_name: Optional[str] = None,
     ) -> PromptBundle:
         """建立同源 prompt bundle（給 Ollama 與給 log 共用）。
 
@@ -165,6 +166,8 @@ class OllamaService:
         persona_context: 自然語言人物描述（每人一個字串，例如 "「老哥」— 群裡的非酋代表"）
         asker_profile: 發問者可信資訊區塊（已含 <asker_profile> 標籤），放 system block
         asker_display_name: 發問者 display_name，作為 <latest_user_message> 的 from 屬性
+        bot_display_name: Bot 自身 display_name（由系統注入為 <bot_history> 的 name 屬性，
+            讓 LLM 知道自己是誰；空 history 時仍輸出空殼 tag 以保持身份錨點）
         """
         composed_user_prompt = ""
 
@@ -181,10 +184,20 @@ class OllamaService:
             composed_user_prompt += "</chat_history>\n\n"
 
         if bot_history:
-            composed_user_prompt += "<bot_history>\n"
+            if bot_display_name:
+                composed_user_prompt += (
+                    f'<bot_history name="{self._sanitize_text(bot_display_name)}">\n'
+                )
+            else:
+                composed_user_prompt += "<bot_history>\n"
             for line in bot_history:
                 composed_user_prompt += f"{self._sanitize_text(line)}\n"
             composed_user_prompt += "</bot_history>\n\n"
+        elif bot_display_name:
+            # 空 history 也輸出空殼 tag，讓身份錨點永遠存在（與 history 是否有內容解耦）
+            composed_user_prompt += (
+                f'<bot_history name="{self._sanitize_text(bot_display_name)}"></bot_history>\n\n'
+            )
 
         if persona_context:
             composed_user_prompt += "<other_member_profiles>\n"
@@ -373,6 +386,7 @@ class OllamaService:
         num_ctx: Optional[int] = None,
         asker_profile: Optional[str] = None,
         asker_display_name: Optional[str] = None,
+        bot_display_name: Optional[str] = None,
         keep_alive: Optional[str] = None,
     ) -> tuple[str, str]:
         """/askai 專用：組 prompt bundle → 呼叫 `chat_raw` → 回 (reply, prompt_record_log)。
@@ -390,6 +404,7 @@ class OllamaService:
             images=images,
             asker_profile=asker_profile,
             asker_display_name=asker_display_name,
+            bot_display_name=bot_display_name,
         )
 
         target_model = self._resolve_runtime_model(model)

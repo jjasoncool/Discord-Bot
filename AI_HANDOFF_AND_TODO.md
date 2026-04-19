@@ -36,6 +36,9 @@
 - 2026-04-18：/askai 效能調優三連。①context 量上調（`max_context_to_send` 20→50、`min_recent_context` 15→25、`max_relevant_context` 14→25），覆蓋典型 ~50 則討論。②Plan C：`_build_vector_rank` 改查持久化 pgvector（既有 `chat_persistence` 寫入端），/askai 的 embed 呼叫從「100 則 in-memory」降到「1 次問題」。③修 BM25 tokenization TF bug（`tokenize_for_retrieval` 回傳 `set`→`list`），保留重複 token 讓 BM25 能用詞頻。附帶清掉無用的 in-memory VectorStoreIndex LRU cache。`_EMBED_CONCURRENCY` 2→1 對齊 server 端 `OLLAMA_NUM_PARALLEL=1`，避免 AMD Vulkan KV cache 倍增風險。音樂機器人播音斷斷續續的根因是 default ThreadPoolExecutor 被 BM25+embedding 佔用 + GIL 爭用，此三項改動後預期大幅緩解。
 - 2026-04-19：Ollama chat 呼叫統一化 Stage 1 完成。`OllamaService` 新增 `chat_raw()` 底層方法（純 HTTP + payload 組裝，raise `OllamaAPIError` / `aiohttp.ClientError`），`generate_reply()` 改為高階封裝（prompt bundle + context 注入 + 錯誤字串化）；`chat_raw` 新增 `timeout` 參數讓 caller 覆蓋預設。`personality_extractor.extract_personalities` 從自寫 aiohttp 遷移到 `service.chat_raw(timeout=600, num_ctx=32768, temperature=0.3, top_p=0.8)`，消除唯一一處 /api/chat 重複實作。附帶修掉「Ollama 呼叫發生未預期錯誤: （空字串）」log 診斷困難（加 `type(exc).__name__`，例：`TimeoutError: `）。
 - 2026-04-19：`chat_raw` / `generate_reply` 新增 `keep_alive` 參數，caller 按用途傳不同值。/askai 傳 `"1h"`（連續互動期間 chat model 常駐）、moderation 傳 `"30m"`（間歇性任務）、personality_extractor 傳 `"30m"`（4am 排程跑完 30 分鐘後釋放）。payload 策略：caller 明確傳值才加 `keep_alive` 欄位，否則沿用 server 端全域 `OLLAMA_KEEP_ALIVE`，不覆蓋；embed 模型目前還是走 server 全域設定（沒動 LlamaIndex 層），待後續需要時再做 Stage 2。
+- 2026-04-19：社群 ID 查詢 Phase 0 Step 2~5 實作完成（Step 2 state_db 新表 + CRUD、Step 3 `services/community_lookup_service.py` 查詢核心、Step 4 `commands/community_lookup_commands.py` Panel/Modal/Flow/日期 hybrid section 管理、Step 5 `/server_manager` 頻道選項 + 自動部署 + `discord_bot.py` COMMAND_MODULES 掛載）。所有 smoke test 通過（CRUD、真實 DB 查詢、cog 實例化 + persistent views 註冊、Modal children 結構、embed 格式）。Step 6 部署驗證待使用者執行。涉及新檔：`src/services/community_lookup_service.py`、`src/commands/community_lookup_commands.py`、`src/scripts/bench_ptt_comment_lookup.py`；涉及改動：`src/services/state_db.py`、`src/commands/management_commands.py`、`src/discord_bot.py`。未動 scraper DB schema。
+- 2026-04-19：社群 ID 查詢 Phase 0 Step 1（JSON1 效能驗證）完成。`src/scripts/bench_ptt_comment_lookup.py` 對現有 `articles.db`（810 篇 / 39,890 留言 / 367 MB）實測，全部 query p95 < 30ms，遠低於 500ms 判準。意外收穫：`ix_ptt_posts_published_at` 早已存在（scraper models.py `published_at=Column(..., index=True)`），EXPLAIN QUERY PLAN 顯示 SQLite 已先走時間 index 縮小範圍再做 `json_each`，所以 `idx_ptt_author` 完全不必加，原定的 PTT index migration 取消 — scraper DB schema 零變更。
+- 2026-04-19：新增主線「社群 ID 查詢（PTT / 巴哈）」，架構已定案（status: draft）。核心概念：`/server_manager` 設定「社群查詢頻道」→ 面板兩顆按鈕（查 PTT / 查巴哈）→ Modal 填目標帳號 + 範圍 Select（7/15/30/60/90/180，預設 30）→ 每個 `(source, lookup_id)` 建立唯一 public thread（命名 `[PTT] JohnDoe` / `[巴哈] 小明 (ABC123)`，auto-archive 7 天）→ 結果 append 模式「日期 hybrid」（同日 edit、跨日 append 新 section）→ 父頻道發公開通知 + bump panel。PTT 走 SQLite JSON1（零 migration，只加 `idx_ptt_author` / `idx_ptt_published_at`），巴哈走 ORM。保底 100 留言 / 20 主文（區間內不足補區間外），hard cap 1000 筆/來源。Phase 0 Step 1 將先跑 JSON1 效能驗證 script 後再動正式 code。詳見[社群 ID 查詢專區](#社群-id-查詢專區)。
 - 2026-04-19：Ollama 穩定性與 VRAM 優化兩連。①`chat_raw` 自動重試：檔頭新增常數 `OLLAMA_MAX_ATTEMPTS=2` / `OLLAMA_RETRY_DELAY=3.0` / `OLLAMA_RETRY_STATUS_CODES={500,502,503,504}`，HTTP 區塊改 2-attempt 迴圈，每次建立新 ClientSession + ClientTimeout 讓 timeout 自動重置；會重試 500/502/503/504 + asyncio.TimeoutError + aiohttp.ClientError，**不重試** 4xx 與回應格式異常。觸發背景：17:14 出現 `500 model runner has unexpectedly stopped`，使用者確認 VRAM 還剩 20GB 排除 OOM，判定為 Ollama runner 暫時性崩潰。②`SafeOllamaEmbedding` 預設注入 `num_ctx=8192`：Ollama VRAM-based 預設 32768 讓 0.6B embedding 吃 5.7GB VRAM（KV cache ~3.5GB 預分配但用不到），調成 8192 後 KV cache 降到 ~880MB，省 ~2.6GB。實作方式：檔頭常數 `_EMBED_NUM_CTX=8192` + `__init__` 覆寫把 `num_ctx` 塞進 `ollama_additional_kwargs`，caller 仍可覆寫；三個 call site（chat_persistence / intro_rag_port / context_retriever）一行都不用改（context_retriever 早已用 `SafeOllamaEmbedding as OllamaEmbedding` alias）。③澄清：人格萃取排程本來就會自動寫 RAG（`run_personality_extraction` 預設 `write_rag=True`，排程 caller 沒傳 False），無需改動；現況語意 = 排程自動 / 手動人審。④embedding 長度稽核：所有 call site 最大輸入 ~4200 字元（Discord 訊息上限），用掉 8192 token 的 51%，有 2 倍 buffer；intro/impression/personality 都有 modal `max_length` 或程式常數硬限制；未來 Bahamut / Article 若需 embed 長文應先切 chunk，不是調大 num_ctx。
 
 ---
@@ -110,6 +113,7 @@ last_confirmed: 2026-03-31
 | 跨來源整合（Article/FB/PTT/TG） | 有方向，尚未全面收斂 | 35% | [跨來源整合](#跨來源整合專區) |
 | Bahamut RAG / AI 整合 | 尚未開始 | 5% | [RAG TODO](#第三階段整合-ai--pgvector--rag) |
 | 幽靈點名系統（Roll Call） | 已實作，待部署驗證 | 80% | [幽靈點名](#幽靈點名系統專區) |
+| 社群 ID 查詢（PTT / 巴哈） | Phase 0 Step 1~5 實作完成，待部署驗證 | 85% | [社群 ID 查詢](#社群-id-查詢專區) |
 | Discord Bot 管理入口 | 規劃中 | 10% | [管理 TODO](#discord-bot-管理入口與指令整理-todo) |
 
 ---
@@ -377,6 +381,133 @@ Phase 1 三個玩法**共用同一張 DB**，不要拆開做。
 | `src/commands/reaction_commands.py`（新增） | `/my_emoji`、每週金句公告 |
 | `src/commands/llm_commands.py` | Phase 2：組 `asker_recent_highlights` |
 | `src/llm/personality_extractor.py` | Phase 3：萃取時加權 reaction 訊號 |
+
+---
+
+## 社群 ID 查詢專區
+
+<!-- @meta
+id: community-lookup
+type: TODO
+status: draft
+depends_on: [project-architecture]
+affects: []
+last_confirmed: 2026-04-19
+-->
+
+> **目標：** 讓使用者在 Discord 上輸入 PTT 帳號或巴哈 ID/名稱，查出該 ID 在兩站的發文與留言紀錄，並把結果做成可追蹤的 thread（每 ID 一個 thread，像搜尋庫）。
+
+### 核心設計（已定案）
+
+**1. 入口與頻道設定**
+- `config.json` 新增 `community_lookup_channel_id`
+- 走既有 `/server_manager` 下拉選單設定（仿 `intro_channel_id` 同構），設定瞬間自動部署 panel
+- 無獨立 slash command；所有互動走面板按鈕
+
+**2. Panel（父頻道常駐）**
+- 兩顆按鈕：🔍 查 PTT / 🎮 查巴哈
+- 永續 View（`timeout=None`）；`setup_hook` 呼叫 `add_view(CommunityPanelView())`
+- 每次查詢後 bump（刪舊發新，維持在父頻道最底）
+
+**3. Modal**
+| 欄位 | 查 PTT | 查巴哈 |
+|---|---|---|
+| 帳號輸入 | TextInput：PTT 帳號 | TextInput：ID 或名稱 |
+| 範圍 | Select：`7/15/30(預設)/60/90/180` | 同左 |
+| 比對模式 | — | Select：精確(預設，只查 ID) / 模糊(ID 或名稱 LIKE) |
+
+- 巴哈模糊查多筆 → ephemeral 候選清單下拉讓使用者挑
+
+**4. Thread 行為（重點）**
+- 每個 `(guild_id, source, lookup_id)` **唯一一個 public thread**，重查複用（封存自動解封）
+- 命名：`[PTT] JohnDoe` / `[巴哈] 小明 (ABC123)`
+- Auto-archive：7 天（Discord 最大）
+- **日期 hybrid 策略：**
+  - 今天首次查 → append 建立「今日 section」
+  - 今天再查 → edit 覆蓋「今日 section」（標頭更新「最新更新」時間）
+  - 跨日首次查 → append 建立「新日期 section」
+- Thread 內無「頂部查詢日誌」embed（section 標頭本身就是當日日誌）
+- 控制訊息「[🔄 更新查詢結果]」每次更新後刪舊發新在 thread 最底
+
+**5. Embed slot 機制（仿巴哈留言）**
+- 每個 slot 一個 embed，`description` ≤ 4000 字（複用 `EMBED_DESC_LIMIT`）
+- 滿了發下一個 slot，slot 間附「⬇️ 更多...」導航連結 + `thread.send(..., reference=prev_msg)` reply 串接
+- 複用 `src/services/bahamut_monitor.py` 既有常數與函式
+- **不做 edit 模式下的預建格**（因為歷史 section 不會被 edit，每個 section 的 slot 數由當次結果決定）
+
+**6. 色條分區**
+- 🟦 標頭 embed（藍色）
+- 🟪 主文 embed（紫色）
+- 🟩 留言 embed（綠色）
+- ⬜ 控制訊息 embed（灰色）
+
+**7. 主文連結策略**
+- 查 `state_db.forum_thread_state` / `bahamut_post_state` 既有對應
+- 有 → 🗨️ Discord 討論（jump URL）
+- 無 → 🌐 原文（PTT / 巴哈原站）
+- **留言不給跳轉連結**，直接印內容
+
+**8. 查詢策略**
+- 保底：留言 100 則 / 主文 20 篇
+- 區間內不足保底時補撈區間外（UI 分段「區間內 X / 區間外補 Y」，含分隔線）
+- Hard cap：1000 筆/來源，超過截斷並在標頭提示「結果過多，縮短天數重查」
+- PTT：SQLite JSON1（`json_each` + `json_extract`）+ 兩個 index
+- 巴哈：ORM 直接查 `author_id` / `LIKE author_name`
+
+**9. 父頻道通知（公開）**
+```
+🔔 @Jason 更新了 [PTT] JohnDoe 的查詢紀錄
+   📅 搜尋前 30 天 · 📊 主文 5 / 留言 127
+   → 🔗 跳轉 thread
+```
+- 公開訊息（非 ephemeral），讓所有人看到「誰查了誰」
+- 另外仍回 ephemeral 給查詢者方便直接點連結
+- 發完後 bump panel
+
+### 資料層變更
+
+**新增表**（`src/services/state_db.py`）：
+```sql
+CREATE TABLE IF NOT EXISTS community_lookup_threads (
+    guild_id              INTEGER NOT NULL,
+    source                TEXT NOT NULL,              -- 'ptt' | 'bahamut'
+    lookup_id             TEXT NOT NULL,              -- PTT 帳號 或 巴哈 user_id
+    thread_id             INTEGER NOT NULL,
+    last_updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_section_date     TEXT,                       -- 'YYYY-MM-DD'，判斷同日 edit / 跨日 append
+    last_section_slots    TEXT,                       -- JSON: 記錄該 section 的 msg_ids（header, post_slots, comment_slots, control）
+    last_query_range_days INTEGER,
+    PRIMARY KEY (guild_id, source, lookup_id)
+);
+```
+
+**PTT schema：** 不變動（`ix_ptt_posts_published_at` 已存在且足夠，`author` index 不需要 — Step 1 驗證結果）。
+
+### 檔案分工
+
+| 檔案 | 角色 |
+|---|---|
+| `src/commands/community_lookup_commands.py`（新增） | `CommunityPanelView`、兩個 Modal、更新按鈕控制訊息 |
+| `src/services/community_lookup_service.py`（新增） | 查詢核心（JSON1 PTT + ORM 巴哈）、slot 切割、section append/edit、主文連結解析 |
+| `src/services/state_db.py`（小動） | `community_lookup_threads` 表 + CRUD |
+| `src/commands/management_commands.py`（小動） | `/server_manager` 加「社群查詢頻道」選項 + 5 個 panel 同構方法（仿 intro） |
+| `src/discord_bot.py`（小動） | `setup_hook` 註冊 `add_view(CommunityPanelView())` |
+| `settings/community_lookup_panel_runtime.json`（新增） | panel message_id（仿 intro runtime） |
+
+### Phase 0 實作步驟
+
+- [x] Step 1：JSON1 效能驗證 script（`src/scripts/bench_ptt_comment_lookup.py`）— 全部 p95 < 30ms，PTT index migration 確認不需要
+- [x] Step 2：state_db 新表 `community_lookup_threads` + CRUD（COALESCE 部分更新、smoke test 通過）
+- [x] Step 3：`services/community_lookup_service.py` 查詢核心（PTT JSON1 + 巴哈 ORM + 模糊候選；對真實 DB smoke test：lovez04wj06 30天查到 618 則留言、坂坂悠模糊候選排序正確）
+- [x] Step 4：`commands/community_lookup_commands.py`（Panel View、Modal、ControlMessageView、Flow 含日期 hybrid/slot 切割/父頻道通知/bump，全部 smoke test 通過）
+- [x] Step 5：`/server_manager` 加「社群查詢頻道」選項 + 設定完自動部署 panel、`discord_bot.py` 已掛入 `COMMAND_MODULES`
+- [ ] Step 6：**端到端部署驗證（待使用者）** — 重啟 discord-bot 容器、`/server_manager` 設社群查詢頻道、測 PTT/巴哈 Modal、同日 edit / 跨日 append、保底補撈、父頻道公告、panel bump、封存 thread 重查自動解封
+
+### 未定事項 / 風險
+
+- Phase 0 Step 1 驗證結果：若 JSON1 query p95 > 500ms 需考慮 Phase X 做 `ptt_comments` 正規化 migration（目前判斷機率低）
+- `last_section_slots` JSON 結構具體欄位在 Step 4 實作時最終拍板
+- Phase 2+：預留「接入 `/askai` 的 `asker_profile` 成 `<asker_community_activity>` 區塊」可能性，目前不在 Phase 0 範圍
 
 ---
 

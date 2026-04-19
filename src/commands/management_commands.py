@@ -695,7 +695,8 @@ class ManagementCommands(commands.Cog):
             telegram_route_option_label: {"type": discord.ChannelType.text, "key": "telegram_channel_routes", "color": discord.Color.teal(), "desc": "先輸入 Telegram 來源（名稱/chat_id），再綁定 Discord 文字頻道"},
             "自我介紹頻道": {"type": discord.ChannelType.text, "key": "intro_channel_id", "color": discord.Color.purple(), "desc": "使用者填寫自我介紹的頻道"},
             "音樂語音頻道": {"type": discord.ChannelType.voice, "key": "music_voice_channel_id", "color": discord.Color.red(), "desc": "音樂機器人掛機與點歌的語音頻道"},
-            "幽靈點名頻道": {"type": discord.ChannelType.text, "key": "rollcall_channel_id", "color": discord.Color.dark_orange(), "desc": "幽靈點名訊息與管理面板的文字頻道"}
+            "幽靈點名頻道": {"type": discord.ChannelType.text, "key": "rollcall_channel_id", "color": discord.Color.dark_orange(), "desc": "幽靈點名訊息與管理面板的文字頻道"},
+            "社群查詢頻道": {"type": discord.ChannelType.text, "key": "community_lookup_channel_id", "color": discord.Color.teal(), "desc": "社群 ID 查詢（PTT / 巴哈）的面板頻道"}
         }
 
         # 創建頻道類型選單
@@ -833,7 +834,7 @@ class ManagementCommands(commands.Cog):
                                 channel,
                                 config,
                             )
-                            auto_panel_note = f"\n🤖 已自動發送填寫面板：{panel_message.jump_url}"
+                            auto_panel_note = f"\n🤖 已自動發送填寫面板:{panel_message.jump_url}"
                             if deleted_old:
                                 auto_panel_note += "\n🧹 舊頻道面板已刪除。"
                         except Exception as e:
@@ -842,6 +843,25 @@ class ManagementCommands(commands.Cog):
                             runtime_cfg.pop("intro_panel_message_id", None)
                             _save_intro_panel_runtime_config(ChannelConfig.DEFAULT_ID)
                             auto_panel_note = "\n⚠️ 自動發送面板失敗，系統會在下一次有人送出表單時自動重新 bump。"
+
+                    elif channel_info["key"] == "community_lookup_channel_id" and isinstance(channel, discord.TextChannel):
+                        # 設定完頻道後，自動部署社群查詢 panel
+                        community_cog = self.bot.get_cog("CommunityLookupCommands")
+                        if community_cog is None:
+                            auto_panel_note = "\n⚠️ CommunityLookupCommands Cog 尚未載入，面板未自動部署"
+                        else:
+                            try:
+                                # 先寫 config（下面 save 仍會跑），讓 get_panel_channel 能讀到
+                                ChannelConfig.save_config(config, config_file, caller="ManagementCommands")
+                                panel_message, deleted_old = await community_cog.replace_community_panel_message(
+                                    interaction.guild, channel,
+                                )
+                                auto_panel_note = f"\n🤖 已自動部署社群查詢面板：{panel_message.jump_url}"
+                                if deleted_old:
+                                    auto_panel_note += "\n🧹 舊頻道面板已刪除。"
+                            except Exception as e:
+                                logger.error(f"設定社群查詢頻道後自動部署面板失敗: {e}", exc_info=True)
+                                auto_panel_note = "\n⚠️ 自動部署面板失敗，可稍後手動重發"
 
                     ChannelConfig.save_config(config, config_file, caller="ManagementCommands")
 

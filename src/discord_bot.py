@@ -48,6 +48,7 @@ intents.voice_states = True
 # 指令模組清單
 COMMAND_MODULES = [
     'commands.article_commands',
+    'commands.community_lookup_commands',
     'commands.forum_monitor',
     'commands.llm_commands',
     'commands.management_commands',

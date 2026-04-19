@@ -6,6 +6,7 @@
 
 | 日期 | 區塊 | 關鍵字 |
 |---|---|---|
+| 2026-04-19 | [askai bot 身份感注入](#askai-bot-身份感注入歸檔2026-04-19) | bot_display_name, bot_history name 屬性, safety_prompt 別稱推斷, persona 對內理解 vs 對外表達 |
 | 2026-04-18 | [Context/Prompt 完整重構 + askai 身份感](#contextprompt-完整重構--askai-身份感歸檔2026-04-18) | askai, asker_profile, persona_card, 人格萃取, 撞名偵測, 429 治本, bahamut author_id |
 | 2026-04-18 | [點歌機器人 Music Bot 完整實作](#點歌機器人-music-bot-完整實作歸檔2026-04-18) | music, yt-dlp, DAVE, 按鈕面板, 快取, 音訊鏈路 |
 | 2026-04-18 | [幽靈點名系統核心實作](#幽靈點名系統核心實作歸檔2026-04-18) | rollcall, 抽選, 豁免期, 自動踢除, persistent view, 管理面板 |
@@ -19,6 +20,47 @@
 | 2026-03-26 | [Telegram 已解決問題集](#telegram-relay-通道連線問題2026-03-26-已解決) | 通道連線, 媒體重複, 時序, 副檔名, route key |
 | 2026-03-25 | [Telegram Relay 設計定案](#telegram-relay-設計定案--架構設定相容流程盤點2026-03-25已完成歸檔) | 架構, config, 路由, 六層設計 |
 | 2026-03-22 | [Telegram Scraper 專案交接](#telegram-scraper-專案交接2026-03-22已完成歸檔) | Docker, 模組化, forward 過濾, session |
+
+---
+
+## askai bot 身份感注入（歸檔 2026-04-19）
+
+### 問題現象
+
+LLM 遇到兩類輸入會角色錯位：
+- 成員在 chat_history 中指涉 bot：「那時候你機器人都還沒畜生」→ LLM 不認得「你機器人」= 自己
+- 使用者指令用代詞：「請你反駁剛剛罵**你**的話」→ LLM 把「你」錯解成對話對象而非自身，回出「我才沒有要罵柔柔喵」這種施暴者立場
+
+### 根因
+
+| 層 | 狀態 |
+|---|---|
+| persona（askai_system_prompt.txt） | 只聲明「貓娘」，無 Discord 身分綁定；且規則 14 禁止自稱 AI |
+| system_safety_prompt | 只定義 asker 側可信規則，無 bot 側 |
+| `<bot_history>` tag | 只有內容沒屬性，LLM 無從確認 display_name 就是自己 |
+
+### 解法（對稱於既有 `<latest_user_message from="">` 設計）
+
+1. **safety rules**（[llm_context_safety_rules.json](src/settings/prompts/llm_context_safety_rules.json)）`system_safety_prompt` 補兩句：`<bot_history>` 的 `name=` 屬性為系統可信來源、區塊內為 bot 過往發言；群友使用該名稱或以「機器人 / bot / 你（非指涉他人時）」稱呼時通常指 bot 本人。
+2. **service 層**（[llm_service.py](src/services/llm_service.py)）`_build_prompt_bundle` 與 `generate_reply` 新增 `bot_display_name` 選填參數。非空 bot_history 寫 `<bot_history name="X">`；空 history 仍輸出 `<bot_history name="X"></bot_history>` 空殼（身份錨點與 history 內容解耦，避免當前頻道最近 100 則內 bot 沒發言時完全無錨點）。
+3. **call site**（[llm_commands.py](src/commands/llm_commands.py)）`generate_reply` 前解析身份：`interaction.guild.me.display_name`（伺服器暱稱，一般情境）→ `interaction.client.user.name`（DM fallback）→ None（極端情境，slash command 下實際不會發生）。
+
+### 關鍵決策
+
+| 項目 | 決定 | 理由 |
+|---|---|---|
+| 是否帶 user_id | 否 | 違反 asker_profile 既有「內部欄位禁止對外揭露」規範 |
+| 是否帶 role 名 | 否 | role 是身份組標籤、不是 display_name，徒增雜訊 |
+| tag 屬性要不要寫 aliases | 否 | tag 保持乾淨，aliases 語意改寫 safety_prompt |
+| 是否動 persona 檔 | 否 | 「對內理解 vs 對外表達」分工：safety_prompt 管理解、persona 管表達（持守「不自稱 AI」規則） |
+| None fallback 要不要寫死字串 | 否 | 維持 None → tag 不輸出，保持 backward compatible |
+
+### 驗證方式
+
+下次 `/askai` 後查 [logs/askai_prompt.txt](logs/askai_prompt.txt)：
+- 非空 bot_history：`<bot_history name="Stargazer">` 開頭
+- 空 bot_history：`<bot_history name="Stargazer"></bot_history>` 空殼
+- DM 情境：`name=` 值為全域 username
 
 ---
 
