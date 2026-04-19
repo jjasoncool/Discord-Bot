@@ -36,6 +36,7 @@
 - 2026-04-18：/askai 效能調優三連。①context 量上調（`max_context_to_send` 20→50、`min_recent_context` 15→25、`max_relevant_context` 14→25），覆蓋典型 ~50 則討論。②Plan C：`_build_vector_rank` 改查持久化 pgvector（既有 `chat_persistence` 寫入端），/askai 的 embed 呼叫從「100 則 in-memory」降到「1 次問題」。③修 BM25 tokenization TF bug（`tokenize_for_retrieval` 回傳 `set`→`list`），保留重複 token 讓 BM25 能用詞頻。附帶清掉無用的 in-memory VectorStoreIndex LRU cache。`_EMBED_CONCURRENCY` 2→1 對齊 server 端 `OLLAMA_NUM_PARALLEL=1`，避免 AMD Vulkan KV cache 倍增風險。音樂機器人播音斷斷續續的根因是 default ThreadPoolExecutor 被 BM25+embedding 佔用 + GIL 爭用，此三項改動後預期大幅緩解。
 - 2026-04-19：Ollama chat 呼叫統一化 Stage 1 完成。`OllamaService` 新增 `chat_raw()` 底層方法（純 HTTP + payload 組裝，raise `OllamaAPIError` / `aiohttp.ClientError`），`generate_reply()` 改為高階封裝（prompt bundle + context 注入 + 錯誤字串化）；`chat_raw` 新增 `timeout` 參數讓 caller 覆蓋預設。`personality_extractor.extract_personalities` 從自寫 aiohttp 遷移到 `service.chat_raw(timeout=600, num_ctx=32768, temperature=0.3, top_p=0.8)`，消除唯一一處 /api/chat 重複實作。附帶修掉「Ollama 呼叫發生未預期錯誤: （空字串）」log 診斷困難（加 `type(exc).__name__`，例：`TimeoutError: `）。
 - 2026-04-19：`chat_raw` / `generate_reply` 新增 `keep_alive` 參數，caller 按用途傳不同值。/askai 傳 `"1h"`（連續互動期間 chat model 常駐）、moderation 傳 `"30m"`（間歇性任務）、personality_extractor 傳 `"30m"`（4am 排程跑完 30 分鐘後釋放）。payload 策略：caller 明確傳值才加 `keep_alive` 欄位，否則沿用 server 端全域 `OLLAMA_KEEP_ALIVE`，不覆蓋；embed 模型目前還是走 server 全域設定（沒動 LlamaIndex 層），待後續需要時再做 Stage 2。
+- 2026-04-19：Ollama 穩定性與 VRAM 優化兩連。①`chat_raw` 自動重試：檔頭新增常數 `OLLAMA_MAX_ATTEMPTS=2` / `OLLAMA_RETRY_DELAY=3.0` / `OLLAMA_RETRY_STATUS_CODES={500,502,503,504}`，HTTP 區塊改 2-attempt 迴圈，每次建立新 ClientSession + ClientTimeout 讓 timeout 自動重置；會重試 500/502/503/504 + asyncio.TimeoutError + aiohttp.ClientError，**不重試** 4xx 與回應格式異常。觸發背景：17:14 出現 `500 model runner has unexpectedly stopped`，使用者確認 VRAM 還剩 20GB 排除 OOM，判定為 Ollama runner 暫時性崩潰。②`SafeOllamaEmbedding` 預設注入 `num_ctx=8192`：Ollama VRAM-based 預設 32768 讓 0.6B embedding 吃 5.7GB VRAM（KV cache ~3.5GB 預分配但用不到），調成 8192 後 KV cache 降到 ~880MB，省 ~2.6GB。實作方式：檔頭常數 `_EMBED_NUM_CTX=8192` + `__init__` 覆寫把 `num_ctx` 塞進 `ollama_additional_kwargs`，caller 仍可覆寫；三個 call site（chat_persistence / intro_rag_port / context_retriever）一行都不用改（context_retriever 早已用 `SafeOllamaEmbedding as OllamaEmbedding` alias）。③澄清：人格萃取排程本來就會自動寫 RAG（`run_personality_extraction` 預設 `write_rag=True`，排程 caller 沒傳 False），無需改動；現況語意 = 排程自動 / 手動人審。④embedding 長度稽核：所有 call site 最大輸入 ~4200 字元（Discord 訊息上限），用掉 8192 token 的 51%，有 2 倍 buffer；intro/impression/personality 都有 modal `max_length` 或程式常數硬限制；未來 Bahamut / Article 若需 embed 長文應先切 chunk，不是調大 num_ctx。
 
 ---
 
@@ -240,7 +241,7 @@ type: TODO
 status: confirmed
 depends_on: [project-architecture]
 affects: [product-todo]
-last_confirmed: 2026-04-17
+last_confirmed: 2026-04-19
 -->
 
 > **目標：** 提升 bot 的群聊參與感與個性表現，讓回覆更自然、更有記憶感。
@@ -260,6 +261,9 @@ last_confirmed: 2026-04-17
 - [ ] 部署後觀察 /askai 回覆是否正確認出發問者；若發現「撞名誤判」或 `asker_profile` 洩漏 user_id 等問題，回到 prompt/safety rules 調整。
 - [ ] **Windows Ollama server 待調整**（使用者本機設定，AI 無法直接改）：`OLLAMA_KEEP_ALIVE=24h`（原 5m，每 5 分鐘反覆 unload/reload 是 Windows `wsarecv` / ephemeral port 耗盡主因）。`OLLAMA_MAX_LOADED_MODELS=2` 已設好（chat + embed 各一條 runner）、`OLLAMA_NUM_PARALLEL=1` 已設好。改完重啟 Ollama 後驗證 `server.log` 不再出現 5 分鐘一次的 `load request`。AMD 顯卡維持 `OLLAMA_VULKAN=true`。
 - [ ] 觀察 /askai 執行時音樂機器人是否還會斷音。Plan C + `_EMBED_CONCURRENCY=1` 後理論上 default ThreadPoolExecutor 爭用大幅下降；若仍斷音，考慮將 BM25/embedding 隔離到獨立 ThreadPoolExecutor（治標），或改 `ProcessPoolExecutor` 脫離 GIL（治本但 IPC overhead 高）。
+- [ ] **部署驗證 Ollama 重試邏輯**（2026-04-19 實作）：重啟 discord-bot 後觀察 `[WARNING] Ollama 第 1 次呼叫失敗（...），3.0s 後重試` log 是否按預期出現、使用者端 500 錯誤是否消失。
+- [ ] **部署驗證 embedding num_ctx=8192**（2026-04-19 實作）：重啟 discord-bot 觸發一次 embed（如 /askai），然後 `curl http://192.168.56.1:11434/api/ps` 確認 `qwen3-embedding:0.6b` 的 `size_vram` 從 ~5.7GB 降到 ~3.1GB。
+- [ ] **/askai 指定 thread 查詢（新議題，未開工）**：使用者提問能否讓 askai 看某個 thread 的貼文評論。現況結論：情境 A（人在 thread 內 `/askai`）已支援；情境 B（在他處指定 thread）不支援，因 slash command 無 thread 參數 + pgvector metadata 無 `thread_id` / `parent_id`。兩方案待選：Minimum 版（加 thread 參數 + retriever 吃 thread.history，3 處以內改動）/ 完整版（Minimum + chat_persistence 寫 thread_id + RAG 查詢加 thread 過濾，需 migration）。AI 建議先 Minimum 版。使用者尚未選。
 
 ### 設計決策備忘
 
@@ -431,7 +435,7 @@ last_confirmed: 2026-04-18
 id: rollcall-todo
 type: TODO
 status: confirmed
-last_confirmed: 2026-04-18
+last_confirmed: 2026-04-19
 -->
 
 **P0（核心）：**
@@ -439,7 +443,23 @@ last_confirmed: 2026-04-18
 
 **P1（體驗優化）：**
 - [ ] `/server_manager` 整合（透過下拉選單設定頻道與身份組）
-- [ ] 踢除前 DM 最後警告
+- [ ] ~~踢除前 DM 最後警告~~ → 已併入下一項（「踢除時 DM 通知 + 邀請連結」）
+- [ ] **踢除時 DM 通知 + 重新加入邀請連結（2026-04-19 設計完未動 code）**：
+  - **背景：** 使用者要求「點名確認 -> 踢人後」寄 DM 告知 + 附邀請連結。Discord 限制：DM 必須在 `guild.kick()` **之前**送（踢後就沒共同伺服器，DM channel 開不起來）。
+  - **改動位置：** [src/services/rollcall_service.py:385-438](src/services/rollcall_service.py#L385-L438) `check_expired()` 迴圈內 —— kick 前插入 `member.send(...)`，包 `try/except discord.Forbidden`（DM 關閉時記 log 但**不阻擋踢除**）。
+  - **DM 文案草稿：**
+    ```
+    標題：👻 你已被移出伺服器
+    內文：
+    你因逾期 7 天未回覆幽靈點名，已被移出「{guild.name}」。
+
+    如果需要加回請用以下連結重新申請：
+    {invite_url}
+    ```
+  - **邀請連結方案：** 靜態連結（管理員手動設永久邀請），不採動態 `channel.create_invite()`（理由：被踢者本來就不活躍，動態邀請易過期）。
+  - **卡在的兩個決策（待使用者確認）：**
+    1. 邀請連結 key 放哪？使用者否決了 `config.json`（認為那邊是「function 可變更的」）。AI 提議 `.env` 的 `ROLLCALL_REJOIN_INVITE_URL`（和 `DISCORD_TOKEN` / `OWNER_ID` 同性質：部署專屬、半敏感、不進 git），**尚未最終確認**。
+    2. 未設 URL 時行為？(A) 不附連結仍寄 DM  (B) 整個 DM 跳過 —— **使用者尚未回答**。
 
 ---
 

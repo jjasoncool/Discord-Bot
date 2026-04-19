@@ -4,6 +4,7 @@ Ollama LLM 服務模組
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from dataclasses import dataclass
@@ -19,6 +20,10 @@ from sys_settings.llm_settings import (
 logger = logging.getLogger("discord_bot")
 
 LLM_SERVICE_SETTINGS = LLMServiceSettings()
+
+OLLAMA_MAX_ATTEMPTS = 2
+OLLAMA_RETRY_DELAY = 3.0
+OLLAMA_RETRY_STATUS_CODES = frozenset({500, 502, 503, 504})
 
 
 @dataclass(frozen=True)
@@ -263,9 +268,14 @@ class OllamaService:
         以 per-request 控制 chat model 在 VRAM 的駐留時間，避免頻繁 unload/reload
         觸發 Windows ephemeral port 耗盡與 runner crash。
 
+        暫時性錯誤會自動重試（OLLAMA_MAX_ATTEMPTS 次，間隔 OLLAMA_RETRY_DELAY 秒）：
+        HTTP 500/502/503/504、asyncio.TimeoutError、aiohttp.ClientError。
+        每次重試會建立新的 ClientSession 與 ClientTimeout，timeout 自動重置。
+        HTTP 4xx 與回應格式異常（content 為空）不重試。
+
         Raises:
-            OllamaAPIError: HTTP 非 200 或回應格式異常
-            aiohttp.ClientError: 連線失敗
+            OllamaAPIError: HTTP 非 200 或回應格式異常（已重試用盡）
+            aiohttp.ClientError: 連線失敗（已重試用盡）
         """
         effective_temperature = (
             temperature if temperature is not None
@@ -299,24 +309,53 @@ class OllamaService:
             payload["keep_alive"] = keep_alive
 
         url = f"{self.base_url}/api/chat"
-        client_timeout = aiohttp.ClientTimeout(total=effective_timeout)
-        async with aiohttp.ClientSession(timeout=client_timeout) as session:
-            async with session.post(url, json=payload) as response:
-                if response.status != 200:
-                    detail = await response.text()
-                    raise OllamaAPIError(
-                        f"HTTP {response.status}",
-                        status=response.status,
-                        detail=detail,
+        # 每次 attempt 建立新的 ClientTimeout + ClientSession → timeout 自動重置，不會累積
+        last_exc: Exception | None = None
+        for attempt in range(1, OLLAMA_MAX_ATTEMPTS + 1):
+            try:
+                client_timeout = aiohttp.ClientTimeout(total=effective_timeout)
+                async with aiohttp.ClientSession(timeout=client_timeout) as session:
+                    async with session.post(url, json=payload) as response:
+                        if response.status != 200:
+                            detail = await response.text()
+                            raise OllamaAPIError(
+                                f"HTTP {response.status}",
+                                status=response.status,
+                                detail=detail,
+                            )
+                        data = await response.json()
+                        content = (data.get("message") or {}).get("content")
+                        if not content:
+                            raise OllamaAPIError(
+                                "回應格式異常",
+                                detail=str(data)[:500],
+                            )
+                        return content
+            except OllamaAPIError as exc:
+                # 只對暫時性 HTTP 錯誤重試（500/502/503/504）；4xx 與回應格式異常直接拋出
+                if exc.status in OLLAMA_RETRY_STATUS_CODES and attempt < OLLAMA_MAX_ATTEMPTS:
+                    last_exc = exc
+                    logger.warning(
+                        "Ollama 第 %d 次呼叫失敗（HTTP %s），%.1fs 後重試",
+                        attempt, exc.status, OLLAMA_RETRY_DELAY,
                     )
-                data = await response.json()
-                content = (data.get("message") or {}).get("content")
-                if not content:
-                    raise OllamaAPIError(
-                        "回應格式異常",
-                        detail=str(data)[:500],
+                    await asyncio.sleep(OLLAMA_RETRY_DELAY)
+                    continue
+                raise
+            except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+                if attempt < OLLAMA_MAX_ATTEMPTS:
+                    last_exc = exc
+                    logger.warning(
+                        "Ollama 第 %d 次呼叫失敗（%s: %s），%.1fs 後重試",
+                        attempt, type(exc).__name__, exc, OLLAMA_RETRY_DELAY,
                     )
-                return content
+                    await asyncio.sleep(OLLAMA_RETRY_DELAY)
+                    continue
+                raise
+        # 理論上不會到這裡（迴圈內一定 return 或 raise），保險用
+        if last_exc is not None:
+            raise last_exc
+        raise OllamaAPIError("Ollama 呼叫未預期結束", detail="retry loop exited without result")
 
     async def generate_reply(
         self,

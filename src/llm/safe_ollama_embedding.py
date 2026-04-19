@@ -32,6 +32,13 @@ _PERTURBATION_PREFIXES: tuple[str, ...] = (" ",)
 _EMBED_CONCURRENCY = 1
 _EMBED_SEMAPHORE = threading.Semaphore(_EMBED_CONCURRENCY)
 
+# embedding num_ctx：Ollama 預設依 VRAM 算出（雙卡 31.7GB → 32K），但 embedding 不需要
+# 那麼長的 context，預分配 KV cache ≈ 3.5GB（qwen3-embedding:0.6b 28 layers）純浪費。
+# 8192 可涵蓋幾乎所有 Discord 訊息情境（單則 4000 字元上限），KV cache 降到 ~880MB，
+# 省 ~2.6GB VRAM。若需極大文本 embed（如完整文章），caller 可透過
+# ollama_additional_kwargs={"num_ctx": N} 覆寫此預設。
+_EMBED_NUM_CTX = 8192
+
 _T = TypeVar("_T")
 
 
@@ -89,7 +96,17 @@ class SafeOllamaEmbedding(OllamaEmbedding):
 
     所有 embed 呼叫都經過 `_EMBED_SEMAPHORE` 限流，同時最多 N 個 request 打 Ollama。
     batch 方法（`_get_text_embeddings`）只在最外層 acquire 一次，避免巢狀持鎖。
+
+    預設把 `num_ctx=_EMBED_NUM_CTX` 注入 `ollama_additional_kwargs`，避免 Ollama 套用
+    VRAM-based 全域預設（32K）導致 KV cache 無謂膨脹。caller 仍可透過
+    `ollama_additional_kwargs` 覆寫。
     """
+
+    def __init__(self, *args: Any, ollama_additional_kwargs: dict[str, Any] | None = None, **kwargs: Any) -> None:
+        merged_kwargs: dict[str, Any] = {"num_ctx": _EMBED_NUM_CTX}
+        if ollama_additional_kwargs:
+            merged_kwargs.update(ollama_additional_kwargs)
+        super().__init__(*args, ollama_additional_kwargs=merged_kwargs, **kwargs)
 
     def _get_text_embedding(self, text: str) -> list[float]:
         with _EMBED_SEMAPHORE:
