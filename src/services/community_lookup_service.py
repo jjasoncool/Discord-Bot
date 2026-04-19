@@ -27,7 +27,7 @@ PTT_COMMENT_MIN = 100
 BAHAMUT_POST_MIN = 20
 BAHAMUT_COMMENT_MIN = 100
 HARD_CAP = 1000
-FUZZY_CANDIDATE_LIMIT = 25
+FUZZY_CANDIDATE_LIMIT = 100  # Discord Select 上限 25，view 端做分頁
 
 
 @dataclass
@@ -239,11 +239,12 @@ class CommunityLookupService:
         hit_cap = False
 
         if fuzzy:
-            post_cond = "(p.author_id = ? OR p.author_name LIKE ?)"
-            comment_cond = "(c.user_id = ? OR c.user_name LIKE ?)"
+            # 模糊模式：ID 與 名稱 都用 LIKE %keyword%
+            post_cond = "(p.author_id LIKE ? OR p.author_name LIKE ?)"
+            comment_cond = "(c.user_id LIKE ? OR c.user_name LIKE ?)"
             like_pat = f"%{lookup_id}%"
-            post_params_base: Tuple = (lookup_id, like_pat)
-            comment_params_base: Tuple = (lookup_id, like_pat)
+            post_params_base: Tuple = (like_pat, like_pat)
+            comment_params_base: Tuple = (like_pat, like_pat)
         else:
             post_cond = "p.author_id = ?"
             comment_cond = "c.user_id = ?"
@@ -382,16 +383,17 @@ class CommunityLookupService:
         async with self._connect_scraper_ro() as conn:
             conn.row_factory = aiosqlite.Row
 
+            # 模糊：ID 與 名稱 都 LIKE %keyword%
             post_rows = await _fetch_all(
                 conn,
                 """
                 SELECT author_id, author_name, COUNT(*) AS n
                 FROM bahamut_posts
                 WHERE author_id IS NOT NULL
-                  AND (author_id = ? OR author_name LIKE ?)
+                  AND (author_id LIKE ? OR author_name LIKE ?)
                 GROUP BY author_id, author_name
                 """,
-                (keyword, like_pat),
+                (like_pat, like_pat),
             )
             comment_rows = await _fetch_all(
                 conn,
@@ -399,10 +401,10 @@ class CommunityLookupService:
                 SELECT user_id AS author_id, user_name AS author_name, COUNT(*) AS n
                 FROM bahamut_post_comments
                 WHERE user_id IS NOT NULL
-                  AND (user_id = ? OR user_name LIKE ?)
+                  AND (user_id LIKE ? OR user_name LIKE ?)
                 GROUP BY user_id, user_name
                 """,
-                (keyword, like_pat),
+                (like_pat, like_pat),
             )
 
         # 合併：以 author_id 為主要 key；同一 id 可能對應多個 name，取最多出現的

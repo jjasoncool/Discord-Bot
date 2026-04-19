@@ -861,8 +861,11 @@ def _build_refresh_warning_embed() -> discord.Embed:
     )
 
 
+CANDIDATES_PER_PAGE = 25  # Discord Select 上限
+
+
 class BahamutCandidateView(discord.ui.View):
-    """模糊查詢候選下拉（ephemeral）"""
+    """模糊查詢候選下拉（ephemeral）；候選數 > 25 自動分頁。"""
 
     def __init__(
         self,
@@ -870,32 +873,76 @@ class BahamutCandidateView(discord.ui.View):
         candidates: List[BahamutCandidate],
         start_date: str,
         end_date: str,
+        page: int = 0,
     ):
         super().__init__(timeout=180)
         self.cog = cog
+        # 過濾無效 ID（雙保險：service 已過濾，這裡再擋 Discord SelectOption.value 1~100 限制）
+        self.all_candidates: List[BahamutCandidate] = [
+            c for c in candidates
+            if c.author_id and 1 <= len((c.author_id or "").strip()) <= 100
+        ]
         self.start_date = start_date
         self.end_date = end_date
-        options = [
+        total = len(self.all_candidates)
+        self.total_pages = max(1, (total + CANDIDATES_PER_PAGE - 1) // CANDIDATES_PER_PAGE)
+        self.page = max(0, min(page, self.total_pages - 1))
+
+        self.select = self._build_select()
+        self.add_item(self.select)
+
+        if self.total_pages > 1:
+            prev_btn = discord.ui.Button(
+                label="⬅️ 上一頁", style=discord.ButtonStyle.secondary, row=1,
+                disabled=(self.page == 0),
+            )
+            prev_btn.callback = self._on_prev
+            self.add_item(prev_btn)
+
+            page_label = discord.ui.Button(
+                label=f"{self.page + 1} / {self.total_pages}",
+                style=discord.ButtonStyle.secondary, row=1, disabled=True,
+            )
+            self.add_item(page_label)
+
+            next_btn = discord.ui.Button(
+                label="下一頁 ➡️", style=discord.ButtonStyle.secondary, row=1,
+                disabled=(self.page == self.total_pages - 1),
+            )
+            next_btn.callback = self._on_next
+            self.add_item(next_btn)
+
+        cancel_btn = discord.ui.Button(label="❌ 取消", style=discord.ButtonStyle.secondary, row=1)
+        cancel_btn.callback = self._on_cancel
+        self.add_item(cancel_btn)
+
+    def _build_select(self) -> discord.ui.Select:
+        start = self.page * CANDIDATES_PER_PAGE
+        end = start + CANDIDATES_PER_PAGE
+        page_candidates = self.all_candidates[start:end]
+        options: List[discord.SelectOption] = [
             discord.SelectOption(
-                label=_truncate(f"{c.author_name or '(無名稱)'}  [{c.author_id}]", 100),
-                value=c.author_id,
+                label=_truncate(f"{c.author_name or '(無名稱)'}  [{c.author_id.strip()}]", 100),
+                value=c.author_id.strip(),
                 description=_truncate(f"主文 {c.post_count} · 留言 {c.comment_count}", 100),
             )
-            for c in candidates[:25]
+            for c in page_candidates
         ]
-        self.select = discord.ui.Select(
-            placeholder="選擇要查詢的巴哈使用者",
-            options=options,
-            min_values=1,
-            max_values=1,
+        if not options:
+            options = [discord.SelectOption(label="(無有效候選)", value="__empty__")]
+        select = discord.ui.Select(
+            placeholder=f"選擇巴哈使用者（第 {self.page + 1}/{self.total_pages} 頁）",
+            options=options, min_values=1, max_values=1, row=0,
         )
-        self.select.callback = self._on_select
-        self.add_item(self.select)
+        select.callback = self._on_select
+        return select
 
     async def _on_select(self, interaction: discord.Interaction):
         chosen_id = self.select.values[0]
+        if chosen_id == "__empty__":
+            await interaction.response.edit_message(content="🚫 無有效候選", view=None)
+            return
         self.stop()
-        # 第二階段查詢，改為精確
         await self.cog.flow.run(
             interaction=interaction,
             source="bahamut",
@@ -905,6 +952,26 @@ class BahamutCandidateView(discord.ui.View):
             fuzzy=False,
             already_deferred=False,
         )
+
+    async def _on_prev(self, interaction: discord.Interaction):
+        new_view = BahamutCandidateView(
+            self.cog, self.all_candidates, self.start_date, self.end_date,
+            page=self.page - 1,
+        )
+        await interaction.response.edit_message(view=new_view)
+        self.stop()
+
+    async def _on_next(self, interaction: discord.Interaction):
+        new_view = BahamutCandidateView(
+            self.cog, self.all_candidates, self.start_date, self.end_date,
+            page=self.page + 1,
+        )
+        await interaction.response.edit_message(view=new_view)
+        self.stop()
+
+    async def _on_cancel(self, interaction: discord.Interaction):
+        self.stop()
+        await interaction.response.edit_message(content="🚫 已取消查詢", view=None)
 
 
 class CommunityPanelView(discord.ui.View):
