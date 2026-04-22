@@ -408,19 +408,19 @@ class CommunityLookupService:
             )
 
         # 合併：以 author_id 為主要 key；同一 id 可能對應多個 name，取最多出現的
-        # 過濾空 / None / 全空白 author_id（巴哈 scraper 早期資料有此狀況，
-        # 會造成 Discord SelectOption.value 不合法 1~100 長度規定）
+        # 過濾 author_id 不符 Discord SelectOption.value 1~100 長度規定者
+        # （巴哈 scraper 早期資料曾出現空 / 全空白 / 異常超長的 author_id）
         merged: Dict[str, BahamutCandidate] = {}
         for row in post_rows:
             aid = (row["author_id"] or "").strip()
-            if not aid:
+            if not (1 <= len(aid) <= 100):
                 continue
             if aid not in merged:
                 merged[aid] = BahamutCandidate(author_id=aid, author_name=row["author_name"] or "")
             merged[aid].post_count += row["n"]
         for row in comment_rows:
             aid = (row["author_id"] or "").strip()
-            if not aid:
+            if not (1 <= len(aid) <= 100):
                 continue
             if aid not in merged:
                 merged[aid] = BahamutCandidate(author_id=aid, author_name=row["author_name"] or "")

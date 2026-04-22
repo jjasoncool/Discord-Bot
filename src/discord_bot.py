@@ -133,14 +133,100 @@ async def on_ready():
         bot._chat_persist_task_started = True
         logger.info("聊天訊息定期持久化已啟動（每 %d 秒）", FLUSH_INTERVAL_SECONDS)
 
+    # 啟動 raw 訊息備份表定期 flush（含 reaction 事件）
+    from llm.raw_message_store import flush_raw_buffer, RAW_FLUSH_INTERVAL_SECONDS
+    if not getattr(bot, '_raw_persist_task_started', False):
+        async def _periodic_raw_flush():
+            while True:
+                await asyncio.sleep(RAW_FLUSH_INTERVAL_SECONDS)
+                try:
+                    await flush_raw_buffer()
+                except Exception as exc:
+                    logger.warning("定期 flush raw 訊息 buffer 失敗: %s", exc)
+        bot._raw_persist_task = asyncio.create_task(_periodic_raw_flush())
+        bot._raw_persist_task_started = True
+        logger.info("raw 訊息備份定期 flush 已啟動（每 %d 秒）", RAW_FLUSH_INTERVAL_SECONDS)
+
     # 啟動人格萃取定期排程
     if not getattr(bot, '_personality_task_started', False):
         from datetime import datetime, timezone, timedelta
         TAIPEI_TZ = timezone(timedelta(hours=8))
 
+        async def _run_personality_extraction_once():
+            """跑一次完整的人格萃取（refresh emoji 字典 → 萃取 → register 結果）。
+
+            排程與啟動補跑共用此函式。若遇到鎖（`PersonalityExtractionInProgressError`）
+            只 log INFO 後返回，不視為錯誤。
+            """
+            guild = bot.guilds[0] if bot.guilds else None
+            if not guild:
+                logger.warning("人格萃取：無可用 guild")
+                return
+
+            try:
+                from llm.personality_extractor import refresh_emoji_dictionary
+                refresh_emoji_dictionary(guild)
+            except Exception as exc:
+                logger.warning("emoji 字典自動更新失敗: %s", exc)
+
+            from llm.personality_extractor import (
+                PersonalityExtractionInProgressError,
+                run_personality_extraction,
+            )
+            try:
+                results = await run_personality_extraction(guild=guild, days=14)
+            except PersonalityExtractionInProgressError:
+                logger.info("人格萃取略過：已有萃取正在執行中")
+                return
+
+            personality_cog = bot.get_cog("PersonalityCommands")
+            if personality_cog:
+                runtime_config = load_ollama_runtime_config(LLM_SETTINGS.ollama_runtime_model_path)
+                scheduled_model = runtime_config.personality_model or runtime_config.model
+                personality_cog.register_scheduled_result(
+                    guild_id=guild.id,
+                    results=results,
+                    model=scheduled_model,
+                    days=14,
+                )
+            logger.info("人格萃取排程完成：萃取 %d 位使用者", len(results))
+
         async def _personality_schedule():
             # 啟動後等 60 秒再開始，讓其他服務先就緒
             await asyncio.sleep(60)
+
+            # 啟動補跑檢查：若上次排程被錯過（容器重啟 / 中斷），立即補一次
+            try:
+                from llm.personality_extractor import get_last_extraction_time
+                guild_for_check = bot.guilds[0] if bot.guilds else None
+                if guild_for_check:
+                    now = datetime.now(TAIPEI_TZ)
+                    # 「上一個應該跑的 04:00」：如果現在還沒過今天 04:00，上個就是昨天 04:00
+                    last_scheduled_run = now.replace(hour=4, minute=0, second=0, microsecond=0)
+                    if now < last_scheduled_run:
+                        last_scheduled_run -= timedelta(days=1)
+
+                    last_extract_utc = get_last_extraction_time(guild_for_check.id)
+                    # metadata 存的是 UTC；轉台北時區再比
+                    last_extract_local = (
+                        last_extract_utc.astimezone(TAIPEI_TZ)
+                        if last_extract_utc else None
+                    )
+
+                    if last_extract_local is None or last_extract_local < last_scheduled_run:
+                        logger.info(
+                            "啟動補跑檢查：last_extract=%s, 上個排程=%s → 立即補跑",
+                            last_extract_local, last_scheduled_run.isoformat(),
+                        )
+                        await _run_personality_extraction_once()
+                    else:
+                        logger.info(
+                            "啟動補跑檢查：last_extract=%s ≥ 上個排程=%s，跳過",
+                            last_extract_local, last_scheduled_run.isoformat(),
+                        )
+            except Exception as exc:
+                logger.error("啟動補跑檢查失敗: %s", exc, exc_info=True)
+
             while True:
                 try:
                     now = datetime.now(TAIPEI_TZ)
@@ -151,35 +237,7 @@ async def on_ready():
                     wait_seconds = (target - now).total_seconds()
                     logger.info("人格萃取排程：下次執行 %s（等待 %.0f 秒）", target.isoformat(), wait_seconds)
                     await asyncio.sleep(wait_seconds)
-
-                    # 執行萃取（取第一個 guild）
-                    guild = bot.guilds[0] if bot.guilds else None
-                    if guild:
-                        # 先掃本 guild 的 custom emoji，補齊字典待填項目
-                        try:
-                            from llm.personality_extractor import refresh_emoji_dictionary
-                            refresh_emoji_dictionary(guild)
-                        except Exception as exc:
-                            logger.warning("emoji 字典自動更新失敗: %s", exc)
-
-                        from llm.personality_extractor import run_personality_extraction
-                        results = await run_personality_extraction(
-                            guild=guild,
-                            days=14,
-                        )
-                        personality_cog = bot.get_cog("PersonalityCommands")
-                        if personality_cog:
-                            runtime_config = load_ollama_runtime_config(LLM_SETTINGS.ollama_runtime_model_path)
-                            scheduled_model = runtime_config.personality_model or runtime_config.model
-                            personality_cog.register_scheduled_result(
-                                guild_id=guild.id,
-                                results=results,
-                                model=scheduled_model,
-                                days=14,
-                            )
-                        logger.info("人格萃取排程完成：萃取 %d 位使用者", len(results))
-                    else:
-                        logger.warning("人格萃取排程：無可用 guild")
+                    await _run_personality_extraction_once()
                 except Exception as exc:
                     logger.error("人格萃取排程失敗: %s", exc, exc_info=True)
                     # 失敗後等 1 小時再試
@@ -187,7 +245,7 @@ async def on_ready():
 
         bot._personality_task = asyncio.create_task(_personality_schedule())
         bot._personality_task_started = True
-        logger.info("人格萃取定期排程已啟動（每日 04:00 UTC+8）")
+        logger.info("人格萃取定期排程已啟動（每日 04:00 UTC+8，含啟動補跑檢查）")
 
     # 自動啟動官方文章更新
     await auto_start_article_monitor(bot)
@@ -280,6 +338,17 @@ async def on_message(message):
         if buffer_size() >= FLUSH_THRESHOLD:
             asyncio.create_task(flush_buffer())
 
+    # 同步寫入 raw 備份表（獨立於 pgvector，包含純附件/純 embed 訊息）
+    if not message.author.bot:
+        from llm.raw_message_store import (
+            enqueue_raw_message,
+            flush_raw_buffer,
+            should_trigger_flush,
+        )
+        enqueue_raw_message(message)
+        if should_trigger_flush():
+            asyncio.create_task(flush_raw_buffer())
+
     # 繼續處理命令
     await bot.process_commands(message)
 
@@ -288,14 +357,60 @@ async def on_message_edit(before, after):
     if after.author.bot:
         return
     from llm.chat_persistence import enqueue_message_edit
+    from llm.raw_message_store import enqueue_raw_edit
+    content_changed = before.content != after.content
+    embeds_added = not before.embeds and after.embeds
+
     # 情況 1：使用者修改了訊息內容
-    if before.content != after.content:
+    if content_changed:
         if after.content or after.stickers:
             enqueue_message_edit(after)
+        enqueue_raw_edit(after)
         return
     # 情況 2：Discord 載入了連結預覽（content 沒變但 embeds 新增了）
-    if not before.embeds and after.embeds:
+    if embeds_added:
         enqueue_message_edit(after)
+        enqueue_raw_edit(after)
+
+
+@bot.event
+async def on_raw_message_delete(payload):
+    """使用者刪除訊息 → raw 表軟刪標記。
+    用 raw 版本因為訊息可能不在 bot cache 裡（例如啟動前發的舊訊息）。"""
+    from llm.raw_message_store import enqueue_raw_delete
+    enqueue_raw_delete(payload.message_id)
+
+
+@bot.event
+async def on_raw_reaction_add(payload):
+    """Reaction 增加 → 更新 raw 表結構化統計。
+    用 raw 版本以涵蓋 bot 啟動前發的舊訊息（非 cache）。"""
+    # 跳過 bot 自己點的 reaction
+    if bot.user and payload.user_id == bot.user.id:
+        return
+    from llm.raw_message_store import enqueue_reaction_change
+    enqueue_reaction_change(
+        message_id=payload.message_id,
+        emoji_name=payload.emoji.name,
+        emoji_id=payload.emoji.id,
+        user_id=payload.user_id,
+        action="add",
+    )
+
+
+@bot.event
+async def on_raw_reaction_remove(payload):
+    """Reaction 移除 → 反向更新 raw 表。"""
+    if bot.user and payload.user_id == bot.user.id:
+        return
+    from llm.raw_message_store import enqueue_reaction_change
+    enqueue_reaction_change(
+        message_id=payload.message_id,
+        emoji_name=payload.emoji.name,
+        emoji_id=payload.emoji.id,
+        user_id=payload.user_id,
+        action="remove",
+    )
 
 async def auto_start_article_monitor(bot):
     """自動啟動官方文章更新功能"""

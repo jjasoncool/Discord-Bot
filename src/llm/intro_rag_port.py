@@ -9,6 +9,7 @@ import asyncio
 import logging
 import re
 import threading
+from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
 from sys_settings.llm_settings import LLMServiceSettings, load_ollama_runtime_config
@@ -419,6 +420,8 @@ class PgVectorIntroRAGPort:
                 "guild_id": str(guild_id),
                 "author_id": str(author_id),
                 "alias": alias or "",
+                # 用 UTC ISO 8601；排程啟動補跑判斷會 query 這個欄位
+                "last_extracted_at": datetime.now(timezone.utc).isoformat(),
             }
             doc_id = f"auto_personality:{guild_id}:{author_id}"
             await self._ainsert(doc_id=doc_id, text=text, metadata=metadata)

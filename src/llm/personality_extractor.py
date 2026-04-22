@@ -12,6 +12,10 @@ from typing import Any, Awaitable, Callable, Protocol
 
 import psycopg2
 
+from llm.emoji_text_utils import (
+    reload_descriptions as _reload_emoji_descriptions,
+    replace_custom_emoji_with_description,
+)
 from sys_settings.llm_settings import LLMServiceSettings, load_ollama_runtime_config
 from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
 
@@ -71,6 +75,35 @@ def _get_db_conn():
         user=settings.pgvector_user,
         password=settings.pgvector_password,
     )
+
+
+def get_last_extraction_time(guild_id: int | None = None) -> datetime | None:
+    """查詢 auto_personality 最後一次萃取的時間（來自 metadata_.last_extracted_at）。
+
+    回傳 UTC datetime；若資料庫沒有任何 auto_personality 記錄或未帶時間戳，回傳 None。
+    給排程啟動時判斷「上次排程是否錯過」用。
+    """
+    profile_table = f"data_{HYBRID_RETRIEVAL_SETTINGS.get_source('member_profile').table_name}"
+    sql = f"""
+        SELECT MAX((metadata_->>'last_extracted_at')::TIMESTAMPTZ)
+        FROM {profile_table}
+        WHERE metadata_->>'profile_kind' = 'auto_personality'
+          AND metadata_->>'last_extracted_at' IS NOT NULL
+    """
+    params: list = []
+    if guild_id is not None:
+        sql += " AND metadata_->>'guild_id' = %s"
+        params.append(str(guild_id))
+
+    try:
+        with _get_db_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                row = cur.fetchone()
+                return row[0] if row and row[0] else None
+    except Exception as exc:
+        logger.warning("查詢 last_extracted_at 失敗: %s", exc)
+        return None
 
 
 def _fetch_aliases_from_db() -> dict[str, str]:
@@ -151,36 +184,7 @@ def group_by_user(
     }
 
 
-_emoji_dict: dict[str, str] | None = None
 _EMOJI_DICT_PATH = "/app/settings/emoji_dictionary.txt"
-
-
-def _load_emoji_dict() -> dict[str, str]:
-    """載入 emoji 語意字典（快取）。只收錄有描述的項目，空值佔位會被忽略。"""
-    global _emoji_dict
-    if _emoji_dict is not None:
-        return _emoji_dict
-
-    _emoji_dict = {}
-    try:
-        from pathlib import Path
-        path = Path(_EMOJI_DICT_PATH)
-        if not path.exists():
-            return _emoji_dict
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" not in line:
-                continue
-            name, _, desc = line.partition("=")
-            name = name.strip()
-            desc = desc.strip()
-            if name and desc:
-                _emoji_dict[name] = desc
-    except Exception as exc:
-        logger.warning("載入 emoji 字典失敗: %s", exc)
-    return _emoji_dict
 
 
 def _load_all_emoji_names_from_file() -> set[str]:
@@ -240,9 +244,13 @@ def refresh_emoji_dictionary(guild) -> int:
         logger.warning("寫入 emoji 字典失敗: %s", exc)
         return 0
 
-    # 清快取，下次 _load_emoji_dict 重讀（新項目空值仍會被 filter 忽略）
-    global _emoji_dict
-    _emoji_dict = None
+    # 清所有共用 emoji 快取（字典檔剛被改過）
+    _reload_emoji_descriptions()
+    try:
+        from llm.reaction_classifier import reload_custom_emoji_categories
+        reload_custom_emoji_categories()
+    except Exception as exc:
+        logger.warning("重載 reaction_classifier 快取失敗: %s", exc)
 
     logger.info(
         "emoji 字典新增 %d 個待填項目（前 10：%s）",
@@ -252,21 +260,11 @@ def refresh_emoji_dictionary(guild) -> int:
     return len(new_names)
 
 
-def _replace_custom_emoji(match) -> str:
-    """regex 替換回呼：有字典就替換，沒有就移除。"""
-    name = match.group(1)
-    emoji_dict = _load_emoji_dict()
-    desc = emoji_dict.get(name, "")
-    if desc:
-        return f"[{desc}]"
-    return ""
-
-
 def _clean_text_for_extraction(text: str) -> str:
     """清理聊天文字，移除對人格分析無用的噪音。"""
     import re
-    # Discord 自訂 emoji：查字典替換，沒有的移除
-    text = re.sub(r"<a?:(\w+):\d+>", _replace_custom_emoji, text)
+    # Discord 自訂 emoji：<:name:id> → :描述:（與 chat_persistence 共用同一替換函式）
+    text = replace_custom_emoji_with_description(text)
     # 移除所有 URL（對人格分析無用，且模型容易誤判為「分享音樂/資訊」）
     text = re.sub(r"https?://\S+", "", text)
     # 移除 Discord mention <@id> 保留可讀形式

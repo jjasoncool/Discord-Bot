@@ -12,6 +12,7 @@ from typing import Optional
 
 import discord
 
+from llm.emoji_text_utils import replace_custom_emoji_with_description
 from llm.sticker_cache import get_sticker_text
 
 logger = logging.getLogger("discord_bot")
@@ -60,8 +61,13 @@ def _check_flush_deps() -> bool:
 
 
 def _build_persist_text(msg: discord.Message) -> str:
-    """組裝要寫入 pgvector 的文字（含貼圖描述、連結預覽）。"""
+    """組裝要寫入 pgvector 的文字（含貼圖描述、連結預覽）。
+
+    custom emoji `<:name:id>` 會被語意化替換為 `[描述]`，避免 embed model
+    把 emoji token 當亂碼。raw_message_store 不做這個替換（保留原文）。
+    """
     text = (msg.content or "").strip()
+    text = replace_custom_emoji_with_description(text)
     if msg.stickers:
         sticker_texts = []
         for sticker in msg.stickers:
