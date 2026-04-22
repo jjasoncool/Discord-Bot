@@ -2,7 +2,7 @@
 手動遷移腳本：sent_articles.json → sent_articles.db
 
 用法（在 discord-bot 容器內）：
-    python services/migrate_json_to_sqlite.py
+    python scripts/migrate_json_to_sqlite.py
 
 行為：
     1. 讀取 services/sent_articles.json

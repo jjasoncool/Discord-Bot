@@ -109,18 +109,19 @@ class MusicCog(commands.Cog):
 
             # 清理上次殘留的面板
             await self.announcer.cleanup_old_panel()
-
-            # 先啟動播放迴圈和面板，歌單背景載入（不阻塞點歌）
-            await self.player.start_background_loop()
             await self.announcer.send_idle_panel()
 
             if self.config.default_playlist_url:
+                # 歌單載完、shuffle 設好、跳到上次位置後才啟動播放迴圈，
+                # 避免迴圈搶先從半載的佇列抓到錯誤的第一首
                 self._playlist_task = asyncio.create_task(self._load_playlist_background())
+            else:
+                await self.player.start_background_loop()
         finally:
             self._starting = False
 
     async def _load_playlist_background(self):
-        """背景載入預設歌單，不阻塞其他操作"""
+        """背景載入預設歌單 → 設定 shuffle / 跳轉 → 啟動播放迴圈"""
         try:
             logger.info("[MusicCog] 開始背景載入預設歌單...")
             await self.player.add_to_playlist(self.config.default_playlist_url)
@@ -137,6 +138,9 @@ class MusicCog(commands.Cog):
                 self.player.skip_to_video_id(last_vid)
         except Exception as e:
             logger.error(f"[MusicCog] 載入歌單失敗: {e}", exc_info=True)
+        finally:
+            # 不論成功失敗都啟動播放迴圈，避免永遠不播
+            await self.player.start_background_loop()
 
     async def _on_config_change(self, new_config: MusicConfig):
         """配置變更時處理"""

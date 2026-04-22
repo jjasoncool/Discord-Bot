@@ -398,6 +398,10 @@ class MusicPlayer:
             if vid == target_video_id:
                 # 旋轉 deque，讓目標歌曲排到最前面
                 self.queue.main_queue.rotate(-i)
+                # shuffle 模式下 get_next() 讀 _next_shuffle 而非 deque 順序，
+                # 必須覆寫才不會被先前 setter 隨機挑的那首蓋過
+                if self.queue.shuffle:
+                    self.queue._next_shuffle = song
                 logger.info(f"[MusicPlayer] 跳轉到上次播放位置: {song.title} (index {i})")
                 return True
         logger.warning(f"[MusicPlayer] 找不到上次播放的歌曲: {target_video_id}")

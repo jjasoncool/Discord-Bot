@@ -17,6 +17,7 @@ monitored_channels_file = "settings/monitored_channels.json"
 import json
 import os
 from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message
+from utils.dm_notifier import notify_keyword_hit
 
 
 class WatchKeywordsView(discord.ui.View):
@@ -483,67 +484,13 @@ class UserCommands(commands.Cog):
                             found_keywords.append(kw)
 
                     if found_keywords and settings.get('notify', True):
-                        # 獲取監控者，優先使用 fetch_member
-                        user = None
-                        try:
-                            user = await message.guild.fetch_member(settings['user_id'])
-                        except discord.NotFound:
-                            logger.warning(f"無法獲取監控者資訊，ID: {settings['user_id']}，可能已離開伺服器")
-                        except discord.Forbidden:
-                            logger.warning(f"無法獲取監控者資訊，ID: {settings['user_id']}，機器人無權限")
-                        except Exception as e:
-                            logger.warning(f"無法獲取監控者資訊，ID: {settings['user_id']}，錯誤: {str(e)}")
-
-                        if not user:
-                            # 嘗試其他方法
-                            user = self.bot.get_user(settings['user_id'])
-                            if not user:
-                                user = message.guild.get_member(settings['user_id'])
-                                if not user:
-                                    logger.warning(f"所有方法均無法獲取監控者資訊，ID: {settings['user_id']}")
-
-                        if user:
-                            try:
-                                channel_name = message.channel.parent.name if parent_channel_id else message.channel.name
-                                thread_name = f"貼文: {message.channel.name}" if parent_channel_id else ""
-                                # 建立嵌入訊息以通知監控者
-                                embed = discord.Embed(
-                                    title="🔔 關鍵字偵測通知",
-                                    description=f"在頻道 **{channel_name}** {thread_name} 中偵測到您監控的關鍵字！",
-                                    color=discord.Color.gold(),
-                                    timestamp=message.created_at
-                                )
-
-                                embed.add_field(
-                                    name="偵測到的關鍵字",
-                                    value=", ".join(f"`{kw}`" for kw in found_keywords),
-                                    inline=False
-                                )
-
-                                embed.add_field(
-                                    name="訊息內容",
-                                    value=message.content[:1024],  # Discord 限制欄位值最多 1024 字元
-                                    inline=False
-                                )
-
-                                embed.add_field(
-                                    name="訊息連結",
-                                    value=f"[點擊前往查看]({message.jump_url})",
-                                    inline=False
-                                )
-
-                                embed.set_author(
-                                    name=f"{message.author.display_name}",
-                                    icon_url=message.author.display_avatar.url
-                                )
-
-                                await user.send(embed=embed)
-                                logger.info(f"已向使用者 {user.name}#{user.discriminator} 發送關鍵字偵測通知")
-
-                            except discord.Forbidden:
-                                logger.warning(f"無法向使用者 {user.name}#{user.discriminator} 發送訊息，可能因為他們已關閉私人訊息")
-                            except Exception as e:
-                                logger.error(f"發送關鍵字通知時發生錯誤: {str(e)}")
+                        await notify_keyword_hit(
+                            self.bot,
+                            settings['user_id'],
+                            message,
+                            found_keywords,
+                            guild=message.guild,
+                        )
 
     @app_commands.command(name="watch_keywords", description="設定頻道中的關鍵字監控")
     async def watch_keywords_cmd(self, interaction: discord.Interaction):

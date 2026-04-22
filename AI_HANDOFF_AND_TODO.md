@@ -40,6 +40,8 @@
 - 2026-04-19：社群 ID 查詢 Phase 0 Step 1（JSON1 效能驗證）完成。`src/scripts/bench_ptt_comment_lookup.py` 對現有 `articles.db`（810 篇 / 39,890 留言 / 367 MB）實測，全部 query p95 < 30ms，遠低於 500ms 判準。意外收穫：`ix_ptt_posts_published_at` 早已存在（scraper models.py `published_at=Column(..., index=True)`），EXPLAIN QUERY PLAN 顯示 SQLite 已先走時間 index 縮小範圍再做 `json_each`，所以 `idx_ptt_author` 完全不必加，原定的 PTT index migration 取消 — scraper DB schema 零變更。
 - 2026-04-19：新增主線「社群 ID 查詢（PTT / 巴哈）」，架構已定案（status: draft）。核心概念：`/server_manager` 設定「社群查詢頻道」→ 面板兩顆按鈕（查 PTT / 查巴哈）→ Modal 填目標帳號 + 範圍 Select（7/15/30/60/90/180，預設 30）→ 每個 `(source, lookup_id)` 建立唯一 public thread（命名 `[PTT] JohnDoe` / `[巴哈] 小明 (ABC123)`，auto-archive 7 天）→ 結果 append 模式「日期 hybrid」（同日 edit、跨日 append 新 section）→ 父頻道發公開通知 + bump panel。PTT 走 SQLite JSON1（零 migration，只加 `idx_ptt_author` / `idx_ptt_published_at`），巴哈走 ORM。保底 100 留言 / 20 主文（區間內不足補區間外），hard cap 1000 筆/來源。Phase 0 Step 1 將先跑 JSON1 效能驗證 script 後再動正式 code。詳見[社群 ID 查詢專區](#社群-id-查詢專區)。
 - 2026-04-19：Ollama 穩定性與 VRAM 優化兩連。①`chat_raw` 自動重試：檔頭新增常數 `OLLAMA_MAX_ATTEMPTS=2` / `OLLAMA_RETRY_DELAY=3.0` / `OLLAMA_RETRY_STATUS_CODES={500,502,503,504}`，HTTP 區塊改 2-attempt 迴圈，每次建立新 ClientSession + ClientTimeout 讓 timeout 自動重置；會重試 500/502/503/504 + asyncio.TimeoutError + aiohttp.ClientError，**不重試** 4xx 與回應格式異常。觸發背景：17:14 出現 `500 model runner has unexpectedly stopped`，使用者確認 VRAM 還剩 20GB 排除 OOM，判定為 Ollama runner 暫時性崩潰。②`SafeOllamaEmbedding` 預設注入 `num_ctx=8192`：Ollama VRAM-based 預設 32768 讓 0.6B embedding 吃 5.7GB VRAM（KV cache ~3.5GB 預分配但用不到），調成 8192 後 KV cache 降到 ~880MB，省 ~2.6GB。實作方式：檔頭常數 `_EMBED_NUM_CTX=8192` + `__init__` 覆寫把 `num_ctx` 塞進 `ollama_additional_kwargs`，caller 仍可覆寫；三個 call site（chat_persistence / intro_rag_port / context_retriever）一行都不用改（context_retriever 早已用 `SafeOllamaEmbedding as OllamaEmbedding` alias）。③澄清：人格萃取排程本來就會自動寫 RAG（`run_personality_extraction` 預設 `write_rag=True`，排程 caller 沒傳 False），無需改動；現況語意 = 排程自動 / 手動人審。④embedding 長度稽核：所有 call site 最大輸入 ~4200 字元（Discord 訊息上限），用掉 8192 token 的 51%，有 2 倍 buffer；intro/impression/personality 都有 modal `max_length` 或程式常數硬限制；未來 Bahamut / Article 若需 embed 長文應先切 chunk，不是調大 num_ctx。
+- 2026-04-22：研究紀錄「X.com / Twitter 影片嵌入原理」歸檔至[跨來源整合專區](#xcom-twitter-影片嵌入研究2026-04-22)。結論：Discord bot（ermiana 等）靠替換 `x.com` → `fxtwitter.com` / `fixupx.com` / `vxtwitter.com` 讓 Discord unfurler 讀到 `og:video` meta 即可直接播放，背後是 X 免費但無保證的 Syndication API（`cdn.syndication.twimg.com/tweet-result`），只能單篇 tweet lookup、無搜尋能力；若本專案未來要加 x.com 來源，最簡單做法是 `on_message` domain replace（一小時可完工），搜尋/timeline 則需付費 v2 API。本輪無 code 異動。
+- 2026-04-23：DM 通知模組抽出 + 音樂面板收藏按鈕。①新增 `src/utils/dm_notifier.py`（系統模組層，與 `logger_config.py` 同層），提供 `resolve_user`（user_id → User/Member，`guild.fetch_member` → `bot.fetch_user` → `bot.get_user` → `guild.get_member`）、`send_dm`（底層發送，吃掉所有例外，回 bool）、`notify_keyword_hit`、`notify_song_liked` 四個函式，所有 discord DM 發送的共通 user resolution + 例外處理集中於此。②`commands/user_commands.py` 的 keyword 監控命中段（原 ~60 行 user resolution + embed + try/except）縮到 `await notify_keyword_hit(self.bot, user_id, message, found_keywords, guild=message.guild)` 一行。③`music/announcer.py` 的 `MusicControlView` 第一排加入 `⭐ 收藏` Secondary 按鈕（順序：點歌 → 歌單 → 收藏），按下後寄 DM 給按鈕觸發者（含歌名、長度、YT 連結、縮圖、語音頻道），`custom_id="music_favorite"` 可持久化；失敗給 ephemeral 提示「你的私訊已關閉」。④純 DM 無記檔、無 de-dup（按幾次寄幾次，符合 MVP）。附帶整理：`src/services/migrate_json_to_sqlite.py` 搬到 `src/scripts/`（用 `git mv` 保留歷史，與 `migrate_emoji_text_format.py` / `reembed_pgvector.py` 同性質），docstring 執行路徑同步更新。
 
 ---
 
@@ -767,6 +769,75 @@ last_confirmed: 2026-04-07
 **注意事項：**
 - 舊貼文（不在 FB 首頁的）不會被重抓，其 CDN URL 過期後無法自動更新
 - `start_fb_monitoring()` 仍保留於 `fb_monitor.py`，可供手動指令使用
+
+### X.com / Twitter 影片嵌入研究（2026-04-22）
+
+<!-- @meta
+id: xcom-video-embed-research
+type: STATE
+status: draft
+depends_on: [cross-source-integration]
+affects: []
+last_confirmed: 2026-04-22
+-->
+
+> **背景：** 使用者問 ermiana 類 Discord bot 為何能把 x.com 貼文影片直接轉成可播放 embed。結論記錄於此，若未來要在本專案加 x.com 來源可直接接手。
+
+**核心原理：**
+- Discord unfurler 會抓訊息裡 URL 的 `<meta>` 標籤（OpenGraph / Twitter Card）決定 embed 樣式
+- x.com 本身**不回傳 `og:video` 直連**，只給縮圖，所以 Discord 播不了
+- 第三方代理站 scrape 該 tweet 後重組一份含 `og:video` / `twitter:player:stream` 的 HTML，Discord 抓到就能直接播
+
+**常用代理網域（把 `x.com` / `twitter.com` 整段替換）：**
+- `fxtwitter.com`（最穩定、最主流）
+- `fixupx.com`（FxTwitter 對應 x.com 的新網域）
+- `vxtwitter.com`（另一派系）
+
+**Bot 極簡實作模式（若要自己做）：**
+1. `on_message` regex 抓 `x.com` / `twitter.com` URL
+2. 替換 domain 後重發
+3. `message.edit(suppress=True)` 或 webhook 模仿使用者身份，抑制原訊息 embed 避免雙重 embed
+
+**影片直連 JSON API（想自己解析用）：**
+- `GET https://api.fxtwitter.com/{user}/status/{id}` → 回 JSON
+- `media.videos[].url` 即 `.mp4` 直連
+- 免認證、免 API key
+
+**能力邊界（重要）：**
+
+| 功能 | 代理網域 | 說明 |
+|---|---|---|
+| 單篇貼文內容 | ✅ | 文字、作者、時間、媒體 |
+| 影片直連 | ✅ | `.mp4` URL |
+| 關鍵字 / hashtag / 使用者時間軸搜尋 | ❌ | 完全沒這能力，只吃「已知的 tweet URL」 |
+
+**代理網域底層靠什麼跑：**
+- Syndication API：`cdn.syndication.twimg.com/tweet-result?id={id}&token={derived}`
+- 原用途是讓部落格 / 新聞網站嵌入推文，免登入、免 key、免費
+- token 是前端用 tweet id 算出來的公式，任何人都能產
+- X 不關掉 syndication 的理由：關了全世界新聞網站的 embed 都會爛，對 X 自己的 SEO 是自殺
+- 舊的 `guest_token`（`/1.1/guest/activate.json`）**2023 年中被封殺**，Nitter / snscrape 就是那時死的，現在不可用
+
+**付費 vs 免費路線比較：**
+
+| 層面 | 官方 v2 API | Syndication（fxtwitter 等） |
+|---|---|---|
+| 要錢 | Basic $200/月 起 | 免費 |
+| 註冊 | 需申請 API key | 不需 |
+| 搜尋 / timeline | ✅ | ❌ |
+| SLA / 文件 | ✅ | **完全沒有** |
+| 隨時被關的風險 | 低 | 高（X 已有前例） |
+
+**若未來要在本專案加 x.com 來源，決策樹：**
+1. 「把 Discord 訊息裡的 x.com 連結轉成可播放影片」→ `on_message` domain replace，最省事，一小時可收工（見 [src/discord_bot.py](src/discord_bot.py)）
+2. 監控特定帳號新貼文 → 沒有免費穩定方案，需評估付費 v2 或放棄
+3. 關鍵字搜尋 → 代理網域做不到，只能走付費 v2 或改用其他社群（Threads / PTT / FB）
+4. 若做商業/長期依賴 → 不建議依賴 syndication，**X 能隨時關掉**
+
+**參考：**
+- FxTwitter 專案：https://github.com/FixTweet/FxTwitter
+
+---
 
 ### 整合方案（按部就班）
 

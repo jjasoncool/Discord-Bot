@@ -4,6 +4,7 @@ import logging
 import discord
 from .models import Song
 from .ytdl import YTDLSource
+from utils.dm_notifier import notify_song_liked
 
 logger = logging.getLogger('discord_bot')
 
@@ -22,7 +23,7 @@ class MusicControlView(discord.ui.View):
         else:
             self.toggle_shuffle.style = discord.ButtonStyle.secondary  # 灰色
 
-    # ─── 第一排：點歌 + 歌單 ───
+    # ─── 第一排：點歌 + 歌單 + 收藏 ───
     @discord.ui.button(label="點歌", style=discord.ButtonStyle.primary, custom_id="music_request", emoji="🎵", row=0)
     async def request_song(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(SongRequestModal(self.cog))
@@ -60,6 +61,22 @@ class MusicControlView(discord.ui.View):
             await interaction.followup.send("📋 歌單是空的", ephemeral=True)
         else:
             await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+    @discord.ui.button(label="收藏", style=discord.ButtonStyle.secondary, custom_id="music_favorite", emoji="⭐", row=0)
+    async def favorite_song(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        player = self.cog.player
+        if not player.queue.current:
+            await interaction.followup.send("目前沒有在播放", ephemeral=True)
+            return
+
+        song = player.queue.current
+        voice_channel = player.voice_client.channel if player.voice_client else None
+        ok = await notify_song_liked(interaction.user, song, voice_channel=voice_channel)
+        if ok:
+            await interaction.followup.send(f"⭐ 已將 **{song.title}** 寄到你的私訊", ephemeral=True)
+        else:
+            await interaction.followup.send("⚠️ 無法寄送，請檢查你的私訊是否已開啟", ephemeral=True)
 
     # ─── 第二排：播放操作 ───
     @discord.ui.button(label="跳過", style=discord.ButtonStyle.secondary, custom_id="music_skip", emoji="⏭", row=1)
