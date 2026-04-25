@@ -1,6 +1,7 @@
 .env
 logs/*
 vector_data/*
+searxng/*
 __pycache__/
 src/music/cache/
 monitored_channels.json

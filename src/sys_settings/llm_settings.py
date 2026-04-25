@@ -171,6 +171,44 @@ class AskAICommandSettings(BaseSettings):
         """停用 env/dotenv，僅接受初始化參數與 class 預設值。"""
         return (init_settings,)
 
+
+class AskAIWebSettings(BaseSettings):
+    """/askai 網路搜尋整合設定（關鍵項可由 env/dotenv 覆寫）。"""
+
+    enabled: bool = Field(
+        default=True,
+        validation_alias="ASKAI_WEB_ENABLED",
+    )
+    searxng_url: str = Field(
+        default="http://searxng:8080/search",
+        validation_alias="SEARXNG_URL",
+    )
+    default_engines: str = "google,bing,duckduckgo,brave"
+    news_engines: str = "google news,bing news,duckduckgo news"
+    timeout_seconds: float = 4.0
+    top_k: int = 5
+    language: str = "zh-TW"
+
+    model_config = SettingsConfigDict(
+        extra="ignore",
+        frozen=True,
+        env_file=".env",
+        env_file_encoding="utf-8",
+    )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: Any,
+        env_settings: Any,
+        dotenv_settings: Any,
+        file_secret_settings: Any,
+    ) -> Tuple[Any, ...]:
+        """允許 init > env > dotenv > file secrets 的覆寫順序。"""
+        return (init_settings, env_settings, dotenv_settings, file_secret_settings)
+
+
 def load_context_safety_rules(path: str | Path) -> LLMContextSafetyRules:
     """讀取並驗證 safety rules JSON（嚴格模式：缺檔或缺值直接拋錯）。"""
     safety_path = Path(path)

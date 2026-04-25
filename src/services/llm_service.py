@@ -154,6 +154,7 @@ class OllamaService:
         chat_context: Optional[List[str]] = None,
         bot_history: Optional[List[str]] = None,
         persona_context: Optional[List[str]] = None,
+        web_context: Optional[List[str]] = None,
         images: Optional[List[str]] = None,
         asker_profile: Optional[str] = None,
         asker_display_name: Optional[str] = None,
@@ -164,6 +165,7 @@ class OllamaService:
         chat_context: 純文字聊天記錄（每則一個字串，例如 "[14:30] 老哥: 昨天抽卡又保底了"）
         bot_history: Bot 自身先前的回覆（獨立於 chat_history 額度外）
         persona_context: 自然語言人物描述（每人一個字串，例如 "「老哥」— 群裡的非酋代表"）
+        web_context: 網路搜尋結果（每筆一個字串，例如 "[1] 標題 — snippet (url)"）
         asker_profile: 發問者可信資訊區塊（已含 <asker_profile> 標籤），放 system block
         asker_display_name: 發問者 display_name，作為 <latest_user_message> 的 from 屬性
         bot_display_name: Bot 自身 display_name（由系統注入為 <bot_history> 的 name 屬性，
@@ -171,7 +173,7 @@ class OllamaService:
         """
         composed_user_prompt = ""
 
-        has_context = bool(chat_context or bot_history or persona_context)
+        has_context = bool(chat_context or bot_history or persona_context or web_context)
         if has_context:
             composed_user_prompt += (
                 f"{self.context_safety_rules.untrusted_context_intro}\n\n"
@@ -204,6 +206,12 @@ class OllamaService:
             for line in persona_context:
                 composed_user_prompt += f"{self._sanitize_text(line)}\n"
             composed_user_prompt += "</other_member_profiles>\n\n"
+
+        if web_context:
+            composed_user_prompt += "<web_context>\n"
+            for line in web_context:
+                composed_user_prompt += f"{self._sanitize_text(line)}\n"
+            composed_user_prompt += "</web_context>\n\n"
 
         if images:
             composed_user_prompt += (
@@ -377,6 +385,7 @@ class OllamaService:
         chat_context: Optional[List[str]] = None,
         bot_history: Optional[List[str]] = None,
         persona_context: Optional[List[str]] = None,
+        web_context: Optional[List[str]] = None,
         images: Optional[List[str]] = None,
         model: Optional[str] = None,
         think: Optional[bool] = None,
@@ -401,6 +410,7 @@ class OllamaService:
             chat_context=chat_context,
             bot_history=bot_history,
             persona_context=persona_context,
+            web_context=web_context,
             images=images,
             asker_profile=asker_profile,
             asker_display_name=asker_display_name,

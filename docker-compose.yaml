@@ -97,6 +97,27 @@ services:
     networks:
       - discord-net
 
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: always
+    expose:
+      - "8080"  # 內網給 discord-bot 呼叫
+    ports:
+      - "127.0.0.1:8888:8080"  # 僅本機 browser 測試用，不對外
+    volumes:
+      - type: bind
+        source: ./searxng
+        target: /etc/searxng
+    environment:
+      - TZ=Asia/Taipei
+      - SEARXNG_BASE_URL=http://searxng:8080/
+      - SEARXNG_SECRET=${SEARXNG_SECRET:-change_me_please_use_long_random_string}
+      - UWSGI_WORKERS=${SEARXNG_WORKERS:-2}
+      - UWSGI_THREADS=${SEARXNG_THREADS:-2}
+    networks:
+      - discord-net
+
 networks:
   discord-net:
     driver: bridge

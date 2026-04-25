@@ -3,5 +3,5 @@
   "embed_model": "qwen3-embedding:0.6b",
   "moderation_model": "qwen2.5:7b",
   "personality_model": "qwen2.5:14b",
-  "think": false
+  "think": true
 }

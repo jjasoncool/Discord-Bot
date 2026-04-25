@@ -13,6 +13,8 @@ from typing import Dict, List, Optional, Set
 
 import discord
 
+from utils.dm_notifier import send_dm
+
 logger = logging.getLogger('discord_bot')
 
 RUNTIME_FILE = Path(__file__).parent.parent / "settings" / "rollcall_runtime.json"
@@ -28,6 +30,8 @@ PICK_HOUR_UTC8 = 14
 PICK_INTERVAL_DAYS = 7
 # 過期掃描間隔（秒）
 EXPIRE_CHECK_INTERVAL = 6 * 3600  # 6 小時
+# 踢除後重新加入的邀請連結
+REJOIN_INVITE_URL = "https://discord.gg/wuwachatroom"
 
 TZ_UTC8 = timezone(timedelta(hours=8))
 
@@ -187,7 +191,16 @@ class RollCallService:
                 await asyncio.sleep(300)
 
     async def _expire_check_loop(self):
-        """定期掃描逾期未回覆的成員"""
+        """定期掃描逾期未回覆的成員（啟動時等 bot ready 後立即掃一次）"""
+        try:
+            await self.bot.wait_until_ready()
+            if self.runtime.enabled:
+                await self.check_expired()
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.error(f"幽靈點名啟動掃描錯誤: {e}", exc_info=True)
+
         while True:
             try:
                 await asyncio.sleep(EXPIRE_CHECK_INTERVAL)
@@ -223,6 +236,12 @@ class RollCallService:
 
     async def do_roll_call(self, count: int = PICK_COUNT, *, manual: bool = False) -> List[discord.Member]:
         """執行一次點名抽選，回傳被抽中的成員列表"""
+        # 抽選新成員前，先清理上一輪逾期未回覆者，避免他們因仍在 pending 而被排除
+        try:
+            await self.check_expired()
+        except Exception as e:
+            logger.error(f"幽靈點名：抽選前過期掃描失敗: {e}", exc_info=True)
+
         channel_id = self._get_channel_id()
         if not channel_id:
             logger.warning("幽靈點名：未設定 rollcall_channel_id，跳過")
@@ -382,23 +401,46 @@ class RollCallService:
         channel = self.bot.get_channel(channel_id) if channel_id else None
         guild = channel.guild if channel else None
 
+        # guild 不可用時保留 pending，下次掃描重試（避免靜默丟失資料）
+        if not guild:
+            logger.warning(
+                f"幽靈點名：{len(expired_uids)} 人逾期但 guild 不可用，保留 pending 等下次重試"
+            )
+            return
+
         for uid_str in expired_uids:
-            info = self.runtime.pending.pop(uid_str, {})
+            info = self.runtime.pending.get(uid_str, {})
             user_id = int(uid_str)
 
-            if not guild:
+            # 用 fetch_member 確認成員是否真的不在伺服器（避免 cache miss 誤刪）
+            try:
+                member = await guild.fetch_member(user_id)
+            except discord.NotFound:
+                self.runtime.pending.pop(uid_str, None)
+                logger.info(f"幽靈點名：成員 {user_id} 已不在伺服器，移除 pending")
+                continue
+            except Exception as e:
+                logger.error(
+                    f"幽靈點名：取得成員 {user_id} 失敗，保留 pending：{e}", exc_info=True
+                )
                 continue
 
-            member = guild.get_member(user_id)
-            if not member:
-                logger.info(f"幽靈點名：成員 {user_id} 已不在伺服器，跳過踢除")
-                continue
+            # 踢出前先 DM 通知（踢後 bot 就 DM 不到了），失敗不影響 kick
+            dm_text = (
+                "👻 幽靈點名通知\n\n"
+                f"由於連續 {RESPONSE_DEADLINE_DAYS} 天未回覆活躍確認點名，我們已將您移出伺服器。\n\n"
+                "若您仍希望加入我們的社群，歡迎透過以下邀請連結重新申請：\n"
+                f"{REJOIN_INVITE_URL}\n\n"
+                "我們會再次進行審核，也誠摯希望您回來後能多與大家交流互動，謝謝！"
+            )
+            await send_dm(member, content=dm_text)
 
             try:
                 await guild.kick(
                     member,
                     reason=f"幽靈點名：逾期 {RESPONSE_DEADLINE_DAYS} 天未回覆",
                 )
+                self.runtime.pending.pop(uid_str, None)
                 self.runtime.stats["total_kicked"] = (
                     self.runtime.stats.get("total_kicked", 0) + 1
                 )

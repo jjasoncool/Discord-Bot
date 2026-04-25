@@ -44,7 +44,7 @@ class PersonalityExtractionProgressCallback(Protocol):
 EXTRACT_DAYS = 14  # 取最近幾天的聊天
 MIN_MESSAGES_PER_USER = 10  # 低於此數的使用者不分析
 BATCH_SIZE = 3  # 每批送幾個人給 LLM
-MAX_PERSONALITY_CHARS = 100  # 每人描述上限
+MAX_PERSONALITY_CHARS = 200  # 每人描述上限（提升至 200：新 prompt 讓 LLM 能寫出更具體描述，100 會截斷完整句子）
 
 _EXTRACT_PROMPT_PATH = "/app/settings/prompts/personality_extraction_prompt.json"
 _extract_prompts: dict[str, str] | None = None

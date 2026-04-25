@@ -13,12 +13,13 @@ from discord.ext import commands
 import llm
 from llm.logger_factory import get_or_create_file_logger
 from services.llm_service import OllamaService
-from sys_settings.llm_settings import AskAICommandSettings
+from sys_settings.llm_settings import AskAICommandSettings, AskAIWebSettings
 from utils.utils import safe_send_interaction_message, check_guild
 
 logger = logging.getLogger("discord_bot")
 
 ASKAI_SETTINGS = AskAICommandSettings()
+WEB_SETTINGS = AskAIWebSettings()
 TAIPEI_TZ = timezone(timedelta(hours=ASKAI_SETTINGS.taipei_utc_offset_hours))
 PROMPT_FILE_PATH = Path(ASKAI_SETTINGS.prompt_file_path)
 PROMPT_LOG_PATH = Path(ASKAI_SETTINGS.prompt_log_path)
@@ -115,6 +116,7 @@ def append_askai_response_log(
     think: bool,
     discord_meta: dict[str, int],
     rag_meta: dict[str, int | bool | str],
+    web_meta: dict[str, object] | None = None,
 ) -> None:
     """將每次 askai 的輸入/輸出與必要統計 append 到 jsonl，供後續觀察改善。"""
     guild_id = interaction.guild.id if interaction.guild else None
@@ -133,6 +135,7 @@ def append_askai_response_log(
         "think": think,
         "discord_context_meta": discord_meta,
         "rag_context_meta": rag_meta,
+        "web_context_meta": web_meta,
     }
 
     response_logger = get_or_create_file_logger(
@@ -306,6 +309,29 @@ class LLMCommands(commands.Cog):
                         f"<@!{uid_str}>", member.display_name
                     )
 
+        # 網路搜尋意圖判斷 + 背景 fetch（與 discord / rag 檢索並行）
+        intent = llm.should_search(resolved_question)
+        run_web = WEB_SETTINGS.enabled and intent.triggered
+
+        web_task: asyncio.Task | None = None
+        if run_web:
+            # 送給 SearXNG 的 query 用 cleaned_query（剝除指令贅字），engines/categories
+            # 由 intent 路由決定：股價走 news+day、新聞走 news+week、reddit 走 social media
+            search_query = intent.cleaned_query or resolved_question
+            search_engines: str | None = None
+            if intent.categories == "news":
+                search_engines = WEB_SETTINGS.news_engines
+            web_task = asyncio.create_task(
+                llm.fetch_web_results(
+                    search_query,
+                    settings=WEB_SETTINGS,
+                    engines=search_engines,
+                    categories=intent.categories,
+                    time_range=intent.time_range,
+                    logger_override=logger,
+                )
+            )
+
         discord_context, bot_history_context, discord_meta = await llm.retrieve_discord_context(
             interaction,
             resolved_question,
@@ -336,6 +362,37 @@ class LLMCommands(commands.Cog):
             logger,
             5,
         )
+
+        # 回收背景 web_task 結果（若有觸發），組 web_context 與 web_meta
+        web_context: list[str] | None = None
+        web_meta: dict[str, object] = {
+            "enabled": WEB_SETTINGS.enabled,
+            "triggered": run_web,
+            "reason": intent.reason,
+            "trigger_keyword": intent.trigger_keyword,
+            "cleaned_query": intent.cleaned_query,
+            "categories": intent.categories,
+            "time_range": intent.time_range,
+        }
+        if web_task is not None:
+            try:
+                outcome = await web_task
+                web_meta.update(outcome.meta)
+                if outcome.results:
+                    web_context = llm.format_web_context_lines(outcome.results)
+                    # 記錄前 3 筆 preview 方便日後 debug：判斷 LLM 到底看到什麼
+                    web_meta["results_preview"] = [
+                        {
+                            "title": r.title,
+                            "url": r.url,
+                            "engine": r.engine,
+                            "published_date": r.published_date,
+                        }
+                        for r in outcome.results[:3]
+                    ]
+            except Exception as exc:
+                logger.warning("web_task 收尾失敗: %s", exc, exc_info=True)
+                web_meta["error"] = f"await_failed:{type(exc).__name__}"
 
         # 聊天記錄：提取純文字，並用 persona card alias 標註身份
         alias_map: dict[str, str] = rag_meta.get("alias_map", {})
@@ -461,6 +518,7 @@ class LLMCommands(commands.Cog):
             chat_context=chat_context,
             bot_history=bot_history,
             persona_context=persona_context,
+            web_context=web_context,
             images=image_payload,
             model=target_model,
             think=target_think,
@@ -555,6 +613,7 @@ class LLMCommands(commands.Cog):
                 think=target_think,
                 discord_meta=discord_meta,
                 rag_meta=rag_meta,
+                web_meta=web_meta,
             )
         except Exception as exc:
             logger.warning("寫入 askai response history 失敗: %s", exc)
