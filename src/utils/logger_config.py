@@ -127,6 +127,22 @@ def get_api_logger():
         include_console=True
     )
 
+def get_ollama_anomaly_logger():
+    """Ollama 空 content / 異常回應的完整 raw dump 專用日誌。
+
+    用於診斷 thinking 全填、content 為空等 Ollama 回應異常。
+    寫入完整 JSON raw response（含 done_reason / eval_count / 完整 thinking），
+    不輸出到 console，避免污染主 log。
+    """
+    return setup_logger(
+        'ollama_anomaly',
+        'ollama_anomaly.log',
+        include_console=False,
+        max_bytes=50*1024*1024,  # 50MB（單筆可達數 KB）
+        backup_count=10,
+    )
+
 # 初始化主要日誌器
 discord_bot_logger = get_discord_bot_logger()
 article_monitor_logger = get_article_monitor_logger()
+ollama_anomaly_logger = get_ollama_anomaly_logger()

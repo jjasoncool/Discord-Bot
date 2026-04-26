@@ -5,6 +5,7 @@ Ollama LLM 服務模組
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from pathlib import Path
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from sys_settings.llm_settings import (
 )
 
 logger = logging.getLogger("discord_bot")
+anomaly_logger = logging.getLogger("ollama_anomaly")
 
 LLM_SERVICE_SETTINGS = LLMServiceSettings()
 
@@ -331,11 +333,11 @@ class OllamaService:
 
         url = f"{self.base_url}/api/chat"
         # 每次 attempt 建立新的 ClientTimeout + ClientSession → timeout 自動重置，不會累積
-        last_exc: Exception | None = None
         for attempt in range(1, OLLAMA_MAX_ATTEMPTS + 1):
             try:
                 client_timeout = aiohttp.ClientTimeout(total=effective_timeout)
                 async with aiohttp.ClientSession(timeout=client_timeout) as session:
+                    # 主請求：取出 data 後立刻退出 response context，連線歸還 pool
                     async with session.post(url, json=payload) as response:
                         if response.status != 200:
                             detail = await response.text()
@@ -345,17 +347,44 @@ class OllamaService:
                                 detail=detail,
                             )
                         data = await response.json()
-                        content = (data.get("message") or {}).get("content")
-                        if not content:
-                            raise OllamaAPIError(
-                                "回應格式異常",
-                                detail=str(data)[:500],
-                            )
+
+                    msg_obj = data.get("message") or {}
+                    content = msg_obj.get("content")
+                    if content:
                         return content
+
+                    # 空 content：完整 raw response 寫進 ollama_anomaly.log（不污染主 log）
+                    anomaly_logger.error(
+                        "empty_content model=%s done_reason=%s eval_count=%s prompt_eval_count=%s raw=%s",
+                        model,
+                        data.get("done_reason"),
+                        data.get("eval_count"),
+                        data.get("prompt_eval_count"),
+                        json.dumps(data, ensure_ascii=False),
+                    )
+
+                    # B1 fallback：原請求 think=True 才嘗試重送 think=False；
+                    # 拿到 content 視為成功，避免使用者看到「⚠️ 異常」。
+                    if think is True:
+                        fb_content = await self._retry_without_think(
+                            session=session, url=url, payload=payload, model=model,
+                        )
+                        if fb_content:
+                            return fb_content
+
+                    raise OllamaAPIError(
+                        "回應格式異常",
+                        detail=str({
+                            "done_reason": data.get("done_reason"),
+                            "eval_count": data.get("eval_count"),
+                            "prompt_eval_count": data.get("prompt_eval_count"),
+                            "thinking_len": len(msg_obj.get("thinking") or ""),
+                            "see": "logs/ollama_anomaly.log",
+                        }),
+                    )
             except OllamaAPIError as exc:
                 # 只對暫時性 HTTP 錯誤重試（500/502/503/504）；4xx 與回應格式異常直接拋出
                 if exc.status in OLLAMA_RETRY_STATUS_CODES and attempt < OLLAMA_MAX_ATTEMPTS:
-                    last_exc = exc
                     logger.warning(
                         "Ollama 第 %d 次呼叫失敗（HTTP %s），%.1fs 後重試",
                         attempt, exc.status, OLLAMA_RETRY_DELAY,
@@ -365,7 +394,6 @@ class OllamaService:
                 raise
             except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
                 if attempt < OLLAMA_MAX_ATTEMPTS:
-                    last_exc = exc
                     logger.warning(
                         "Ollama 第 %d 次呼叫失敗（%s: %s），%.1fs 後重試",
                         attempt, type(exc).__name__, exc, OLLAMA_RETRY_DELAY,
@@ -373,10 +401,41 @@ class OllamaService:
                     await asyncio.sleep(OLLAMA_RETRY_DELAY)
                     continue
                 raise
-        # 理論上不會到這裡（迴圈內一定 return 或 raise），保險用
-        if last_exc is not None:
-            raise last_exc
+        # 不可達：迴圈內 try/except 各分支必定 return 或 raise；保留作 type checker safety net
         raise OllamaAPIError("Ollama 呼叫未預期結束", detail="retry loop exited without result")
+
+    async def _retry_without_think(
+        self,
+        *,
+        session: aiohttp.ClientSession,
+        url: str,
+        payload: dict[str, object],
+        model: str,
+    ) -> Optional[str]:
+        """B1 fallback：重送一次 `think=False`。失敗任何環節都吞掉，回傳 None；caller 自行決定後續錯誤處理。"""
+        try:
+            async with session.post(url, json={**payload, "think": False}) as fb_resp:
+                if fb_resp.status != 200:
+                    fb_text = await fb_resp.text()
+                    anomaly_logger.error(
+                        "fallback_http_%d model=%s detail=%s",
+                        fb_resp.status, model, fb_text[:1000],
+                    )
+                    return None
+                fb_data = await fb_resp.json()
+            fb_content = (fb_data.get("message") or {}).get("content")
+            if fb_content:
+                logger.warning("Ollama 空 content，think=False fallback 成功 model=%s", model)
+                return fb_content
+            anomaly_logger.error(
+                "fallback_still_empty model=%s raw=%s",
+                model,
+                json.dumps(fb_data, ensure_ascii=False),
+            )
+            return None
+        except Exception:  # noqa: BLE001 - fallback 失敗不影響原錯誤路徑
+            anomaly_logger.exception("fallback_retry_failed")
+            return None
 
     async def generate_reply(
         self,
