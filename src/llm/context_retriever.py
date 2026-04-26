@@ -344,6 +344,11 @@ def _build_discord_context_item(msg: discord.Message, tz: timezone) -> dict[str,
     同時將給 LLM 看的文字組合在 'content' 欄位中。
     """
     display_name = getattr(msg.author, "display_name", msg.author.name)
+    author_id = str(msg.author.id)
+    # 末 4 碼當穩定身份錨點，跟 persona card 標題的 alias#XXXX 對齊
+    # 完整 user_id 不進 prompt（降敏 + 省 token）；撞號代價只在 LLM 描述層
+    short_id = author_id[-4:] if len(author_id) >= 4 else ""
+    name_with_id = f"{display_name}#{short_id}" if short_id else display_name
     time_str = msg.created_at.astimezone(tz).strftime("%Y-%m-%d %H:%M")
     compact_content = " ".join(msg.content.split())
 
@@ -358,15 +363,15 @@ def _build_discord_context_item(msg: discord.Message, tz: timezone) -> dict[str,
             sticker_part = " ".join(sticker_texts)
             compact_content = f"{compact_content} {sticker_part}" if compact_content else sticker_part
 
-    # 產出格式範例：[2026-02-26 14:30] 老哥: 昨天抽卡又保底了 [貼圖：哭哭貓｜難過想哭的心情]
-    # author_id 保留在 metadata，避免 content 重複佔用 token。
-    formatted_text = f"[{time_str}] {display_name}: {compact_content}"
+    # 產出格式範例：[2026-02-26 14:30] 老哥#1234: 昨天抽卡又保底了 [貼圖：哭哭貓｜難過想哭的心情]
+    # author_id 完整保留在 metadata，避免 content 重複佔用 token。
+    formatted_text = f"[{time_str}] {name_with_id}: {compact_content}"
 
     return {
         "role": "user",
         "content": formatted_text,
         "message_id": str(msg.id),
-        "author_id": str(msg.author.id),
+        "author_id": author_id,
         "display_name": display_name,
         "channel_id": str(msg.channel.id)
     }
@@ -608,8 +613,14 @@ def retrieve_rag_context_sync(
     participant_user_ids: list[int] | None,
     logger: logging.Logger,
     top_k: int = 5,
+    mentioned_user_ids: list[str] | None = None,
 ) -> tuple[list[dict[str, str]], dict[str, int | bool | str]]:
-    """同步版本，供 run_in_executor 呼叫。"""
+    """同步版本，供 run_in_executor 呼叫。
+
+    mentioned_user_ids: 上游已從原始 question（含 <@id>）抽出的 user_id 列表。
+        若為 None，內部會從 question 重抽——但若 caller 已把 question 替換成
+        display_name（resolved），重抽會失敗，必須顯式傳入。
+    """
     return _retrieve_rag_context_impl(
         question=question,
         guild_id=guild_id,
@@ -617,6 +628,7 @@ def retrieve_rag_context_sync(
         participant_user_ids=participant_user_ids,
         logger=logger,
         top_k=top_k,
+        mentioned_user_ids=mentioned_user_ids,
     )
 
 
@@ -628,6 +640,7 @@ async def retrieve_rag_context(
     participant_user_ids: list[int] | None,
     logger: logging.Logger,
     top_k: int = 5,
+    mentioned_user_ids: list[str] | None = None,
 ) -> tuple[list[dict[str, str]], dict[str, int | bool | str]]:
     """async 版本（向後相容），內部直接呼叫同步實作。"""
     return _retrieve_rag_context_impl(
@@ -637,6 +650,7 @@ async def retrieve_rag_context(
         participant_user_ids=participant_user_ids,
         logger=logger,
         top_k=top_k,
+        mentioned_user_ids=mentioned_user_ids,
     )
 
 
@@ -648,6 +662,7 @@ def _retrieve_rag_context_impl(
     participant_user_ids: list[int] | None,
     logger: logging.Logger,
     top_k: int = 5,
+    mentioned_user_ids: list[str] | None = None,
 ) -> tuple[list[dict[str, str]], dict[str, int | bool | str]]:
     """檢索 member_profile RAG（guild scoped + identity aware + persona cards）。"""
 
@@ -686,7 +701,10 @@ def _retrieve_rag_context_impl(
     table_name = source.table_name
     physical_table = f"data_{re.sub(r'[^a-zA-Z0-9_]', '', table_name)}"
     alias_hints = expand_alias_candidates(question)
-    mentioned_user_ids = extract_mentioned_user_ids(question)
+    # mentioned_user_ids 優先採 caller 傳入（從原始 <@id> 抽出）；否則從 question 重抽
+    # caller 若已將 question 替換成 display_name，重抽會失敗，必須顯式傳入
+    if mentioned_user_ids is None:
+        mentioned_user_ids = extract_mentioned_user_ids(question)
     participant_ids = [str(uid) for uid in (participant_user_ids or []) if uid]
     participant_ids = list(dict.fromkeys(participant_ids))[:PERSONA_MAX_PARTICIPANTS]
     meta["participant_count"] = len(participant_ids)
@@ -712,12 +730,19 @@ def _retrieve_rag_context_impl(
                           AND metadata_->>'guild_id' = %s
                           AND (
                                 (metadata_->>'profile_kind' = 'intro_profile' AND metadata_->>'author_id' = %s)
+                             OR (metadata_->>'profile_kind' = 'auto_personality' AND metadata_->>'author_id' = %s)
                              OR (metadata_->>'profile_kind' = 'impression' AND metadata_->>'target_user_id' = %s)
                           )
                         ORDER BY id DESC
                         LIMIT %s
                         """,
-                        (str(guild_id), str(requester_user_id), str(requester_user_id), max(3, top_k)),
+                        (
+                            str(guild_id),
+                            str(requester_user_id),
+                            str(requester_user_id),
+                            str(requester_user_id),
+                            max(3, top_k),
+                        ),
                     )
                     for row_id, row_text, row_meta in cur.fetchall():
                         parsed_meta = row_meta
@@ -754,12 +779,19 @@ def _retrieve_rag_context_impl(
                           AND metadata_->>'guild_id' = %s
                           AND (
                                 (metadata_->>'profile_kind' = 'intro_profile' AND metadata_->>'author_id' = ANY(%s))
+                             OR (metadata_->>'profile_kind' = 'auto_personality' AND metadata_->>'author_id' = ANY(%s))
                              OR (metadata_->>'profile_kind' = 'impression' AND metadata_->>'target_user_id' = ANY(%s))
                           )
                         ORDER BY id DESC
                         LIMIT %s
                         """,
-                        (str(guild_id), participant_ids, participant_ids, max(8, top_k + 3)),
+                        (
+                            str(guild_id),
+                            participant_ids,
+                            participant_ids,
+                            participant_ids,
+                            max(8, top_k + 3),
+                        ),
                     )
                     part_rows = cur.fetchall()
                     for row_id, row_text, row_meta in part_rows:
@@ -791,6 +823,10 @@ def _retrieve_rag_context_impl(
                 with conn.cursor() as cur:
                     like_values = [f"%{hint}%" for hint in alias_hints] or ["%__never_match__%"]
                     placeholders = ",".join(["%s"] * len(like_values))
+                    # Stage 2 按 profile_kind 分流：
+                    # - intro_profile / auto_personality 用 author_id（被 tag 者本人寫的 / AI 觀察的）
+                    # - impression 用 target_user_id（別人寫給被 tag 者的印象）
+                    # 不再用扁平 author_id ANY，避免「被 tag 者寫給別人的印象」被歸到別人卡裡
                     cur.execute(
                         f"""
                         SELECT id, text, metadata_
@@ -800,8 +836,10 @@ def _retrieve_rag_context_impl(
                           AND (
                                 metadata_->>'alias' ILIKE ANY(ARRAY[{placeholders}])
                              OR metadata_->>'target_alias' ILIKE ANY(ARRAY[{placeholders}])
-                             OR metadata_->>'author_id' = ANY(%s)
-                             OR metadata_->>'target_user_id' = ANY(%s)
+                             OR (metadata_->>'profile_kind' IN ('intro_profile', 'auto_personality')
+                                 AND metadata_->>'author_id' = ANY(%s))
+                             OR (metadata_->>'profile_kind' = 'impression'
+                                 AND metadata_->>'target_user_id' = ANY(%s))
                           )
                         ORDER BY id DESC
                         LIMIT %s

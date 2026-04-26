@@ -267,6 +267,11 @@ def format_persona_cards_for_context(cards: list[dict[str, Any]]) -> list[dict[s
     )
     for card in cards:
         alias = card.get("alias") or "未知"
+        person_id = str(card.get("person_id") or "")
+        # 末 4 碼當穩定身份錨點，跟 chat_history 行的 display_name#XXXX 對齊
+        # 完整 user_id 不進 prompt（降敏 + 省 token）；撞號代價只在 LLM 描述層
+        short_id = person_id[-4:] if len(person_id) >= 4 else ""
+        label = f"{alias}#{short_id}" if short_id else alias
 
         # 清理 intro（自我介紹）
         intro = _clean_intro_text(card.get("intro_summary") or "")
@@ -291,8 +296,8 @@ def format_persona_cards_for_context(cards: list[dict[str, Any]]) -> list[dict[s
             context_items.append(
                 {
                     "role": "user",
-                    "content": f"「{alias}」— {description}",
-                    "person_id": card.get("person_id", ""),
+                    "content": f"「{label}」— {description}",
+                    "person_id": person_id,
                 }
             )
     return context_items

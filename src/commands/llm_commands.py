@@ -1,6 +1,7 @@
 import logging
 from pathlib import Path
 import asyncio
+import functools
 import json
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
@@ -297,16 +298,22 @@ class LLMCommands(commands.Cog):
 
         mentioned_user_ids = llm.extract_mentioned_user_ids(question)
 
-        # 將 <@id> 解析為顯示名稱，讓 LLM 能自然關聯問題中的人與聊天記錄
+        # 將 <@id> 解析為「顯示名稱#XXXX」，跟 chat_history / persona card 的錨點對齊
+        # 否則 LLM 看到問題裡的「二口氣上吧」對不上卡標題「NNN#7489」（display_name vs alias 不同字串）
         resolved_question = question
         if mentioned_user_ids and interaction.guild:
             for uid_str in mentioned_user_ids:
                 member = interaction.guild.get_member(int(uid_str))
                 if member:
+                    short_id = uid_str[-4:] if len(uid_str) >= 4 else ""
+                    name_with_id = (
+                        f"{member.display_name}#{short_id}"
+                        if short_id else member.display_name
+                    )
                     resolved_question = resolved_question.replace(
-                        f"<@{uid_str}>", member.display_name
+                        f"<@{uid_str}>", name_with_id
                     ).replace(
-                        f"<@!{uid_str}>", member.display_name
+                        f"<@!{uid_str}>", name_with_id
                     )
 
         # 網路搜尋意圖判斷 + 背景 fetch（與 discord / rag 檢索並行）
@@ -352,15 +359,20 @@ class LLMCommands(commands.Cog):
 
         # retrieve_rag_context 內部呼叫 LlamaIndex 同步 API（embedding + pgvector），
         # 在 executor 中執行以避免阻塞 event loop（影響語音 heartbeat 等）。
+        # mentioned_user_ids 必須顯式傳入：resolved_question 已把 <@id> 換成 display_name，
+        # 內部重抽會失敗，會導致 +35 mention boost 永遠不生效（2026-04-27 修正）
         rag_context, rag_meta = await asyncio.get_running_loop().run_in_executor(
             None,
-            llm.retrieve_rag_context_sync,
-            resolved_question,
-            interaction.guild.id if interaction.guild else None,
-            interaction.user.id if interaction.user else None,
-            participant_user_ids,
-            logger,
-            5,
+            functools.partial(
+                llm.retrieve_rag_context_sync,
+                resolved_question,
+                interaction.guild.id if interaction.guild else None,
+                interaction.user.id if interaction.user else None,
+                participant_user_ids,
+                logger,
+                5,
+                mentioned_user_ids=mentioned_user_ids,
+            ),
         )
 
         # 回收背景 web_task 結果（若有觸發），組 web_context 與 web_meta
@@ -395,16 +407,9 @@ class LLMCommands(commands.Cog):
                 web_meta["error"] = f"await_failed:{type(exc).__name__}"
 
         # 聊天記錄：提取純文字，並用 persona card alias 標註身份
+        # _build_discord_context_item 已在每行 display_name 後加 #XXXX 錨點
+        # 這裡只做 alias 註記，不再需要撞名偵測
         alias_map: dict[str, str] = rag_meta.get("alias_map", {})
-
-        # 偵測同名衝突：同一 display_name 對應到多個 author_id 時才加 #xxxx 後綴
-        name_to_ids: dict[str, set[str]] = {}
-        for item in discord_context:
-            nm = item.get("display_name", "")
-            aid = item.get("author_id", "")
-            if nm and aid:
-                name_to_ids.setdefault(nm, set()).add(aid)
-        collided_names = {nm for nm, ids in name_to_ids.items() if len(ids) > 1}
 
         chat_context: list[str] | None = None
         if discord_context:
@@ -414,17 +419,12 @@ class LLMCommands(commands.Cog):
                 if not content:
                     continue
                 author_id = item.get("author_id", "")
-                display_name = item.get("display_name", "")
 
-                # 撞名才加 #xxxx 後綴（取 user_id 末 4 碼，伺服器內已足夠唯一）
-                if display_name and display_name in collided_names and author_id:
-                    content = content.replace(": ", f"#{author_id[-4:]}: ", 1)
-
-                # 如果這個人有 persona card，在 display_name 後標註 alias
+                # 如果這個人有 persona card，在 display_name#XXXX 後標註 alias
+                # content 格式: "[14:30] ❤️柔柔喵❤️#4635: 內容"
+                # 改成:        "[14:30] ❤️柔柔喵❤️#4635(喵董): 內容"
                 card_alias = alias_map.get(author_id, "")
                 if card_alias and card_alias not in content:
-                    # content 格式: "[14:30] ❤️柔柔喵❤️: 內容"
-                    # 改成:        "[14:30] ❤️柔柔喵❤️(喵董): 內容"
                     content = content.replace(": ", f"({card_alias}): ", 1)
                 lines.append(content)
             chat_context = lines or None
@@ -438,31 +438,56 @@ class LLMCommands(commands.Cog):
             ] or None
 
         # 人物描述：由 persona card builder 產出的自然語言
-        # 發問者本人的卡片抽出來給 asker_profile 用，其餘才放 other_member_profiles
+        # 三路分流（依優先序）：
+        # 1. 發問者本人的卡（asker_persona_text）→ 注入 asker_profile system block
+        # 2. 發問者明確 mention 的對象（target_profiles）→ 放 <target_profile>，緊鄰問題
+        # 3. 其餘參與者（persona_context）→ 放 <other_member_profiles>，背景資訊
         asker_uid_str = str(interaction.user.id)
+        mentioned_uid_set = set(mentioned_user_ids or [])
         asker_persona_text: str | None = None
+        target_items: list[str] = []
         persona_context: list[str] | None = None
+        matched_mention_ids: set[str] = set()
         if rag_context:
             other_items: list[str] = []
             for item in rag_context:
                 content = item.get("content")
                 if not content or item.get("metadata") == "persona_card_header":
                     continue
-                if item.get("person_id") == asker_uid_str and asker_persona_text is None:
+                person_id = item.get("person_id")
+                if person_id == asker_uid_str and asker_persona_text is None:
                     asker_persona_text = content
+                elif person_id in mentioned_uid_set:
+                    target_items.append(content)
+                    matched_mention_ids.add(person_id)
                 else:
                     other_items.append(content)
             persona_context = other_items or None
 
+        # mention 了但 DB 沒卡：放退場提示，避免 LLM 反問或硬猜
+        # 例：新進群、未填自介、AI 觀察未跑、或 user_id 已不在群內
+        unmatched_mention_ids = mentioned_uid_set - matched_mention_ids
+        for uid in unmatched_mention_ids:
+            short_id = uid[-4:] if len(uid) >= 4 else ""
+            member = interaction.guild.get_member(int(uid)) if interaction.guild else None
+            display_name = member.display_name if member else f"user_{short_id}"
+            label = f"{display_name}#{short_id}" if short_id else display_name
+            target_items.append(
+                f"「{label}」— 群內尚無此人的 persona 紀錄；"
+                f"可從 chat_history 推測，否則請老實說對此人不熟悉"
+            )
+        target_profiles = target_items or None
+
         # 組 asker_profile：可信的發問者身份資訊（給 system block）
+        # asker_display_name 永遠帶 #XXXX，跟 chat_history / persona card 對齊
         asker_display_name_raw = getattr(
             interaction.user, "display_name", interaction.user.name
         )
-        # 若發問者在 chat_history 中撞名，profile 也加 #xxxx 方便 LLM 對應
-        if asker_display_name_raw in collided_names:
-            asker_display_name = f"{asker_display_name_raw}#{asker_uid_str[-4:]}"
-        else:
-            asker_display_name = asker_display_name_raw
+        asker_short_id = asker_uid_str[-4:] if len(asker_uid_str) >= 4 else ""
+        asker_display_name = (
+            f"{asker_display_name_raw}#{asker_short_id}"
+            if asker_short_id else asker_display_name_raw
+        )
         now_str = datetime.now(TAIPEI_TZ).strftime("%Y-%m-%d %H:%M (UTC+8)")
         guild_name = interaction.guild.name if interaction.guild else "(DM)"
         channel_name = getattr(interaction.channel, "name", "") or "(unknown)"
@@ -518,6 +543,7 @@ class LLMCommands(commands.Cog):
             chat_context=chat_context,
             bot_history=bot_history,
             persona_context=persona_context,
+            target_profiles=target_profiles,
             web_context=web_context,
             images=image_payload,
             model=target_model,

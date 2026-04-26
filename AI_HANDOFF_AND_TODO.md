@@ -24,24 +24,12 @@
 > 3. 在現況摘要 / 管理級總覽中移除其「當前主線」身份
 > 4. 保留可追溯來源，避免之後重複討論同一件事
 
-最後盤點紀錄：
-- 2026-04-03：清理 handoff，已完成的設計文件和歷史盤點移至 `TODO-completed.md`。
-- 2026-04-05：續文/多圖/並行/子看板等完成，已歸檔至 `TODO-completed.md`。
-- 2026-04-06：Telegram embed title 來源頻道名稱修正，已歸檔至 `TODO-completed.md`。
-- 2026-04-07：Telegram media group 合併（grouped_id + 多圖合併為單則 Discord 訊息），已歸檔至 `TODO-completed.md`。
-- 2026-04-07：FB 貼文改推送模式 + 圖片 URL 刷新機制（詳見跨來源整合專區）。
-- 2026-04-18：Context/Prompt 完整重構 + askai 身份感（2026-04-15 ~ 2026-04-18 整串工作）全數歸檔至 `TODO-completed.md`，包含 on_message 持久化、自動人格萃取、LLM 服務穩定性修復、askai 排隊顯示修正、Bahamut 主文 `author_id` 修復、Bahamut 增量更新 429 治本（per-message 冷卻）、askai 發問者身份注入（asker_profile + 撞名偵測 + persona 拆分 + safety rules 修飾）。
-- 2026-04-18：新增主線「Reaction 統計與社群互動玩法」TODO，規劃 Phase 1 基礎統計（/askai 整合前置）→ Phase 2 askai 整合（殺手級應用）→ Phase 3 強化人格萃取。詳見對應區塊。
-- 2026-04-18：點歌機器人與幽靈點名系統的架構、設計決策、已實作功能、音訊鏈路、管理面板、使用方式等完整內容歸檔至 `TODO-completed.md`；handoff 僅保留專區錨點 + 未完 TODO（音樂 P1/P2、點名部署驗證 + P1）。
-- 2026-04-18：/askai 效能調優三連。①context 量上調（`max_context_to_send` 20→50、`min_recent_context` 15→25、`max_relevant_context` 14→25），覆蓋典型 ~50 則討論。②Plan C：`_build_vector_rank` 改查持久化 pgvector（既有 `chat_persistence` 寫入端），/askai 的 embed 呼叫從「100 則 in-memory」降到「1 次問題」。③修 BM25 tokenization TF bug（`tokenize_for_retrieval` 回傳 `set`→`list`），保留重複 token 讓 BM25 能用詞頻。附帶清掉無用的 in-memory VectorStoreIndex LRU cache。`_EMBED_CONCURRENCY` 2→1 對齊 server 端 `OLLAMA_NUM_PARALLEL=1`，避免 AMD Vulkan KV cache 倍增風險。音樂機器人播音斷斷續續的根因是 default ThreadPoolExecutor 被 BM25+embedding 佔用 + GIL 爭用，此三項改動後預期大幅緩解。
-- 2026-04-19：Ollama chat 呼叫統一化 Stage 1 完成。`OllamaService` 新增 `chat_raw()` 底層方法（純 HTTP + payload 組裝，raise `OllamaAPIError` / `aiohttp.ClientError`），`generate_reply()` 改為高階封裝（prompt bundle + context 注入 + 錯誤字串化）；`chat_raw` 新增 `timeout` 參數讓 caller 覆蓋預設。`personality_extractor.extract_personalities` 從自寫 aiohttp 遷移到 `service.chat_raw(timeout=600, num_ctx=32768, temperature=0.3, top_p=0.8)`，消除唯一一處 /api/chat 重複實作。附帶修掉「Ollama 呼叫發生未預期錯誤: （空字串）」log 診斷困難（加 `type(exc).__name__`，例：`TimeoutError: `）。
-- 2026-04-19：`chat_raw` / `generate_reply` 新增 `keep_alive` 參數，caller 按用途傳不同值。/askai 傳 `"1h"`（連續互動期間 chat model 常駐）、moderation 傳 `"30m"`（間歇性任務）、personality_extractor 傳 `"30m"`（4am 排程跑完 30 分鐘後釋放）。payload 策略：caller 明確傳值才加 `keep_alive` 欄位，否則沿用 server 端全域 `OLLAMA_KEEP_ALIVE`，不覆蓋；embed 模型目前還是走 server 全域設定（沒動 LlamaIndex 層），待後續需要時再做 Stage 2。
-- 2026-04-19：社群 ID 查詢 Phase 0 Step 2~5 實作完成（Step 2 state_db 新表 + CRUD、Step 3 `services/community_lookup_service.py` 查詢核心、Step 4 `commands/community_lookup_commands.py` Panel/Modal/Flow/日期 hybrid section 管理、Step 5 `/server_manager` 頻道選項 + 自動部署 + `discord_bot.py` COMMAND_MODULES 掛載）。所有 smoke test 通過（CRUD、真實 DB 查詢、cog 實例化 + persistent views 註冊、Modal children 結構、embed 格式）。Step 6 部署驗證待使用者執行。涉及新檔：`src/services/community_lookup_service.py`、`src/commands/community_lookup_commands.py`、`src/scripts/bench_ptt_comment_lookup.py`；涉及改動：`src/services/state_db.py`、`src/commands/management_commands.py`、`src/discord_bot.py`。未動 scraper DB schema。
-- 2026-04-19：社群 ID 查詢 Phase 0 Step 1（JSON1 效能驗證）完成。`src/scripts/bench_ptt_comment_lookup.py` 對現有 `articles.db`（810 篇 / 39,890 留言 / 367 MB）實測，全部 query p95 < 30ms，遠低於 500ms 判準。意外收穫：`ix_ptt_posts_published_at` 早已存在（scraper models.py `published_at=Column(..., index=True)`），EXPLAIN QUERY PLAN 顯示 SQLite 已先走時間 index 縮小範圍再做 `json_each`，所以 `idx_ptt_author` 完全不必加，原定的 PTT index migration 取消 — scraper DB schema 零變更。
-- 2026-04-19：新增主線「社群 ID 查詢（PTT / 巴哈）」，架構已定案（status: draft）。核心概念：`/server_manager` 設定「社群查詢頻道」→ 面板兩顆按鈕（查 PTT / 查巴哈）→ Modal 填目標帳號 + 範圍 Select（7/15/30/60/90/180，預設 30）→ 每個 `(source, lookup_id)` 建立唯一 public thread（命名 `[PTT] JohnDoe` / `[巴哈] 小明 (ABC123)`，auto-archive 7 天）→ 結果 append 模式「日期 hybrid」（同日 edit、跨日 append 新 section）→ 父頻道發公開通知 + bump panel。PTT 走 SQLite JSON1（零 migration，只加 `idx_ptt_author` / `idx_ptt_published_at`），巴哈走 ORM。保底 100 留言 / 20 主文（區間內不足補區間外），hard cap 1000 筆/來源。Phase 0 Step 1 將先跑 JSON1 效能驗證 script 後再動正式 code。詳見[社群 ID 查詢專區](#社群-id-查詢專區)。
-- 2026-04-19：Ollama 穩定性與 VRAM 優化兩連。①`chat_raw` 自動重試：檔頭新增常數 `OLLAMA_MAX_ATTEMPTS=2` / `OLLAMA_RETRY_DELAY=3.0` / `OLLAMA_RETRY_STATUS_CODES={500,502,503,504}`，HTTP 區塊改 2-attempt 迴圈，每次建立新 ClientSession + ClientTimeout 讓 timeout 自動重置；會重試 500/502/503/504 + asyncio.TimeoutError + aiohttp.ClientError，**不重試** 4xx 與回應格式異常。觸發背景：17:14 出現 `500 model runner has unexpectedly stopped`，使用者確認 VRAM 還剩 20GB 排除 OOM，判定為 Ollama runner 暫時性崩潰。②`SafeOllamaEmbedding` 預設注入 `num_ctx=8192`：Ollama VRAM-based 預設 32768 讓 0.6B embedding 吃 5.7GB VRAM（KV cache ~3.5GB 預分配但用不到），調成 8192 後 KV cache 降到 ~880MB，省 ~2.6GB。實作方式：檔頭常數 `_EMBED_NUM_CTX=8192` + `__init__` 覆寫把 `num_ctx` 塞進 `ollama_additional_kwargs`，caller 仍可覆寫；三個 call site（chat_persistence / intro_rag_port / context_retriever）一行都不用改（context_retriever 早已用 `SafeOllamaEmbedding as OllamaEmbedding` alias）。③澄清：人格萃取排程本來就會自動寫 RAG（`run_personality_extraction` 預設 `write_rag=True`，排程 caller 沒傳 False），無需改動；現況語意 = 排程自動 / 手動人審。④embedding 長度稽核：所有 call site 最大輸入 ~4200 字元（Discord 訊息上限），用掉 8192 token 的 51%，有 2 倍 buffer；intro/impression/personality 都有 modal `max_length` 或程式常數硬限制；未來 Bahamut / Article 若需 embed 長文應先切 chunk，不是調大 num_ctx。
-- 2026-04-22：研究紀錄「X.com / Twitter 影片嵌入原理」歸檔至[跨來源整合專區](#xcom-twitter-影片嵌入研究2026-04-22)。結論：Discord bot（ermiana 等）靠替換 `x.com` → `fxtwitter.com` / `fixupx.com` / `vxtwitter.com` 讓 Discord unfurler 讀到 `og:video` meta 即可直接播放，背後是 X 免費但無保證的 Syndication API（`cdn.syndication.twimg.com/tweet-result`），只能單篇 tweet lookup、無搜尋能力；若本專案未來要加 x.com 來源，最簡單做法是 `on_message` domain replace（一小時可完工），搜尋/timeline 則需付費 v2 API。本輪無 code 異動。
-- 2026-04-23：DM 通知模組抽出 + 音樂面板收藏按鈕。①新增 `src/utils/dm_notifier.py`（系統模組層，與 `logger_config.py` 同層），提供 `resolve_user`（user_id → User/Member，`guild.fetch_member` → `bot.fetch_user` → `bot.get_user` → `guild.get_member`）、`send_dm`（底層發送，吃掉所有例外，回 bool）、`notify_keyword_hit`、`notify_song_liked` 四個函式，所有 discord DM 發送的共通 user resolution + 例外處理集中於此。②`commands/user_commands.py` 的 keyword 監控命中段（原 ~60 行 user resolution + embed + try/except）縮到 `await notify_keyword_hit(self.bot, user_id, message, found_keywords, guild=message.guild)` 一行。③`music/announcer.py` 的 `MusicControlView` 第一排加入 `⭐ 收藏` Secondary 按鈕（順序：點歌 → 歌單 → 收藏），按下後寄 DM 給按鈕觸發者（含歌名、長度、YT 連結、縮圖、語音頻道），`custom_id="music_favorite"` 可持久化；失敗給 ephemeral 提示「你的私訊已關閉」。④純 DM 無記檔、無 de-dup（按幾次寄幾次，符合 MVP）。附帶整理：`src/services/migrate_json_to_sqlite.py` 搬到 `src/scripts/`（用 `git mv` 保留歷史，與 `migrate_emoji_text_format.py` / `reembed_pgvector.py` 同性質），docstring 執行路徑同步更新。
+最後盤點紀錄（只保留近期；過往詳見 `TODO-completed.md` 各歸檔 entry）：
+- 2026-04-27：handoff 大清理。三個已完成主線（Bahamut scraper + 反爬基礎設施、幽靈點名系統、社群 ID 查詢 Phase 0）整段移至 `TODO-completed.md`。Bahamut 第三階段 RAG ingestion 與幽靈點名剩餘 P1（部署驗證 + `/server_manager` 整合）併入歸檔當「未來工作 reference」，要做時從 archive 撈回。
+- 2026-04-27：askai 人物身份對照與 prompt 整合三輪重構完成並歸檔。①#XXXX 末 4 碼錨點全鏈路對齊 ②SQL 按 profile_kind 分流 + 補 auto_personality ③mention boost 修復 ④target_profile 提權結構 + 退場處理 + 自我否定豁免 ⑤askai_system_prompt 整合精煉（11 → 8 段、~700 tok/次）+ 角色設定加陪聊感 + 回答風格三梯度 + 客服反射禁令 + 撩的拿捏。詳見 `TODO-completed.md`。未來路線：`/remember`、Structured XML context、tool calling-based persona lookup。
+- 2026-04-23：DM 通知模組抽出 + 音樂面板收藏按鈕完成並歸檔。
+- 2026-04-22：X.com / Twitter 影片嵌入研究歸檔（純研究、無 code 異動）。
+- 2026-04-19：Ollama 服務穩定化三連（chat_raw 統一化 + keep_alive 參數 + 自動重試 + VRAM 優化）已歸檔。
 
 ---
 
@@ -108,15 +96,15 @@ last_confirmed: 2026-03-31
 
 | 主軸 | 狀態 | 進度 | 詳見 |
 |---|---|---:|---|
-| Discord Bot / AI 對話能力 | 已有可用基礎能力 | 75% | [專案架構](#專案-ai-架構總覽) |
-| Context / Prompt 優化 | 已實作（含 askai 身份感），待部署驗證 | 95% | [Context 優化](#context--prompt-優化專區) |
+| Discord Bot / AI 對話能力 | 已有可用基礎能力 | 80% | [專案架構](#專案-ai-架構總覽) |
+| Context / Prompt 優化 | 含 askai 身份感 + 人物對照三輪重構，待部署驗證 | 95% | [Context 優化](#context--prompt-優化專區) |
+| 使用者指令記憶 (/remember) | 規劃中 | 5% | [/remember 規劃](#使用者指令記憶-remember-未來工作) |
 | Reaction 統計 / 社群互動玩法 | 規劃中 | 5% | [Reaction TODO](#reaction-統計與社群互動玩法) |
 | 點歌機器人（Music Bot） | 已上線運作 | 85% | [點歌機器人](#點歌機器人專區) |
 | 跨來源整合（Article/FB/PTT/TG） | 有方向，尚未全面收斂 | 35% | [跨來源整合](#跨來源整合專區) |
-| Bahamut RAG / AI 整合 | 尚未開始 | 5% | [RAG TODO](#第三階段整合-ai--pgvector--rag) |
-| 幽靈點名系統（Roll Call） | 已實作，待部署驗證 | 80% | [幽靈點名](#幽靈點名系統專區) |
-| 社群 ID 查詢（PTT / 巴哈） | Phase 0 Step 1~5 實作完成，待部署驗證 | 85% | [社群 ID 查詢](#社群-id-查詢專區) |
 | Discord Bot 管理入口 | 規劃中 | 10% | [管理 TODO](#discord-bot-管理入口與指令整理-todo) |
+
+> 已完成 / 過往工作（Bahamut scraper + 反爬基礎設施、幽靈點名核心 + DM、社群 ID 查詢 Phase 0、Telegram Relay、Music Bot 完整實作等）詳見 `TODO-completed.md`。
 
 ---
 
@@ -259,17 +247,24 @@ last_confirmed: 2026-04-19
 
 ### 待處理
 
-- [ ] System prompt 禁忌清單精簡（待定案）
-- [ ] `/personality_extract` 的「寫入 RAG」改為背景 task：按鈕按下後先立即回應，避免 interaction 長時間停在 loading。（目前仍在前景等完，但已加進度訊息降低體感不安。）
-- [ ] 若背景寫入超時或 followup 失敗，規劃 fallback（例如 DM 或至少補 log / 狀態查詢入口）。
-- [ ] 為 `save_personality_results()` / `index_auto_personality()` 補上逐筆或批次成功 log 與耗時統計，方便判斷卡點是在 embedding、delete、還是 pgvector insert。
-- [ ] `asker_profile` 的 `roles` 欄位目前為 `(未啟用)`，未來視需求再填：可選混合 Discord 身份組名稱 + 權限層級（admin/moderator/member）。
-- [ ] 部署後觀察 /askai 回覆是否正確認出發問者；若發現「撞名誤判」或 `asker_profile` 洩漏 user_id 等問題，回到 prompt/safety rules 調整。
-- [ ] **Windows Ollama server 待調整**（使用者本機設定，AI 無法直接改）：`OLLAMA_KEEP_ALIVE=24h`（原 5m，每 5 分鐘反覆 unload/reload 是 Windows `wsarecv` / ephemeral port 耗盡主因）。`OLLAMA_MAX_LOADED_MODELS=2` 已設好（chat + embed 各一條 runner）、`OLLAMA_NUM_PARALLEL=1` 已設好。改完重啟 Ollama 後驗證 `server.log` 不再出現 5 分鐘一次的 `load request`。AMD 顯卡維持 `OLLAMA_VULKAN=true`。
-- [ ] 觀察 /askai 執行時音樂機器人是否還會斷音。Plan C + `_EMBED_CONCURRENCY=1` 後理論上 default ThreadPoolExecutor 爭用大幅下降；若仍斷音，考慮將 BM25/embedding 隔離到獨立 ThreadPoolExecutor（治標），或改 `ProcessPoolExecutor` 脫離 GIL（治本但 IPC overhead 高）。
-- [ ] **部署驗證 Ollama 重試邏輯**（2026-04-19 實作）：重啟 discord-bot 後觀察 `[WARNING] Ollama 第 1 次呼叫失敗（...），3.0s 後重試` log 是否按預期出現、使用者端 500 錯誤是否消失。
-- [ ] **部署驗證 embedding num_ctx=8192**（2026-04-19 實作）：重啟 discord-bot 觸發一次 embed（如 /askai），然後 `curl http://192.168.56.1:11434/api/ps` 確認 `qwen3-embedding:0.6b` 的 `size_vram` 從 ~5.7GB 降到 ~3.1GB。
-- [ ] **/askai 指定 thread 查詢（新議題，未開工）**：使用者提問能否讓 askai 看某個 thread 的貼文評論。現況結論：情境 A（人在 thread 內 `/askai`）已支援；情境 B（在他處指定 thread）不支援，因 slash command 無 thread 參數 + pgvector metadata 無 `thread_id` / `parent_id`。兩方案待選：Minimum 版（加 thread 參數 + retriever 吃 thread.history，3 處以內改動）/ 完整版（Minimum + chat_persistence 寫 thread_id + RAG 查詢加 thread 過濾，需 migration）。AI 建議先 Minimum 版。使用者尚未選。
+**體驗 / 觀測：**
+- [ ] `/personality_extract` 的「寫入 RAG」改為背景 task：按鈕按下後先立即回應，避免 interaction 長時間停在 loading（目前仍前景等完，已加進度訊息降低體感不安）
+- [ ] 若背景寫入超時或 followup 失敗，規劃 fallback（DM 或至少補 log / 狀態查詢入口）
+- [ ] 為 `save_personality_results()` / `index_auto_personality()` 補逐筆或批次成功 log 與耗時統計，判斷卡點在 embedding、delete、還是 pgvector insert
+- [ ] `asker_profile.roles` 欄位目前為 `(未啟用)`，未來可填 Discord 身份組名稱 + 權限層級（admin/moderator/member）
+
+**部署驗證（待重啟 + 跑一輪確認）：**
+- [ ] 2026-04-27 三輪 askai 重構完整效果（#XXXX 對齊、target_profile 區塊、prompt 整合後回答長度與陪聊感、自我否定卡片是否仍能被 LLM 正常引用）
+- [ ] Ollama 重試邏輯（觀察 `[WARNING] Ollama 第 1 次呼叫失敗` log）
+- [ ] embedding `num_ctx=8192`（`curl http://192.168.56.1:11434/api/ps` 看 `qwen3-embedding:0.6b` 的 `size_vram` 從 ~5.7GB 降到 ~3.1GB）
+
+**外部環境：**
+- [ ] **Windows Ollama server 待調整**（使用者本機設定，AI 無法直接改）：`OLLAMA_KEEP_ALIVE=24h`（原 5m，每 5 分鐘反覆 unload/reload 是 Windows `wsarecv` / ephemeral port 耗盡主因）。`OLLAMA_MAX_LOADED_MODELS=2` 已設好、`OLLAMA_NUM_PARALLEL=1` 已設好。改完重啟 Ollama 後驗證 `server.log` 不再 5 分鐘一次的 `load request`。AMD 顯卡維持 `OLLAMA_VULKAN=true`。
+
+**新議題（未開工）：**
+- [ ] **/askai 指定 thread 查詢**：情境 A（人在 thread 內 `/askai`）已支援；情境 B（在他處指定 thread）不支援，因 slash command 無 thread 參數 + pgvector metadata 無 `thread_id` / `parent_id`。兩方案：Minimum 版（加 thread 參數 + retriever 吃 thread.history，≤3 處改動）/ 完整版（Minimum + chat_persistence 寫 thread_id + RAG 加 thread 過濾，需 migration）。AI 建議先 Minimum 版，使用者未選。
+- [ ] **使用者指令記憶 `/remember`**：詳見 [使用者指令記憶專區](#使用者指令記憶-remember-未來工作)
+- [ ] 觀察 /askai 執行時音樂機器人是否還會斷音；若仍斷，考慮 BM25/embedding 隔離到獨立 ThreadPoolExecutor（治標）或 ProcessPoolExecutor（治本但 IPC overhead 高）
 
 ### 設計決策備忘
 
@@ -386,130 +381,90 @@ Phase 1 三個玩法**共用同一張 DB**，不要拆開做。
 
 ---
 
-## 社群 ID 查詢專區
+## 使用者指令記憶 (/remember) 未來工作
 
 <!-- @meta
-id: community-lookup
+id: user-directive-memory
 type: TODO
 status: draft
-depends_on: [project-architecture]
-affects: []
-last_confirmed: 2026-04-19
+depends_on: [context-prompt-optimization]
+affects: [project-architecture]
+last_confirmed: 2026-04-27
 -->
 
-> **目標：** 讓使用者在 Discord 上輸入 PTT 帳號或巴哈 ID/名稱，查出該 ID 在兩站的發文與留言紀錄，並把結果做成可追蹤的 thread（每 ID 一個 thread，像搜尋庫）。
+> **目標：** 讓使用者用「請記住 X」「希望你叫我 Y」等指令把事實 / 偏好寫進 RAG，下次 `/askai` 自動帶入，不會因聊天記錄淘汰而消失。
 
-### 核心設計（已定案）
+### 現況差距
 
-**1. 入口與頻道設定**
-- `config.json` 新增 `community_lookup_channel_id`
-- 走既有 `/server_manager` 下拉選單設定（仿 `intro_channel_id` 同構），設定瞬間自動部署 panel
-- 無獨立 slash command；所有互動走面板按鈕
+| 層 | 寫入來源 | 是否被 askai 自動讀取 | 是否能受「請記住」觸發 |
+|---|---|---|---|
+| `raw_message_store` (SQL) | 全部 on_message | 否（只給 personality_extractor 用） | ✅ 寫入但不被讀 |
+| `chat_persistence` (pgvector) | 訊息 embedding | 是（vector rank） | ✅ 寫入但僅靠語意命中才被撈 |
+| `intro_profile` | /intro 面板 | 是（persona card） | ❌ 需走面板 |
+| `impression` | /impression | 是（persona card） | ❌ 需走面板 |
+| `auto_personality` | 排程批次萃取 | 是（persona card） | ✅ 但抽的是「人格特徵」不是「請記住的事實」 |
 
-**2. Panel（父頻道常駐）**
-- 兩顆按鈕：🔍 查 PTT / 🎮 查巴哈
-- 永續 View（`timeout=None`）；`setup_hook` 呼叫 `add_view(CommunityPanelView())`
-- 每次查詢後 bump（刪舊發新，維持在父頻道最底）
+→ 沒有「使用者指令記憶」這一層；「請記住 X」會被 raw / chat 收進去但不會被當作持久指令對待。
 
-**3. Modal**
-| 欄位 | 查 PTT | 查巴哈 |
+### 業界主流做法
+
+| 模式 | 代表產品 | 概念 |
 |---|---|---|
-| 帳號輸入 | TextInput：PTT 帳號 | TextInput：ID 或名稱 |
-| 範圍 | Select：`7/15/30(預設)/60/90/180` | 同左 |
-| 比對模式 | — | Select：精確(預設，只查 ID) / 模糊(ID 或名稱 LIKE) |
+| **A. LLM 偵測 + 自動寫入** | ChatGPT Memory、Claude memory、Mem0 | 訊息過 LLM 分類器，判定要記就抽成 fact 存 DB |
+| **B. 顯式 /remember command** | Notion AI、Slack chatbots | 使用者打 `/remember X`，bot 寫入 fact，標明 owner / scope |
+| **C. 結構化 knowledge graph** | 企業級 CRM、Replika | 抽成 (subject, predicate, object) 三元組 |
+| **D. Long-term episodic + semantic memory** | MemGPT、LangChain memory | 短期 + 中期 summary + 長期 facts，分層檢索 |
+| **E. 混合：自動萃 + 使用者覆蓋** | Cursor rules、CLI agent memory | 自動觀察存背景知識，使用者可手動加 / 修 / 刪 |
 
-- 巴哈模糊查多筆 → ephemeral 候選清單下拉讓使用者挑
+### 推薦路線（A+B 混合，複用 member_profile 表）
 
-**4. Thread 行為（重點）**
-- 每個 `(guild_id, source, lookup_id)` **唯一一個 public thread**，重查複用（封存自動解封）
-- 命名：`[PTT] JohnDoe` / `[巴哈] 小明 (ABC123)`
-- Auto-archive：7 天（Discord 最大）
-- **日期 hybrid 策略：**
-  - 今天首次查 → append 建立「今日 section」
-  - 今天再查 → edit 覆蓋「今日 section」（標頭更新「最新更新」時間）
-  - 跨日首次查 → append 建立「新日期 section」
-- Thread 內無「頂部查詢日誌」embed（section 標頭本身就是當日日誌）
-- 控制訊息「[🔄 更新查詢結果]」每次更新後刪舊發新在 thread 最底
+不用新 schema，沿用現有 `member_profile`：
 
-**5. Embed slot 機制（仿巴哈留言）**
-- 每個 slot 一個 embed，`description` ≤ 4000 字（複用 `EMBED_DESC_LIMIT`）
-- 滿了發下一個 slot，slot 間附「⬇️ 更多...」導航連結 + `thread.send(..., reference=prev_msg)` reply 串接
-- 複用 `src/services/bahamut_monitor.py` 既有常數與函式
-- **不做 edit 模式下的預建格**（因為歷史 section 不會被 edit，每個 section 的 slot 數由當次結果決定）
-
-**6. 色條分區**
-- 🟦 標頭 embed（藍色）
-- 🟪 主文 embed（紫色）
-- 🟩 留言 embed（綠色）
-- ⬜ 控制訊息 embed（灰色）
-
-**7. 主文連結策略**
-- 查 `state_db.forum_thread_state` / `bahamut_post_state` 既有對應
-- 有 → 🗨️ Discord 討論（jump URL）
-- 無 → 🌐 原文（PTT / 巴哈原站）
-- **留言不給跳轉連結**，直接印內容
-
-**8. 查詢策略**
-- 保底：留言 100 則 / 主文 20 篇
-- 區間內不足保底時補撈區間外（UI 分段「區間內 X / 區間外補 Y」，含分隔線）
-- Hard cap：1000 筆/來源，超過截斷並在標頭提示「結果過多，縮短天數重查」
-- PTT：SQLite JSON1（`json_each` + `json_extract`）+ 兩個 index
-- 巴哈：ORM 直接查 `author_id` / `LIKE author_name`
-
-**9. 父頻道通知（公開）**
 ```
-🔔 @Jason 更新了 [PTT] JohnDoe 的查詢紀錄
-   📅 搜尋前 30 天 · 📊 主文 5 / 留言 127
-   → 🔗 跳轉 thread
-```
-- 公開訊息（非 ephemeral），讓所有人看到「誰查了誰」
-- 另外仍回 ephemeral 給查詢者方便直接點連結
-- 發完後 bump panel
-
-### 資料層變更
-
-**新增表**（`src/services/state_db.py`）：
-```sql
-CREATE TABLE IF NOT EXISTS community_lookup_threads (
-    guild_id              INTEGER NOT NULL,
-    source                TEXT NOT NULL,              -- 'ptt' | 'bahamut'
-    lookup_id             TEXT NOT NULL,              -- PTT 帳號 或 巴哈 user_id
-    thread_id             INTEGER NOT NULL,
-    last_updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    last_section_date     TEXT,                       -- 'YYYY-MM-DD'，判斷同日 edit / 跨日 append
-    last_section_slots    TEXT,                       -- JSON: 記錄該 section 的 msg_ids（header, post_slots, comment_slots, control）
-    last_query_range_days INTEGER,
-    PRIMARY KEY (guild_id, source, lookup_id)
-);
+新增 profile_kind = "user_directive"
+metadata: {
+  doc_type: "member_profile",
+  guild_id: ...,
+  author_id: 寫入者 user_id,
+  target_user_id: 適用對象（可選；空=寫入者自己 / "all"=全群）
+  alias: 寫入者名稱
+}
+text: [User Directive] {自然語言事實或偏好}
 ```
 
-**PTT schema：** 不變動（`ix_ptt_posts_published_at` 已存在且足夠，`author` index 不需要 — Step 1 驗證結果）。
+**入口：**
+- **B 模式（先做）**：`/remember 我用 PS5 玩鳴潮` → 寫入 user_directive 卡（author=自己、target=自己）
+- **A 模式（後做）**：on_message 偵測「請記住」「希望你」「以後我」等 pattern → 用 cheap LLM async 判斷是不是直陳事實 → 是的話自動寫入 + reply ✅
 
-### 檔案分工
+**讀取：**
+- `retrieve_rag_context` Stage 1/2 SQL 多撈 `profile_kind='user_directive'`
+- 寫入者的 directive 進 `<asker_profile>` 的 `directives:` 欄位
+- 對別人的 directive 進 persona card
 
-| 檔案 | 角色 |
+**進階機制：**
+- `/forget X` 刪除
+- 寫 directive 時記時間戳，超過 N 個月可標 stale
+- 衝突偵測（兩條 directive 矛盾時靠 timestamp 取新）
+
+### 工作量估算
+
+| 元件 | 動作 |
 |---|---|
-| `src/commands/community_lookup_commands.py`（新增） | `CommunityPanelView`、兩個 Modal、更新按鈕控制訊息 |
-| `src/services/community_lookup_service.py`（新增） | 查詢核心（JSON1 PTT + ORM 巴哈）、slot 切割、section append/edit、主文連結解析 |
-| `src/services/state_db.py`（小動） | `community_lookup_threads` 表 + CRUD |
-| `src/commands/management_commands.py`（小動） | `/server_manager` 加「社群查詢頻道」選項 + 5 個 panel 同構方法（仿 intro） |
-| `src/discord_bot.py`（小動） | `setup_hook` 註冊 `add_view(CommunityPanelView())` |
-| `settings/community_lookup_panel_runtime.json`（新增） | panel message_id（仿 intro runtime） |
+| DB schema | 不動（沿用 member_profile） |
+| `intro_rag_port` | 加 `index_directive()` 函式 |
+| `context_retriever` Stage 1/2 | SQL 加 `OR profile_kind='user_directive'` |
+| `persona_card_builder` | 新增 directive 處理（或合併到 intro 區） |
+| /askai prompt | 加 `<user_directives>` 區塊或併入 asker_profile |
+| 新指令 | `/remember`、`/forget` |
 
-### Phase 0 實作步驟
+預估 5-8 小時（B 模式 MVP）。複雜度比 #XXXX 重構低（複用現有 RAG）。
 
-- [x] Step 1：JSON1 效能驗證 script（`src/scripts/bench_ptt_comment_lookup.py`）— 全部 p95 < 30ms，PTT index migration 確認不需要
-- [x] Step 2：state_db 新表 `community_lookup_threads` + CRUD（COALESCE 部分更新、smoke test 通過）
-- [x] Step 3：`services/community_lookup_service.py` 查詢核心（PTT JSON1 + 巴哈 ORM + 模糊候選；對真實 DB smoke test：lovez04wj06 30天查到 618 則留言、坂坂悠模糊候選排序正確）
-- [x] Step 4：`commands/community_lookup_commands.py`（Panel View、Modal、ControlMessageView、Flow 含日期 hybrid/slot 切割/父頻道通知/bump，全部 smoke test 通過）
-- [x] Step 5：`/server_manager` 加「社群查詢頻道」選項 + 設定完自動部署 panel、`discord_bot.py` 已掛入 `COMMAND_MODULES`
-- [ ] Step 6：**端到端部署驗證（待使用者）** — 重啟 discord-bot 容器、`/server_manager` 設社群查詢頻道、測 PTT/巴哈 Modal、同日 edit / 跨日 append、保底補撈、父頻道公告、panel bump、封存 thread 重查自動解封
+### 待定事項
 
-### 未定事項 / 風險
-
-- Phase 0 Step 1 驗證結果：若 JSON1 query p95 > 500ms 需考慮 Phase X 做 `ptt_comments` 正規化 migration（目前判斷機率低）
-- `last_section_slots` JSON 結構具體欄位在 Step 4 實作時最終拍板
-- Phase 2+：預留「接入 `/askai` 的 `asker_profile` 成 `<asker_community_activity>` 區塊」可能性，目前不在 Phase 0 範圍
+- 先做 B（命令版）就好，還是 A+B 一起？
+- A 模式偵測 pattern 用哪個 model（cheap async）？
+- target_user_id="all" 全群 directive 的權限控制（誰能寫？）
+- 跟 auto_personality 衝突時優先序
 
 ---
 
@@ -545,188 +500,6 @@ last_confirmed: 2026-04-18
 - [ ] 歷史播放紀錄
 - [ ] 使用者點歌統計
 - [ ] DAVE 加速問題追蹤（等 discord.py 後續版本優化）
-
----
-
-## 幽靈點名系統專區
-
-<!-- @meta
-id: rollcall-system
-type: STATE
-status: confirmed
-depends_on: [project-architecture]
-affects: []
-last_confirmed: 2026-04-18
--->
-
-> 核心 P0 已實作完成（除部署驗證外）。
-> **完整架構 / 設計決策 / 管理面板 / 使用方式已歸檔至 `TODO-completed.md` 的「幽靈點名系統核心實作（歸檔 2026-04-18）」。**
-
-### 幽靈點名 TODO
-
-<!-- @meta
-id: rollcall-todo
-type: TODO
-status: confirmed
-last_confirmed: 2026-04-19
--->
-
-**P0（核心）：**
-- [ ] 部署驗證（其餘 P0 已完成，歸檔於 TODO-completed.md）
-
-**P1（體驗優化）：**
-- [ ] `/server_manager` 整合（透過下拉選單設定頻道與身份組）
-- [ ] ~~踢除前 DM 最後警告~~ → 已併入下一項（「踢除時 DM 通知 + 邀請連結」）
-- [ ] **踢除時 DM 通知 + 重新加入邀請連結（2026-04-19 設計完未動 code）**：
-  - **背景：** 使用者要求「點名確認 -> 踢人後」寄 DM 告知 + 附邀請連結。Discord 限制：DM 必須在 `guild.kick()` **之前**送（踢後就沒共同伺服器，DM channel 開不起來）。
-  - **改動位置：** [src/services/rollcall_service.py:385-438](src/services/rollcall_service.py#L385-L438) `check_expired()` 迴圈內 —— kick 前插入 `member.send(...)`，包 `try/except discord.Forbidden`（DM 關閉時記 log 但**不阻擋踢除**）。
-  - **DM 文案草稿：**
-    ```
-    標題：👻 你已被移出伺服器
-    內文：
-    你因逾期 7 天未回覆幽靈點名，已被移出「{guild.name}」。
-
-    如果需要加回請用以下連結重新申請：
-    {invite_url}
-    ```
-  - **邀請連結方案：** 靜態連結（管理員手動設永久邀請），不採動態 `channel.create_invite()`（理由：被踢者本來就不活躍，動態邀請易過期）。
-  - **卡在的兩個決策（待使用者確認）：**
-    1. 邀請連結 key 放哪？使用者否決了 `config.json`（認為那邊是「function 可變更的」）。AI 提議 `.env` 的 `ROLLCALL_REJOIN_INVITE_URL`（和 `DISCORD_TOKEN` / `OWNER_ID` 同性質：部署專屬、半敏感、不進 git），**尚未最終確認**。
-    2. 未設 URL 時行為？(A) 不附連結仍寄 DM  (B) 整個 DM 跳過 —— **使用者尚未回答**。
-
----
-
-## Bahamut 專區
-
-> 本專區已改為雙層：
-> 1. **正式知識層（AI-first）**：給下一個 AI 直接接手與維護
-> 2. **歷史附錄層（raw history）**：保留完整脈絡，不作為第一閱讀入口
-
-### Bahamut 正式知識層（AI-first）
-
-> 這一層是後續 AI 應優先維護的主體。
-> 原則：
-> - 新結論優先更新在這裡
-> - 舊細節保留在後面的歷史附錄
-> - 若正式知識層與歷史附錄衝突，以正式知識層為準，再回頭修正附錄註記
-
-#### BAHAMUT.RISK
-
-<!-- @meta
-id: bahamut-risk-formal
-type: RISK
-status: confirmed
-last_confirmed: 2026-04-03
--->
-
-**目前風險**
-1. `snB == sn` 高度吻合但未 100% 證明
-2. HTML 結構若再變，`section.c-section` / `Commendlist_*` selector 可能失效
-3. 巴哈 `moreCommend.php` XHR 留言端點有反爬偵測（403），已透過 `BaseScraperClient` + `curl_cffi` 修復（2026-04-12）
-
-#### BAHAMUT.NEXT
-
-<!-- @meta
-id: bahamut-next-formal
-type: TODO
-status: confirmed
-last_confirmed: 2026-04-03
--->
-
-**下一步（依優先序）**
-1. 端到端測試：重啟兩容器 → 確認續文 + 多圖 + 自動閉環
-2. 正式 DB migration（Alembic）
-3. 跨來源整合（base_monitor 共用層擴展）
-4. RAG ingestion
-
-### 反爬基礎設施（BaseScraperClient）
-
-<!-- @meta
-id: scraper-anti-detect
-type: STATE
-status: confirmed
-depends_on: [bahamut-risk-formal]
-affects: [bahamut-todo]
-last_confirmed: 2026-04-12
--->
-
-**起因：** 巴哈 `moreCommend.php` XHR 留言端點回 403，根因為 TLS 指紋 + XHR headers 不完整被反爬偵測。
-
-**新增元件：**
-- `src/scraper/services/base_scraper_client.py` — 反爬 HTTP client 基底類別
-  - `curl_cffi` Session 建立（TLS 指紋模擬 Chrome 127）
-  - `_build_page_headers()` — 一般頁面請求（Sec-Fetch-Mode: navigate）
-  - `_build_xhr_headers()` — AJAX 請求（Sec-Fetch-Mode: cors, Origin, Sec-CH-UA）
-  - `_fetch_with_retry()` — 共用 GET + 指數退避 retry
-  - 統一 User-Agent（與 impersonate 版本對齊）
-
-**套件變更：**
-- 移除 `cloudscraper`（已停止維護，Cloudflare 繞過失效）
-- 新增 `curl_cffi`（TLS JA3/JA4 指紋模擬，API 與 requests 相容）
-- 保留 `requests`（PTT scraper 尚未遷移）
-
-**整合狀態：**
-- [x] Phase 1：`BahamutScraperService` 繼承 `BaseScraperClient`，XHR headers 修復
-- [x] Phase 2：`PTTScraperService` 接上 `BaseScraperClient`
-- [x] Phase 3：`APIService`（鳴潮）接上 `BaseScraperClient`，`main.py` 改用 `curl_cffi`
-- [x] 清理：移除 `requests`、`fake-useragent`、`cloudscraper` 依賴，scraper 容器統一只用 `curl_cffi`
-
-### 已歸檔設計文件（移至 TODO-completed.md）
-
-> 以下設計文件已落地且歸檔：方法與 JSON 契約、ID 語意、文章結構判斷、留言抓取契約、留言 parser 規則、sn 抓取策略、版本路由策略、抓取模式與套件、開發原則、DB Schema 設計、Discord 呈現策略、作者查詢能力。
-> 詳見 `TODO-completed.md`。
-
-<!--  以下區塊已移至 TODO-completed.md，此處僅保留錨點供跨區塊引用 -->
-
-### Bahamut TODO
-
-<!-- @meta
-id: bahamut-todo
-type: TODO
-status: confirmed
-last_confirmed: 2026-04-05
--->
-
-**當前待辦：**
-1. 端到端測試：重啟兩容器 → 確認續文 + 多圖 + subbsn + 自動閉環
-2. 正式 DB migration（Alembic）
-3. RAG ingestion（不急）
-
-#### 第三階段：整合 AI / pgvector / RAG
-
-> **前置已完成：** Bahamut 全流程（scraper → DB → API → Discord）已 100% 完成並持續運行中。
-> 詳見 `TODO-completed.md`（Bahamut Scraper MVP、增量更新、續文/多圖/並行/子看板等）。
-
-**目標：** Discord bot 可用巴哈資料做語意搜尋、摘要、審查輔助；讓結構化查詢與向量檢索並存
-
-**交付成果：**
-- Bahamut RAG ingestion pipeline
-- pgvector embeddings 與 metadata 設計
-- Discord bot 查人 / 查文 / 摘要 / 審查指令雛型
-- SQL + Vector 雙軌查詢流程
-
-**完成標準：**
-- Discord bot 可回答巴哈相關問題
-- 可對特定使用者或主題進行 RAG 搜尋與摘要
-- 可結合 moderation 資料做文章審查輔助
-- 可與既有 `discord_chat` / `member_profile` retrieval 共存
-
-- [ ] 在 `retrieval_sources` 新增 `bahamut_forum` 資料來源設定
-- [ ] 設計 chunk 策略：主文/留言/回文/回文留言
-- [ ] 設計 pgvector metadata：`doc_type`, `post_id`, `comment_id`, `reply_id`, `user_id`, `category`, `published_at`, `moderation_status`
-- [ ] 建立 embedding / ingestion pipeline
-- [ ] 設計 SQL filter + Vector retrieval 混合查詢
-- [ ] 設計 Discord bot 指令：查主題、查文章、查使用者、查高風險留言
-- [ ] 建立摘要 prompt：單篇摘要、討論風向摘要、使用者發言摘要
-- [ ] 建立觀測指標：索引筆數、查詢延遲、命中率、審查覆蓋率
-- [ ] 驗證 Discord 問答是否可同時引用 Discord 聊天資料與巴哈論壇資料
-
-**建議執行順序：**
-- 第三階段前先補端到端測試與 migration
-- [ ] 第二階段穩定後再做第三階段 RAG
-- [ ] 每階段保留 JSON 範例與測試案例
-
----
 
 ---
 

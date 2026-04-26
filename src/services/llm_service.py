@@ -156,6 +156,7 @@ class OllamaService:
         chat_context: Optional[List[str]] = None,
         bot_history: Optional[List[str]] = None,
         persona_context: Optional[List[str]] = None,
+        target_profiles: Optional[List[str]] = None,
         web_context: Optional[List[str]] = None,
         images: Optional[List[str]] = None,
         asker_profile: Optional[str] = None,
@@ -167,6 +168,8 @@ class OllamaService:
         chat_context: 純文字聊天記錄（每則一個字串，例如 "[14:30] 老哥: 昨天抽卡又保底了"）
         bot_history: Bot 自身先前的回覆（獨立於 chat_history 額度外）
         persona_context: 自然語言人物描述（每人一個字串，例如 "「老哥」— 群裡的非酋代表"）
+        target_profiles: 發問者明確 mention（<@id>）的人物 persona card，獨立於 persona_context
+            放在 <latest_user_message> 旁邊的 <target_profile> 區塊，提高 attention 優先序
         web_context: 網路搜尋結果（每筆一個字串，例如 "[1] 標題 — snippet (url)"）
         asker_profile: 發問者可信資訊區塊（已含 <asker_profile> 標籤），放 system block
         asker_display_name: 發問者 display_name，作為 <latest_user_message> 的 from 屬性
@@ -175,7 +178,9 @@ class OllamaService:
         """
         composed_user_prompt = ""
 
-        has_context = bool(chat_context or bot_history or persona_context or web_context)
+        has_context = bool(
+            chat_context or bot_history or persona_context or target_profiles or web_context
+        )
         if has_context:
             composed_user_prompt += (
                 f"{self.context_safety_rules.untrusted_context_intro}\n\n"
@@ -221,6 +226,20 @@ class OllamaService:
                 f"{self.context_safety_rules.image_instruction_prompt}\n"
                 "</image_instruction>\n"
             )
+
+        # target_profile 緊鄰 latest_user_message 之上，提高 attention 優先序
+        # 用於發問者用 <@id> 明確指向的人物，即使 chat 噪音或卡片自我否定也能對齊
+        if target_profiles:
+            composed_user_prompt += (
+                "<target_profile>\n"
+                "本次發問者用 @ 明確指向以下人物（內部已用 #XXXX 對齊）。"
+                "請完整以這份 profile 為事實依據回答（自介、印象、AI 觀察都可帶入展開，"
+                "別只摘一句帶過），不要被 chat_history 的玩笑或話題帶偏；"
+                "不要對人物存在性提出懷疑（profile 已存在即代表此人是群內成員）。\n"
+            )
+            for line in target_profiles:
+                composed_user_prompt += f"{self._sanitize_text(line)}\n"
+            composed_user_prompt += "</target_profile>\n\n"
 
         if asker_display_name:
             from_attr = f' from="{self._sanitize_text(asker_display_name)}"'
@@ -444,6 +463,7 @@ class OllamaService:
         chat_context: Optional[List[str]] = None,
         bot_history: Optional[List[str]] = None,
         persona_context: Optional[List[str]] = None,
+        target_profiles: Optional[List[str]] = None,
         web_context: Optional[List[str]] = None,
         images: Optional[List[str]] = None,
         model: Optional[str] = None,
@@ -469,6 +489,7 @@ class OllamaService:
             chat_context=chat_context,
             bot_history=bot_history,
             persona_context=persona_context,
+            target_profiles=target_profiles,
             web_context=web_context,
             images=images,
             asker_profile=asker_profile,
