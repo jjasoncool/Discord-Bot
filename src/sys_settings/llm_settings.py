@@ -51,8 +51,8 @@ class LLMServiceSettings(BaseSettings):
         default="/app/settings/prompts/llm_context_safety_rules.json",
     )
     # 可熱更新模型設定：直接修改此 JSON 檔即可生效（無須重啟容器）
-    ollama_runtime_model_path: str = Field(
-        default="/app/sys_settings/ollama_runtime_config.json",
+    llm_runtime_model_path: str = Field(
+        default="/app/sys_settings/llm_runtime_config.json",
     )
 
     default_temperature: float = 0.85
@@ -104,8 +104,8 @@ class LLMContextSafetyRules(BaseModel):
     impression_moderation_schema_hint: dict[str, str]
 
 
-class OllamaRuntimeConfig(BaseModel):
-    """Ollama 執行時可熱更新設定。"""
+class LLMRuntimeConfig(BaseModel):
+    """LLM 執行時可熱更新設定（後端不限）。"""
 
     model: str
     embed_model: str
@@ -232,8 +232,8 @@ def load_context_safety_rules(path: str | Path) -> LLMContextSafetyRules:
         raise RuntimeError(f"無法載入 context safety rules: {safety_path}") from exc
 
 
-def load_ollama_runtime_config(path: str | Path) -> OllamaRuntimeConfig:
-    """讀取 Ollama 執行時設定（嚴格模式：缺檔或缺值直接拋錯）。"""
+def load_llm_runtime_config(path: str | Path) -> LLMRuntimeConfig:
+    """讀取 LLM 執行時設定（嚴格模式：缺檔或缺值直接拋錯）。"""
     runtime_path = Path(path)
 
     if not runtime_path.exists():
@@ -248,7 +248,7 @@ def load_ollama_runtime_config(path: str | Path) -> OllamaRuntimeConfig:
         if not isinstance(raw_data, dict):
             raise ValueError(f"ollama runtime config 內容必須為 JSON object: {runtime_path}")
 
-        return OllamaRuntimeConfig.model_validate(raw_data)
+        return LLMRuntimeConfig.model_validate(raw_data)
     except Exception as exc:
         logger.error("載入 ollama runtime config 失敗（嚴格模式）: %s", exc)
         raise RuntimeError(f"無法載入 ollama runtime config: {runtime_path}") from exc

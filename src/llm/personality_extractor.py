@@ -16,7 +16,7 @@ from llm.emoji_text_utils import (
     reload_descriptions as _reload_emoji_descriptions,
     replace_custom_emoji_with_description,
 )
-from sys_settings.llm_settings import LLMServiceSettings, load_ollama_runtime_config
+from sys_settings.llm_settings import LLMServiceSettings, load_llm_runtime_config
 from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
 
 logger = logging.getLogger("discord_bot")
@@ -532,7 +532,7 @@ async def _run_personality_extraction_impl(
     # 解析模型：呼叫端指定 > config personality_model > config 主 model
     if not model:
         settings = LLMServiceSettings()
-        runtime_config = load_ollama_runtime_config(settings.ollama_runtime_model_path)
+        runtime_config = load_llm_runtime_config(settings.llm_runtime_model_path)
         model = runtime_config.personality_model or runtime_config.model
     logger.info("人格萃取：使用模型 %s", model)
     if progress_callback:

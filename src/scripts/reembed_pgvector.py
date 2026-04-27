@@ -10,7 +10,7 @@
         --table data_discord_messages_index
 
 前置步驟（必做）：
-    1. 改 src/sys_settings/ollama_runtime_config.json 的 embed_model
+    1. 改 src/sys_settings/llm_runtime_config.json 的 embed_model
        （runtime hot reload，不用重啟 bot）
     2. 用 SQL 把舊向量清成 NULL，讓 script 能辨識未處理的 row：
          docker exec pgvector psql -U llm_vector -d discord_data -c \
@@ -20,7 +20,7 @@
 
 參數：
     --batch-size N   每批送 Ollama 的筆數（預設 16）
-    --model NAME     embed model（預設從 ollama_runtime_config.json 讀）
+    --model NAME     embed model（預設從 llm_runtime_config.json 讀）
     --dry-run        只 embed 不寫 DB
 
 DB 連線與 Ollama URL 皆從專案 `LLMServiceSettings` 取得（同 bot 環境變數），
@@ -48,7 +48,7 @@ import psycopg2
 import requests
 
 from llm.safe_ollama_embedding import embed_with_perturbation_retry
-from sys_settings.llm_settings import LLMServiceSettings, load_ollama_runtime_config
+from sys_settings.llm_settings import LLMServiceSettings, load_llm_runtime_config
 
 logger = logging.getLogger("reembed")
 logging.basicConfig(
@@ -120,7 +120,7 @@ def main() -> int:
 
     # 統一使用 bot 的設定載入流程，所有連線參數從 env / runtime config 來
     settings = LLMServiceSettings()
-    runtime_config = load_ollama_runtime_config(settings.ollama_runtime_model_path)
+    runtime_config = load_llm_runtime_config(settings.llm_runtime_model_path)
 
     model = args.model or runtime_config.embed_model
     if not model:

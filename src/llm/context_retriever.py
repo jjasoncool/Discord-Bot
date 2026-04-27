@@ -29,7 +29,7 @@ from llm.persona_card_builder import (
 from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
 from sys_settings.llm_settings import (
     LLMServiceSettings,
-    load_ollama_runtime_config,
+    load_llm_runtime_config,
 )
 
 try:
@@ -67,7 +67,7 @@ _vector_index_lock = threading.Lock()
 
 def _load_embed_model_name() -> str:
     """從 Ollama runtime 設定讀取 embedding model，失敗則回退預設。"""
-    runtime_config = load_ollama_runtime_config(LLM_SETTINGS.ollama_runtime_model_path)
+    runtime_config = load_llm_runtime_config(LLM_SETTINGS.llm_runtime_model_path)
     return runtime_config.embed_model
 
 

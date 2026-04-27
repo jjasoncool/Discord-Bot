@@ -12,7 +12,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
-from sys_settings.llm_settings import LLMServiceSettings, load_ollama_runtime_config
+from sys_settings.llm_settings import LLMServiceSettings, load_llm_runtime_config
 from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
 
 import psycopg2
@@ -248,7 +248,7 @@ class PgVectorIntroRAGPort:
         return True
 
     def _get_embed_model(self):
-        runtime_config = load_ollama_runtime_config(self.settings.ollama_runtime_model_path)
+        runtime_config = load_llm_runtime_config(self.settings.llm_runtime_model_path)
         embed_model_name = runtime_config.embed_model
         # Fast path：model 沒變直接返回，不進 lock
         if self._embed_model is not None and self._embed_model_name == embed_model_name:

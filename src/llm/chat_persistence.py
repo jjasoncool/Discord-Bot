@@ -184,11 +184,11 @@ def _get_chat_index():
     from llama_index.core import VectorStoreIndex
     from llama_index.vector_stores.postgres import PGVectorStore
     from llm.safe_ollama_embedding import SafeOllamaEmbedding
-    from sys_settings.llm_settings import LLMServiceSettings, load_ollama_runtime_config
+    from sys_settings.llm_settings import LLMServiceSettings, load_llm_runtime_config
     from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
 
     settings = LLMServiceSettings()
-    runtime_config = load_ollama_runtime_config(settings.ollama_runtime_model_path)
+    runtime_config = load_llm_runtime_config(settings.llm_runtime_model_path)
     embed_model_name = runtime_config.embed_model
 
     # Fast path：無鎖 double-check

@@ -12,7 +12,7 @@ from services.llm_service import OllamaService
 from sys_settings.llm_settings import (
     LLMServiceSettings,
     load_context_safety_rules,
-    load_ollama_runtime_config,
+    load_llm_runtime_config,
 )
 
 logger = logging.getLogger("discord_bot")
@@ -102,7 +102,7 @@ class ImpressionModerationService:
     def __init__(self, llm_service: OllamaService | None = None) -> None:
         self.settings = LLMServiceSettings()
         self.safety_rules = load_context_safety_rules(self.settings.llm_context_safety_rules_path)
-        self.runtime_config = load_ollama_runtime_config(self.settings.ollama_runtime_model_path)
+        self.runtime_config = load_llm_runtime_config(self.settings.llm_runtime_model_path)
         self.llm = llm_service or OllamaService()
 
     async def moderate(self, *, target_display: str, text: str) -> ImpressionModerationResult:

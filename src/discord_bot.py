@@ -8,7 +8,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
-from sys_settings.llm_settings import LLMServiceSettings, load_ollama_runtime_config
+from sys_settings.llm_settings import LLMServiceSettings, load_llm_runtime_config
 from utils.logger_config import get_discord_bot_logger
 from utils.utils import safe_send_interaction_message
 from services.telegram_relay_service import (
@@ -181,7 +181,7 @@ async def on_ready():
 
             personality_cog = bot.get_cog("PersonalityCommands")
             if personality_cog:
-                runtime_config = load_ollama_runtime_config(LLM_SETTINGS.ollama_runtime_model_path)
+                runtime_config = load_llm_runtime_config(LLM_SETTINGS.llm_runtime_model_path)
                 scheduled_model = runtime_config.personality_model or runtime_config.model
                 personality_cog.register_scheduled_result(
                     guild_id=guild.id,

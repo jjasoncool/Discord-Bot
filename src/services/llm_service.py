@@ -15,7 +15,7 @@ import aiohttp
 from sys_settings.llm_settings import (
     LLMServiceSettings,
     load_context_safety_rules,
-    load_ollama_runtime_config,
+    load_llm_runtime_config,
 )
 
 logger = logging.getLogger("discord_bot")
@@ -70,7 +70,7 @@ class OllamaService:
 
     def _load_runtime_config_cached(self) -> bool:
         """在 service 層讀取並快取 runtime config。"""
-        runtime_config_path = Path(self.settings.ollama_runtime_model_path)
+        runtime_config_path = Path(self.settings.llm_runtime_model_path)
 
         try:
             if not runtime_config_path.exists():
@@ -87,7 +87,7 @@ class OllamaService:
             ):
                 return True
 
-            runtime_config = load_ollama_runtime_config(runtime_config_path)
+            runtime_config = load_llm_runtime_config(runtime_config_path)
             candidate_model = runtime_config.model.strip()
 
             if not candidate_model:
