@@ -17,12 +17,12 @@ from dataclasses import dataclass
 # 強觸發：明確指涉需要即時 / 外部資訊
 # 注意：剛剛/剛才 刻意不放 HARD（太泛、會誤觸「剛才那段翻成英文」），改進 SOFT 時間詞。
 _SEARCH_HARD = re.compile(
-    r"新聞|最新|今天|昨天|目前|現在|即時|此刻|近況|"
-    r"股價|股票|匯率|幣價|漲跌|大盤|盤中|收盤|"
+    r"新聞|最新|今天|今日|本日|昨天|昨日|目前|現在|即時|此刻|近況|"
+    r"股價|股票|台股|美股|港股|陸股|日股|加權|大盤|盤中|收盤|漲跌|行情|匯率|幣價|"
     r"天氣|氣溫|下雨|颱風|氣象|降雨|"
     r"版本|更新|patch|release|開服|維護|公告|活動|改版|前瞻|"
     r"發布|發佈|上市|上線|推出|公布|發售|"
-    r"查一下|搜尋|搜一下|找一下|看一下|"
+    r"查詢|查一下|搜尋|搜一下|找一下|看一下|"
     r"幫我查|幫我找|幫我搜|幫我看|"
     r"google\s*一下|goolge一下|"
     r"幾點開|何時上線|什麼時候出|發布日|發佈日|"
@@ -76,7 +76,7 @@ _STRIP_PATTERNS: tuple[re.Pattern[str], ...] = (
 # 才能抓到真正的遊戲新聞，同時用日期過濾擋掉舊版。
 _ROUTE_RULES: tuple[tuple[re.Pattern[str], str | None, str | None], ...] = (
     # 股價類：news + 當日（股市真的是時事類，news engines 覆蓋 OK）
-    (re.compile(r"股價|漲跌|盤中|收盤|大盤|匯率|幣價"), "news", "day"),
+    (re.compile(r"股價|漲跌|盤中|收盤|大盤|台股|美股|港股|陸股|日股|加權|行情|匯率|幣價"), "news", "day"),
     # 天氣類：通用 + 當日
     (re.compile(r"天氣|氣溫|降雨|颱風|氣象"), None, "day"),
     # 遊戲改版 / 軟體版本：通用 + 一週（news engines 對這類覆蓋太差）
@@ -89,7 +89,7 @@ _ROUTE_RULES: tuple[tuple[re.Pattern[str], str | None, str | None], ...] = (
         "week",
     ),
     # 純新聞 / 政治時事：news + 一週
-    (re.compile(r"新聞|今天|昨天|最新|公告|開服|維護"), "news", "week"),
+    (re.compile(r"新聞|今天|今日|本日|昨天|昨日|最新|公告|開服|維護"), "news", "week"),
     # Reddit / 鄉民 / 網友討論
     (re.compile(r"reddit|鄉民|網友怎麼說|網友說|討論度", re.IGNORECASE), "social media", None),
 )

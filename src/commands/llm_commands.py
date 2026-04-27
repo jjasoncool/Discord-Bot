@@ -23,6 +23,7 @@ ASKAI_SETTINGS = AskAICommandSettings()
 WEB_SETTINGS = AskAIWebSettings()
 TAIPEI_TZ = timezone(timedelta(hours=ASKAI_SETTINGS.taipei_utc_offset_hours))
 PROMPT_FILE_PATH = Path(ASKAI_SETTINGS.prompt_file_path)
+IDENTITY_FILE_PATH = Path(ASKAI_SETTINGS.identity_file_path)
 PROMPT_LOG_PATH = Path(ASKAI_SETTINGS.prompt_log_path)
 RESPONSE_LOG_PATH = Path(ASKAI_SETTINGS.response_log_path)
 MAX_IMAGE_SIZE_BYTES = ASKAI_SETTINGS.max_image_size_bytes
@@ -85,17 +86,28 @@ def _format_log_block(*, title: str, body: str) -> str:
     )
 
 
-def load_system_prompt() -> str:
-    """從檔案載入可維護的 system prompt，找不到則使用預設值。"""
+def _read_prompt_file(path: Path) -> str:
+    """讀單一 prompt 檔；不存在或失敗回傳空字串並記 warning。"""
     try:
-        if PROMPT_FILE_PATH.exists():
-            content = PROMPT_FILE_PATH.read_text(encoding="utf-8").strip()
-            if content:
-                return content
-        logger.warning("找不到或讀不到 prompt 檔案，改用預設 SYSTEM PROMPT: %s", PROMPT_FILE_PATH)
+        if path.exists():
+            return path.read_text(encoding="utf-8").strip()
+        logger.warning("找不到 prompt 檔案：%s", path)
     except Exception as exc:
-        logger.warning("載入 prompt 檔案失敗，改用預設 SYSTEM PROMPT: %s", exc)
-    return ASKAI_SETTINGS.default_system_prompt
+        logger.warning("載入 prompt 檔案失敗 %s：%s", path, exc)
+    return ""
+
+
+def load_system_prompt() -> str:
+    """從檔案載入 system prompt（身份核心 + 主 prompt 拼接），缺檔時降級至預設值。"""
+    parts = [
+        _read_prompt_file(IDENTITY_FILE_PATH),
+        _read_prompt_file(PROMPT_FILE_PATH),
+    ]
+    parts = [p for p in parts if p]
+    if not parts:
+        logger.warning("身份與主 prompt 皆無內容，改用預設 SYSTEM PROMPT")
+        return ASKAI_SETTINGS.default_system_prompt
+    return "\n\n".join(parts)
 
 
 def askai_cooldown(interaction: discord.Interaction):

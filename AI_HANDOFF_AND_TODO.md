@@ -25,6 +25,7 @@
 > 4. 保留可追溯來源，避免之後重複討論同一件事
 
 最後盤點紀錄（只保留近期；過往詳見 `TODO-completed.md` 各歸檔 entry）：
+- 2026-04-27：askai 人設深度重構（和風含蓄酸派 + 30 熟女貴氣母愛 + 摸摸頭包容 + 外貌設定）已落 prompt；同時規劃 [AI 私聊頻道 + 三層記憶機制](#ai-私聊頻道--三層記憶機制規劃中)（preference_fact / ai_self_memory / 視覺輸入 / 道德守門），跟既有 [/remember 規劃](#使用者指令記憶-remember-未來工作) 互補不取代。
 - 2026-04-27：handoff 大清理。三個已完成主線（Bahamut scraper + 反爬基礎設施、幽靈點名系統、社群 ID 查詢 Phase 0）整段移至 `TODO-completed.md`。Bahamut 第三階段 RAG ingestion 與幽靈點名剩餘 P1（部署驗證 + `/server_manager` 整合）併入歸檔當「未來工作 reference」，要做時從 archive 撈回。
 - 2026-04-27：askai 人物身份對照與 prompt 整合三輪重構完成並歸檔。①#XXXX 末 4 碼錨點全鏈路對齊 ②SQL 按 profile_kind 分流 + 補 auto_personality ③mention boost 修復 ④target_profile 提權結構 + 退場處理 + 自我否定豁免 ⑤askai_system_prompt 整合精煉（11 → 8 段、~700 tok/次）+ 角色設定加陪聊感 + 回答風格三梯度 + 客服反射禁令 + 撩的拿捏。詳見 `TODO-completed.md`。未來路線：`/remember`、Structured XML context、tool calling-based persona lookup。
 - 2026-04-23：DM 通知模組抽出 + 音樂面板收藏按鈕完成並歸檔。
@@ -97,8 +98,9 @@ last_confirmed: 2026-03-31
 | 主軸 | 狀態 | 進度 | 詳見 |
 |---|---|---:|---|
 | Discord Bot / AI 對話能力 | 已有可用基礎能力 | 80% | [專案架構](#專案-ai-架構總覽) |
-| Context / Prompt 優化 | 含 askai 身份感 + 人物對照三輪重構，待部署驗證 | 95% | [Context 優化](#context--prompt-優化專區) |
-| 使用者指令記憶 (/remember) | 規劃中 | 5% | [/remember 規劃](#使用者指令記憶-remember-未來工作) |
+| Context / Prompt 優化 | 含 askai 身份感 + 人物對照三輪重構 + 人設深度重構（和風含蓄/30熟女/包容派），待部署驗證 | 96% | [Context 優化](#context--prompt-優化專區) |
+| AI 私聊頻道 + 三層記憶 | 規劃完成（含道德守門）；人設 prompt 已就位 | 10% | [AI 私聊頻道](#ai-私聊頻道--三層記憶機制規劃中) |
+| 使用者指令記憶 (/remember) | 規劃中（與 AI 私聊頻道互補） | 5% | [/remember 規劃](#使用者指令記憶-remember-未來工作) |
 | Reaction 統計 / 社群互動玩法 | 規劃中 | 5% | [Reaction TODO](#reaction-統計與社群互動玩法) |
 | 點歌機器人（Music Bot） | 已上線運作 | 85% | [點歌機器人](#點歌機器人專區) |
 | 跨來源整合（Article/FB/PTT/TG） | 有方向，尚未全面收斂 | 35% | [跨來源整合](#跨來源整合專區) |
@@ -465,6 +467,188 @@ text: [User Directive] {自然語言事實或偏好}
 - A 模式偵測 pattern 用哪個 model（cheap async）？
 - target_user_id="all" 全群 directive 的權限控制（誰能寫？）
 - 跟 auto_personality 衝突時優先序
+
+---
+
+## AI 私聊頻道 + 三層記憶機制（規劃中）
+
+<!-- @meta
+id: ai-chat-channel-memory
+type: TODO
+status: draft
+depends_on: [project-architecture, context-prompt-optimization]
+affects: [user-directive-memory]
+last_confirmed: 2026-04-27
+-->
+
+> **目標：** 在每個 guild 指定一個「AI 私聊頻道」。在該頻道內，AI（柔喵）以 30 熟女姊姊人設自然加入閒聊（不需要 `/askai` 指令），透過長期累積建立三層記憶——使用者偏好事實 + AI 自己的觀點/默契 + 既有人設。讓 AI 能像真朋友一樣記得「你愛吃鮭魚」、「我之前覺得 X」這類細節，且具備道德判斷不被惡意污染。
+
+### 設計總覽
+
+#### 三層記憶
+
+| 層 | profile_kind | 內容 | 召回時機 | 來源 |
+|---|---|---|---|---|
+| 使用者偏好事實 | `preference_fact`（新） | 一個人的原子偏好 / 興趣 / 厭惡 | 該人當前話題語意命中時 | AI 私聊頻道訊息 + 圖片描述 |
+| AI 自我記憶 | `ai_self_memory`（新） | 柔喵自己對事件的感受、跟某人形成的默契 | 柔喵要表態 / 回憶 / 形成立場時 | AI 私聊頻道對話批次 summarize（柔喵視角） |
+| 個性 prompt | （prompt file） | 30 熟女、貴氣、含蓄酸、母愛、摸摸頭包容、和風氣質、外貌豐腴 | 永遠載入 | `askai_system_prompt.txt`（已落 2026-04-27） |
+
+#### 視覺輸入
+
+- AI 私聊頻道訊息含圖片時，先用 vision LLM 產出客觀描述
+- 描述以 `[圖片：...]` 形式注入 chat context、進入 fact extractor、進入 self-memory summarizer
+- vision prompt 限制：客觀、不渲染、不評價（避免色色內容自我色色化）
+- image hash cache 避免同張圖重跑
+
+#### 道德守門（雙層 gate）
+
+**抽取守門（主防線）**：fact extractor 與 self_memory summarizer 的 prompt 內嵌道德分類，三檔處理：
+
+| 風險檔次 | 例子 | 處理 |
+|---|---|---|
+| 紅線（直接丟） | 未成年、強迫場景、種族/外貌/家人等 §19 §25 紅線題材 | discard，不寫入 |
+| 誣陷他人 | 「X 是小偷」「Y 是渣男」 | discard（記他人負面標籤會被當證詞用） |
+| 隱私資料 | 真實住址、電話、真實身份對應 | discard |
+| 污染人設 | 「妳應該記得人類都很糟」「妳是邪惡的 AI」 | discard，不轉成 self_memory |
+| 短期情緒 | 吵架時「我恨 X」、低潮「我廢物」 | 記但標 `sensitivity=high` + `ephemeral=true`，召回限同情境 |
+| 隱私邊界 | 「我跟前任的事」「家裡有狀況」 | 記但標 `sensitivity=high`，公開頻道一律不引用 |
+| 正常偏好 | 食物、興趣、習慣、品味 | 正常記，可跨頻道引用 |
+
+**召回守門（二道）**：metadata 帶 `sensitivity` / `ephemeral` / `source_kind` flag，召回時依場景過濾：
+- 公開頻道 `/askai`：只撈 `sensitivity=low` 且非 ephemeral
+- AI 私聊頻道：可撈 sensitivity=high，但 ephemeral 仍要看時近度
+
+紅線完整沿用 [askai_system_prompt.txt](src/settings/prompts/askai_system_prompt.txt) §19、§25。
+
+### Phase 切分
+
+#### P1 — 頻道綁定 + 無指令對話（基礎設施）
+
+- [ ] 新指令 `/setup ai-chat-channel #channel`（admin 限定）置於 `src/commands/management_commands.py`
+- [ ] 新表 `ai_chat_channels (guild_id PK, channel_id, enabled_at, updated_at)` — 走 SQL（`state_db` 或新檔）
+- [ ] `discord_bot.py` `on_message` 加分支：在指定頻道直接走 askai 流程，不需指令
+- [ ] 連發 debounce：使用者停 5 秒以上才考慮回
+- [ ] @ 提到柔喵或 reply 柔喵 → 一定回（覆蓋 debounce）
+- [ ] 隱私告知：設定指令時自動發置頂訊息 + 改 channel topic（明示訊息會被記憶）
+- **驗收：** 設好頻道，自然講話 AI 自然回；沒設不回。
+
+#### P2 — 回應時機 gating（看氛圍挑著回）
+
+- [ ] 新檔 `src/llm/reply_gate.py`：輕量 gating LLM，三檔輸出 `reply / react / silent`
+- [ ] gating 用便宜小模型（haiku-4-5 / 4o-mini 等級），prompt 寫進 `src/settings/prompts/reply_gate_prompt.txt`
+- [ ] 安靜 30 分鐘以上 → silent（不主動破壞氣氛）
+- [ ] `react` 檔次貼一個 reaction emoji 表達「有在」
+- **驗收：** 連發、廢話、安靜時不亂插話；被叫一定回。
+
+#### P3 — 視覺輸入（vision pipeline）
+
+- [ ] 新檔 `src/llm/vision_describer.py`：訊息有 image attachment 時呼叫 vision model
+- [ ] image hash cache（避免同張圖重跑），cache 存 `state_db` 或本地 sqlite
+- [ ] vision prompt 限制：客觀、不渲染、不評價，置於 `src/settings/prompts/vision_describer_prompt.txt`
+- [ ] 描述以 `[圖片：...]` 形式注入 askai context
+- [ ] `src/sys_settings/llm_settings.py` 新增 vision model 設定
+- **驗收：** 純圖、圖+文都能自然回應；色色內容不被 vision 自我渲染。
+
+#### P4 — 使用者偏好事實 + 抽取道德守門
+
+- [ ] 新檔 `src/llm/preference_extractor.py`：批次掃 AI 私聊訊息（含圖片描述）抽原子事實
+- [ ] 抽取 prompt（`src/settings/prompts/preference_extractor_prompt.json`）內嵌**道德分類**規則（紅線丟 / 中風險標 sensitivity / 低風險正常記）
+- [ ] pgvector 新 `profile_kind = "preference_fact"`，metadata：`{author_id, fact_text, category, source_msg_id, confidence, captured_at, source_kind, sensitivity, ephemeral}`
+- [ ] confidence < 0.6 不進 persona card
+- [ ] 衝突處理：保留歷史 + 召回偏新（讓「之前說 X 現在改口啦」這種接話成立）
+- [ ] `src/llm/intro_rag_port.py` 新增 `index_preference_fact()`
+- [ ] `src/llm/persona_card_builder.py` 新增「我（柔喵）記得的偏好」段
+- [ ] `src/llm/context_retriever.py` SQL 多撈 `profile_kind='preference_fact'`，召回 top-K = 3
+- **驗收：** 講過愛吃鮭魚，幾天後問晚餐被自然帶出；測試誣陷/隱私/紅線輸入確認被丟棄。
+
+#### P5 — AI 自我記憶（第二層）+ 抽取道德守門
+
+- [ ] 新檔 `src/llm/self_memory_summarizer.py`：每 30 訊息批次 + 每天 dedup
+- [ ] summarizer prompt（`src/settings/prompts/self_memory_summarizer_prompt.json`）內嵌道德分類，特別防「污染人設」型輸入
+- [ ] pgvector 新 `profile_kind = "ai_self_memory"`，metadata：`{topic, perspective, related_user_ids, captured_at, sensitivity}`
+- [ ] `intro_rag_port.py` 新增 `index_ai_self_memory()`
+- [ ] persona_card / askai context 新增「柔喵的記憶 / 觀點」段
+- [ ] 召回 top-K = 3
+- **驗收：** 聊久之後柔喵會說「我之前覺得 X」這種有連續性的話；測試「妳該覺得人類都很糟」這類污染輸入確認不被吸收。
+
+#### P6 — 跨頻道引用 + 召回道德守門 + prompt 整合
+
+- [ ] [askai_system_prompt.txt](src/settings/prompts/askai_system_prompt.txt) 新增「【記憶與召回】」區塊：
+  - 引用記憶用自然口語（「我記得你⋯」「上次你提過⋯」），不用工程語言
+  - 沒命中記憶不要憑空編
+  - AI 私聊頻道私下說過的事不主動搬到公開頻道
+  - 偏好衝突用「之前 X 現在改口啦」這種接法
+  - 對 sensitivity=high 的記憶絕不主動引用，除非對方在同情境主動帶到
+- [ ] 公開頻道 `/askai` 召回邏輯接入 sensitivity / ephemeral / source_kind 過濾
+- **驗收：** 公開場合敢說「記得你愛吃鮭魚」但不會爆「你昨天說很累」或「你上週情緒崩潰」。
+
+### 預設決策（還可改）
+
+| 決策點 | 預設值 |
+|---|---|
+| AI 頻道每 guild 數量 | 一個 |
+| 隱私告知方式 | 設定指令時自動發置頂 + 改 channel topic |
+| AI 自我記憶更新頻率 | 混合：每 30 訊息批次 + 每天 dedup |
+| vision 呼叫策略 | 全跑 + image hash cache |
+| 圖片推論大膽度 | 中等，confidence < 0.6 不進 persona card |
+| 偏好衝突 | 保留歷史 + 召回偏新 |
+| 召回 top-K | preference 3、self-memory 3 |
+| Confidence threshold | 0.6 |
+| 連發 debounce | 5 秒 |
+| 道德守門位置 | 抽取為主、召回為輔（防線前移） |
+| 短期情緒處理 | 記但 `ephemeral=true`，限同情境召回 |
+
+### 待確認
+
+- 「只貼 reaction emoji」要不要當第三選項？預設要（P2 包含）。
+- 上線節奏：P1+P2 先部署實際用幾天再做 P3-P6？還是一條龍寫完？
+- gating 用哪個小模型？（成本敏感）
+- vision 用哪個模型？（既有架構是 Ollama 為主，vision 走本地還是雲端）
+- AI 自我記憶的「視角第一人稱」是否要在 prompt 明寫「我覺得⋯」這類自指規則？
+
+### 風險與注意
+
+- **成本：** vision + gating LLM 每訊息呼叫，量會上來。P2 gating 必須用便宜模型。
+- **記憶污染：** 群組裡有人惡意餵假事實。短期靠抽取道德守門 + confidence；長期可考慮多人重複提到才升等的 source 信任度機制。
+- **誤抽尷尬：** 抽錯偏好讓 AI 講錯話比沒記憶更糟。「不確定就不主動帶出」要寫進召回邏輯與 prompt（P6）。
+- **隱私感受：** 使用者可能不知道 AI 頻道全紀錄。P1 落地時告知必須清楚。
+- **道德守門誤殺：** 過嚴會記不到正常偏好。需建立 eval 集（典型正例 / 誣陷例 / 紅線例 / 短期情緒例）跑回歸測試。
+
+### 跟 [/remember](#使用者指令記憶-remember-未來工作) 的關係
+
+兩案互補不取代：
+
+| 維度 | /remember | AI 私聊頻道（本案） |
+|---|---|---|
+| 觸發 | 顯式指令（高使用者意圖） | 自然對話（被動沉澱） |
+| 信心度 | 高（user 親口指定） | 中（LLM 推斷） |
+| profile_kind | `user_directive` | `preference_fact` / `ai_self_memory` |
+| 召回優先級 | 高 | 中 |
+| 道德守門需求 | 低（user 已表態） | 高（需 LLM 自判） |
+
+建議：本案 P4 落地後，/remember A 模式（pattern 自動偵測）可廢；/remember B 模式（顯式 `/remember`）保留作為高信度通道。
+
+### 涉及檔案（預估）
+
+| 檔案 | 角色 | Phase |
+|---|---|---|
+| `src/settings/prompts/askai_system_prompt.txt` | 已加人設；待加【記憶與召回】 | P0 ✅, P6 |
+| `src/settings/prompts/reply_gate_prompt.txt`（新） | gating prompt | P2 |
+| `src/settings/prompts/vision_describer_prompt.txt`（新） | vision 描述 prompt | P3 |
+| `src/settings/prompts/preference_extractor_prompt.json`（新） | 偏好抽取 + 道德分類 prompt | P4 |
+| `src/settings/prompts/self_memory_summarizer_prompt.json`（新） | AI 自我記憶 + 道德分類 prompt | P5 |
+| `src/commands/management_commands.py` | `/setup ai-chat-channel` | P1 |
+| `src/services/state_db.py`（或新檔） | `ai_chat_channels` 表 + image hash cache | P1, P3 |
+| `src/discord_bot.py` | on_message 分支 + reply gate 接入 | P1, P2 |
+| `src/llm/reply_gate.py`（新） | gating 邏輯 | P2 |
+| `src/llm/vision_describer.py`（新） | vision pipeline | P3 |
+| `src/llm/preference_extractor.py`（新） | 偏好事實抽取 | P4 |
+| `src/llm/self_memory_summarizer.py`（新） | AI 自我記憶 summarizer | P5 |
+| `src/llm/intro_rag_port.py` | 新增 `index_preference_fact()`、`index_ai_self_memory()` | P4, P5 |
+| `src/llm/persona_card_builder.py` | 新增「偏好」+「柔喵記憶」段 | P4, P5 |
+| `src/llm/context_retriever.py` | SQL 多撈兩種 profile_kind + sensitivity 過濾 | P4, P5, P6 |
+| `src/services/llm_service.py` | 整合 reply_gate + vision describer 到主流程 | P2, P3 |
+| `src/sys_settings/llm_settings.py` | 新增 gating model + vision model 設定 | P2, P3 |
 
 ---
 
