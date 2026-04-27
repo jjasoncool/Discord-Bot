@@ -39,11 +39,11 @@ except Exception:  # pragma: no cover - 依賴可能在部份環境尚未安裝
 
 try:
     from llama_index.core import VectorStoreIndex
-    from llm.safe_ollama_embedding import SafeOllamaEmbedding as OllamaEmbedding
+    from llm.safe_llm_embedding import SafeLLMEmbedding
     from llama_index.vector_stores.postgres import PGVectorStore
 except Exception:  # pragma: no cover - 依賴可能在部份環境尚未安裝
     VectorStoreIndex = None
-    OllamaEmbedding = None
+    SafeLLMEmbedding = None
     PGVectorStore = None
 
 try:
@@ -78,19 +78,19 @@ def _get_embed_model(logger: logging.Logger) -> Any | None:
     if _EMBED_MODEL is not None and _EMBED_MODEL_NAME == embed_model_name:
         return _EMBED_MODEL
 
-    if OllamaEmbedding is None:
-        logger.warning("OllamaEmbedding 尚未可用，向量檢索將退化為 BM25。")
+    if SafeLLMEmbedding is None:
+        logger.warning("SafeLLMEmbedding 尚未可用，向量檢索將退化為 BM25。")
         return None
 
     try:
-        _EMBED_MODEL = OllamaEmbedding(
+        _EMBED_MODEL = SafeLLMEmbedding(
             model_name=embed_model_name,
-            base_url=LLM_SETTINGS.ollama_base_url,
-            request_timeout=LLM_SETTINGS.ollama_timeout,
+            base_url=LLM_SETTINGS.llm_base_url,
+            request_timeout=LLM_SETTINGS.llm_timeout,
         )
         _EMBED_MODEL_NAME = embed_model_name
     except Exception as exc:
-        logger.warning("初始化 OllamaEmbedding 失敗，改用 BM25: %s", exc)
+        logger.warning("初始化 SafeLLMEmbedding 失敗，改用 BM25: %s", exc)
         _EMBED_MODEL = None
         _EMBED_MODEL_NAME = None
 

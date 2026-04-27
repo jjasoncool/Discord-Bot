@@ -1,5 +1,5 @@
 """
-Ollama LLM 服務模組
+LLM 服務模組
 透過 OpenAI dialect (/v1/chat/completions) 與後端互動，目前對接 Ollama；
 對 LM Studio / Lemonade 等相容後端只需改 base_url 即可。
 """
@@ -25,7 +25,7 @@ from sys_settings.llm_settings import (
 )
 
 logger = logging.getLogger("discord_bot")
-anomaly_logger = logging.getLogger("ollama_anomaly")
+anomaly_logger = logging.getLogger("llm_anomaly")
 
 LLM_SERVICE_SETTINGS = LLMServiceSettings()
 
@@ -73,7 +73,7 @@ class PromptBundle:
     prompt_record_log: str
 
 
-class OllamaAPIError(Exception):
+class LLMAPIError(Exception):
     """LLM /v1/chat/completions 非 2xx 或回應格式異常。
 
     與 openai SDK 的連線層例外（`APITimeoutError` / `APIConnectionError`）區分：
@@ -87,7 +87,7 @@ class OllamaAPIError(Exception):
         self.detail = detail
 
 
-class OllamaService:
+class LLMService:
     """LLM 服務封裝（透過 OpenAI dialect SDK；對接 Ollama）。"""
 
     def __init__(
@@ -97,9 +97,9 @@ class OllamaService:
         timeout: Optional[int] = None,
     ) -> None:
         self.settings = LLM_SERVICE_SETTINGS
-        self.base_url = base_url or self.settings.ollama_base_url
-        self.model_default = model or self.settings.ollama_model
-        self.timeout = timeout if timeout is not None else self.settings.ollama_timeout
+        self.base_url = base_url or self.settings.llm_base_url
+        self.model_default = model or self.settings.llm_model
+        self.timeout = timeout if timeout is not None else self.settings.llm_timeout
         self.context_safety_rules = load_context_safety_rules(self.settings.llm_context_safety_rules_path)
         # OpenAI 相容端點；api_key 對 Ollama 無作用但 SDK 必填
         self._client = AsyncOpenAI(
@@ -361,7 +361,7 @@ class OllamaService:
         - /askai 流程透過 `generate_reply`（包好 bundle 後內部呼叫 `chat_raw`）
         - 已有自組 messages 的 caller（如 personality_extractor）直接呼叫此方法
 
-        參數 `timeout`：None → 沿用 `self.timeout`（settings.ollama_timeout，預設 300s）。
+        參數 `timeout`：None → 沿用 `self.timeout`（settings.llm_timeout，預設 300s）。
         長任務（如人格萃取）傳較大值覆蓋。
 
         Ollama-only 欄位（`think` / `keep_alive` / `num_ctx` / `repeat_penalty`）透過
@@ -372,7 +372,7 @@ class OllamaService:
         `OPENAI_MAX_RETRIES` 次。HTTP 4xx 與回應 content 為空不重試。
 
         Raises:
-            OllamaAPIError: HTTP 非 2xx 或回應 content 為空（已重試用盡）
+            LLMAPIError: HTTP 非 2xx 或回應 content 為空（已重試用盡）
             APITimeoutError / APIConnectionError: 連線失敗（已重試用盡）
         """
         effective_temperature = (
@@ -414,14 +414,14 @@ class OllamaService:
                 extra_body=extra_body,
             )
         except APIStatusError as exc:
-            raise OllamaAPIError(
+            raise LLMAPIError(
                 f"HTTP {exc.status_code}",
                 status=exc.status_code,
                 detail=str(exc),
             ) from exc
 
         if not completion.choices:
-            raise OllamaAPIError("回應格式異常: 無 choices")
+            raise LLMAPIError("回應格式異常: 無 choices")
 
         choice = completion.choices[0]
         content = choice.message.content if choice.message else None
@@ -436,12 +436,12 @@ class OllamaService:
             completion.usage.model_dump() if completion.usage else None,
             completion.model_dump_json(),
         )
-        raise OllamaAPIError(
+        raise LLMAPIError(
             "回應格式異常: 空 content",
             detail=str({
                 "finish_reason": choice.finish_reason,
                 "usage": completion.usage.model_dump() if completion.usage else None,
-                "see": "logs/ollama_anomaly.log",
+                "see": "logs/llm_anomaly.log",
             }),
         )
 
@@ -501,7 +501,7 @@ class OllamaService:
                 keep_alive=keep_alive,
             )
             return reply, bundle.prompt_record_log
-        except OllamaAPIError as exc:
+        except LLMAPIError as exc:
             if exc.status is not None:
                 logger.error("LLM 回應失敗: %s - %s", exc.status, exc.detail)
                 return "⚠️ LLM 回應失敗，請稍後再試。", bundle.prompt_record_log

@@ -1,4 +1,4 @@
-"""SafeOllamaEmbedding：包住 LlamaIndex 的 OpenAIEmbedding 打 Ollama `/v1/embeddings`，
+"""SafeLLMEmbedding：包住 LlamaIndex 的 OpenAIEmbedding 打 Ollama `/v1/embeddings`，
 加上「空格 perturbation」retry 與全域並發 semaphore。
 
 動機（perturbation）：Ollama Windows 版有已知 bug（#7288）— 某些 text 的 tokenize 結果會
@@ -8,7 +8,7 @@ assertion 而崩掉，回 HTTP 400/500 帶 `wsarecv forcibly closed`。OpenAI �
 
 Workaround：失敗時把 text 加一個空格（尾或前）再 retry，改變 tokenizer 產生的序列繞過 bug。
 
-底層已切換為 OpenAI dialect（保留 `SafeOllamaEmbedding` 檔名與類別名以避免動 caller）；
+底層已切換為 OpenAI dialect（保留 `SafeLLMEmbedding` 檔名與類別名以避免動 caller）；
 未來換 LM Studio / Lemonade 只需改 base_url，不用動這個檔。
 """
 from __future__ import annotations
@@ -63,7 +63,7 @@ def embed_with_perturbation_retry(
     加空格改變 token 序列即可繞過，語意影響極小。
 
     使用場景：
-      - bot 裡透過 LlamaIndex 的 `SafeOllamaEmbedding`
+      - bot 裡透過 LlamaIndex 的 `SafeLLMEmbedding`
       - re-embed script 裡直接打 Ollama HTTP 的 fallback
     兩邊邏輯一致，避免 drift。
     """
@@ -96,7 +96,7 @@ def embed_with_perturbation_retry(
         raise first_exc
 
 
-class SafeOllamaEmbedding(OpenAIEmbedding):
+class SafeLLMEmbedding(OpenAIEmbedding):
     """OpenAIEmbedding（指 Ollama `/v1/embeddings`）+ 空格 perturbation retry +
     全域並發上限 semaphore。
 
@@ -128,14 +128,14 @@ class SafeOllamaEmbedding(OpenAIEmbedding):
         with _EMBED_SEMAPHORE:
             return embed_with_perturbation_retry(
                 super()._get_text_embedding, text,
-                context_label="SafeOllamaEmbedding.text",
+                context_label="SafeLLMEmbedding.text",
             )
 
     def _get_query_embedding(self, query: str) -> list[float]:
         with _EMBED_SEMAPHORE:
             return embed_with_perturbation_retry(
                 super()._get_query_embedding, query,
-                context_label="SafeOllamaEmbedding.query",
+                context_label="SafeLLMEmbedding.query",
             )
 
     def _get_text_embeddings(self, texts: list[str]) -> list[list[float]]:
@@ -146,7 +146,7 @@ class SafeOllamaEmbedding(OpenAIEmbedding):
                 return super()._get_text_embeddings(texts)
             except Exception as exc:
                 logger.warning(
-                    "SafeOllamaEmbedding: batch 失敗（size=%d），改逐筆 + perturbation: %s",
+                    "SafeLLMEmbedding: batch 失敗（size=%d），改逐筆 + perturbation: %s",
                     len(texts), exc,
                 )
         return [self._get_text_embedding(t) for t in texts]

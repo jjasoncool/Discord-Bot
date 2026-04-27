@@ -8,7 +8,7 @@ import logging
 import re
 from typing import Any
 
-from services.llm_service import OllamaService
+from services.llm_service import LLMService
 from sys_settings.llm_settings import (
     LLMServiceSettings,
     load_context_safety_rules,
@@ -99,11 +99,11 @@ class ImpressionModerationResult:
 class ImpressionModerationService:
     """以 LLM + 規則做提交前審核，並輸出可入庫的安全 metadata。"""
 
-    def __init__(self, llm_service: OllamaService | None = None) -> None:
+    def __init__(self, llm_service: LLMService | None = None) -> None:
         self.settings = LLMServiceSettings()
         self.safety_rules = load_context_safety_rules(self.settings.llm_context_safety_rules_path)
         self.runtime_config = load_llm_runtime_config(self.settings.llm_runtime_model_path)
-        self.llm = llm_service or OllamaService()
+        self.llm = llm_service or LLMService()
 
     async def moderate(self, *, target_display: str, text: str) -> ImpressionModerationResult:
         pre_ok, pre_reason = _rule_prefilter(text)

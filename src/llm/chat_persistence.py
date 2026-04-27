@@ -29,7 +29,7 @@ _buffer: list[dict] = []
 _edit_buffer: list[dict] = []
 _buffer_lock = asyncio.Lock()
 
-# 跨批次共用的 LlamaIndex chat index，避免每次 flush 都 new 新 OllamaEmbedding / PGVectorStore；
+# 跨批次共用的 LlamaIndex chat index，避免每次 flush 都 new 新 SafeLLMEmbedding / PGVectorStore；
 # 大量短連線會塞滿 Windows ephemeral port 池。
 # 只在 embed_model 換掉時重建；runtime config 熱切換仍會被感知。
 _chat_index_cache: tuple[str, object] | None = None  # (embed_model_name, VectorStoreIndex)
@@ -183,7 +183,7 @@ def _get_chat_index():
 
     from llama_index.core import VectorStoreIndex
     from llama_index.vector_stores.postgres import PGVectorStore
-    from llm.safe_ollama_embedding import SafeOllamaEmbedding
+    from llm.safe_llm_embedding import SafeLLMEmbedding
     from sys_settings.llm_settings import LLMServiceSettings, load_llm_runtime_config
     from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
 
@@ -198,10 +198,10 @@ def _get_chat_index():
     with _chat_index_lock:
         if _chat_index_cache is not None and _chat_index_cache[0] == embed_model_name:
             return _chat_index_cache[1]
-        embed_model = SafeOllamaEmbedding(
+        embed_model = SafeLLMEmbedding(
             model_name=embed_model_name,
-            base_url=settings.ollama_base_url,
-            request_timeout=settings.ollama_timeout,
+            base_url=settings.llm_base_url,
+            request_timeout=settings.llm_timeout,
         )
         vector_store = PGVectorStore.from_params(
             database=settings.pgvector_db,

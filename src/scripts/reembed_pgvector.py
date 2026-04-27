@@ -47,7 +47,7 @@ sys.path.insert(0, "/app")
 import psycopg2
 import requests
 
-from llm.safe_ollama_embedding import embed_with_perturbation_retry
+from llm.safe_llm_embedding import embed_with_perturbation_retry
 from sys_settings.llm_settings import LLMServiceSettings, load_llm_runtime_config
 
 logger = logging.getLogger("reembed")
@@ -131,7 +131,7 @@ def main() -> int:
 
     logger.info(
         "table=%s model=%s ollama=%s batch=%d dry_run=%s",
-        table, model, settings.ollama_base_url, args.batch_size, args.dry_run,
+        table, model, settings.llm_base_url, args.batch_size, args.dry_run,
     )
     logger.info(
         "pgvector=%s@%s:%s/%s",
@@ -217,7 +217,7 @@ def main() -> int:
             embeds: list[list[float] | None]
             try:
                 embeds = list(embed_batch(
-                    session, settings.ollama_base_url, model, texts, settings.ollama_timeout,
+                    session, settings.llm_base_url, model, texts, settings.llm_timeout,
                 ))
             except Exception as exc:
                 logger.warning(
@@ -227,8 +227,8 @@ def main() -> int:
                 # 單筆 + 空格 perturbation retry（跟 bot 端共用 helper，邏輯一致）
                 def _embed_single(t: str) -> list[float]:
                     return embed_batch(
-                        session, settings.ollama_base_url, model, [t],
-                        settings.ollama_timeout,
+                        session, settings.llm_base_url, model, [t],
+                        settings.llm_timeout,
                     )[0]
 
                 embeds = []

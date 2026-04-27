@@ -20,11 +20,11 @@ import psycopg2
 try:
     from llama_index.core import Document, VectorStoreIndex
     from llama_index.vector_stores.postgres import PGVectorStore
-    from llm.safe_ollama_embedding import SafeOllamaEmbedding
+    from llm.safe_llm_embedding import SafeLLMEmbedding
 except Exception:  # pragma: no cover - 依賴可能在部份環境尚未安裝
     Document = None
     VectorStoreIndex = None
-    SafeOllamaEmbedding = None
+    SafeLLMEmbedding = None
     PGVectorStore = None
 
 
@@ -242,7 +242,7 @@ class PgVectorIntroRAGPort:
             logger.error("刪除舊 Intro RAG 文件失敗: doc_id=%s err=%s", doc_id, exc, exc_info=True)
 
     def _dependencies_ready(self) -> bool:
-        if any(dep is None for dep in (Document, VectorStoreIndex, SafeOllamaEmbedding, PGVectorStore)):
+        if any(dep is None for dep in (Document, VectorStoreIndex, SafeLLMEmbedding, PGVectorStore)):
             logger.warning("Intro RAG 依賴未就緒，略過 pgvector 寫入。")
             return False
         return True
@@ -259,10 +259,10 @@ class PgVectorIntroRAGPort:
         with self._index_lock:
             if self._embed_model is not None and self._embed_model_name == embed_model_name:
                 return self._embed_model
-            self._embed_model = SafeOllamaEmbedding(
+            self._embed_model = SafeLLMEmbedding(
                 model_name=embed_model_name,
-                base_url=self.settings.ollama_base_url,
-                request_timeout=self.settings.ollama_timeout,
+                base_url=self.settings.llm_base_url,
+                request_timeout=self.settings.llm_timeout,
             )
             self._embed_model_name = embed_model_name
             self._index = None

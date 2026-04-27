@@ -13,7 +13,7 @@ from discord.ext import commands
 
 import llm
 from llm.logger_factory import get_or_create_file_logger
-from services.llm_service import OllamaService
+from services.llm_service import LLMService
 from sys_settings.llm_settings import AskAICommandSettings, AskAIWebSettings
 from utils.utils import safe_send_interaction_message, check_guild
 
@@ -206,7 +206,7 @@ class _AskaiCancelButton(discord.ui.View):
 class LLMCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.llm_service = OllamaService()
+        self.llm_service = LLMService()
         self._askai_worker_task: asyncio.Task | None = None
 
     def _ensure_askai_worker(self) -> None:

@@ -15,19 +15,19 @@ logger = logging.getLogger("discord_bot")
 
 
 class LLMServiceSettings(BaseSettings):
-    """Ollama 服務層設定（可由 env/dotenv 覆寫）。"""
+    """LLM 服務層設定（可由 env/dotenv 覆寫；後端不限）。"""
 
-    ollama_base_url: str = Field(
+    llm_base_url: str = Field(
         default="http://192.168.56.1:11434",
-        validation_alias="OLLAMA_BASE_URL",
+        validation_alias="LLM_BASE_URL",
     )
-    ollama_model: str = Field(
-        default="ministral-3:14b",
-        validation_alias="OLLAMA_MODEL",
+    llm_model: str = Field(
+        default="gemma4:26b",
+        validation_alias="LLM_MODEL",
     )
-    ollama_timeout: int = Field(
+    llm_timeout: int = Field(
         default=300,
-        validation_alias="OLLAMA_TIMEOUT",
+        validation_alias="LLM_TIMEOUT",
     )
     pgvector_host: str = Field(
         default="pgvector",

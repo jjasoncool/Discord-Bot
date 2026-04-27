@@ -303,11 +303,11 @@ async def extract_personalities(
 
     回傳 {author_id: {"alias": str, "personality": str}}
     """
-    # 走共用 OllamaService.chat_raw（不重複一套 aiohttp 實作）
+    # 走共用 LLMService.chat_raw（不重複一套 aiohttp 實作）
     # 本函式自組 messages list，走底層 chat_raw 而非 generate_reply 比較語意乾淨
     # （generate_reply 是 /askai 專用的 prompt bundle 組裝流程）。
-    from services.llm_service import OllamaAPIError, OllamaService
-    service = OllamaService()
+    from services.llm_service import LLMAPIError, LLMService
+    service = LLMService()
 
     user_ids = list(user_groups.keys())
     results: dict[str, dict[str, str]] = {}
@@ -412,7 +412,7 @@ async def extract_personalities(
                     current_batch=current_batch,
                     total_batches=total_batches,
                 )
-        except OllamaAPIError as exc:
+        except LLMAPIError as exc:
             if exc.status is not None:
                 logger.error("人格萃取 LLM 回應失敗: %s - %s", exc.status, exc.detail)
             else:
