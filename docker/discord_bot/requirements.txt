@@ -18,13 +18,15 @@ asyncpg
 # 讓 SQLAlchemy 支援 PostgreSQL 的向量擴充
 pgvector
 
+# === LLM client（OpenAI dialect；對 Ollama / LM Studio / Lemonade 等相容後端通用）===
+# Python SDK，bot 主要 chat 路徑透過此 SDK 打 /v1/chat/completions
+openai
+
 # === LlamaIndex ===
 # LlamaIndex 核心框架
 llama-index-core
-# 連接本地端 Ollama 進行對話生成
-llama-index-llms-ollama
-# 連接本地端 Ollama 進行向量化 (Embedding)
-llama-index-embeddings-ollama
+# Embedding 走 OpenAI dialect（含本機 Ollama 的 /v1/embeddings）
+llama-index-embeddings-openai
 # 讓 LlamaIndex 能夠讀寫 pgvector 資料庫
 llama-index-vector-stores-postgres
 # 關鍵字檢索

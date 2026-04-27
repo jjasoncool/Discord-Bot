@@ -1,17 +1,23 @@
 """
 Ollama LLM 服務模組
-提供與 Ollama API 的非同步互動封裝
+透過 OpenAI dialect (/v1/chat/completions) 與後端互動，目前對接 Ollama；
+對 LM Studio / Lemonade 等相容後端只需改 base_url 即可。
 """
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
-from pathlib import Path
-from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, List, Optional
 
-import aiohttp
+from dataclasses import dataclass
+from pathlib import Path
+
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncOpenAI,
+)
+
 from sys_settings.llm_settings import (
     LLMServiceSettings,
     load_context_safety_rules,
@@ -23,9 +29,40 @@ anomaly_logger = logging.getLogger("ollama_anomaly")
 
 LLM_SERVICE_SETTINGS = LLMServiceSettings()
 
-OLLAMA_MAX_ATTEMPTS = 2
-OLLAMA_RETRY_DELAY = 3.0
-OLLAMA_RETRY_STATUS_CODES = frozenset({500, 502, 503, 504})
+# openai SDK 自帶 retry：rate limit / 連線錯誤 / 5xx 自動指數退避，預設 max_retries=2
+OPENAI_MAX_RETRIES = 2
+
+
+def _convert_messages_for_openai(
+    messages: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """把 Ollama 風格 messages 轉成 OpenAI vision schema。
+
+    Ollama: ``{"role": "user", "content": "...", "images": ["base64..."]}``
+    OpenAI: ``{"role": "user", "content": [{"type":"text"...},{"type":"image_url"...}]}``
+
+    無 images 的訊息原封不動回傳；保留原 dict 其他鍵。
+    Discord 上傳格式以 jpeg/png 為主，data URL prefix 用 jpeg 即可（model 端不嚴格驗證）。
+    """
+    converted: list[dict[str, object]] = []
+    for msg in messages:
+        images = msg.get("images")
+        if not images:
+            converted.append(msg)
+            continue
+        text = msg.get("content", "") or ""
+        content_parts: list[dict[str, object]] = []
+        if text:
+            content_parts.append({"type": "text", "text": text})
+        for image_b64 in images:
+            content_parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
+            })
+        new_msg = {k: v for k, v in msg.items() if k != "images"}
+        new_msg["content"] = content_parts
+        converted.append(new_msg)
+    return converted
 
 
 @dataclass(frozen=True)
@@ -37,11 +74,11 @@ class PromptBundle:
 
 
 class OllamaAPIError(Exception):
-    """Ollama /api/chat 非 200 或回應格式異常。
+    """LLM /v1/chat/completions 非 2xx 或回應格式異常。
 
-    與 `aiohttp.ClientError`（連線層）區分：
-      - `status is not None` → HTTP 非 200（含 detail 原文）
-      - `status is None`     → 200 但回應 JSON 沒有預期的 content
+    與 openai SDK 的連線層例外（`APITimeoutError` / `APIConnectionError`）區分：
+      - `status is not None` → HTTP 非 2xx（含 detail 原文）
+      - `status is None`     → 2xx 但回應 content 為空
     """
 
     def __init__(self, message: str, *, status: int | None = None, detail: str = "") -> None:
@@ -51,7 +88,7 @@ class OllamaAPIError(Exception):
 
 
 class OllamaService:
-    """Ollama LLM 服務封裝"""
+    """LLM 服務封裝（透過 OpenAI dialect SDK；對接 Ollama）。"""
 
     def __init__(
         self,
@@ -64,6 +101,13 @@ class OllamaService:
         self.model_default = model or self.settings.ollama_model
         self.timeout = timeout if timeout is not None else self.settings.ollama_timeout
         self.context_safety_rules = load_context_safety_rules(self.settings.llm_context_safety_rules_path)
+        # OpenAI 相容端點；api_key 對 Ollama 無作用但 SDK 必填
+        self._client = AsyncOpenAI(
+            base_url=f"{self.base_url.rstrip('/')}/v1",
+            api_key="ollama",
+            timeout=float(self.timeout),
+            max_retries=OPENAI_MAX_RETRIES,
+        )
         self._runtime_model_cached_value: Optional[str] = None
         self._runtime_model_cached_mtime_ns: Optional[int] = None
         self._runtime_think_cached_value: Optional[bool] = None
@@ -307,7 +351,7 @@ class OllamaService:
         timeout: Optional[int] = None,
         keep_alive: Optional[str] = None,
     ) -> str:
-        """底層 Ollama /api/chat：caller 自組 messages，回傳 assistant content。
+        """底層 /v1/chat/completions：caller 自組 messages，回傳 assistant content。
 
         與 `generate_reply` 的分工：
         - `chat_raw` 只負責 HTTP、payload 組裝與錯誤分類（raise 例外）
@@ -320,19 +364,16 @@ class OllamaService:
         參數 `timeout`：None → 沿用 `self.timeout`（settings.ollama_timeout，預設 300s）。
         長任務（如人格萃取）傳較大值覆蓋。
 
-        參數 `keep_alive`：None → 沿用 server 端 `OLLAMA_KEEP_ALIVE` 預設；傳值則覆蓋。
-        支援格式：`"1h"`、`"30m"`、`"24h"`、整數秒、`"-1"`（永不 unload）、`"0"`（立即釋放）。
-        以 per-request 控制 chat model 在 VRAM 的駐留時間，避免頻繁 unload/reload
-        觸發 Windows ephemeral port 耗盡與 runner crash。
+        Ollama-only 欄位（`think` / `keep_alive` / `num_ctx` / `repeat_penalty`）透過
+        openai SDK 的 `extra_body` 透傳：在 Ollama 上有效，換到不解析這些欄位的後端
+        （LM Studio / Lemonade）會自動被忽略，不會 raise。
 
-        暫時性錯誤會自動重試（OLLAMA_MAX_ATTEMPTS 次，間隔 OLLAMA_RETRY_DELAY 秒）：
-        HTTP 500/502/503/504、asyncio.TimeoutError、aiohttp.ClientError。
-        每次重試會建立新的 ClientSession 與 ClientTimeout，timeout 自動重置。
-        HTTP 4xx 與回應格式異常（content 為空）不重試。
+        暫時性錯誤（連線層 / 5xx / rate limit）由 openai SDK 自動指數退避重試
+        `OPENAI_MAX_RETRIES` 次。HTTP 4xx 與回應 content 為空不重試。
 
         Raises:
-            OllamaAPIError: HTTP 非 200 或回應格式異常（已重試用盡）
-            aiohttp.ClientError: 連線失敗（已重試用盡）
+            OllamaAPIError: HTTP 非 2xx 或回應 content 為空（已重試用盡）
+            APITimeoutError / APIConnectionError: 連線失敗（已重試用盡）
         """
         effective_temperature = (
             temperature if temperature is not None
@@ -346,130 +387,63 @@ class OllamaService:
         effective_num_ctx = num_ctx if num_ctx is not None else self.settings.default_num_ctx
         effective_timeout = timeout if timeout is not None else self.timeout
 
-        payload: dict[str, object] = {
-            "model": model,
-            "messages": messages,
+        # Ollama-only 透傳欄位；其它後端不解析會被忽略（graceful degradation）
+        extra_body: dict[str, Any] = {
             "options": {
-                "temperature": effective_temperature,
-                "top_p": effective_top_p,
                 "repeat_penalty": effective_repeat_penalty,
                 "num_ctx": effective_num_ctx,
             },
-            "stream": False,
         }
-        # think 只在 caller 明確指定時才放入 payload，避免覆蓋各 model 預設行為
-        # (personality_extractor 原本就沒帶 think，遷移後保持一致)
         if think is not None:
-            payload["think"] = think
-        # keep_alive 同理：只有 caller 明確指定時才覆蓋 server 端全域設定。
+            extra_body["think"] = think
         if keep_alive is not None:
-            payload["keep_alive"] = keep_alive
+            extra_body["keep_alive"] = keep_alive
 
-        url = f"{self.base_url}/api/chat"
-        # 每次 attempt 建立新的 ClientTimeout + ClientSession → timeout 自動重置，不會累積
-        for attempt in range(1, OLLAMA_MAX_ATTEMPTS + 1):
-            try:
-                client_timeout = aiohttp.ClientTimeout(total=effective_timeout)
-                async with aiohttp.ClientSession(timeout=client_timeout) as session:
-                    # 主請求：取出 data 後立刻退出 response context，連線歸還 pool
-                    async with session.post(url, json=payload) as response:
-                        if response.status != 200:
-                            detail = await response.text()
-                            raise OllamaAPIError(
-                                f"HTTP {response.status}",
-                                status=response.status,
-                                detail=detail,
-                            )
-                        data = await response.json()
+        # 把 Ollama 風格 images=[base64...] 轉成 OpenAI vision content array
+        openai_messages = _convert_messages_for_openai(messages)
 
-                    msg_obj = data.get("message") or {}
-                    content = msg_obj.get("content")
-                    if content:
-                        return content
-
-                    # 空 content：完整 raw response 寫進 ollama_anomaly.log（不污染主 log）
-                    anomaly_logger.error(
-                        "empty_content model=%s done_reason=%s eval_count=%s prompt_eval_count=%s raw=%s",
-                        model,
-                        data.get("done_reason"),
-                        data.get("eval_count"),
-                        data.get("prompt_eval_count"),
-                        json.dumps(data, ensure_ascii=False),
-                    )
-
-                    # B1 fallback：原請求 think=True 才嘗試重送 think=False；
-                    # 拿到 content 視為成功，避免使用者看到「⚠️ 異常」。
-                    if think is True:
-                        fb_content = await self._retry_without_think(
-                            session=session, url=url, payload=payload, model=model,
-                        )
-                        if fb_content:
-                            return fb_content
-
-                    raise OllamaAPIError(
-                        "回應格式異常",
-                        detail=str({
-                            "done_reason": data.get("done_reason"),
-                            "eval_count": data.get("eval_count"),
-                            "prompt_eval_count": data.get("prompt_eval_count"),
-                            "thinking_len": len(msg_obj.get("thinking") or ""),
-                            "see": "logs/ollama_anomaly.log",
-                        }),
-                    )
-            except OllamaAPIError as exc:
-                # 只對暫時性 HTTP 錯誤重試（500/502/503/504）；4xx 與回應格式異常直接拋出
-                if exc.status in OLLAMA_RETRY_STATUS_CODES and attempt < OLLAMA_MAX_ATTEMPTS:
-                    logger.warning(
-                        "Ollama 第 %d 次呼叫失敗（HTTP %s），%.1fs 後重試",
-                        attempt, exc.status, OLLAMA_RETRY_DELAY,
-                    )
-                    await asyncio.sleep(OLLAMA_RETRY_DELAY)
-                    continue
-                raise
-            except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
-                if attempt < OLLAMA_MAX_ATTEMPTS:
-                    logger.warning(
-                        "Ollama 第 %d 次呼叫失敗（%s: %s），%.1fs 後重試",
-                        attempt, type(exc).__name__, exc, OLLAMA_RETRY_DELAY,
-                    )
-                    await asyncio.sleep(OLLAMA_RETRY_DELAY)
-                    continue
-                raise
-        # 不可達：迴圈內 try/except 各分支必定 return 或 raise；保留作 type checker safety net
-        raise OllamaAPIError("Ollama 呼叫未預期結束", detail="retry loop exited without result")
-
-    async def _retry_without_think(
-        self,
-        *,
-        session: aiohttp.ClientSession,
-        url: str,
-        payload: dict[str, object],
-        model: str,
-    ) -> Optional[str]:
-        """B1 fallback：重送一次 `think=False`。失敗任何環節都吞掉，回傳 None；caller 自行決定後續錯誤處理。"""
         try:
-            async with session.post(url, json={**payload, "think": False}) as fb_resp:
-                if fb_resp.status != 200:
-                    fb_text = await fb_resp.text()
-                    anomaly_logger.error(
-                        "fallback_http_%d model=%s detail=%s",
-                        fb_resp.status, model, fb_text[:1000],
-                    )
-                    return None
-                fb_data = await fb_resp.json()
-            fb_content = (fb_data.get("message") or {}).get("content")
-            if fb_content:
-                logger.warning("Ollama 空 content，think=False fallback 成功 model=%s", model)
-                return fb_content
-            anomaly_logger.error(
-                "fallback_still_empty model=%s raw=%s",
-                model,
-                json.dumps(fb_data, ensure_ascii=False),
+            completion = await self._client.with_options(
+                timeout=float(effective_timeout),
+            ).chat.completions.create(
+                model=model,
+                messages=openai_messages,
+                temperature=effective_temperature,
+                top_p=effective_top_p,
+                stream=False,
+                extra_body=extra_body,
             )
-            return None
-        except Exception:  # noqa: BLE001 - fallback 失敗不影響原錯誤路徑
-            anomaly_logger.exception("fallback_retry_failed")
-            return None
+        except APIStatusError as exc:
+            raise OllamaAPIError(
+                f"HTTP {exc.status_code}",
+                status=exc.status_code,
+                detail=str(exc),
+            ) from exc
+
+        if not completion.choices:
+            raise OllamaAPIError("回應格式異常: 無 choices")
+
+        choice = completion.choices[0]
+        content = choice.message.content if choice.message else None
+        if content:
+            return content
+
+        # 空 content：完整 raw response 寫進 anomaly log（不污染主 log）
+        anomaly_logger.error(
+            "empty_content model=%s finish_reason=%s usage=%s raw=%s",
+            model,
+            choice.finish_reason,
+            completion.usage.model_dump() if completion.usage else None,
+            completion.model_dump_json(),
+        )
+        raise OllamaAPIError(
+            "回應格式異常: 空 content",
+            detail=str({
+                "finish_reason": choice.finish_reason,
+                "usage": completion.usage.model_dump() if completion.usage else None,
+                "see": "logs/ollama_anomaly.log",
+            }),
+        )
 
     async def generate_reply(
         self,
@@ -529,17 +503,17 @@ class OllamaService:
             return reply, bundle.prompt_record_log
         except OllamaAPIError as exc:
             if exc.status is not None:
-                logger.error("Ollama 回應失敗: %s - %s", exc.status, exc.detail)
+                logger.error("LLM 回應失敗: %s - %s", exc.status, exc.detail)
                 return "⚠️ LLM 回應失敗，請稍後再試。", bundle.prompt_record_log
-            logger.error("Ollama 回應格式異常: %s", exc.detail)
+            logger.error("LLM 回應格式異常: %s", exc.detail)
             return "⚠️ LLM 回應格式異常，請稍後再試。", bundle.prompt_record_log
-        except aiohttp.ClientError as exc:
-            logger.error("Ollama 連線失敗: %s", exc)
+        except (APITimeoutError, APIConnectionError) as exc:
+            logger.error("LLM 連線失敗: %s: %s", type(exc).__name__, exc)
             return "⚠️ 無法連線到 LLM 服務。", bundle.prompt_record_log
         except Exception as exc:
-            # 過去這條訊息經常出現空字串 exc（asyncio.TimeoutError 類），加上型別名避免診斷困難
+            # 加上型別名避免空字串例外時診斷困難
             logger.error(
-                "Ollama 呼叫發生未預期錯誤: %s: %s",
+                "LLM 呼叫發生未預期錯誤: %s: %s",
                 type(exc).__name__, exc, exc_info=True,
             )
             return "⚠️ LLM 發生未預期錯誤。", bundle.prompt_record_log

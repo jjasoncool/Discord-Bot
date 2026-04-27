@@ -1,14 +1,15 @@
-"""SafeOllamaEmbedding：包住 LlamaIndex 的 OllamaEmbedding，加上「空格 perturbation」retry。
+"""SafeOllamaEmbedding：包住 LlamaIndex 的 OpenAIEmbedding 打 Ollama `/v1/embeddings`，
+加上「空格 perturbation」retry 與全域並發 semaphore。
 
-動機：Ollama Windows 版有已知 bug（#7288）— 某些 text 的 tokenize 結果會讓內部 runner
-subprocess 觸發 `GGML_ASSERT(i01 >= 0 && i01 < ne01) failed` C-level assertion 而崩掉，
-回 HTTP 400/500 帶 `wsarecv forcibly closed`。
+動機（perturbation）：Ollama Windows 版有已知 bug（#7288）— 某些 text 的 tokenize 結果會
+讓內部 runner subprocess 觸發 `GGML_ASSERT(i01 >= 0 && i01 < ne01) failed` C-level
+assertion 而崩掉，回 HTTP 400/500 帶 `wsarecv forcibly closed`。OpenAI 相容端點走的還是
+同一個 Ollama embedding 內部 path，因此這個 bug 與 retry 仍然適用。
 
-Workaround：若 embedding 呼叫失敗，把 text 加一個空格（尾或前）再 retry。空格會改變 tokenizer
-產出的 token 序列，繞過會觸發 bug 的特定 pattern；語意影響極小（embedding 向量近乎相同）。
+Workaround：失敗時把 text 加一個空格（尾或前）再 retry，改變 tokenizer 產生的序列繞過 bug。
 
-使用：把專案中所有 `OllamaEmbedding(...)` 換成 `SafeOllamaEmbedding(...)` 即可，
-介面完全相容。
+底層已切換為 OpenAI dialect（保留 `SafeOllamaEmbedding` 檔名與類別名以避免動 caller）；
+未來換 LM Studio / Lemonade 只需改 base_url，不用動這個檔。
 """
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ import logging
 import threading
 from typing import Any, Callable, TypeVar
 
-from llama_index.embeddings.ollama import OllamaEmbedding
+from llama_index.embeddings.openai import OpenAIEmbedding
 
 logger = logging.getLogger("discord_bot")
 
@@ -35,8 +36,12 @@ _EMBED_SEMAPHORE = threading.Semaphore(_EMBED_CONCURRENCY)
 # embedding num_ctx：Ollama 預設依 VRAM 算出（雙卡 31.7GB → 32K），但 embedding 不需要
 # 那麼長的 context，預分配 KV cache ≈ 3.5GB（qwen3-embedding:0.6b 28 layers）純浪費。
 # 8192 可涵蓋幾乎所有 Discord 訊息情境（單則 4000 字元上限），KV cache 降到 ~880MB，
-# 省 ~2.6GB VRAM。若需極大文本 embed（如完整文章），caller 可透過
-# ollama_additional_kwargs={"num_ctx": N} 覆寫此預設。
+# 省 ~2.6GB VRAM。
+#
+# 切到 OpenAI dialect 後，per-request 注入 num_ctx 的路徑（`ollama_additional_kwargs`）
+# 失效——OpenAI 標準沒有這欄位。要保住 VRAM 省的這 2.6GB，請在 Ollama server 端設
+# `OLLAMA_DEFAULT_NUM_CTX=8192` env 或在 Modelfile 裡 `PARAMETER num_ctx 8192`。
+# 此常數保留作 server 端配置的參考值。
 _EMBED_NUM_CTX = 8192
 
 _T = TypeVar("_T")
@@ -91,22 +96,33 @@ def embed_with_perturbation_retry(
         raise first_exc
 
 
-class SafeOllamaEmbedding(OllamaEmbedding):
-    """OllamaEmbedding + 空格 perturbation retry + 全域並發上限（semaphore）。
+class SafeOllamaEmbedding(OpenAIEmbedding):
+    """OpenAIEmbedding（指 Ollama `/v1/embeddings`）+ 空格 perturbation retry +
+    全域並發上限 semaphore。
 
-    所有 embed 呼叫都經過 `_EMBED_SEMAPHORE` 限流，同時最多 N 個 request 打 Ollama。
+    所有 embed 呼叫都經過 `_EMBED_SEMAPHORE` 限流，同時最多 N 個 request 打後端。
     batch 方法（`_get_text_embeddings`）只在最外層 acquire 一次，避免巢狀持鎖。
 
-    預設把 `num_ctx=_EMBED_NUM_CTX` 注入 `ollama_additional_kwargs`，避免 Ollama 套用
-    VRAM-based 全域預設（32K）導致 KV cache 無謂膨脹。caller 仍可透過
-    `ollama_additional_kwargs` 覆寫。
+    Constructor 維持原 caller 簽名（`model_name` / `base_url` / `request_timeout`），
+    內部翻譯成 OpenAIEmbedding 的 `model` / `api_base` / `timeout`。
     """
 
-    def __init__(self, *args: Any, ollama_additional_kwargs: dict[str, Any] | None = None, **kwargs: Any) -> None:
-        merged_kwargs: dict[str, Any] = {"num_ctx": _EMBED_NUM_CTX}
-        if ollama_additional_kwargs:
-            merged_kwargs.update(ollama_additional_kwargs)
-        super().__init__(*args, ollama_additional_kwargs=merged_kwargs, **kwargs)
+    def __init__(
+        self,
+        model_name: str,
+        base_url: str,
+        request_timeout: float | None = None,
+        **kwargs: Any,
+    ) -> None:
+        api_base = f"{base_url.rstrip('/')}/v1"
+        timeout = request_timeout if request_timeout is not None else 60.0
+        super().__init__(
+            model=model_name,
+            api_base=api_base,
+            api_key="ollama",  # Ollama 不驗 key，但 SDK 必填
+            timeout=timeout,
+            **kwargs,
+        )
 
     def _get_text_embedding(self, text: str) -> list[float]:
         with _EMBED_SEMAPHORE:
