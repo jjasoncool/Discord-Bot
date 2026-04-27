@@ -347,6 +347,7 @@ class LLMCommands(commands.Cog):
                     engines=search_engines,
                     categories=intent.categories,
                     time_range=intent.time_range,
+                    language=intent.language,
                     logger_override=logger,
                 )
             )
@@ -397,6 +398,7 @@ class LLMCommands(commands.Cog):
             "cleaned_query": intent.cleaned_query,
             "categories": intent.categories,
             "time_range": intent.time_range,
+            "language": intent.language,
         }
         if web_task is not None:
             try:

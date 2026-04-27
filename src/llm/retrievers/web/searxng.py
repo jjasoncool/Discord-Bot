@@ -44,21 +44,23 @@ async def fetch_web_results(
     categories: str | None = None,
     limit: int | None = None,
     time_range: str | None = None,
+    language: str | None = None,
     logger_override: logging.Logger | None = None,
 ) -> WebRetrievalOutcome:
     """打 SearXNG 取回搜尋結果。
 
-    engines / categories / limit / time_range 未指定時沿用 settings 預設。
+    engines / categories / limit / time_range / language 未指定時沿用 settings 預設。
     失敗不 raise：回空 results + meta.error 標記原因。
     """
     log = logger_override or logger
     top_k = limit if limit is not None else settings.top_k
     effective_engines = engines if engines is not None else settings.default_engines
+    effective_language = language if language is not None else settings.language
 
     params: dict[str, str] = {
         "q": question,
         "format": "json",
-        "language": settings.language,
+        "language": effective_language,
         "engines": effective_engines,
     }
     if categories:
@@ -72,6 +74,7 @@ async def fetch_web_results(
         "engines": effective_engines,
         "categories": categories,
         "time_range": time_range,
+        "language": effective_language,
         "result_count": 0,
         "elapsed_ms": 0,
         "error": None,

@@ -3,7 +3,7 @@
 三個獨立責任：
 1. `should_search`：判斷要不要搜（yes/no + 觸發原因）
 2. `clean_query`：剝除指令性贅字，得到真正要送 SearXNG 的字串
-3. `classify_route`：依關鍵字決定 categories / time_range
+3. `classify_route`：依關鍵字決定 categories / time_range / language
 
 合併為 `IntentResult`，方便 caller 一次拿到所有所需資訊。
 """
@@ -14,19 +14,60 @@ import re
 from dataclasses import dataclass
 
 
+# === 主題 token 群（HARD 觸發 + 對應 route 共用）===
+# 新增主題：在這裡加一個常數、再到 _ROUTE_RULES 加一條規則即可，
+# HARD 端會自動透過下方 _alt(...) 收進去，不會再有單邊忘改的 drift。
+#
+# tuple 元素是 regex fragment（允許 \s+ \s* 等控制字元）；要塞含 + * ? | ( )
+# 等 regex 特殊符號的 token 需自行 escape。
+_TOPIC_FINANCE_INTL = (
+    "美股", "nasdaq", "nyse", "s&p", r"dow\s+jones", "道瓊",
+    "比特幣", "以太幣", "加密貨幣", "crypto", "bitcoin", "ethereum",
+)
+_TOPIC_FINANCE_ZH = (
+    "股價", "漲跌", "盤中", "收盤", "大盤",
+    "台股", "港股", "陸股", "日股", "加權",
+    "行情", "匯率", "幣價",
+)
+_TOPIC_WEATHER = ("天氣", "氣溫", "降雨", "颱風", "氣象")
+_TOPIC_GAME_PATCH = (
+    "版本", "更新", "改版", "patch", "release", "前瞻",
+    "上線", "發布", "發佈", "推出", "公布",
+)
+_TOPIC_NEWS_PURE = ("公告", "開服", "維護")
+_TOPIC_REDDIT = ("reddit", "鄉民", "網友怎麼說", "討論度")
+
+# === 純觸發 token（HARD 用；不對應特定 route）===
+# 新聞時序錨字：HARD + 純新聞 route 共用
+_TRIGGER_NEWS_TIME = ("新聞", "最新", "今天", "今日", "本日", "昨天", "昨日")
+# HARD-only：觸發但無特定 route，落入 default（categories/time_range/language 皆 None）
+_TRIGGER_HARD_ONLY = (
+    # 即時狀態詞
+    "目前", "現在", "即時", "此刻", "近況",
+    # 主題不夠特定的單字（沿用既有行為，未掛 route）
+    "股票", "下雨", "活動", "上市", "發售",
+    # 搜尋動詞 / 禮貌請求
+    "查詢", "查一下", "搜尋", "搜一下", "找一下", "看一下",
+    "幫我查", "幫我找", "幫我搜", "幫我看",
+    r"google\s*一下", "goolge一下",
+    # 釋出時程提問
+    "幾點開", "何時上線", "什麼時候出", "發布日", "發佈日",
+)
+
+
+def _alt(*groups: tuple[str, ...]) -> str:
+    """把多個 token tuple 攤平串成 regex alternation。"""
+    return "|".join(token for group in groups for token in group)
+
+
 # 強觸發：明確指涉需要即時 / 外部資訊
 # 注意：剛剛/剛才 刻意不放 HARD（太泛、會誤觸「剛才那段翻成英文」），改進 SOFT 時間詞。
 _SEARCH_HARD = re.compile(
-    r"新聞|最新|今天|今日|本日|昨天|昨日|目前|現在|即時|此刻|近況|"
-    r"股價|股票|台股|美股|港股|陸股|日股|加權|大盤|盤中|收盤|漲跌|行情|匯率|幣價|"
-    r"天氣|氣溫|下雨|颱風|氣象|降雨|"
-    r"版本|更新|patch|release|開服|維護|公告|活動|改版|前瞻|"
-    r"發布|發佈|上市|上線|推出|公布|發售|"
-    r"查詢|查一下|搜尋|搜一下|找一下|看一下|"
-    r"幫我查|幫我找|幫我搜|幫我看|"
-    r"google\s*一下|goolge一下|"
-    r"幾點開|何時上線|什麼時候出|發布日|發佈日|"
-    r"reddit|鄉民|網友怎麼說|討論度",
+    _alt(
+        _TRIGGER_NEWS_TIME, _TRIGGER_HARD_ONLY,
+        _TOPIC_FINANCE_ZH, _TOPIC_FINANCE_INTL,
+        _TOPIC_WEATHER, _TOPIC_GAME_PATCH, _TOPIC_NEWS_PURE, _TOPIC_REDDIT,
+    ),
     re.IGNORECASE,
 )
 
@@ -74,24 +115,28 @@ _STRIP_PATTERNS: tuple[re.Pattern[str], ...] = (
 # 實測 Google News / Bing News 在 zh-TW 對遊戲垂直站（巴哈、4Gamers、遊戲角落）
 # 覆蓋極差，news engines 查「鳴潮」會拿到買房/政治新聞。通用 engines + time_range
 # 才能抓到真正的遊戲新聞，同時用日期過濾擋掉舊版。
-_ROUTE_RULES: tuple[tuple[re.Pattern[str], str | None, str | None], ...] = (
-    # 股價類：news + 當日（股市真的是時事類，news engines 覆蓋 OK）
-    (re.compile(r"股價|漲跌|盤中|收盤|大盤|台股|美股|港股|陸股|日股|加權|行情|匯率|幣價"), "news", "day"),
+#
+# 為什麼國際金融題材要切 language=en：
+# zh-TW news engines 對美股/加密幣當日新聞命中差，題材源頭幾乎都是英文
+# (reuters/bloomberg/cnbc)，中文媒體常落後 6~24 小時。切到 en locale 才能撈到
+# 原始英文頭條；chat model（gemma 27B）自帶英→繁中能力，配 system prompt
+# 「只能使用繁體中文」規則，最終輸出仍是繁中。
+#
+# 「網友說」歷史上只在 Reddit route 出現、未在 HARD 裡，因此維持 inline
+# 不收進 _TOPIC_REDDIT，避免擴張 HARD 觸發行為。
+_ROUTE_RULES: tuple[tuple[re.Pattern[str], str | None, str | None, str | None], ...] = (
+    # 國際金融題材：news + 當日 + 英文 locale（最特定，需排在股價類之前）
+    (re.compile(_alt(_TOPIC_FINANCE_INTL), re.IGNORECASE), "news", "day", "en"),
+    # 股價類：news + 當日（中文圈題材：台股、港股、日股、陸股、匯率等）
+    (re.compile(_alt(_TOPIC_FINANCE_ZH)), "news", "day", None),
     # 天氣類：通用 + 當日
-    (re.compile(r"天氣|氣溫|降雨|颱風|氣象"), None, "day"),
+    (re.compile(_alt(_TOPIC_WEATHER)), None, "day", None),
     # 遊戲改版 / 軟體版本：通用 + 一週（news engines 對這類覆蓋太差）
-    (
-        re.compile(
-            r"版本|更新|改版|patch|release|前瞻|上線|發布|發佈|推出|公布",
-            re.IGNORECASE,
-        ),
-        None,
-        "week",
-    ),
+    (re.compile(_alt(_TOPIC_GAME_PATCH), re.IGNORECASE), None, "week", None),
     # 純新聞 / 政治時事：news + 一週
-    (re.compile(r"新聞|今天|今日|本日|昨天|昨日|最新|公告|開服|維護"), "news", "week"),
-    # Reddit / 鄉民 / 網友討論
-    (re.compile(r"reddit|鄉民|網友怎麼說|網友說|討論度", re.IGNORECASE), "social media", None),
+    (re.compile(_alt(_TRIGGER_NEWS_TIME, _TOPIC_NEWS_PURE)), "news", "week", None),
+    # Reddit / 鄉民 / 網友討論（網友說 inline，原因見上方說明）
+    (re.compile(_alt(_TOPIC_REDDIT) + r"|網友說", re.IGNORECASE), "social media", None, None),
 )
 
 
@@ -105,6 +150,7 @@ class IntentResult:
     cleaned_query: str
     categories: str | None  # "news" | "social media" | None
     time_range: str | None  # "day" | "week" | "month" | None
+    language: str | None  # 強制 SearXNG locale；None 沿用 settings.language（zh-TW）
 
 
 def clean_query(text: str) -> str:
@@ -123,12 +169,12 @@ def clean_query(text: str) -> str:
     return cleaned or text.strip()
 
 
-def classify_route(text: str) -> tuple[str | None, str | None]:
-    """依關鍵字決定 SearXNG 的 categories 與 time_range。"""
-    for pattern, cat, tr in _ROUTE_RULES:
+def classify_route(text: str) -> tuple[str | None, str | None, str | None]:
+    """依關鍵字決定 SearXNG 的 categories、time_range 與 language。"""
+    for pattern, cat, tr, lang in _ROUTE_RULES:
         if pattern.search(text):
-            return cat, tr
-    return None, None
+            return cat, tr, lang
+    return None, None, None
 
 
 def should_search(question: str) -> IntentResult:
@@ -150,11 +196,12 @@ def should_search(question: str) -> IntentResult:
             cleaned_query="",
             categories=None,
             time_range=None,
+            language=None,
         )
 
     text = question.strip()
     cleaned = clean_query(text)
-    cat, tr = classify_route(text)
+    cat, tr, lang = classify_route(text)
 
     if len(text) < 6:
         hard = _SEARCH_HARD.search(text)
@@ -166,6 +213,7 @@ def should_search(question: str) -> IntentResult:
                 cleaned_query=cleaned,
                 categories=cat,
                 time_range=tr,
+                language=lang,
             )
         return IntentResult(
             triggered=False,
@@ -174,6 +222,7 @@ def should_search(question: str) -> IntentResult:
             cleaned_query=cleaned,
             categories=None,
             time_range=None,
+            language=None,
         )
 
     never = _SEARCH_NEVER.search(text)
@@ -185,6 +234,7 @@ def should_search(question: str) -> IntentResult:
             cleaned_query=cleaned,
             categories=None,
             time_range=None,
+            language=None,
         )
 
     hard = _SEARCH_HARD.search(text)
@@ -196,6 +246,7 @@ def should_search(question: str) -> IntentResult:
             cleaned_query=cleaned,
             categories=cat,
             time_range=tr,
+            language=lang,
         )
 
     soft = _SEARCH_SOFT.search(text)
@@ -207,6 +258,7 @@ def should_search(question: str) -> IntentResult:
             cleaned_query=cleaned,
             categories=cat,
             time_range=tr,
+            language=lang,
         )
 
     return IntentResult(
@@ -216,4 +268,5 @@ def should_search(question: str) -> IntentResult:
         cleaned_query=cleaned,
         categories=None,
         time_range=None,
+        language=None,
     )
