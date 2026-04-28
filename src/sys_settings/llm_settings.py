@@ -10,6 +10,7 @@ from urllib.parse import quote_plus
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Literal
 
 logger = logging.getLogger("discord_bot")
 
@@ -104,13 +105,30 @@ class LLMContextSafetyRules(BaseModel):
     impression_moderation_schema_hint: dict[str, str]
 
 
-class LLMRuntimeConfig(BaseModel):
-    """LLM 執行時可熱更新設定（後端不限）。"""
+class BackendProfile(BaseModel):
+    """單一後端的 wire 層參數設定（會原封不動 top-level merge 到 chat completion body）。
 
+    用途：把 Ollama-only 的 `think` / `keep_alive` / `options.num_ctx` 等與
+    Lemonade 的 `chat_template_kwargs` 等放在各自 profile 內，切後端時不需動 code。
+    """
+
+    extra_body: dict[str, Any] = Field(default_factory=dict)
+
+
+class LLMRuntimeConfig(BaseModel):
+    """LLM 執行時可熱更新設定（後端不限）。
+
+    切後端的單一控制點：搭配 `.env` 的 `LLM_BASE_URL` 兩邊一起改即可。
+    `backends` 內各 profile 的 `extra_body` 是後端專屬參數的歸宿。
+    """
+
+    backend: Literal["ollama", "lemonade", "vllm"] = "ollama"
     model: str
     embed_model: str
     moderation_model: str | None = None
     personality_model: str | None = None
+    backends: dict[str, BackendProfile] = Field(default_factory=dict)
+    # 舊欄位：保留以避免舊 config 載入失敗；新 config 應將 think 放進 backends.ollama.extra_body
     think: bool = True
 
 

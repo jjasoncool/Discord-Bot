@@ -1,7 +1,8 @@
 """
 LLM 服務模組
-透過 OpenAI dialect (/v1/chat/completions) 與後端互動，目前對接 Ollama；
-對 LM Studio / Lemonade 等相容後端只需改 base_url 即可。
+透過 OpenAI dialect (/v1/chat/completions) 與後端互動。
+切後端只需改 `.env` 的 `LLM_BASE_URL` 與 `llm_runtime_config.json` 的 `backend` 欄位。
+不依賴 `openai` SDK；透過自寫 `LlmHttpClient` 直接打 wire。
 """
 from __future__ import annotations
 
@@ -11,14 +12,15 @@ from typing import Any, List, Optional
 from dataclasses import dataclass
 from pathlib import Path
 
-from openai import (
-    APIConnectionError,
-    APIStatusError,
-    APITimeoutError,
-    AsyncOpenAI,
+from llm.llm_http_client import (
+    LlmAPIError,
+    LlmConnectionError,
+    LlmHttpClient,
+    LlmTimeoutError,
 )
 
 from sys_settings.llm_settings import (
+    LLMRuntimeConfig,
     LLMServiceSettings,
     load_context_safety_rules,
     load_llm_runtime_config,
@@ -28,9 +30,6 @@ logger = logging.getLogger("discord_bot")
 anomaly_logger = logging.getLogger("llm_anomaly")
 
 LLM_SERVICE_SETTINGS = LLMServiceSettings()
-
-# openai SDK 自帶 retry：rate limit / 連線錯誤 / 5xx 自動指數退避，預設 max_retries=2
-OPENAI_MAX_RETRIES = 2
 
 
 def _convert_messages_for_openai(
@@ -73,22 +72,12 @@ class PromptBundle:
     prompt_record_log: str
 
 
-class LLMAPIError(Exception):
-    """LLM /v1/chat/completions 非 2xx 或回應格式異常。
-
-    與 openai SDK 的連線層例外（`APITimeoutError` / `APIConnectionError`）區分：
-      - `status is not None` → HTTP 非 2xx（含 detail 原文）
-      - `status is None`     → 2xx 但回應 content 為空
-    """
-
-    def __init__(self, message: str, *, status: int | None = None, detail: str = "") -> None:
-        super().__init__(message)
-        self.status = status
-        self.detail = detail
+# 對外保留別名：caller 與 generate_reply 已捕捉此名稱
+LLMAPIError = LlmAPIError
 
 
 class LLMService:
-    """LLM 服務封裝（透過 OpenAI dialect SDK；對接 Ollama）。"""
+    """LLM 服務封裝（透過自寫 LlmHttpClient 走 OpenAI dialect wire）。"""
 
     def __init__(
         self,
@@ -101,64 +90,43 @@ class LLMService:
         self.model_default = model or self.settings.llm_model
         self.timeout = timeout if timeout is not None else self.settings.llm_timeout
         self.context_safety_rules = load_context_safety_rules(self.settings.llm_context_safety_rules_path)
-        # OpenAI 相容端點；api_key 對 Ollama 無作用但 SDK 必填
-        self._client = AsyncOpenAI(
-            base_url=f"{self.base_url.rstrip('/')}/v1",
-            api_key="ollama",
+        # 自寫薄殼：chat / embedding / models 都走它，retry 由它內部處理
+        self._client = LlmHttpClient(
+            base_url=self.base_url,
             timeout=float(self.timeout),
-            max_retries=OPENAI_MAX_RETRIES,
         )
-        self._runtime_model_cached_value: Optional[str] = None
+        self._runtime_config_cached: Optional[LLMRuntimeConfig] = None
         self._runtime_model_cached_mtime_ns: Optional[int] = None
-        self._runtime_think_cached_value: Optional[bool] = None
 
-    def _load_runtime_config_cached(self) -> bool:
-        """在 service 層讀取並快取 runtime config。"""
+    def _load_runtime_config_cached(self) -> Optional[LLMRuntimeConfig]:
+        """讀取 runtime config 並依 mtime 快取（檔案沒變不重讀）。"""
         runtime_config_path = Path(self.settings.llm_runtime_model_path)
 
         try:
             if not runtime_config_path.exists():
-                self._runtime_model_cached_value = None
+                self._runtime_config_cached = None
                 self._runtime_model_cached_mtime_ns = None
-                self._runtime_think_cached_value = None
-                return False
+                return None
 
             current_mtime_ns = runtime_config_path.stat().st_mtime_ns
             if (
                 self._runtime_model_cached_mtime_ns == current_mtime_ns
-                and self._runtime_model_cached_value is not None
-                and self._runtime_think_cached_value is not None
+                and self._runtime_config_cached is not None
             ):
-                return True
+                return self._runtime_config_cached
 
             runtime_config = load_llm_runtime_config(runtime_config_path)
-            candidate_model = runtime_config.model.strip()
-
-            if not candidate_model:
-                self._runtime_model_cached_value = None
-                self._runtime_think_cached_value = None
+            if not runtime_config.model.strip():
+                self._runtime_config_cached = None
                 self._runtime_model_cached_mtime_ns = None
-                return False
+                return None
 
-            self._runtime_model_cached_value = candidate_model or None
-            self._runtime_think_cached_value = runtime_config.think
+            self._runtime_config_cached = runtime_config
             self._runtime_model_cached_mtime_ns = current_mtime_ns
-            return True
+            return runtime_config
         except Exception as exc:
             logger.warning("讀取 runtime config 失敗: %s", exc)
-            return False
-
-    def _load_runtime_model_from_file(self) -> Optional[str]:
-        """回傳 runtime config 中的 model，並沿用 service 內快取。"""
-        if not self._load_runtime_config_cached():
             return None
-        return self._runtime_model_cached_value
-
-    def _load_runtime_think_from_file(self) -> Optional[bool]:
-        """回傳 runtime config 中的 think，並沿用 service 內快取。"""
-        if not self._load_runtime_config_cached():
-            return None
-        return self._runtime_think_cached_value
 
     def _resolve_runtime_model(self, override_model: Optional[str] = None) -> str:
         """解析本次請求模型：call override > runtime file > 預設。"""
@@ -166,9 +134,11 @@ class LLMService:
         if request_override:
             return request_override
 
-        runtime_model = self._load_runtime_model_from_file()
-        if runtime_model:
-            return runtime_model
+        runtime_config = self._load_runtime_config_cached()
+        if runtime_config is not None:
+            candidate = runtime_config.model.strip()
+            if candidate:
+                return candidate
 
         return self.model_default
 
@@ -177,15 +147,25 @@ class LLMService:
         return self._resolve_runtime_model(override_model)
 
     def resolve_request_think(self, override_think: Optional[bool] = None) -> bool:
-        """對外提供本次請求最終 think 設定（供記錄/觀測使用）。"""
+        """對外提供本次請求最終 think 設定（觀測用）。
+
+        新版優先序：override > backends.ollama.extra_body.think > 舊欄位 think > True。
+        非 ollama backend 此欄位無實際作用，仍保留以向後相容呼叫端。
+        """
         if override_think is not None:
             return bool(override_think)
 
-        runtime_think = self._load_runtime_think_from_file()
-        if runtime_think is not None:
-            return runtime_think
+        runtime_config = self._load_runtime_config_cached()
+        if runtime_config is None:
+            return True
 
-        return True
+        ollama_profile = runtime_config.backends.get("ollama")
+        if ollama_profile is not None:
+            think_in_profile = ollama_profile.extra_body.get("think")
+            if isinstance(think_in_profile, bool):
+                return think_in_profile
+
+        return runtime_config.think
 
     @staticmethod
     def _sanitize_text(text: str) -> str:
@@ -338,6 +318,73 @@ class LLMService:
         prompt_record_log = "\n".join(parts)
         return PromptBundle(messages=messages, prompt_record_log=prompt_record_log)
 
+    def _build_chat_extra_body(
+        self,
+        *,
+        think: Optional[bool],
+        repeat_penalty: Optional[float],
+        num_ctx: Optional[int],
+        keep_alive: Optional[str],
+    ) -> dict[str, Any]:
+        """依 runtime config 的 backend profile 組 extra_body。
+
+        切後端的單一控制點：
+          - 有 `backends[backend].extra_body` → 整包帶入；per-call Ollama-only knobs
+            （think / keep_alive / repeat_penalty / num_ctx）只在 backend == "ollama"
+            時 merge / override，其它後端忽略並 debug log。
+          - 沒設定 backends profile（舊 config）→ 沿用 Ollama-style 預設，向後相容。
+        """
+        runtime_config = self._load_runtime_config_cached()
+        backend = runtime_config.backend if runtime_config is not None else "ollama"
+        profile = (
+            runtime_config.backends.get(backend) if runtime_config is not None else None
+        )
+
+        if profile is not None:
+            extra_body: dict[str, Any] = dict(profile.extra_body)
+        else:
+            # 舊 config 後備：當 ollama 處理（think + options）
+            extra_body = {
+                "options": {
+                    "repeat_penalty": (
+                        repeat_penalty if repeat_penalty is not None
+                        else self.settings.default_repeat_penalty
+                    ),
+                    "num_ctx": num_ctx if num_ctx is not None else self.settings.default_num_ctx,
+                },
+            }
+
+        if backend == "ollama":
+            if think is not None:
+                extra_body["think"] = think
+            if keep_alive is not None:
+                extra_body["keep_alive"] = keep_alive
+            if repeat_penalty is not None or num_ctx is not None:
+                options = dict(extra_body.get("options", {}))
+                if repeat_penalty is not None:
+                    options["repeat_penalty"] = repeat_penalty
+                if num_ctx is not None:
+                    options["num_ctx"] = num_ctx
+                extra_body["options"] = options
+        else:
+            # 非 ollama 後端忽略 Ollama-only knobs；過去用 graceful-ignore，
+            # 現在改成根本不送，避免 vLLM 嚴格模式直接 4xx
+            ignored = [
+                name for name, val in (
+                    ("think", think),
+                    ("keep_alive", keep_alive),
+                    ("repeat_penalty", repeat_penalty),
+                    ("num_ctx", num_ctx),
+                ) if val is not None
+            ]
+            if ignored:
+                logger.debug(
+                    "chat_raw: backend=%s 不支援 Ollama-only knobs，忽略: %s",
+                    backend, ignored,
+                )
+
+        return extra_body
+
     async def chat_raw(
         self,
         *,
@@ -364,67 +411,50 @@ class LLMService:
         參數 `timeout`：None → 沿用 `self.timeout`（settings.llm_timeout，預設 300s）。
         長任務（如人格萃取）傳較大值覆蓋。
 
-        Ollama-only 欄位（`think` / `keep_alive` / `num_ctx` / `repeat_penalty`）透過
-        openai SDK 的 `extra_body` 透傳：在 Ollama 上有效，換到不解析這些欄位的後端
-        （LM Studio / Lemonade）會自動被忽略，不會 raise。
+        後端專屬參數（如 Ollama 的 `think` / `keep_alive` 或 Lemonade 的
+        `chat_template_kwargs`）由 `runtime_config.backends[backend].extra_body` 提供，
+        切後端時不需動 code。Ollama-only per-call knobs 只在 backend == "ollama" 時生效。
 
-        暫時性錯誤（連線層 / 5xx / rate limit）由 openai SDK 自動指數退避重試
-        `OPENAI_MAX_RETRIES` 次。HTTP 4xx 與回應 content 為空不重試。
+        暫時性錯誤（連線層 / 5xx / rate limit）由 LlmHttpClient 內部指數退避重試。
+        HTTP 4xx 與回應 content 為空不重試。
 
         Raises:
             LLMAPIError: HTTP 非 2xx 或回應 content 為空（已重試用盡）
-            APITimeoutError / APIConnectionError: 連線失敗（已重試用盡）
+            LlmTimeoutError / LlmConnectionError: 連線失敗（已重試用盡）
         """
         effective_temperature = (
             temperature if temperature is not None
             else self.settings.default_temperature
         )
         effective_top_p = top_p if top_p is not None else self.settings.default_top_p
-        effective_repeat_penalty = (
-            repeat_penalty if repeat_penalty is not None
-            else self.settings.default_repeat_penalty
-        )
-        effective_num_ctx = num_ctx if num_ctx is not None else self.settings.default_num_ctx
         effective_timeout = timeout if timeout is not None else self.timeout
 
-        # Ollama-only 透傳欄位；其它後端不解析會被忽略（graceful degradation）
-        extra_body: dict[str, Any] = {
-            "options": {
-                "repeat_penalty": effective_repeat_penalty,
-                "num_ctx": effective_num_ctx,
-            },
-        }
-        if think is not None:
-            extra_body["think"] = think
-        if keep_alive is not None:
-            extra_body["keep_alive"] = keep_alive
+        extra_body = self._build_chat_extra_body(
+            think=think,
+            repeat_penalty=repeat_penalty,
+            num_ctx=num_ctx,
+            keep_alive=keep_alive,
+        )
 
         # 把 Ollama 風格 images=[base64...] 轉成 OpenAI vision content array
         openai_messages = _convert_messages_for_openai(messages)
 
-        try:
-            completion = await self._client.with_options(
-                timeout=float(effective_timeout),
-            ).chat.completions.create(
-                model=model,
-                messages=openai_messages,
-                temperature=effective_temperature,
-                top_p=effective_top_p,
-                stream=False,
-                extra_body=extra_body,
-            )
-        except APIStatusError as exc:
-            raise LLMAPIError(
-                f"HTTP {exc.status_code}",
-                status=exc.status_code,
-                detail=str(exc),
-            ) from exc
+        completion = await self._client.chat_completion(
+            model=model,
+            messages=openai_messages,
+            temperature=effective_temperature,
+            top_p=effective_top_p,
+            timeout=float(effective_timeout),
+            extra_body=extra_body,
+        )
 
-        if not completion.choices:
+        choices = completion.get("choices") or []
+        if not choices:
             raise LLMAPIError("回應格式異常: 無 choices")
 
-        choice = completion.choices[0]
-        content = choice.message.content if choice.message else None
+        choice = choices[0]
+        message = choice.get("message") or {}
+        content = message.get("content")
         if content:
             return content
 
@@ -432,15 +462,15 @@ class LLMService:
         anomaly_logger.error(
             "empty_content model=%s finish_reason=%s usage=%s raw=%s",
             model,
-            choice.finish_reason,
-            completion.usage.model_dump() if completion.usage else None,
-            completion.model_dump_json(),
+            choice.get("finish_reason"),
+            completion.get("usage"),
+            completion,
         )
         raise LLMAPIError(
             "回應格式異常: 空 content",
             detail=str({
-                "finish_reason": choice.finish_reason,
-                "usage": completion.usage.model_dump() if completion.usage else None,
+                "finish_reason": choice.get("finish_reason"),
+                "usage": completion.get("usage"),
                 "see": "logs/llm_anomaly.log",
             }),
         )
@@ -507,7 +537,7 @@ class LLMService:
                 return "⚠️ LLM 回應失敗，請稍後再試。", bundle.prompt_record_log
             logger.error("LLM 回應格式異常: %s", exc.detail)
             return "⚠️ LLM 回應格式異常，請稍後再試。", bundle.prompt_record_log
-        except (APITimeoutError, APIConnectionError) as exc:
+        except (LlmTimeoutError, LlmConnectionError) as exc:
             logger.error("LLM 連線失敗: %s: %s", type(exc).__name__, exc)
             return "⚠️ 無法連線到 LLM 服務。", bundle.prompt_record_log
         except Exception as exc:
