@@ -18,15 +18,19 @@ asyncpg
 # 讓 SQLAlchemy 支援 PostgreSQL 的向量擴充
 pgvector
 
-# === LLM client（OpenAI dialect；對 Ollama / LM Studio / Lemonade 等相容後端通用）===
-# Python SDK，bot 主要 chat 路徑透過此 SDK 打 /v1/chat/completions
-openai
+# === LLM client（OpenAI dialect；對 Ollama / LM Studio / Lemonade / vLLM 等相容後端通用）===
+# 自寫 wire 薄殼（src/llm/llm_http_client.py），用 httpx 直接打 /v1/chat/completions、
+# /v1/embeddings 與 /v1/models。不依賴任何 LLM 廠商 SDK（openai 早期 v0→v1 大改、
+# Pydantic v1→v2 等都炸過 caller），也避開 LlamaIndex provider 子套件硬塞驗證
+# （如 llama-index-embeddings-openai 的 OpenAIEmbeddingModelType enum 白名單地雷）。
+# wire 規格 2023 年定下來後沒有破壞性更動，是事實標準；綁協定不綁 SDK。
+httpx
 
 # === LlamaIndex ===
-# LlamaIndex 核心框架
+# LlamaIndex 核心框架（BaseEmbedding 抽象介面、VectorStoreIndex、QueryEngine）。
+# 故意不用 llama-index-embeddings-* 系列：provider 子套件品質不齊、常硬塞驗證；
+# 改在 src/llm/safe_llm_embedding.py 直接 subclass BaseEmbedding 自己呼叫 wire。
 llama-index-core
-# Embedding 走 OpenAI dialect（含本機 Ollama 的 /v1/embeddings）
-llama-index-embeddings-openai
 # 讓 LlamaIndex 能夠讀寫 pgvector 資料庫
 llama-index-vector-stores-postgres
 # 關鍵字檢索
