@@ -14,6 +14,7 @@ LlamaIndex 核心介面 `BaseEmbedding` 穩定、不參與 wire IO，繼承它�
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from typing import Any, Callable, TypeVar
@@ -22,6 +23,8 @@ from llama_index.core.embeddings import BaseEmbedding
 from pydantic import PrivateAttr
 
 from llm.llm_http_client import LlmHttpClient
+
+from sys_settings.llm_settings import LLMRuntimeConfig, LLMServiceSettings
 
 logger = logging.getLogger("discord_bot")
 
@@ -99,18 +102,25 @@ class SafeLLMEmbedding(BaseEmbedding):
     內部直接用 `LlmHttpClient` 打 `/v1/embeddings`，不經 `openai` SDK 也不經
     `llama-index-embeddings-openai`，避免兩邊的 breaking change / 白名單地雷。
 
-    建構子簽名與舊版相同（`model_name` / `base_url` / `request_timeout`），
-    既有 caller（context_retriever / chat_persistence / intro_rag_port）零改動。
+    建構子保留舊簽名（`model_name` / `base_url` / `request_timeout`）；
+    新增 optional `backend` / `model_load_options` 兩個欄位讓 caller 帶入後端
+    與 per-model 載入參數，命中 Lemonade 時會在第一次 embed 之前先 push
+    `/api/v1/load` 確保 ctx_size 對齊。其他後端忽略這兩個欄位。
     """
 
-    # 內部 wire client，不參與 Pydantic 驗證
+    # 內部 wire client + per-instance 後端 / load options，不參與 Pydantic 驗證
     _http_client: LlmHttpClient = PrivateAttr()
+    _backend: str = PrivateAttr(default="ollama")
+    _load_options: dict[str, Any] | None = PrivateAttr(default=None)
 
     def __init__(
         self,
         model_name: str,
         base_url: str,
         request_timeout: float | None = None,
+        *,
+        backend: str = "ollama",
+        model_load_options: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
         timeout = float(request_timeout) if request_timeout is not None else 60.0
@@ -120,10 +130,28 @@ class SafeLLMEmbedding(BaseEmbedding):
             base_url=base_url,
             timeout=timeout,
         )
+        self._backend = backend
+        self._load_options = model_load_options or None
+
+    def _ensure_lemonade_loaded(self) -> None:
+        """打 embedding 之前先確認 Lemonade 已用對的 ctx_size 載入 model。
+
+        Lemonade 以外的 backend 不適用，直接 return。`LlmHttpClient.ensure_lemonade_model`
+        內部對未變動的 (model, options) 組合會 cache 命中 → 第二次以後 ~ms 級。
+        """
+        if self._backend != "lemonade":
+            return
+        if not self._load_options:
+            return
+        self._http_client.ensure_lemonade_model(
+            model=self.model_name,
+            options=self._load_options,
+        )
 
     # ---------- sync embed（LlamaIndex 內部某些路徑會走 sync）----------
 
     def _embed_one(self, text: str) -> list[float]:
+        self._ensure_lemonade_loaded()
         return self._http_client.embedding(model=self.model_name, input=text)[0]
 
     def _get_text_embedding(self, text: str) -> list[float]:
@@ -145,6 +173,7 @@ class SafeLLMEmbedding(BaseEmbedding):
         # 避免同一執行緒重入 semaphore（threading.Semaphore 非 reentrant）。
         with _EMBED_SEMAPHORE:
             try:
+                self._ensure_lemonade_loaded()
                 return self._http_client.embedding(model=self.model_name, input=texts)
             except Exception as exc:
                 logger.warning(
@@ -156,6 +185,13 @@ class SafeLLMEmbedding(BaseEmbedding):
     # ---------- async embed ----------
 
     async def _aembed_one(self, text: str) -> list[float]:
+        # ensure_lemonade_model 是 sync HTTP，async path 包 to_thread 避免阻塞 loop
+        if self._backend == "lemonade" and self._load_options:
+            await asyncio.to_thread(
+                self._http_client.ensure_lemonade_model,
+                model=self.model_name,
+                options=self._load_options,
+            )
         result = await self._http_client.aembedding(model=self.model_name, input=text)
         return result[0]
 
@@ -173,3 +209,30 @@ class SafeLLMEmbedding(BaseEmbedding):
             return await self._aembed_one(query)
         except Exception:
             return self._get_query_embedding(query)
+
+
+def make_safe_llm_embedding(
+    *,
+    settings: LLMServiceSettings,
+    runtime_config: LLMRuntimeConfig,
+) -> SafeLLMEmbedding:
+    """Factory：從 settings + runtime_config 組裝 `SafeLLMEmbedding`。
+
+    自動帶入後端類型 + 該 embedding model 在 `model_load_options` 裡的設定，
+    讓 caller 不用重複組裝這些後端不可知的 wiring（context_retriever /
+    chat_persistence / intro_rag_port 三處共用）。
+    """
+    backend = runtime_config.backend
+    profile = runtime_config.backends.get(backend)
+    options = (
+        profile.model_load_options.get(runtime_config.embed_model)
+        if profile is not None
+        else None
+    )
+    return SafeLLMEmbedding(
+        model_name=runtime_config.embed_model,
+        base_url=settings.llm_base_url,
+        request_timeout=settings.llm_timeout,
+        backend=backend,
+        model_load_options=options,
+    )

@@ -20,11 +20,12 @@ import psycopg2
 try:
     from llama_index.core import Document, VectorStoreIndex
     from llama_index.vector_stores.postgres import PGVectorStore
-    from llm.safe_llm_embedding import SafeLLMEmbedding
+    from llm.safe_llm_embedding import SafeLLMEmbedding, make_safe_llm_embedding
 except Exception:  # pragma: no cover - 依賴可能在部份環境尚未安裝
     Document = None
     VectorStoreIndex = None
     SafeLLMEmbedding = None
+    make_safe_llm_embedding = None
     PGVectorStore = None
 
 
@@ -259,10 +260,9 @@ class PgVectorIntroRAGPort:
         with self._index_lock:
             if self._embed_model is not None and self._embed_model_name == embed_model_name:
                 return self._embed_model
-            self._embed_model = SafeLLMEmbedding(
-                model_name=embed_model_name,
-                base_url=self.settings.llm_base_url,
-                request_timeout=self.settings.llm_timeout,
+            self._embed_model = make_safe_llm_embedding(
+                settings=self.settings,
+                runtime_config=runtime_config,
             )
             self._embed_model_name = embed_model_name
             self._index = None

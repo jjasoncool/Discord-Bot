@@ -3,7 +3,7 @@
   "model": "Gemma-4-26B-A4B-it-GGUF",
   "embed_model": "Qwen3-Embedding-0.6B-GGUF",
   "moderation_model": "user.Qwen2.5-7B-Instruct-GGUF-Q4_K_M",
-  "personality_model": "user.Qwen2.5-7B-Instruct-GGUF-Q4_K_M",
+  "personality_model": "Qwen3-14B-GGUF",
   "backends": {
     "ollama": {
       "extra_body": {
@@ -21,6 +21,20 @@
           "enable_thinking": true
         },
         "cache_prompt": true
+      },
+      "model_load_options": {
+        "Gemma-4-26B-A4B-it-GGUF": {
+          "ctx_size": 12288
+        },
+        "Qwen3-14B-GGUF": {
+          "ctx_size": 32768
+        },
+        "user.Qwen2.5-7B-Instruct-GGUF-Q4_K_M": {
+          "ctx_size": 4096
+        },
+        "Qwen3-Embedding-0.6B-GGUF": {
+          "ctx_size": 4096
+        }
       }
     },
     "vllm": {

@@ -66,7 +66,7 @@ _vector_index_lock = threading.Lock()
 
 
 def _load_embed_model_name() -> str:
-    """從 Ollama runtime 設定讀取 embedding model，失敗則回退預設。"""
+    """從 runtime 設定讀取 embedding model，失敗則回退預設。"""
     runtime_config = load_llm_runtime_config(LLM_SETTINGS.llm_runtime_model_path)
     return runtime_config.embed_model
 
@@ -74,7 +74,8 @@ def _load_embed_model_name() -> str:
 def _get_embed_model(logger: logging.Logger) -> Any | None:
     """延遲初始化 Embedding 模型，避免啟動時阻塞。"""
     global _EMBED_MODEL, _EMBED_MODEL_NAME
-    embed_model_name = _load_embed_model_name()
+    runtime_config = load_llm_runtime_config(LLM_SETTINGS.llm_runtime_model_path)
+    embed_model_name = runtime_config.embed_model
     if _EMBED_MODEL is not None and _EMBED_MODEL_NAME == embed_model_name:
         return _EMBED_MODEL
 
@@ -83,10 +84,10 @@ def _get_embed_model(logger: logging.Logger) -> Any | None:
         return None
 
     try:
-        _EMBED_MODEL = SafeLLMEmbedding(
-            model_name=embed_model_name,
-            base_url=LLM_SETTINGS.llm_base_url,
-            request_timeout=LLM_SETTINGS.llm_timeout,
+        from llm.safe_llm_embedding import make_safe_llm_embedding
+        _EMBED_MODEL = make_safe_llm_embedding(
+            settings=LLM_SETTINGS,
+            runtime_config=runtime_config,
         )
         _EMBED_MODEL_NAME = embed_model_name
     except Exception as exc:

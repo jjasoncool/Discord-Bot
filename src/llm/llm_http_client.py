@@ -17,13 +17,28 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import threading
 import time
 from typing import Any
 
 import httpx
 
 logger = logging.getLogger("discord_bot")
+
+# 跨 LlmHttpClient instance 共用：(host, model, options_json) → True
+# Lemonade 的「已載入此 model + 此 options」狀態是 server 端全域屬性，
+# bot 內 LLMService / SafeLLMEmbedding 各有自己的 client 但打的是同一個 Lemonade，
+# 共用 cache 才不會每個 instance 重複 push 一遍 /api/v1/load。
+_LEMONADE_LOADED: dict[tuple[str, str, str], bool] = {}
+_LEMONADE_LOAD_LOCK = threading.Lock()
+
+
+def reset_lemonade_load_cache() -> None:
+    """清掉 Lemonade load cache（測試 / Lemonade 端被外部改動時手動觸發 re-ensure 用）。"""
+    with _LEMONADE_LOAD_LOCK:
+        _LEMONADE_LOADED.clear()
 
 # 連線層 / 暫時性錯誤的指數退避：對齊原 openai SDK max_retries=2
 DEFAULT_MAX_RETRIES = 2
@@ -80,8 +95,9 @@ class LlmHttpClient:
         max_retries: int = DEFAULT_MAX_RETRIES,
         api_key: str = "no-auth",
     ) -> None:
-        # base_url 在實例化時固定為 "<host>/v1"，後續所有 path 走相對拼接
-        self._base = base_url.rstrip("/") + "/v1"
+        # 保存 host 而非預組 /v1：因為 Lemonade 的 admin API 在 /api/v1/...，
+        # OpenAI dialect 在 /v1/...，兩條路徑共用同一台 server 不同 prefix
+        self._host = base_url.rstrip("/")
         self._timeout = timeout
         self._max_retries = max_retries
         self._headers = {
@@ -156,12 +172,79 @@ class LlmHttpClient:
         data = self._get_json("/models")
         return [m.get("id", "") for m in data.get("data", []) if m.get("id")]
 
+    # ---------- Lemonade admin（/api/v1/load）----------
+
+    def ensure_lemonade_model(
+        self,
+        *,
+        model: str,
+        options: dict[str, Any] | None,
+        load_timeout: float = 180.0,
+    ) -> None:
+        """確認 Lemonade 已用指定 `recipe_options` 載入 `model`，若沒有就觸發 reload。
+
+        process 內 cache：同一個 (host, model, options) 組合只會打一次 `/api/v1/load`。
+        Lemonade 端對未變動的 options 通常會 short-circuit 不重載，但避免每次 chat /
+        embed 都打一次 admin API 還是值得 cache。
+
+        本方法是 sync HTTP；async caller 請用 `asyncio.to_thread` 包起來避免阻塞 loop。
+
+        非 Lemonade 後端不該呼叫這個 method（caller 負責判斷 backend type）。
+        """
+        if not options:
+            return
+        opts_json = json.dumps(options, sort_keys=True)
+        cache_key = (self._host, model, opts_json)
+        with _LEMONADE_LOAD_LOCK:
+            if cache_key in _LEMONADE_LOADED:
+                return
+            self._lemonade_load_model(
+                model_name=model,
+                recipe_options=options,
+                timeout=load_timeout,
+            )
+            _LEMONADE_LOADED[cache_key] = True
+            logger.info(
+                "Lemonade model loaded: model=%s recipe_options=%s",
+                model, options,
+            )
+
+    def _lemonade_load_model(
+        self,
+        *,
+        model_name: str,
+        recipe_options: dict[str, Any],
+        timeout: float,
+    ) -> None:
+        """POST /api/v1/load（Lemonade 原生 admin API）。
+
+        Lemonade 載入大模型可能要 30-60 秒，因此用較長的 timeout（呼叫端傳入）。
+        重試政策跟一般 wire 不同：admin API 失敗多半是 server 設定問題，
+        retry 沒意義，直接拋 `LlmAPIError` / `LlmConnectionError` 出去。
+        """
+        url = self._host + "/api/v1/load"
+        body: dict[str, Any] = {
+            "model_name": model_name,
+            "recipe_options": dict(recipe_options),
+        }
+        try:
+            resp = self._sync.post(url, json=body, timeout=timeout)
+        except httpx.TimeoutException as exc:
+            raise LlmTimeoutError(
+                f"Lemonade /api/v1/load timed out after {timeout}s for {model_name}"
+            ) from exc
+        except httpx.RequestError as exc:
+            raise LlmConnectionError(
+                f"Lemonade /api/v1/load 連線錯誤 ({model_name}): {exc}"
+            ) from exc
+        self._raise_for_status(resp)
+
     # ---------- low-level：retry + error mapping ----------
 
     def _get_json(self, path: str) -> dict[str, Any]:
         for attempt in range(self._max_retries + 1):
             try:
-                resp = self._sync.get(self._base + path)
+                resp = self._sync.get(self._host + "/v1" + path)
                 self._raise_for_status(resp)
                 return resp.json()
             except httpx.TimeoutException as exc:
@@ -181,7 +264,7 @@ class LlmHttpClient:
     def _post_json(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         for attempt in range(self._max_retries + 1):
             try:
-                resp = self._sync.post(self._base + path, json=body)
+                resp = self._sync.post(self._host + "/v1" + path, json=body)
                 self._raise_for_status(resp)
                 return resp.json()
             except httpx.TimeoutException as exc:
@@ -209,7 +292,7 @@ class LlmHttpClient:
         for attempt in range(self._max_retries + 1):
             try:
                 resp = await self._async.post(
-                    self._base + path,
+                    self._host + "/v1" + path,
                     json=body,
                     timeout=eff_timeout,
                 )

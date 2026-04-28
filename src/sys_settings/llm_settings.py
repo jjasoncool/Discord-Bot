@@ -106,13 +106,22 @@ class LLMContextSafetyRules(BaseModel):
 
 
 class BackendProfile(BaseModel):
-    """單一後端的 wire 層參數設定（會原封不動 top-level merge 到 chat completion body）。
+    """單一後端的設定 profile。
 
-    用途：把 Ollama-only 的 `think` / `keep_alive` / `options.num_ctx` 等與
-    Lemonade 的 `chat_template_kwargs` 等放在各自 profile 內，切後端時不需動 code。
+    `extra_body`：chat completion request body 的後端專屬 top-level merge 欄位
+      （Ollama 的 `think` / `keep_alive` / `options.num_ctx`、Lemonade 的
+      `chat_template_kwargs` / `cache_prompt` 等）。
+
+    `model_load_options`：server admin API 用的 per-model 載入參數
+      （目前只 Lemonade 有用，bot 啟動或第一次呼叫某 model 時 push 到
+      `/api/v1/load`，避免每次調 ctx_size 都要去 Lemonade UI 手動設）。
+      key 是 model id，value 是 Lemonade `recipe_options` dict（如
+      `{"ctx_size": 12288}`）。Ollama / vLLM 在這個欄位就空著（Ollama 走
+      per-request `extra_body.options.num_ctx`；vLLM 是 server 啟動參數）。
     """
 
     extra_body: dict[str, Any] = Field(default_factory=dict)
+    model_load_options: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 class LLMRuntimeConfig(BaseModel):

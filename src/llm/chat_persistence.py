@@ -183,7 +183,7 @@ def _get_chat_index():
 
     from llama_index.core import VectorStoreIndex
     from llama_index.vector_stores.postgres import PGVectorStore
-    from llm.safe_llm_embedding import SafeLLMEmbedding
+    from llm.safe_llm_embedding import make_safe_llm_embedding
     from sys_settings.llm_settings import LLMServiceSettings, load_llm_runtime_config
     from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
 
@@ -198,10 +198,9 @@ def _get_chat_index():
     with _chat_index_lock:
         if _chat_index_cache is not None and _chat_index_cache[0] == embed_model_name:
             return _chat_index_cache[1]
-        embed_model = SafeLLMEmbedding(
-            model_name=embed_model_name,
-            base_url=settings.llm_base_url,
-            request_timeout=settings.llm_timeout,
+        embed_model = make_safe_llm_embedding(
+            settings=settings,
+            runtime_config=runtime_config,
         )
         vector_store = PGVectorStore.from_params(
             database=settings.pgvector_db,

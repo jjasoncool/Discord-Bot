@@ -6,6 +6,7 @@ LLM 服務模組
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, List, Optional
 
@@ -318,6 +319,43 @@ class LLMService:
         prompt_record_log = "\n".join(parts)
         return PromptBundle(messages=messages, prompt_record_log=prompt_record_log)
 
+    async def _ensure_model_loaded(self, model: str) -> None:
+        """確認後端已用 runtime config 指定的 options 載入此 model（目前只 Lemonade 有效）。
+
+        Lemonade 預設 ctx_size 是 4096，對 personality（chat_log 13K+ token）會
+        `Context size has been exceeded` 直接 5xx。在這裡 push `recipe_options.ctx_size`
+        到 `/api/v1/load`，bot 變成 ctx_size 的單一控制點，不用每次去 Lemonade UI 改。
+
+        Ollama 走 per-request `extra_body.options.num_ctx`、vLLM 是 server 啟動參數，
+        都不需要也不能透過這個路徑控制 → short-circuit。
+        """
+        runtime_config = self._load_runtime_config_cached()
+        if runtime_config is None:
+            return
+        if runtime_config.backend != "lemonade":
+            return
+        profile = runtime_config.backends.get("lemonade")
+        if profile is None:
+            return
+        options = profile.model_load_options.get(model)
+        if not options:
+            return
+        # admin API 是 sync HTTP，包 to_thread 避免阻塞 event loop
+        # （load 本身可能 30-60 秒；cache 命中時 ~ms 級也包著保險）
+        try:
+            await asyncio.to_thread(
+                self._client.ensure_lemonade_model,
+                model=model,
+                options=options,
+            )
+        except (LlmAPIError, LlmTimeoutError, LlmConnectionError) as exc:
+            # 載入失敗不直接 raise：讓後續 chat_completion 嘗試打舊 ctx；如果真的撞 ctx
+            # 由 chat_completion 那層 raise 才有完整 detail。這裡只 log。
+            logger.warning(
+                "Lemonade model load 失敗（model=%s options=%s）: %s",
+                model, options, exc,
+            )
+
     def _build_chat_extra_body(
         self,
         *,
@@ -435,6 +473,9 @@ class LLMService:
             num_ctx=num_ctx,
             keep_alive=keep_alive,
         )
+
+        # 確認 Lemonade 已用對的 ctx_size 載入此 model（其他後端 short-circuit）
+        await self._ensure_model_loaded(model)
 
         # 把 Ollama 風格 images=[base64...] 轉成 OpenAI vision content array
         openai_messages = _convert_messages_for_openai(messages)
