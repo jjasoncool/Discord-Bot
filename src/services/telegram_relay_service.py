@@ -29,6 +29,48 @@ from telegram_scraper.tg_config import normalize_channel_identifier
 logger = logging.getLogger("discord_bot")
 
 
+def apply_spoiler_entities(text: str, entities: list[dict] | None) -> str:
+    """把 Telegram MessageEntitySpoiler 範圍轉成 Discord 的 `||...||` 暴雷標記。
+
+    Telegram 的 entity offset/length 以 UTF-16 code units 計，須先將文字轉為 UTF-16-LE
+    bytes 再切片，否則 BMP 外字元（部分 emoji / 罕字）會偏移。
+    其他 entity 類型（bold/italic 等）目前不處理。
+    """
+    if not text or not entities:
+        return text
+
+    spoilers = [
+        ent for ent in entities
+        if isinstance(ent, dict) and ent.get("type") == "MessageEntitySpoiler"
+    ]
+    if not spoilers:
+        return text
+
+    text_bytes = text.encode("utf-16-le")
+    open_marker = "||".encode("utf-16-le")
+    close_marker = "||".encode("utf-16-le")
+
+    # 從後往前處理，避免插入記號後位移失效
+    for ent in sorted(spoilers, key=lambda e: int(e.get("offset", 0)), reverse=True):
+        offset_units = int(ent.get("offset", 0))
+        length_units = int(ent.get("length", 0))
+        if length_units <= 0:
+            continue
+        start = offset_units * 2
+        end = start + length_units * 2
+        if start < 0 or end > len(text_bytes):
+            continue
+        text_bytes = (
+            text_bytes[:start]
+            + open_marker
+            + text_bytes[start:end]
+            + close_marker
+            + text_bytes[end:]
+        )
+
+    return text_bytes.decode("utf-16-le")
+
+
 @dataclass
 class TelegramMediaRecord:
     file_rel_path: str
@@ -52,6 +94,7 @@ class TelegramMessageRecord:
     chat_title: Optional[str] = None
     grouped_id: Optional[int] = None
     media_items: list[TelegramMediaRecord] = field(default_factory=list)
+    entities: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -282,7 +325,8 @@ class TelegramMessageRepository:
                     message_date,
                     has_media,
                     chat_title,
-                    grouped_id
+                    grouped_id,
+                    entities
                 FROM telegram_messages
                 WHERE id = $1;
                 """,
@@ -326,6 +370,20 @@ class TelegramMessageRepository:
         raw_gid = message_row["grouped_id"]
         grouped_id = int(raw_gid) if raw_gid is not None else None
 
+        raw_entities = message_row["entities"]
+        if raw_entities is None:
+            entities: list[dict] = []
+        elif isinstance(raw_entities, str):
+            try:
+                parsed = json.loads(raw_entities)
+                entities = parsed if isinstance(parsed, list) else []
+            except json.JSONDecodeError:
+                entities = []
+        elif isinstance(raw_entities, list):
+            entities = raw_entities
+        else:
+            entities = []
+
         return TelegramMessageRecord(
             message_pk=int(message_row["id"]),
             telegram_chat_id=int(message_row["telegram_chat_id"]),
@@ -336,6 +394,7 @@ class TelegramMessageRepository:
             chat_title=message_row["chat_title"],
             grouped_id=grouped_id,
             media_items=media_items,
+            entities=entities,
         )
 
 
@@ -524,7 +583,9 @@ class TelegramRenderAdapter:
                 )
             )
 
-        content = (message.text or "").strip()
+        # 先以 entities 還原 spoiler 等格式，再做長度截斷，避免切到 markdown 中間
+        rendered_text = apply_spoiler_entities(message.text or "", message.entities)
+        content = rendered_text.strip()
         description = content[:4000] + ("..." if len(content) > 4000 else "")
 
         source_name = message.chat_title or self._get_source_channel_name()

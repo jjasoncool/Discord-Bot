@@ -179,6 +179,29 @@ def _build_media_item(message: Any, file_rel_path: str) -> dict:
     }
 
 
+def _serialize_entities(message: Any) -> list[dict] | None:
+    """把 Telethon 的 message.entities 序列化成 JSON 友善的 list。
+
+    保留所有 entity（不只 spoiler），讓 relay 端日後可擴充支援 bold/italic 等格式。
+    offset/length 沿用 Telegram 原語意（UTF-16 code units）。
+    """
+    entities = getattr(message, "entities", None) or []
+    if not entities:
+        return None
+    serialized: list[dict] = []
+    for ent in entities:
+        offset = getattr(ent, "offset", None)
+        length = getattr(ent, "length", None)
+        if offset is None or length is None:
+            continue
+        serialized.append({
+            "type": type(ent).__name__,
+            "offset": int(offset),
+            "length": int(length),
+        })
+    return serialized or None
+
+
 _chat_title_cache: dict[int, str | None] = {}
 
 
@@ -246,6 +269,9 @@ async def _process_message(
     raw_grouped_id = getattr(message, "grouped_id", None)
     grouped_id = int(raw_grouped_id) if raw_grouped_id else None
 
+    # 解析 message entities（spoiler、bold 等）以便 relay 端還原 Discord markdown
+    entities = _serialize_entities(message)
+
     # 1. 先 upsert 訊息（取得 pk 與是否新增）
     message_pk, inserted_new = await db.upsert_message_only(
         telegram_chat_id=int(chat_id or 0),
@@ -255,6 +281,7 @@ async def _process_message(
         has_media=has_media,
         chat_title=resolved_chat_title,
         grouped_id=grouped_id,
+        entities=entities,
     )
 
     # 2. 媒體下載（僅在需要時：新訊息 或 尚無媒體記錄）

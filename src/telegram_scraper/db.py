@@ -1,4 +1,5 @@
 import asyncio
+import json
 import asyncpg
 import re
 
@@ -91,25 +92,12 @@ class TelegramDatabase:
                     message_date TIMESTAMPTZ,
                     has_media BOOLEAN NOT NULL DEFAULT FALSE,
                     chat_title TEXT,
+                    grouped_id BIGINT,
+                    entities JSONB,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     UNIQUE (telegram_chat_id, telegram_message_id)
                 );
-                """
-            )
-
-            # 既有資料庫補欄位
-            await conn.execute(
-                """
-                ALTER TABLE telegram_messages
-                ADD COLUMN IF NOT EXISTS chat_title TEXT;
-                """
-            )
-
-            await conn.execute(
-                """
-                ALTER TABLE telegram_messages
-                ADD COLUMN IF NOT EXISTS grouped_id BIGINT;
                 """
             )
 
@@ -118,6 +106,13 @@ class TelegramDatabase:
                 CREATE INDEX IF NOT EXISTS idx_telegram_messages_grouped_id
                 ON telegram_messages (grouped_id)
                 WHERE grouped_id IS NOT NULL;
+                """
+            )
+
+            await conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_telegram_messages_date
+                ON telegram_messages (message_date DESC);
                 """
             )
 
@@ -143,13 +138,6 @@ class TelegramDatabase:
 
             await conn.execute(
                 """
-                CREATE INDEX IF NOT EXISTS idx_telegram_messages_date
-                ON telegram_messages (message_date DESC);
-                """
-            )
-
-            await conn.execute(
-                """
                 CREATE INDEX IF NOT EXISTS idx_telegram_message_media_message_id
                 ON telegram_message_media (message_id);
                 """
@@ -165,10 +153,13 @@ class TelegramDatabase:
         has_media: bool,
         chat_title: str | None = None,
         grouped_id: int | None = None,
+        entities: list[dict] | None = None,
     ) -> tuple[int, bool]:
         """Upsert 訊息（不含媒體），回傳 (message_pk, inserted_new_message)。"""
         if self.pool is None:
             raise RuntimeError("資料庫尚未 connect")
+
+        entities_json = json.dumps(entities) if entities else None
 
         async with self.pool.acquire() as conn:
             insert_row = await conn.fetchrow(
@@ -180,9 +171,10 @@ class TelegramDatabase:
                     message_date,
                     has_media,
                     chat_title,
-                    grouped_id
+                    grouped_id,
+                    entities
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
                 ON CONFLICT (telegram_chat_id, telegram_message_id) DO NOTHING
                 RETURNING id;
                 """,
@@ -193,6 +185,7 @@ class TelegramDatabase:
                 has_media,
                 chat_title,
                 grouped_id,
+                entities_json,
             )
 
             if insert_row is not None:
@@ -223,6 +216,7 @@ class TelegramDatabase:
                     has_media = has_media OR $4,
                     chat_title = COALESCE(chat_title, $5),
                     grouped_id = COALESCE(grouped_id, $6),
+                    entities = COALESCE(entities, $7::jsonb),
                     updated_at = NOW()
                 WHERE id = $1;
                 """,
@@ -232,6 +226,7 @@ class TelegramDatabase:
                 has_media,
                 chat_title,
                 grouped_id,
+                entities_json,
             )
             return message_pk, False
 
@@ -304,121 +299,3 @@ class TelegramDatabase:
                 self.notify_channel,
                 str(message_pk),
             )
-
-    async def upsert_message_with_media(
-        self,
-        *,
-        telegram_chat_id: int,
-        telegram_message_id: int,
-        text: str,
-        message_date,
-        has_media: bool,
-        media_items: list[dict],
-    ) -> tuple[int, bool]:
-        """Upsert 訊息與媒體，回傳 (message_pk, inserted_new_message)。"""
-        if self.pool is None:
-            raise RuntimeError("資料庫尚未 connect")
-
-        async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                insert_row = await conn.fetchrow(
-                    """
-                    INSERT INTO telegram_messages (
-                        telegram_chat_id,
-                        telegram_message_id,
-                        text,
-                        message_date,
-                        has_media
-                    )
-                    VALUES ($1, $2, $3, $4, $5)
-                    ON CONFLICT (telegram_chat_id, telegram_message_id) DO NOTHING
-                    RETURNING id;
-                    """,
-                    telegram_chat_id,
-                    telegram_message_id,
-                    text,
-                    message_date,
-                    has_media,
-                )
-
-                inserted_new_message = insert_row is not None
-                if inserted_new_message:
-                    message_pk = int(insert_row["id"])
-                else:
-                    existing_row = await conn.fetchrow(
-                        """
-                        SELECT id
-                        FROM telegram_messages
-                        WHERE telegram_chat_id = $1 AND telegram_message_id = $2;
-                        """,
-                        telegram_chat_id,
-                        telegram_message_id,
-                    )
-                    if existing_row is None:
-                        raise RuntimeError("訊息 upsert 後找不到既有資料")
-
-                    message_pk = int(existing_row["id"])
-
-                    await conn.execute(
-                        """
-                        UPDATE telegram_messages
-                        SET
-                            text = CASE
-                                WHEN COALESCE(text, '') = '' AND COALESCE($2, '') <> '' THEN $2
-                                ELSE text
-                            END,
-                            message_date = COALESCE(message_date, $3),
-                            has_media = has_media OR $4,
-                            updated_at = NOW()
-                        WHERE id = $1;
-                        """,
-                        message_pk,
-                        text,
-                        message_date,
-                        has_media,
-                    )
-
-                for media in media_items:
-                    await conn.execute(
-                        """
-                        INSERT INTO telegram_message_media (
-                            message_id,
-                            media_type,
-                            file_rel_path,
-                            mime_type,
-                            file_size,
-                            width,
-                            height,
-                            duration_sec,
-                            is_spoiler
-                        )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                        ON CONFLICT (message_id, file_rel_path)
-                        DO UPDATE SET
-                            mime_type = COALESCE(EXCLUDED.mime_type, telegram_message_media.mime_type),
-                            file_size = COALESCE(EXCLUDED.file_size, telegram_message_media.file_size),
-                            width = COALESCE(EXCLUDED.width, telegram_message_media.width),
-                            height = COALESCE(EXCLUDED.height, telegram_message_media.height),
-                            duration_sec = COALESCE(EXCLUDED.duration_sec, telegram_message_media.duration_sec),
-                            is_spoiler = EXCLUDED.is_spoiler,
-                            updated_at = NOW();
-                        """,
-                        message_pk,
-                        media["media_type"],
-                        media["file_rel_path"],
-                        media.get("mime_type"),
-                        media.get("file_size"),
-                        media.get("width"),
-                        media.get("height"),
-                        media.get("duration_sec"),
-                        bool(media.get("is_spoiler", False)),
-                    )
-
-                if inserted_new_message:
-                    await conn.execute(
-                        "SELECT pg_notify($1, $2)",
-                        self.notify_channel,
-                        str(message_pk),
-                    )
-
-                return message_pk, inserted_new_message
