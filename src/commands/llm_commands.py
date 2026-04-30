@@ -3,6 +3,7 @@ from pathlib import Path
 import asyncio
 import functools
 import json
+import time
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
 from typing import NamedTuple
@@ -120,6 +121,44 @@ def askai_cooldown(interaction: discord.Interaction):
     )
 
 
+def _strip_images_for_log(
+    messages: list[dict[str, object]] | None,
+) -> list[dict[str, object]] | None:
+    """把 messages_sent 內的 base64 圖片換成佔位符，避免 jsonl 單筆暴增到 MB 等級。
+
+    一張 1MB 圖 ≈ 1.3MB base64，原樣寫進 jsonl 會讓檔案幾天就難 grep / tail。
+    保留長度資訊讓事後仍能判斷是否有圖、有幾張。
+    支援兩種格式：
+      - Ollama 風格：{"role": "user", "content": "...", "images": [b64, ...]}
+      - OpenAI vision：{"role": "user", "content": [{"type":"image_url", "image_url": {"url": "data:..."}}]}
+    """
+    if not messages:
+        return messages
+    sanitized: list[dict[str, object]] = []
+    for msg in messages:
+        new_msg = dict(msg)
+        if isinstance(new_msg.get("images"), list):
+            new_msg["images"] = [
+                f"<image_b64 stripped, len={len(img) if isinstance(img, str) else 0}>"
+                for img in new_msg["images"]
+            ]
+        content = new_msg.get("content")
+        if isinstance(content, list):
+            new_parts: list[object] = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    url = (part.get("image_url") or {}).get("url", "")
+                    new_parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"<image_url stripped, len={len(url)}>"},
+                    })
+                else:
+                    new_parts.append(part)
+            new_msg["content"] = new_parts
+        sanitized.append(new_msg)
+    return sanitized
+
+
 def append_askai_response_log(
     *,
     interaction: discord.Interaction,
@@ -130,14 +169,30 @@ def append_askai_response_log(
     discord_meta: dict[str, int],
     rag_meta: dict[str, int | bool | str],
     web_meta: dict[str, object] | None = None,
+    trace_id: str | None = None,
+    messages_sent: list[dict[str, object]] | None = None,
+    error_kind: str | None = None,
 ) -> None:
-    """將每次 askai 的輸入/輸出與必要統計 append 到 jsonl，供後續觀察改善。"""
+    """將每次 askai 的輸入/輸出與必要統計 append 到 jsonl，供後續觀察改善。
+
+    `trace_id` 可串到 discord_bot.log / askai_prompt.txt / llm_anomaly.log。
+    `messages_sent` 只在失敗時保留（含圖片佔位符），成功時不存——askai_prompt.txt
+    已記錄同源 prompt_record_log，重複落盤一份完整 messages 會讓 jsonl 體積膨脹過快。
+    `error_kind` 在失敗時標記類型（no_choices / empty_content / http_error / timeout / connection / unknown）。
+    """
     guild_id = interaction.guild.id if interaction.guild else None
     channel_id = interaction.channel.id if interaction.channel else None
     author_name = getattr(interaction.user, "display_name", interaction.user.name)
 
+    # 只在錯誤時保留 messages_sent；圖片 base64 一律換成佔位符
+    persisted_messages = (
+        _strip_images_for_log(messages_sent) if error_kind is not None else None
+    )
+
     record = {
         "time": datetime.now(TAIPEI_TZ).isoformat(),
+        "trace_id": trace_id,
+        "error_kind": error_kind,
         "guild_id": guild_id,
         "channel_id": channel_id,
         "user_id": interaction.user.id,
@@ -146,6 +201,7 @@ def append_askai_response_log(
         "reply": reply,
         "model": model,
         "think": think,
+        "messages_sent": persisted_messages,
         "discord_context_meta": discord_meta,
         "rag_context_meta": rag_meta,
         "web_context_meta": web_meta,
@@ -280,6 +336,11 @@ class LLMCommands(commands.Cog):
         cancel_event: asyncio.Event | None = None,
     ):
         """實際處理 AI 回覆流程（在隊列鎖內執行）"""
+        # trace_id 串接所有 askai log（discord_bot.log / askai_prompt.txt /
+        # askai_response_history.jsonl / llm_anomaly.log）— 出錯時複製此 ID 即可一次定位
+        trace_id = f"ask-{str(interaction.user.id)[-4:]}-{int(time.time() * 1000)}"
+        logger.info("askai 開始 trace=%s user_id=%s q=%r", trace_id, interaction.user.id, question[:30])
+
         system_prompt = load_system_prompt()
 
         cancel_view = None
@@ -568,6 +629,7 @@ class LLMCommands(commands.Cog):
             # chat model 在最後一次 /askai 後 1h 內保持常駐，避開反覆 unload/reload
             # 觸發的 Windows ephemeral port 與 runner crash；閒置超過 1h 才釋放 VRAM
             keep_alive="1h",
+            trace_id=trace_id,
         ))
 
         # 同時等 LLM 回覆和取消事件
@@ -583,9 +645,14 @@ class LLMCommands(commands.Cog):
             await asyncio.gather(llm_task, cancel_waiter, return_exceptions=True)
             if cancel_event.is_set():
                 return
-            reply, prompt_record_log = llm_task.result()
+            llm_result = llm_task.result()
         else:
-            reply, prompt_record_log = await llm_task
+            llm_result = await llm_task
+
+        reply = llm_result.reply
+        prompt_record_log = llm_result.prompt_record_log
+        messages_sent = llm_result.messages_sent
+        error_kind = llm_result.error_kind
 
         # askai_prompt.txt：只記錄「真正送給 Ollama 的文字」
         try:
@@ -599,12 +666,12 @@ class LLMCommands(commands.Cog):
             )
             prompt_trace_logger.info(
                 _format_log_block(
-                    title="ASKAI_PROMPT",
+                    title=f"ASKAI_PROMPT trace={trace_id}",
                     body=prompt_record_log,
                 )
             )
         except Exception as exc:
-            logger.warning("寫入 askai prompt 失敗: %s", exc)
+            logger.warning("寫入 askai prompt 失敗 trace=%s: %s", trace_id, exc)
 
         # askai_prompt_debug.txt：記錄檢索/融合等 debug 細節
         try:
@@ -633,7 +700,7 @@ class LLMCommands(commands.Cog):
             )
             prompt_debug_logger.info(
                 _format_log_block(
-                    title="ASKAI_PROMPT_DEBUG",
+                    title=f"ASKAI_PROMPT_DEBUG trace={trace_id}",
                     body=(
                         f"<prompt_record_log>\n{prompt_record_log}\n</prompt_record_log>\n"
                         f"<debug>\n{prompt_debug_text}\n</debug>"
@@ -641,7 +708,7 @@ class LLMCommands(commands.Cog):
                 )
             )
         except Exception as exc:
-            logger.warning("寫入 askai prompt debug 失敗: %s", exc)
+            logger.warning("寫入 askai prompt debug 失敗 trace=%s: %s", trace_id, exc)
 
         # 記錄回應歷史
         try:
@@ -654,9 +721,12 @@ class LLMCommands(commands.Cog):
                 discord_meta=discord_meta,
                 rag_meta=rag_meta,
                 web_meta=web_meta,
+                trace_id=trace_id,
+                messages_sent=messages_sent,
+                error_kind=error_kind,
             )
         except Exception as exc:
-            logger.warning("寫入 askai response history 失敗: %s", exc)
+            logger.warning("寫入 askai response history 失敗 trace=%s: %s", trace_id, exc)
 
         # 使用 followup 回覆，避免互動超時，並組合最終排版
         response_lines = [

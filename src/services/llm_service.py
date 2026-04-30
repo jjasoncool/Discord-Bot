@@ -73,6 +73,23 @@ class PromptBundle:
     prompt_record_log: str
 
 
+@dataclass(frozen=True)
+class GenerateReplyResult:
+    """generate_reply 結果。失敗時 reply 是友善字串、error_kind 標記類型。
+
+    支援前兩個欄位 tuple unpacking 以保持與舊 caller 相容（`reply, log = ...`）。
+    """
+
+    reply: str
+    prompt_record_log: str
+    messages_sent: list[dict[str, object]]
+    error_kind: Optional[str] = None  # None=success / 'no_choices' / 'empty_content' / 'http_error' / 'timeout' / 'connection' / 'unknown'
+
+    def __iter__(self):
+        yield self.reply
+        yield self.prompt_record_log
+
+
 # 對外保留別名：caller 與 generate_reply 已捕捉此名稱
 LLMAPIError = LlmAPIError
 
@@ -435,6 +452,7 @@ class LLMService:
         num_ctx: Optional[int] = None,
         timeout: Optional[int] = None,
         keep_alive: Optional[str] = None,
+        trace_id: Optional[str] = None,
     ) -> str:
         """底層 /v1/chat/completions：caller 自組 messages，回傳 assistant content。
 
@@ -489,9 +507,27 @@ class LLMService:
             extra_body=extra_body,
         )
 
+        trace_label = trace_id or "-"
+
         choices = completion.get("choices") or []
         if not choices:
-            raise LLMAPIError("回應格式異常: 無 choices")
+            # 後端 200 OK 但結構不完整（例如模型 safety filter 直接拒絕生成）
+            anomaly_logger.error(
+                "no_choices trace=%s model=%s usage=%s raw=%s",
+                trace_label,
+                model,
+                completion.get("usage"),
+                completion,
+            )
+            raise LLMAPIError(
+                "回應格式異常: 無 choices",
+                kind="no_choices",
+                detail=str({
+                    "trace": trace_label,
+                    "usage": completion.get("usage"),
+                    "see": "logs/llm_anomaly.log",
+                }),
+            )
 
         choice = choices[0]
         message = choice.get("message") or {}
@@ -501,7 +537,8 @@ class LLMService:
 
         # 空 content：完整 raw response 寫進 anomaly log（不污染主 log）
         anomaly_logger.error(
-            "empty_content model=%s finish_reason=%s usage=%s raw=%s",
+            "empty_content trace=%s model=%s finish_reason=%s usage=%s raw=%s",
+            trace_label,
             model,
             choice.get("finish_reason"),
             completion.get("usage"),
@@ -509,7 +546,9 @@ class LLMService:
         )
         raise LLMAPIError(
             "回應格式異常: 空 content",
+            kind="empty_content",
             detail=str({
+                "trace": trace_label,
                 "finish_reason": choice.get("finish_reason"),
                 "usage": completion.get("usage"),
                 "see": "logs/llm_anomaly.log",
@@ -536,12 +575,15 @@ class LLMService:
         asker_display_name: Optional[str] = None,
         bot_display_name: Optional[str] = None,
         keep_alive: Optional[str] = None,
-    ) -> tuple[str, str]:
-        """/askai 專用：組 prompt bundle → 呼叫 `chat_raw` → 回 (reply, prompt_record_log)。
+        trace_id: Optional[str] = None,
+    ) -> "GenerateReplyResult":
+        """/askai 專用：組 prompt bundle → 呼叫 `chat_raw` → 回 GenerateReplyResult。
 
         將 Ollama 各類例外翻譯成使用者友善的 ⚠️ 訊息，caller 收到字串即可。
+        前兩個欄位仍可 tuple unpacking（`reply, log = await generate_reply(...)`）以保持與舊 caller 相容。
 
         `keep_alive` 轉交給 `chat_raw`；不同 caller（/askai / moderation）可獨立設值。
+        `trace_id` 串接 caller 與 anomaly log，失敗時可由 ERROR log 一鍵追到 raw response。
         """
         bundle = self._build_prompt_bundle(
             system=system,
@@ -559,6 +601,7 @@ class LLMService:
 
         target_model = self._resolve_runtime_model(model)
         target_think = self.resolve_request_think(think)
+        trace_label = trace_id or "-"
 
         try:
             reply = await self.chat_raw(
@@ -570,21 +613,57 @@ class LLMService:
                 repeat_penalty=repeat_penalty,
                 num_ctx=num_ctx,
                 keep_alive=keep_alive,
+                trace_id=trace_id,
             )
-            return reply, bundle.prompt_record_log
+            return GenerateReplyResult(
+                reply=reply,
+                prompt_record_log=bundle.prompt_record_log,
+                messages_sent=list(bundle.messages),
+                error_kind=None,
+            )
         except LLMAPIError as exc:
             if exc.status is not None:
-                logger.error("LLM 回應失敗: %s - %s", exc.status, exc.detail)
-                return "⚠️ LLM 回應失敗，請稍後再試。", bundle.prompt_record_log
-            logger.error("LLM 回應格式異常: %s", exc.detail)
-            return "⚠️ LLM 回應格式異常，請稍後再試。", bundle.prompt_record_log
-        except (LlmTimeoutError, LlmConnectionError) as exc:
-            logger.error("LLM 連線失敗: %s: %s", type(exc).__name__, exc)
-            return "⚠️ 無法連線到 LLM 服務。", bundle.prompt_record_log
+                logger.error("LLM 回應失敗 trace=%s status=%s detail=%s", trace_label, exc.status, exc.detail)
+                return GenerateReplyResult(
+                    reply="⚠️ LLM 回應失敗，請稍後再試。",
+                    prompt_record_log=bundle.prompt_record_log,
+                    messages_sent=list(bundle.messages),
+                    error_kind="http_error",
+                )
+            # raise 端帶 kind，未帶時退回 unknown_format（理論上不會走到，留個安全網）
+            kind = exc.kind or "unknown_format"
+            logger.error("LLM 回應格式異常 trace=%s kind=%s detail=%s", trace_label, kind, exc.detail)
+            return GenerateReplyResult(
+                reply="⚠️ LLM 回應格式異常，請稍後再試。",
+                prompt_record_log=bundle.prompt_record_log,
+                messages_sent=list(bundle.messages),
+                error_kind=kind,
+            )
+        except LlmTimeoutError as exc:
+            logger.error("LLM 連線逾時 trace=%s: %s", trace_label, exc)
+            return GenerateReplyResult(
+                reply="⚠️ 無法連線到 LLM 服務。",
+                prompt_record_log=bundle.prompt_record_log,
+                messages_sent=list(bundle.messages),
+                error_kind="timeout",
+            )
+        except LlmConnectionError as exc:
+            logger.error("LLM 連線失敗 trace=%s: %s", trace_label, exc)
+            return GenerateReplyResult(
+                reply="⚠️ 無法連線到 LLM 服務。",
+                prompt_record_log=bundle.prompt_record_log,
+                messages_sent=list(bundle.messages),
+                error_kind="connection",
+            )
         except Exception as exc:
             # 加上型別名避免空字串例外時診斷困難
             logger.error(
-                "LLM 呼叫發生未預期錯誤: %s: %s",
-                type(exc).__name__, exc, exc_info=True,
+                "LLM 呼叫發生未預期錯誤 trace=%s: %s: %s",
+                trace_label, type(exc).__name__, exc, exc_info=True,
             )
-            return "⚠️ LLM 發生未預期錯誤。", bundle.prompt_record_log
+            return GenerateReplyResult(
+                reply="⚠️ LLM 發生未預期錯誤。",
+                prompt_record_log=bundle.prompt_record_log,
+                messages_sent=list(bundle.messages),
+                error_kind="unknown",
+            )

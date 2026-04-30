@@ -51,6 +51,8 @@ class LlmAPIError(Exception):
 
     `status is not None` 表示 HTTP 層錯誤；
     `status is None` 表示 2xx 但回應格式不符預期。
+    `kind` 用來分類 2xx 異常（"no_choices" / "empty_content" 等），
+    讓 caller 不需要靠 message 字串判斷類型。
     """
 
     def __init__(
@@ -59,10 +61,12 @@ class LlmAPIError(Exception):
         *,
         status: int | None = None,
         detail: str = "",
+        kind: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status = status
         self.detail = detail
+        self.kind = kind
 
 
 class LlmConnectionError(Exception):
