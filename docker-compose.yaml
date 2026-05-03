@@ -5,6 +5,15 @@ services:
       dockerfile: docker/discord_bot/dockerfile
     container_name: discord-bot
     restart: always
+    # 啟動前先跑相關 unittest（觀測機制 + telegram spoiler）；測試紅就 exit 1，
+    # compose 會無限重啟 → log 立刻可見。`exec` 把 PID 1 交給 python，讓 SIGTERM 能正確收。
+    command: >
+      bash -c "
+      echo '--- running startup tests ---' &&
+      python -m unittest test.test_llm_snapshot test.test_telegram_spoiler &&
+      echo '--- tests OK, starting bot ---' &&
+      exec python discord_bot.py
+      "
     expose:
       - "5000"  # notify server，供 scraper 內網通知用
     volumes:

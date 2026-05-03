@@ -176,7 +176,40 @@ class LlmHttpClient:
         data = self._get_json("/models")
         return [m.get("id", "") for m in data.get("data", []) if m.get("id")]
 
-    # ---------- Lemonade admin（/api/v1/load）----------
+    # ---------- Lemonade admin（/api/v1/load, /api/v1/health, ...） ----------
+
+    async def admin_get(
+        self,
+        path: str,
+        *,
+        timeout: float = 2.0,
+    ) -> dict[str, Any]:
+        """Best-effort GET，給故障路徑診斷快照用。
+
+        `path` 是完整路徑（例如 ``"/api/v1/health"``、``"/api/v1/system-info"``），
+        跟 chat / embedding 自動加 ``/v1`` 前綴的低階路徑不同。
+
+        任何錯誤吞掉、永不 raise；回值描述：
+          - 成功：``{"status": 200, "body": <json|str-truncated>}``
+          - HTTP 非 2xx：``{"status": <code>, "body": <text>[:500]}``
+          - 連線/timeout：``{"err": "<ExceptionType>: <msg>"}``
+
+        只給 snapshot helper 呼叫；不該塞進熱路徑或 retry 邏輯。
+        """
+        url = self._host + path
+        try:
+            resp = await self._async.get(url, timeout=timeout)
+        except httpx.TimeoutException as exc:
+            return {"err": f"timeout after {timeout}s: {exc}"}
+        except httpx.RequestError as exc:
+            return {"err": f"{type(exc).__name__}: {exc}"}
+        ct = resp.headers.get("content-type", "")
+        if "application/json" in ct:
+            try:
+                return {"status": resp.status_code, "body": resp.json()}
+            except Exception:
+                return {"status": resp.status_code, "body": resp.text[:500]}
+        return {"status": resp.status_code, "body": resp.text[:500]}
 
     def ensure_lemonade_model(
         self,

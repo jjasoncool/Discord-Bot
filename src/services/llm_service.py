@@ -33,6 +33,28 @@ anomaly_logger = logging.getLogger("llm_anomaly")
 LLM_SERVICE_SETTINGS = LLMServiceSettings()
 
 
+# 失敗路徑快照：各 backend 該打哪些 read-only admin / 觀測端點。
+# 加 backend 只需在此補一行；某 endpoint 不存在會被 `admin_get` 吞成 dict，不影響其他 probe。
+# 命名規則：(label_in_log, full_url_path)。label 會成為 snapshot log 的 dict key。
+_BACKEND_PROBES: dict[str, tuple[tuple[str, str], ...]] = {
+    # Lemonade：gateway 自家 admin（health 看當下載了哪些 model、system_info 看 backend recipe）
+    "lemonade": (
+        ("health", "/api/v1/health"),
+        ("system_info", "/api/v1/system-info"),
+    ),
+    # Ollama：/api/ps 是核心 — 已載 model + 各自 VRAM + TTL 倒數；/api/tags 補註冊表
+    "ollama": (
+        ("ps", "/api/ps"),
+        ("tags", "/api/tags"),
+    ),
+    # vLLM：本來就一進程一 model、沒 swap 概念，只能看活著沒 + 服務的 model id
+    "vllm": (
+        ("health", "/health"),
+        ("models", "/v1/models"),
+    ),
+}
+
+
 def _convert_messages_for_openai(
     messages: list[dict[str, object]],
 ) -> list[dict[str, object]]:
@@ -498,16 +520,25 @@ class LLMService:
         # 把 Ollama 風格 images=[base64...] 轉成 OpenAI vision content array
         openai_messages = _convert_messages_for_openai(messages)
 
-        completion = await self._client.chat_completion(
-            model=model,
-            messages=openai_messages,
-            temperature=effective_temperature,
-            top_p=effective_top_p,
-            timeout=float(effective_timeout),
-            extra_body=extra_body,
-        )
-
         trace_label = trace_id or "-"
+
+        try:
+            completion = await self._client.chat_completion(
+                model=model,
+                messages=openai_messages,
+                temperature=effective_temperature,
+                top_p=effective_top_p,
+                timeout=float(effective_timeout),
+                extra_body=extra_body,
+            )
+        except (LlmTimeoutError, LlmConnectionError) as exc:
+            # 連線層失敗：原本 chat_raw 不寫 anomaly，補上一行並抓 Lemonade 狀態快照後 re-raise
+            kind = "timeout" if isinstance(exc, LlmTimeoutError) else "connection"
+            anomaly_logger.error(
+                "%s trace=%s model=%s err=%s", kind, trace_label, model, exc,
+            )
+            await self._snapshot_backend_state(trace_label, model, kind)
+            raise
 
         choices = completion.get("choices") or []
         if not choices:
@@ -519,6 +550,7 @@ class LLMService:
                 completion.get("usage"),
                 completion,
             )
+            await self._snapshot_backend_state(trace_label, model, "no_choices")
             raise LLMAPIError(
                 "回應格式異常: 無 choices",
                 kind="no_choices",
@@ -544,6 +576,7 @@ class LLMService:
             completion.get("usage"),
             completion,
         )
+        await self._snapshot_backend_state(trace_label, model, "empty_content")
         raise LLMAPIError(
             "回應格式異常: 空 content",
             kind="empty_content",
@@ -554,6 +587,40 @@ class LLMService:
                 "see": "logs/llm_anomaly.log",
             }),
         )
+
+    async def _snapshot_backend_state(
+        self,
+        trace_label: str,
+        model: str,
+        error_kind: str,
+    ) -> None:
+        """失敗時抓 LLM backend 狀態快照寫進 anomaly log，協助事後定位。
+
+        依 ``runtime.backend`` 從 ``_BACKEND_PROBES`` registry 查當前 backend 該打哪些
+        read-only admin / 觀測端點，並行 GET 後寫一行 log。
+        未在 registry 的 backend 直接跳過（不打沒意義的 endpoint）。
+        每個 endpoint timeout 預設 2s（``admin_get`` 預設值）；gather 並行所以總時間 ≈ 最慢者。
+        內部全部 try/except 吞錯：故障路徑的次要診斷絕不能蓋掉原本的 raise。
+        """
+        try:
+            runtime = self._load_runtime_config_cached()
+            backend = runtime.backend if runtime else None
+            probes = _BACKEND_PROBES.get(backend) if backend else None
+            if not probes:
+                return
+            results = await asyncio.gather(
+                *(self._client.admin_get(path) for _, path in probes)
+            )
+            snapshot = {label: data for (label, _), data in zip(probes, results)}
+            anomaly_logger.error(
+                "snapshot trace=%s kind=%s backend=%s model_requested=%s probes=%s",
+                trace_label, error_kind, backend, model, snapshot,
+            )
+        except Exception as exc:
+            anomaly_logger.warning(
+                "snapshot failed trace=%s kind=%s err=%s",
+                trace_label, error_kind, exc,
+            )
 
     async def generate_reply(
         self,
