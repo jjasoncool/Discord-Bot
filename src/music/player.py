@@ -38,6 +38,51 @@ class MusicPlayer:
         async with self._voice_lock:
             return await self._ensure_voice_inner()
 
+    async def _force_cleanup_guild_voice(self, guild):
+        """強制斷開並清理 guild 上的殘留 voice_client，含 disconnect 的硬 timeout"""
+        self._reset_voice_client()
+        existing = guild.voice_client
+        if existing is not None:
+            try:
+                # discord.py 的 disconnect 在 voice gateway 已死時也可能 hang，硬性限時
+                await asyncio.wait_for(existing.disconnect(force=True), timeout=5)
+            except (asyncio.TimeoutError, Exception):
+                pass
+        try:
+            guild._voice_client = None
+        except Exception:
+            pass
+
+    async def _try_connect(self, channel) -> bool:
+        """單次嘗試連線。用外層 wait_for 強制中斷 discord.py 不可靠的 timeout。
+
+        實測 discord.py 2.7.1 的 channel.connect(timeout=60) 在 voice gateway hang 時
+        會等 ~3 分鐘才超時（issue #10376 相關），用外層 wait_for=35s 強制保底。
+        """
+        try:
+            self.voice_client = await asyncio.wait_for(
+                channel.connect(self_deaf=True, timeout=30),
+                timeout=35,
+            )
+            logger.info(f"[MusicPlayer] 已加入語音頻道: {channel.name}")
+            return True
+        except asyncio.TimeoutError:
+            logger.warning("[MusicPlayer] connect() 超過 35 秒未回應，強制中斷")
+            self._reset_voice_client()
+            return False
+        except discord.ClientException:
+            if channel.guild.voice_client and channel.guild.voice_client.is_connected():
+                logger.warning("[MusicPlayer] connect 失敗但 guild 有活躍連線，強制認領")
+                self.voice_client = channel.guild.voice_client
+                return True
+            self._reset_voice_client()
+            logger.warning("[MusicPlayer] connect 失敗: Already connected 且無法認領")
+            return False
+        except Exception as e:
+            self._reset_voice_client()
+            logger.warning(f"[MusicPlayer] connect 失敗: {e}")
+            return False
+
     async def _ensure_voice_inner(self) -> bool:
         channel = self.bot.get_channel(self.config.voice_channel_id)
         if channel is None:
@@ -49,15 +94,10 @@ class MusicPlayer:
 
         guild = channel.guild
 
-        # 已連線到同一頻道，直接複用
+        # bot 固定在同一頻道，已連線就直接複用
         if self._has_active_voice():
-            if self.voice_client.channel and self.voice_client.channel.id == channel.id:
-                return True
-            logger.info(f"[MusicPlayer] 從 {self.voice_client.channel} 移到 {channel.name}")
-            await self.voice_client.disconnect(force=True)
-            self._reset_voice_client()
-            await asyncio.sleep(3)
-        elif self.voice_client is not None:
+            return True
+        if self.voice_client is not None:
             logger.warning("[MusicPlayer] 偵測到失效的 voice_client，將重新建立連線")
             self._reset_voice_client()
 
@@ -69,36 +109,23 @@ class MusicPlayer:
                 logger.info("[MusicPlayer] 認領 guild 殘留語音連線（同頻道）")
                 self.voice_client = existing_vc
                 return True
-            # 不同頻道或已斷線，強制清理
             logger.info("[MusicPlayer] 清理 guild 殘留語音連線")
-            try:
-                await existing_vc.disconnect(force=True)
-            except Exception:
-                pass
-            # 確保 discord.py 內部狀態也清乾淨
-            try:
-                guild._voice_client = None
-            except Exception:
-                pass
+            await self._force_cleanup_guild_voice(guild)
             await asyncio.sleep(3)
 
-        try:
-            self.voice_client = await channel.connect(self_deaf=True, timeout=60)
-            logger.info(f"[MusicPlayer] 已加入語音頻道: {channel.name}")
+        # 第一次嘗試
+        if await self._try_connect(channel):
             return True
-        except discord.ClientException:
-            # connect 仍失敗（內部狀態殘留），最後嘗試認領
-            if guild.voice_client and guild.voice_client.is_connected():
-                logger.warning("[MusicPlayer] connect 失敗但 guild 有活躍連線，強制認領")
-                self.voice_client = guild.voice_client
-                return True
-            self._reset_voice_client()
-            logger.error("[MusicPlayer] 加入語音頻道失敗: Already connected 且無法認領")
-            return False
-        except Exception as e:
-            self._reset_voice_client()
-            logger.error(f"[MusicPlayer] 加入語音頻道失敗: {e}", exc_info=True)
-            return False
+
+        # 失敗則強制清理 guild 狀態後再試一次（不等 _play_loop 5 秒）
+        logger.info("[MusicPlayer] 第一次連線失敗，強制清理後立即重試")
+        await self._force_cleanup_guild_voice(guild)
+        await asyncio.sleep(2)
+        if await self._try_connect(channel):
+            return True
+
+        logger.error("[MusicPlayer] 加入語音頻道失敗（兩次嘗試皆失敗）")
+        return False
 
     def _track_task(self, coro) -> asyncio.Task:
         """建立背景 task 並自動追蹤，完成後從 set 移除"""
