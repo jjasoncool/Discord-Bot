@@ -62,10 +62,18 @@ class MusicQueue:
             else:
                 song = self.main_queue.popleft()
                 self._next_shuffle = None
-            if self.loop:
-                self.main_queue.append(song)
+            # NOTE: 不在此處 append 回主歌單，否則 play() 失敗 + requeue 會造成
+            # 同一首同時出現於 deque 前後端，每次 retry 淨增 1 首。
+            # 由 player 在 play() 成功後呼叫 mark_played 完成 loop append。
             return song
         raise QueueEmptyError("Queue is empty")
+
+    def mark_played(self, song: Song, is_interrupt: bool):
+        """play() 成功送出後呼叫；loop 模式下將主歌單歌曲附回尾端"""
+        if is_interrupt:
+            return
+        if self.loop:
+            self.main_queue.append(song)
 
     def peek_next(self) -> Song | None:
         """查看下一首要播的歌（不取出），供 prefetch 使用"""

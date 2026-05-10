@@ -262,6 +262,15 @@ class MusicPlayer:
                 self.queue.current = None
                 return
 
+            # 防呆：voice 仍在播時直接呼叫 play() 會丟 ClientException: Already playing audio
+            # （通常是上一輪 _play_next 因 announcer 503 等例外提早跳出，play_done 未等待）
+            if self.voice_client.is_playing():
+                logger.warning("[MusicPlayer] voice_client 仍在播放，將歌曲排回稍後重試")
+                self.queue.requeue_song(song, is_interrupt_song)
+                self.queue.current = None
+                await asyncio.sleep(2)
+                return
+
             try:
                 self.voice_client.play(audio_source, after=after_callback, bitrate=192)
             except discord.ClientException as e:
@@ -271,9 +280,15 @@ class MusicPlayer:
                 self.queue.current = None
                 return
 
-            # 通知「現在播放」面板
+            # play() 已成功送出，loop 模式將歌曲循環回主歌單尾端
+            self.queue.mark_played(song, is_interrupt_song)
+
+            # 通知「現在播放」面板（Discord HTTP 暫時性錯誤不應炸到播放迴圈）
             if self.announcer:
-                await self.announcer.send_now_playing(song)
+                try:
+                    await self.announcer.send_now_playing(song)
+                except Exception as e:
+                    logger.warning(f"[MusicPlayer] 發送現在播放面板失敗（不影響播放）: {e}")
 
             # 背景下載當前歌曲 + 預先快取下一首
             if need_download and song.webpage_url:
