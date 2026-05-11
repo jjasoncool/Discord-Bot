@@ -13,6 +13,7 @@ from typing import Any, List, Optional
 from dataclasses import dataclass
 from pathlib import Path
 
+from llm.lemonade_gate import stream_exclusive
 from llm.llm_http_client import (
     LlmAPIError,
     LlmConnectionError,
@@ -523,14 +524,17 @@ class LLMService:
         trace_label = trace_id or "-"
 
         try:
-            completion = await self._client.chat_completion(
-                model=model,
-                messages=openai_messages,
-                temperature=effective_temperature,
-                top_p=effective_top_p,
-                timeout=float(effective_timeout),
-                extra_body=extra_body,
-            )
+            # 對稱 gate：stream 期間擋背景 embedding flush，避免 lemonade
+            # 把進行中的連線 reset（lemonade_gate.py 有詳細說明）。
+            async with stream_exclusive():
+                completion = await self._client.chat_completion(
+                    model=model,
+                    messages=openai_messages,
+                    temperature=effective_temperature,
+                    top_p=effective_top_p,
+                    timeout=float(effective_timeout),
+                    extra_body=extra_body,
+                )
         except (LlmTimeoutError, LlmConnectionError) as exc:
             # 連線層失敗：原本 chat_raw 不寫 anomaly，補上一行並抓 Lemonade 狀態快照後 re-raise
             kind = "timeout" if isinstance(exc, LlmTimeoutError) else "connection"

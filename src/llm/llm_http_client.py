@@ -334,7 +334,16 @@ class LlmHttpClient:
                     timeout=eff_timeout,
                 )
                 self._raise_for_status(resp)
-                return resp.json()
+                data = resp.json()
+                # Lemonade 在內部 CURL 轉發到 downstream backend 失敗時，會回
+                # `200 OK + {"error": {"type": "network_error", ...}}` 這種反 HTTP
+                # 語意的 envelope。視為連線層暫時錯誤，走既有 RequestError 退避重試。
+                err = data.get("error") if isinstance(data, dict) else None
+                if isinstance(err, dict) and err.get("type") == "network_error":
+                    raise httpx.ConnectError(
+                        f"lemonade upstream error: {err.get('message', '')}"
+                    )
+                return data
             except httpx.TimeoutException as exc:
                 if attempt >= self._max_retries:
                     raise LlmTimeoutError(f"POST {path} timed out") from exc

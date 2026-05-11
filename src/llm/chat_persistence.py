@@ -13,6 +13,7 @@ from typing import Optional
 import discord
 
 from llm.emoji_text_utils import replace_custom_emoji_with_description
+from llm.lemonade_gate import stream_exclusive
 from llm.sticker_cache import get_sticker_text
 
 logger = logging.getLogger("discord_bot")
@@ -164,12 +165,16 @@ async def flush_buffer() -> int:
         update_batch = list(_edit_buffer)
         _edit_buffer.clear()
 
+    # _buffer_lock 已釋放（不卡新訊息入 buffer）；
+    # 接下來的 batch embedding 必須等 lemonade 沒人在 stream LLM，否則
+    # 會把對方連線 reset 掉（詳見 lemonade_gate.py）。
     loop = asyncio.get_running_loop()
     count = 0
-    if insert_batch:
-        count += await loop.run_in_executor(None, _sync_write_batch, insert_batch)
-    if update_batch:
-        count += await loop.run_in_executor(None, _sync_update_batch, update_batch)
+    async with stream_exclusive():
+        if insert_batch:
+            count += await loop.run_in_executor(None, _sync_write_batch, insert_batch)
+        if update_batch:
+            count += await loop.run_in_executor(None, _sync_update_batch, update_batch)
     return count
 
 
