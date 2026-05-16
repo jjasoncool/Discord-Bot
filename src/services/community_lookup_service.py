@@ -71,6 +71,14 @@ class BahamutCandidate:
     comment_count: int = 0
 
 
+@dataclass
+class NicknameHistoryEntry:
+    """暱稱歷史條目：name + 該暱稱首次出現 / 最後出現時間。"""
+    name: str
+    first_seen: str   # ISO 字串
+    last_seen: str    # ISO 字串
+
+
 class CommunityLookupService:
     """查 scraper DB 的社群活動紀錄。"""
 
@@ -101,6 +109,7 @@ class CommunityLookupService:
         post_min: int = PTT_POST_MIN,
         comment_min: int = PTT_COMMENT_MIN,
         hard_cap: int = HARD_CAP,
+        skip_fallback: bool = False,
     ) -> LookupResult:
         """查 PTT 某使用者在指定日期區間的發文 + 留言紀錄。
 
@@ -111,6 +120,8 @@ class CommunityLookupService:
             guild_id: 若提供且 state_db 存在，會解析主文的 Discord 內部 jump URL。
             post_min/comment_min: 區間內不足時補撈區間外的保底門檻。
             hard_cap: 單類單次硬上限。
+            skip_fallback: 跳過區間外補撈（thread 已有過往 section 時用，
+                避免區間外與舊 section 內容重複）。
         """
         range_start = f"{start_date} 00:00:00"
         range_end = f"{end_date} 23:59:59"
@@ -138,7 +149,7 @@ class CommunityLookupService:
                 hit_cap = True
 
             post_rows_fb: List = []
-            if len(post_rows_in) < post_min:
+            if not skip_fallback and len(post_rows_in) < post_min:
                 need = post_min - len(post_rows_in)
                 post_rows_fb = await _fetch_all(
                     conn,
@@ -166,7 +177,7 @@ class CommunityLookupService:
                 hit_cap = True
 
             comment_rows_fb: List = []
-            if len(comment_rows_in) < comment_min:
+            if not skip_fallback and len(comment_rows_in) < comment_min:
                 need = comment_min - len(comment_rows_in)
                 comment_rows_fb = await _fetch_all(
                     conn,
@@ -225,6 +236,7 @@ class CommunityLookupService:
         post_min: int = BAHAMUT_POST_MIN,
         comment_min: int = BAHAMUT_COMMENT_MIN,
         hard_cap: int = HARD_CAP,
+        skip_fallback: bool = False,
     ) -> LookupResult:
         """查巴哈某使用者在指定日期區間的發文 + 留言紀錄。
 
@@ -233,6 +245,8 @@ class CommunityLookupService:
             start_date: 區間起始日 `YYYY-MM-DD`（含）。
             end_date: 區間結束日 `YYYY-MM-DD`（含）。
             fuzzy: 模糊模式 — 同時比對 user_id 精確 + author_name/user_name LIKE。
+            skip_fallback: 跳過區間外補撈（thread 已有過往 section 時用，
+                避免區間外與舊 section 內容重複）。
         """
         range_start = f"{start_date} 00:00:00"
         range_end = f"{end_date} 23:59:59"
@@ -279,7 +293,7 @@ class CommunityLookupService:
                 hit_cap = True
 
             post_rows_fb: List = []
-            if len(post_rows_in) < post_min:
+            if not skip_fallback and len(post_rows_in) < post_min:
                 need = post_min - len(post_rows_in)
                 post_rows_fb = await _fetch_all(
                     conn,
@@ -318,7 +332,7 @@ class CommunityLookupService:
                 hit_cap = True
 
             comment_rows_fb: List = []
-            if len(comment_rows_in) < comment_min:
+            if not skip_fallback and len(comment_rows_in) < comment_min:
                 need = comment_min - len(comment_rows_in)
                 comment_rows_fb = await _fetch_all(
                     conn,
@@ -438,6 +452,57 @@ class CommunityLookupService:
             ),
         )
         return candidates[:limit]
+
+    async def get_bahamut_nickname_history(
+        self, author_id: str
+    ) -> List[NicknameHistoryEntry]:
+        """查巴哈 author_id 對應的暱稱演進史（依首次出現時間遞增）。
+
+        合併 bahamut_posts.author_name + bahamut_post_comments.user_name，
+        以 (author_id) 為穩定 key，對每個 name 取 MIN(published_at) 作為首次出現、
+        MAX(published_at) 作為最後出現。caller 可依 last_seen 判斷「目前」暱稱。
+
+        靠 author_id / user_id index 命中，再對結果集 aggregate，不會 full scan。
+        """
+        if not author_id:
+            return []
+
+        sql = """
+            SELECT name, MIN(first_seen) AS first_seen, MAX(last_seen) AS last_seen
+            FROM (
+                SELECT author_name AS name,
+                       MIN(published_at) AS first_seen,
+                       MAX(published_at) AS last_seen
+                FROM bahamut_posts
+                WHERE author_id = ?
+                  AND author_name IS NOT NULL AND author_name != ''
+                  AND published_at IS NOT NULL
+                GROUP BY author_name
+                UNION ALL
+                SELECT user_name AS name,
+                       MIN(published_at) AS first_seen,
+                       MAX(published_at) AS last_seen
+                FROM bahamut_post_comments
+                WHERE user_id = ?
+                  AND user_name IS NOT NULL AND user_name != ''
+                  AND published_at IS NOT NULL
+                GROUP BY user_name
+            )
+            GROUP BY name
+            ORDER BY first_seen ASC
+        """
+        async with self._connect_scraper_ro() as conn:
+            conn.row_factory = aiosqlite.Row
+            rows = await _fetch_all(conn, sql, (author_id, author_id))
+
+        return [
+            NicknameHistoryEntry(
+                name=row["name"],
+                first_seen=row["first_seen"] or "",
+                last_seen=row["last_seen"] or "",
+            )
+            for row in rows
+        ]
 
 
 # ══════════════════════════════════════════════════

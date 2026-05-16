@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS community_lookup_threads (
     thread_id             INTEGER NOT NULL,
     control_msg_id        INTEGER,                    -- 底部控制訊息（[🔄 更新]）的 msg_id
     last_section_date     TEXT,                       -- 'YYYY-MM-DD'：判斷同日 edit / 跨日 append
-    last_section_slots    TEXT,                       -- JSON: {header_msg_id, post_slot_msg_ids, comment_slot_msg_ids}
+    last_section_slots    TEXT,                       -- JSON: {header_msg_id, nickname_msg_id, post_slot_msg_ids, comment_slot_msg_ids}
     last_updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (guild_id, source, lookup_id)
 );

@@ -632,7 +632,10 @@ class DatabaseManager:
 
             existing.title = post_data.get("title", "") or existing.title
             existing.category = post_data.get("category", "") or existing.category
-            existing.author_name = post_data.get("author_name", "") or existing.author_name
+            # author_name 鎖定首次寫入的值（保留發文當下的歷史快照）；只在原值為空時補。
+            # 避免 user 改名後巴哈端把舊文顯示名同步更新時，DB 被覆蓋導致暱稱歷史失準。
+            if not existing.author_name:
+                existing.author_name = post_data.get("author_name", "") or existing.author_name
             existing.author_id = post_data.get("author_id", "") or existing.author_id
             existing.url = post_data.get("url", "") or existing.url
             existing.published_at = post_data.get("published_at") or existing.published_at
@@ -705,8 +708,9 @@ class DatabaseManager:
                             (excluded.user_id != "", excluded.user_id),
                             else_=BahamutPostComment.user_id,
                         ),
+                        # user_name 鎖定首次寫入的值（保留留言當下的歷史快照）；只在原值為空時補。
                         "user_name": case(
-                            (excluded.user_name != "", excluded.user_name),
+                            (BahamutPostComment.user_name == "", excluded.user_name),
                             else_=BahamutPostComment.user_name,
                         ),
                         "content": case(

@@ -32,6 +32,7 @@ from services.community_lookup_service import (
     CommunityLookupService,
     HARD_CAP,
     LookupResult,
+    NicknameHistoryEntry,
     PTT_COMMENT_MIN,
     PTT_POST_MIN,
     BAHAMUT_COMMENT_MIN,
@@ -54,9 +55,12 @@ SEND_DELAY = 0.3                # slot 連發間隔
 TAIPEI_TZ = timezone(timedelta(hours=8))
 
 COLOR_HEADER = 0x3498DB         # 🟦 藍
+COLOR_NICKNAME = 0x5DADE2       # 🔵 淺藍（暱稱史，與 header 區隔）
 COLOR_POSTS = 0x9B59B6          # 🟪 紫
 COLOR_COMMENTS = 0x2ECC71       # 🟩 綠
 COLOR_CONTROL = 0x95A5A6        # ⬜ 灰
+
+NICKNAME_HISTORY_MAX_DISPLAY = 20  # 超過則截斷顯示最近 N 個
 
 DEFAULT_DAYS = 30
 MAX_RANGE_DAYS = 180  # 6 個月上限
@@ -339,6 +343,48 @@ def _build_header_embed(
         color=COLOR_HEADER,
     )
     return embed
+
+
+def _build_nickname_history_embed(
+    history: List[NicknameHistoryEntry],
+) -> Optional[discord.Embed]:
+    """組「暱稱修改歷史」embed。
+
+    - 只有 1 個（或更少）暱稱時回傳 None（無變更不必顯示）
+    - 超過 NICKNAME_HISTORY_MAX_DISPLAY 個時，顯示最近 N 個並附截斷提示
+    - 「最近活動」標記用 last_seen 最大者；不講「目前」避免誤導
+      （scraper 只看得到歷史貼文/留言，看不到 user 改名後尚未發任何新活動的狀態）
+    """
+    if len(history) < 2:
+        return None
+
+    total = len(history)
+    most_recent = max(history, key=lambda e: e.last_seen)
+
+    # 超過上限時取「最近 N 個」（依 first_seen 排序的尾段）
+    if total > NICKNAME_HISTORY_MAX_DISPLAY:
+        display = history[-NICKNAME_HISTORY_MAX_DISPLAY:]
+        truncated = True
+    else:
+        display = history
+        truncated = False
+
+    lines = ["📝 **暱稱修改歷史**"]
+    for entry in display:
+        date_str = (entry.first_seen or "")[:10] or "—"
+        if entry.name == most_recent.name:
+            last_date = (entry.last_seen or "")[:10] or "—"
+            suffix = f" ← 最近活動 {last_date}"
+        else:
+            suffix = ""
+        lines.append(f"• `{date_str}`  {entry.name}{suffix}")
+    if truncated:
+        lines.append(f"… 共 {total} 個歷史暱稱（已截斷至最近 {NICKNAME_HISTORY_MAX_DISPLAY} 個）")
+
+    return discord.Embed(
+        description="\n".join(lines),
+        color=COLOR_NICKNAME,
+    )
 
 
 class _CommentBlock(NamedTuple):
@@ -1139,10 +1185,17 @@ class CommunityLookupFlow:
                 )
                 return
 
+        # 先讀 state 判斷 thread 是否已有過往查詢 — 若有則略過區間外補撈，
+        # 避免區間外與舊 section 內容重複（讓使用者選不重疊新區間就好）
+        state = await self.cog.state_db.get_community_lookup_thread(guild_id, source, lookup_id)
+        has_prior_query = bool(state and state.get("last_section_date"))
+
         # 執行查詢
+        nickname_history: List[NicknameHistoryEntry] = []
         if source == "ptt":
             result = await self.cog.service.query_ptt(
                 author=lookup_id, start_date=start_date, end_date=end_date, guild_id=guild_id,
+                skip_fallback=has_prior_query,
             )
             # PTT 推文斷句合併（同作者 + 同 tag + 同分鐘 + 同父文）
             result.comments_in_range = _merge_ptt_comments(result.comments_in_range)
@@ -1150,7 +1203,14 @@ class CommunityLookupFlow:
         else:
             result = await self.cog.service.query_bahamut(
                 lookup_id=lookup_id, start_date=start_date, end_date=end_date, fuzzy=False, guild_id=guild_id,
+                skip_fallback=has_prior_query,
             )
+            # 暱稱修改歷史（僅精確 author_id 查詢適用；fuzzy 已在前段解析成精確 id）
+            try:
+                nickname_history = await self.cog.service.get_bahamut_nickname_history(lookup_id)
+            except Exception as e:
+                logger.warning("查詢暱稱修改歷史失敗 author_id=%s: %s", lookup_id, e)
+                nickname_history = []
 
         if result.total_posts == 0 and result.total_comments == 0:
             await interaction.followup.send(
@@ -1169,7 +1229,7 @@ class CommunityLookupFlow:
             return
 
         thread = existing_thread
-        state = await self.cog.state_db.get_community_lookup_thread(guild_id, source, lookup_id)
+        # state 已在查詢前讀過（為了判斷 skip_fallback），這裡直接重用
 
         created_thread = False
         if thread is None:
@@ -1250,9 +1310,13 @@ class CommunityLookupFlow:
             )
             post_embeds = _build_post_embeds(result.posts_in_range, result.posts_fallback)
             comment_embeds = _build_comment_embeds(result.comments_in_range, result.comments_fallback)
+            nickname_embed = _build_nickname_history_embed(nickname_history)
 
             # Append section messages
-            slot_ids = await self._append_section(thread, header_embed, post_embeds, comment_embeds)
+            slot_ids = await self._append_section(
+                thread, header_embed, post_embeds, comment_embeds,
+                nickname_embed=nickname_embed,
+            )
 
             # Append 新控制訊息
             ctrl_msg = await thread.send(
@@ -1298,13 +1362,21 @@ class CommunityLookupFlow:
         header_embed: discord.Embed,
         post_embeds: List[discord.Embed],
         comment_embeds: List[discord.Embed],
+        nickname_embed: Optional[discord.Embed] = None,
     ) -> Dict[str, object]:
         """Append 一整組 section embeds，回傳 msg_ids 讓後續 edit / 追蹤。"""
         header_msg = await thread.send(embed=header_embed)
         await asyncio.sleep(SEND_DELAY)
+        prev_msg = header_msg
+
+        nickname_msg_id: Optional[int] = None
+        if nickname_embed is not None:
+            m = await thread.send(embed=nickname_embed, reference=prev_msg)
+            nickname_msg_id = m.id
+            prev_msg = m
+            await asyncio.sleep(SEND_DELAY)
 
         post_msg_ids: List[int] = []
-        prev_msg = header_msg
         for emb in post_embeds:
             m = await thread.send(embed=emb, reference=prev_msg)
             post_msg_ids.append(m.id)
@@ -1320,6 +1392,7 @@ class CommunityLookupFlow:
 
         return {
             "header_msg_id": header_msg.id,
+            "nickname_msg_id": nickname_msg_id,
             "post_slot_msg_ids": post_msg_ids,
             "comment_slot_msg_ids": comment_msg_ids,
         }
@@ -1329,6 +1402,8 @@ class CommunityLookupFlow:
         msg_ids: List[int] = []
         if slots.get("header_msg_id"):
             msg_ids.append(slots["header_msg_id"])
+        if slots.get("nickname_msg_id"):
+            msg_ids.append(slots["nickname_msg_id"])
         msg_ids.extend(slots.get("post_slot_msg_ids") or [])
         msg_ids.extend(slots.get("comment_slot_msg_ids") or [])
         for mid in msg_ids:
