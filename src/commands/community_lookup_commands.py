@@ -19,7 +19,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import discord
@@ -52,7 +52,6 @@ COMMUNITY_PANEL_RUNTIME_FILE = "settings/community_panel_runtime.json"
 
 EMBED_DESC_MAX = 4000          # 留 96 字 buffer
 SEND_DELAY = 0.3                # slot 連發間隔
-TAIPEI_TZ = timezone(timedelta(hours=8))
 
 COLOR_HEADER = 0x3498DB         # 🟦 藍
 COLOR_NICKNAME = 0x5DADE2       # 🔵 淺藍（暱稱史，與 header 區隔）
@@ -71,6 +70,11 @@ THREAD_AUTO_ARCHIVE_MIN = 10080  # 7 days
 CUSTOM_ID_PANEL_PTT = "community_lookup:panel:ptt"
 CUSTOM_ID_PANEL_BAHAMUT = "community_lookup:panel:bahamut"
 CUSTOM_ID_CONTROL_REFRESH = "community_lookup:control:refresh"
+
+
+def _now_local() -> datetime:
+    """取得 container 系統時區的 aware datetime（docker-compose 設 TZ=Asia/Taipei）。"""
+    return datetime.now().astimezone()
 
 
 # ═══════════════════════════════════════════════════
@@ -286,7 +290,7 @@ def _build_header_embed(
     latest_query_time: Optional[datetime] = None,
 ) -> discord.Embed:
     source_label = "PTT" if source == "ptt" else "巴哈"
-    today = datetime.now(TAIPEI_TZ).date().isoformat()
+    today = _now_local().date().isoformat()
 
     # 巴哈對象 ID 做成搜尋超連結；PTT 維持純文字
     if source == "bahamut":
@@ -642,7 +646,7 @@ def _build_thread_name(
 
 def _default_date_range() -> Tuple[str, str]:
     """預設區間：今天-30 ~ 今天（台灣時區）。"""
-    today = datetime.now(TAIPEI_TZ).date()
+    today = _now_local().date()
     start = (today - timedelta(days=DEFAULT_DAYS)).isoformat()
     return start, today.isoformat()
 
@@ -673,7 +677,7 @@ def _validate_date_range(start_raw: str, end_raw: str) -> Tuple[Optional[str], O
     if e is None:
         return None, None, "結束日格式錯誤，請使用 `YYYY-MM-DD`（例 `2026-04-20`）"
 
-    today = datetime.now(TAIPEI_TZ).date()
+    today = _now_local().date()
     if s > today:
         return None, None, "起始日不能是未來日期"
     if e > today:
@@ -806,7 +810,12 @@ class BahamutLookupModal(discord.ui.Modal):
 
 
 class RefreshLookupModal(discord.ui.Modal):
-    """Thread 內 🔄 更新按鈕（經警告確認後）彈出的 Modal — 只問起迄日期。"""
+    """Thread 內 🔄 更新按鈕彈出的 Modal — 只問起迄日期。
+
+    重查皆為「在現有 thread 追加新 section」性質，所以 title 一律帶 ⚠️ 提示要小心。
+    有 prev range 時 default 自動接續：起始日 = 上次結束日、結束日 = 今天，
+    讓 user 一打開就有「上次結束 → 今天」的近似不重疊新區間（5/15 那天可能重疊一次）。
+    """
 
     def __init__(
         self,
@@ -814,26 +823,45 @@ class RefreshLookupModal(discord.ui.Modal):
         source: str,
         lookup_id: str,
         existing_thread: discord.Thread,
+        prev_start: Optional[str] = None,
+        prev_end: Optional[str] = None,
     ):
         source_label = "PTT" if source == "ptt" else "巴哈"
-        title = _truncate(f"重新查詢 [{source_label}] {lookup_id}", 45)
+        title = _truncate(f"⚠️ 重新查詢 [{source_label}] {lookup_id}", 45)
         super().__init__(title=title, timeout=600)
         self.cog = cog
         self.source = source
         self.lookup_id = lookup_id
         self.existing_thread = existing_thread
+
+        # default 邏輯：
+        #   - prev_end <= 今天 → 接續模式：start = prev_end、end = 今天
+        #     （等於今天時 start=end=今天 是合法單日 query，user 想擴大可手動改 start）
+        #   - prev_end > 今天（未來日 / TZ 飄移）或沒有 prev_end → 退回 default 30 天窗
+        # 用 <= 避免 start > end 進到 validator 被擋。
         ds, de = _default_date_range()
+        if prev_end and prev_end <= de:
+            start_default = prev_end
+            end_default = de
+            start_label = f"🗓️ 起始日（接續上次結束 {prev_end}）"
+            end_label = "🗓️ 結束日（建議不要重疊避免後續查到相同內容）"
+        else:
+            start_default = ds
+            end_default = de
+            start_label = "🗓️ 起始日"
+            end_label = "🗓️ 結束日（⚠️ 建議不要重疊避免後續查到相同內容）"
+
         self.start_input = discord.ui.TextInput(
-            label="🗓️ 起始日",
+            label=start_label,
             placeholder="YYYY-MM-DD",
-            default=ds,
+            default=start_default,
             max_length=10,
             required=True,
         )
         self.end_input = discord.ui.TextInput(
-            label="🗓️ 結束日",
+            label=end_label,
             placeholder="YYYY-MM-DD",
-            default=de,
+            default=end_default,
             max_length=10,
             required=True,
         )
@@ -853,58 +881,6 @@ class RefreshLookupModal(discord.ui.Modal):
             end_date=end_iso,
             existing_thread=self.existing_thread,
         )
-
-
-class ConfirmRefreshView(discord.ui.View):
-    """兩段式 refresh 流程的第一段：警告 + 確認/取消按鈕。"""
-
-    def __init__(
-        self,
-        cog: "CommunityLookupCommands",
-        source: str,
-        lookup_id: str,
-        existing_thread: discord.Thread,
-    ):
-        super().__init__(timeout=120)
-        self.cog = cog
-        self.source = source
-        self.lookup_id = lookup_id
-        self.existing_thread = existing_thread
-
-    @discord.ui.button(label="✅ 確認繼續", style=discord.ButtonStyle.success)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.stop()
-        await interaction.response.send_modal(
-            RefreshLookupModal(
-                self.cog,
-                source=self.source,
-                lookup_id=self.lookup_id,
-                existing_thread=self.existing_thread,
-            )
-        )
-
-    @discord.ui.button(label="❌ 取消", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.stop()
-        await interaction.response.edit_message(
-            content="🚫 已取消重新查詢",
-            embed=None,
-            view=None,
-        )
-
-
-def _build_refresh_warning_embed() -> discord.Embed:
-    return discord.Embed(
-        title="⚠️ 重新查詢前請確認",
-        description=(
-            "若您此次選的區間與之前查詢的區間**重疊**，重疊部分的留言會在本 thread 內"
-            "**重複出現**（前次 section 有一次、這次 section 又有一次），不容易閱讀。\n\n"
-            "**建議選不重疊的新區間，例如：**\n"
-            "・先前若查 `2026-03-01 ~ 2026-04-20`\n"
-            "・這次改查 `2026-01-01 ~ 2026-02-28`（接續在前）"
-        ),
-        color=0xE67E22,  # 橘色警示
-    )
 
 
 CANDIDATES_PER_PAGE = 25  # Discord Select 上限
@@ -1099,24 +1075,19 @@ class ControlMessageView(discord.ui.View):
             return
         source, lookup_id = meta
 
-        # 同日 refresh → 覆蓋今日 section，不會產生重複資料，直接彈 Modal 不需警告
-        # 跨日 refresh → append 新 section，可能與歷史 section 區間重疊，顯示警告
+        # 取上次區間以便填入 modal default + label（警告內嵌 modal，不再用前置確認 embed）
         state = await cog.state_db.get_community_lookup_thread(
             interaction.guild_id or 0, source, lookup_id,
         )
-        today = datetime.now(TAIPEI_TZ).date().isoformat()
-        is_same_day = bool(state and state.get("last_section_date") == today)
+        prev_start = (state or {}).get("last_start_date")
+        prev_end = (state or {}).get("last_end_date")
 
-        if is_same_day:
-            await interaction.response.send_modal(
-                RefreshLookupModal(cog, source=source, lookup_id=lookup_id, existing_thread=thread)
+        await interaction.response.send_modal(
+            RefreshLookupModal(
+                cog, source=source, lookup_id=lookup_id, existing_thread=thread,
+                prev_start=prev_start, prev_end=prev_end,
             )
-        else:
-            await interaction.response.send_message(
-                embed=_build_refresh_warning_embed(),
-                view=ConfirmRefreshView(cog, source=source, lookup_id=lookup_id, existing_thread=thread),
-                ephemeral=True,
-            )
+        )
 
 
 # ═══════════════════════════════════════════════════
@@ -1244,7 +1215,7 @@ class CommunityLookupFlow:
                     state = None
 
         # Thread 名稱：帶今天日期，每次查詢都會嘗試更新為最新日期
-        today_iso = datetime.now(TAIPEI_TZ).date().isoformat()
+        today_iso = _now_local().date().isoformat()
         display_name = None
         if source == "bahamut" and result.posts_in_range:
             display_name = result.posts_in_range[0].extra.get("author_name")
@@ -1283,8 +1254,8 @@ class CommunityLookupFlow:
 
         # 同 thread 並發 lock
         async with self._lock_for(thread.id):
-            today = datetime.now(TAIPEI_TZ).date().isoformat()
-            now_tw = datetime.now(TAIPEI_TZ)
+            today = _now_local().date().isoformat()
+            now_tw = _now_local()
             is_same_day = state and state.get("last_section_date") == today
 
             # 同日 → 刪除今日 section 後重新 append
@@ -1333,6 +1304,8 @@ class CommunityLookupFlow:
                 control_msg_id=ctrl_msg.id,
                 last_section_date=today,
                 last_section_slots=slot_ids,
+                last_start_date=start_date,
+                last_end_date=end_date,
             )
 
         # 父頻道通知 + bump panel

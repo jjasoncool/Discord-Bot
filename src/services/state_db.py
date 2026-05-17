@@ -81,6 +81,8 @@ CREATE TABLE IF NOT EXISTS community_lookup_threads (
     control_msg_id        INTEGER,                    -- 底部控制訊息（[🔄 更新]）的 msg_id
     last_section_date     TEXT,                       -- 'YYYY-MM-DD'：判斷同日 edit / 跨日 append
     last_section_slots    TEXT,                       -- JSON: {header_msg_id, nickname_msg_id, post_slot_msg_ids, comment_slot_msg_ids}
+    last_start_date       TEXT,                       -- 上次查詢區間起 'YYYY-MM-DD'（顯示於重查警告 embed）
+    last_end_date         TEXT,                       -- 上次查詢區間迄 'YYYY-MM-DD'
     last_updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (guild_id, source, lookup_id)
 );
@@ -91,6 +93,8 @@ _MIGRATIONS_SQL = [
     "ALTER TABLE bahamut_post_state ADD COLUMN content_hash TEXT",
     "ALTER TABLE bahamut_comment_slot ADD COLUMN content_hash TEXT",
     "ALTER TABLE bahamut_post_state ADD COLUMN continuation_msg_ids TEXT",
+    "ALTER TABLE community_lookup_threads ADD COLUMN last_start_date TEXT",
+    "ALTER TABLE community_lookup_threads ADD COLUMN last_end_date TEXT",
 ]
 
 
@@ -308,7 +312,8 @@ class StateDB:
         """取得社群 ID 查詢 thread 狀態。"""
         async with self.db.execute(
             """SELECT thread_id, control_msg_id, last_section_date,
-                      last_section_slots, last_updated_at
+                      last_section_slots, last_updated_at,
+                      last_start_date, last_end_date
                FROM community_lookup_threads
                WHERE guild_id=? AND source=? AND lookup_id=?""",
             (guild_id, source, str(lookup_id)),
@@ -322,6 +327,8 @@ class StateDB:
             "last_section_date": row[2],
             "last_section_slots": json.loads(row[3]) if row[3] else {},
             "last_updated_at": row[4],
+            "last_start_date": row[5],
+            "last_end_date": row[6],
         }
 
     async def upsert_community_lookup_thread(
@@ -334,6 +341,8 @@ class StateDB:
         control_msg_id: Optional[int] = None,
         last_section_date: Optional[str] = None,
         last_section_slots: Optional[Dict] = None,
+        last_start_date: Optional[str] = None,
+        last_end_date: Optional[str] = None,
     ) -> None:
         """新增或更新 community lookup thread 狀態。
 
@@ -344,13 +353,16 @@ class StateDB:
         await self.db.execute(
             """INSERT INTO community_lookup_threads
                (guild_id, source, lookup_id, thread_id, control_msg_id,
-                last_section_date, last_section_slots, last_updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                last_section_date, last_section_slots,
+                last_start_date, last_end_date, last_updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                ON CONFLICT(guild_id, source, lookup_id) DO UPDATE SET
                    thread_id=excluded.thread_id,
                    control_msg_id=COALESCE(excluded.control_msg_id, community_lookup_threads.control_msg_id),
                    last_section_date=COALESCE(excluded.last_section_date, community_lookup_threads.last_section_date),
                    last_section_slots=COALESCE(excluded.last_section_slots, community_lookup_threads.last_section_slots),
+                   last_start_date=COALESCE(excluded.last_start_date, community_lookup_threads.last_start_date),
+                   last_end_date=COALESCE(excluded.last_end_date, community_lookup_threads.last_end_date),
                    last_updated_at=CURRENT_TIMESTAMP""",
             (
                 guild_id,
@@ -360,6 +372,8 @@ class StateDB:
                 control_msg_id,
                 last_section_date,
                 slots_json,
+                last_start_date,
+                last_end_date,
             ),
         )
         await self.db.commit()
