@@ -25,6 +25,7 @@ WEB_SETTINGS = AskAIWebSettings()
 TAIPEI_TZ = timezone(timedelta(hours=ASKAI_SETTINGS.taipei_utc_offset_hours))
 PROMPT_FILE_PATH = Path(ASKAI_SETTINGS.prompt_file_path)
 IDENTITY_FILE_PATH = Path(ASKAI_SETTINGS.identity_file_path)
+EXAMPLES_FILE_PATH = Path(ASKAI_SETTINGS.examples_file_path)
 PROMPT_LOG_PATH = Path(ASKAI_SETTINGS.prompt_log_path)
 RESPONSE_LOG_PATH = Path(ASKAI_SETTINGS.response_log_path)
 MAX_IMAGE_SIZE_BYTES = ASKAI_SETTINGS.max_image_size_bytes
@@ -99,13 +100,16 @@ def _read_prompt_file(path: Path) -> str:
 
 
 def load_system_prompt() -> str:
-    """從檔案載入 system prompt（身份核心 + 主 prompt 拼接），缺檔時降級至預設值。"""
-    parts = [
-        _read_prompt_file(IDENTITY_FILE_PATH),
-        _read_prompt_file(PROMPT_FILE_PATH),
-    ]
-    parts = [p for p in parts if p]
-    if not parts:
+    """從檔案載入 system prompt：身份 → 主規則 → few-shot 範例。
+
+    範例放最末，因 LLM 對 prompt 尾端的模仿力最強；範例缺檔時不影響主流程。
+    主規則與身份都缺才降級至預設值。
+    """
+    identity = _read_prompt_file(IDENTITY_FILE_PATH)
+    main_prompt = _read_prompt_file(PROMPT_FILE_PATH)
+    examples = _read_prompt_file(EXAMPLES_FILE_PATH)
+    parts = [p for p in (identity, main_prompt, examples) if p]
+    if not (identity or main_prompt):
         logger.warning("身份與主 prompt 皆無內容，改用預設 SYSTEM PROMPT")
         return ASKAI_SETTINGS.default_system_prompt
     return "\n\n".join(parts)

@@ -162,6 +162,7 @@ class AskAICommandSettings(BaseSettings):
 
     prompt_file_path: str = "/app/settings/prompts/askai_system_prompt.txt"
     identity_file_path: str = "/app/settings/prompts/persona_identity.txt"
+    examples_file_path: str = "/app/settings/prompts/persona_examples.txt"
     prompt_log_path: str = "/logs/askai_prompt.txt"
     # askai_prompt：以時間輪替，並只保留固定份數
     prompt_log_when: str = "midnight"

@@ -88,6 +88,63 @@ def _backoff_delay(attempt: int) -> float:
     return DEFAULT_BACKOFF_INITIAL_S * (DEFAULT_BACKOFF_FACTOR ** attempt)
 
 
+def _unwrap_response_envelope(data: Any) -> Any:
+    """處理 Lemonade 風格的「200 OK + {"error": {...}}」反 HTTP envelope。
+
+    Lemonade 在內部 CURL 轉發到 downstream backend 失敗時，會把錯誤包成 200 OK
+    回傳，與正常 OpenAI 格式同一 endpoint 但 payload 是 `{"error": {...}}` 而非
+    `{"data": [...]}` / `{"choices": [...]}`。下游若直接 `data["data"]` 會撞
+    KeyError、訊息僅 `'data'` 兩字，無法判斷實際後端狀態。
+
+    分流：
+      - `error.type == "network_error"` → `httpx.ConnectError`（連線層暫時錯誤，
+        交給上層退避重試）
+      - 其他 error type → `LlmAPIError(status=None)`（服務端永久錯誤，不重試）
+      - 非 envelope / 無 error key → 原樣回傳
+
+    這層接在 `_post_json` / `_apost_json` 出口，所有 POST 端點（chat / embedding /
+    未來新增）都自動享有相同的錯誤護網，不必每個 endpoint 各寫一份。
+    """
+    if not isinstance(data, dict):
+        return data
+    err = data.get("error")
+    if not isinstance(err, dict):
+        return data
+    err_type = str(err.get("type", "")).strip()
+    err_msg = str(err.get("message", "")).strip()
+    if err_type == "network_error":
+        raise httpx.ConnectError(f"upstream network_error: {err_msg}")
+    raise LlmAPIError(
+        f"upstream error envelope: type={err_type or '<unknown>'} message={err_msg or '<empty>'}",
+        status=None,
+        detail=str(data)[:1000],
+    )
+
+
+def _require_json_key(data: Any, key: str, *, op_label: str) -> Any:
+    """從回應 dict 安全取 key；缺 key / 型別不符時 raise `LlmAPIError` 並附結構摘要。
+
+    取代各 endpoint 內裸寫 `data[key]` 的反模式——當後端回應結構漂移（換版本、
+    換 OpenAI compat vs native shape、邊界 error envelope 沒被 unwrap 等）時，
+    給 caller 看得懂的訊息而非空泛的 `KeyError: 'data'`。
+
+    回傳該 key 的值；長度 / 內容由 caller 自行檢查。
+    """
+    if not isinstance(data, dict):
+        raise LlmAPIError(
+            f"{op_label} 回應不是 dict：type={type(data).__name__} sample={str(data)[:300]}",
+            status=None,
+            detail=str(data)[:1000],
+        )
+    if key not in data:
+        raise LlmAPIError(
+            f"{op_label} 回應缺少 key='{key}'：keys={list(data.keys())} sample={str(data)[:300]}",
+            status=None,
+            detail=str(data)[:1000],
+        )
+    return data[key]
+
+
 class LlmHttpClient:
     """OpenAI dialect HTTP 薄殼：chat / embedding / models 三個端點。"""
 
@@ -158,7 +215,8 @@ class LlmHttpClient:
         簡化 batch / single 共用 code path。
         """
         data = self._post_json("/embeddings", {"model": model, "input": input})
-        return [item["embedding"] for item in data["data"]]
+        items = _require_json_key(data, "data", op_label="embedding(sync)")
+        return [item["embedding"] for item in items]
 
     async def aembedding(
         self,
@@ -167,7 +225,8 @@ class LlmHttpClient:
         input: str | list[str],
     ) -> list[list[float]]:
         data = await self._apost_json("/embeddings", {"model": model, "input": input})
-        return [item["embedding"] for item in data["data"]]
+        items = _require_json_key(data, "data", op_label="embedding(async)")
+        return [item["embedding"] for item in items]
 
     # ---------- models（啟動自我測試 / 觀測用）----------
 
@@ -303,7 +362,8 @@ class LlmHttpClient:
             try:
                 resp = self._sync.post(self._host + "/v1" + path, json=body)
                 self._raise_for_status(resp)
-                return resp.json()
+                # envelope unwrap：跟 async path 對稱，所有 POST 端點共用同一層護網
+                return _unwrap_response_envelope(resp.json())
             except httpx.TimeoutException as exc:
                 if attempt >= self._max_retries:
                     raise LlmTimeoutError(f"POST {path} timed out") from exc
@@ -334,16 +394,9 @@ class LlmHttpClient:
                     timeout=eff_timeout,
                 )
                 self._raise_for_status(resp)
-                data = resp.json()
-                # Lemonade 在內部 CURL 轉發到 downstream backend 失敗時，會回
-                # `200 OK + {"error": {"type": "network_error", ...}}` 這種反 HTTP
-                # 語意的 envelope。視為連線層暫時錯誤，走既有 RequestError 退避重試。
-                err = data.get("error") if isinstance(data, dict) else None
-                if isinstance(err, dict) and err.get("type") == "network_error":
-                    raise httpx.ConnectError(
-                        f"lemonade upstream error: {err.get('message', '')}"
-                    )
-                return data
+                # envelope unwrap：與 sync path 共用同一層護網（含非 network_error
+                # 類型的 error envelope，避免下游 caller 撞 `KeyError: 'data'`）
+                return _unwrap_response_envelope(resp.json())
             except httpx.TimeoutException as exc:
                 if attempt >= self._max_retries:
                     raise LlmTimeoutError(f"POST {path} timed out") from exc

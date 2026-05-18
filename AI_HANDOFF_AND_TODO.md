@@ -103,7 +103,7 @@ last_confirmed: 2026-03-31
 | 主軸 | 狀態 | 進度 | 詳見 |
 |---|---|---:|---|
 | Discord Bot / AI 對話能力 | 已有可用基礎能力 | 80% | [專案架構](#專案-ai-架構總覽) |
-| Context / Prompt 優化 | 含 askai 身份感 + 人物對照三輪重構 + 人設深度重構（和風含蓄/30熟女/包容派），待部署驗證 | 96% | [Context 優化](#context--prompt-優化專區) |
+| Context / Prompt 優化 | 含 askai 身份感 + 人物對照三輪重構 + 人設深度重構（和風含蓄/30熟女/包容派）+ 智慧女性風格重寫（2026-05-18）+ few-shot 範例檔，待部署驗證 | 97% | [Context 優化](#context--prompt-優化專區) |
 | AI 私聊頻道 + 三層記憶 | 規劃完成（含道德守門）；人設 prompt 已就位 | 10% | [AI 私聊頻道](#ai-私聊頻道--三層記憶機制規劃中) |
 | 使用者指令記憶 (/remember) | 規劃中（與 AI 私聊頻道互補） | 5% | [/remember 規劃](#使用者指令記憶-remember-未來工作) |
 | Reaction 統計 / 社群互動玩法 | 規劃中 | 5% | [Reaction TODO](#reaction-統計與社群互動玩法) |
@@ -252,6 +252,44 @@ last_confirmed: 2026-04-19
 > 詳細項目已歸檔至 `TODO-completed.md` 的「Context/Prompt 完整重構 + askai 身份感（歸檔 2026-04-18）」。
 > 摘要：context/prompt 格式重構、貼圖描述、on_message 持久化、自動人格萃取 pipeline、/askai 體驗優化（timeout / 抓取量 / 取消 / 排隊顯示）、LLM 服務穩定性修復（SafeOllamaEmbedding + HTTP 連線重用 + thread-safety）、/askai 發問者身份注入（`<asker_profile>` + `<latest_user_message from=...>` + persona 拆分 + 撞名偵測 `#xxxx` + safety rules 修飾）。
 
+### 已完成（2026-05-18：LLM HTTP client 通用錯誤護網）
+
+**症狀：** `/askai` 每次跑都跳兩個 warning：
+- `pgvector vector rank 嵌入問題失敗（降級為 BM25-only）: 'data'`
+- `member-profile vector retrieval 失敗（保留 SQL 結果）: 'data'`
+
+**根因：** `llm_http_client.py:embedding/aembedding` 直接 `data["data"]` 取 key，當後端（Lemonade / Ollama compat 層）回傳非 OpenAI shape（如 error envelope、ollama native shape）時 raise `KeyError: 'data'`，例外 str 出來就是 `'data'` 兩個字，無法判讀。原 sync `_post_json` 完全沒有 envelope unwrap，async `_apost_json` 也只認 `error.type == "network_error"`，其他 error type（如 model_not_loaded）會漏到下游撞牆。
+
+**改動：** [llm_http_client.py](src/llm/llm_http_client.py) 新增兩個 module-level helper，多 endpoint 通用：
+
+| Helper | 行為 | 應用 |
+|---|---|---|
+| `_unwrap_response_envelope(data)` | `error.type==network_error` → `ConnectError`（觸發退避重試）；其他 error envelope → `LlmAPIError(status=None)` 不重試；正常 payload 原樣回傳 | sync `_post_json` + async `_apost_json` 出口，所有 POST 端點自動受惠 |
+| `_require_json_key(data, key, *, op_label)` | 缺 key / 型別不符 → raise `LlmAPIError` 附 `keys=[...]` + sample；錯誤訊息含 op_label 區分入口 | `embedding()` / `aembedding()`；未來新 endpoint（rerank / classification 等）直接套 |
+
+**收益：** 下次同樣 warning 會直接顯示後端實際回了什麼（envelope error type / native shape / 空陣列），不必去 server log 對拍。Lemonade KEEP_ALIVE 跑掉導致的 model_not_loaded 等永久錯誤也會被正確識別、不無限退避。
+
+---
+
+### 已完成（2026-05-18：智慧女性風格重寫 + few-shot 範例檔）
+
+**動機：** 原 `askai_system_prompt.txt` 的「姊姊 + 同盟 roast + 暗刺」與「母性溫度」內在矛盾；使用者要求轉向「Pekora mama 但更智慧」——溫柔為底、刺輕但準、看穿不說破、不重複不撤回。
+
+**改動內容：**
+- `src/settings/prompts/askai_system_prompt.txt` 重寫開場 3 行 + 【回答風格】1-4 + 【互動與語氣】1-3, 6 + 【色色模式】4 + 【語氣與禁忌】4-6（新增 6：失敗模式區擋空話智者 / 毒舌分析師）
+- 拿掉「禁止自我撤回」條（智慧女性的刺輕，不需要這條防線撐第二句）
+- 結尾反問規則鬆綁：客服式禁止照舊，**真誠好奇式反問允許**（觀察者語言）
+- 八卦/情緒回應長度從 4~8 句 → 3~5 句多留白
+- 加入「點規律而非點現象」原則
+- 新增 `src/settings/prompts/persona_examples.txt`（12 組正反例對照 few-shot；含色色降級範例）
+- `src/sys_settings/llm_settings.py` 加 `examples_file_path` 欄位
+- `src/commands/llm_commands.py` `load_system_prompt()` 改成讀三檔（identity → main → examples），examples 放最末利用 LLM 對尾端模仿力最強的特性；範例缺檔不影響主流程
+
+**設計重點：**
+- few-shot 採「禁止 ❌ / 示範 ✅」對照法（負例對壓制 failure mode 比純正例有效，token 多花 ~30% 值得）
+- 12 組情境覆蓋：熬夜、抽卡爆、技術搞砸、抱怨第三方、做對事、低潮、純技術求答、被邀 roast 自己人、自嘲示弱、閒聊、色色情境、色色降級
+- examples 跟 rules 拆檔 → 未來迭代範例不必動主規則
+
 ### 待處理
 
 **體驗 / 觀測：**
@@ -261,6 +299,7 @@ last_confirmed: 2026-04-19
 - [ ] `asker_profile.roles` 欄位目前為 `(未啟用)`，未來可填 Discord 身份組名稱 + 權限層級（admin/moderator/member）
 
 **部署驗證（待重啟 + 跑一輪確認）：**
+- [ ] 2026-05-18 智慧女性風格 + few-shot 範例效果（觀察：回應是否變短/留白變多、是否真的「點規律不點現象」、空話智者 / 毒舌分析師 failure mode 是否被擋掉、色色降級觸發是否更敏感）
 - [ ] 2026-04-27 三輪 askai 重構完整效果（#XXXX 對齊、target_profile 區塊、prompt 整合後回答長度與陪聊感、自我否定卡片是否仍能被 LLM 正常引用）
 - [ ] Ollama 重試邏輯（觀察 `[WARNING] Ollama 第 1 次呼叫失敗` log）
 - [ ] embedding `num_ctx=8192`（`curl http://192.168.56.1:11434/api/ps` 看 `qwen3-embedding:0.6b` 的 `size_vram` 從 ~5.7GB 降到 ~3.1GB）
@@ -316,8 +355,12 @@ last_confirmed: 2026-04-19
 | `src/llm/chat_persistence.py` | buffer 批次寫入、SafeOllamaEmbedding |
 | `src/llm/personality_extractor.py` | 人格萃取 pipeline |
 | `src/llm/intro_rag_port.py` | `index_auto_personality`、`_ainsert`、singleton |
-| `src/settings/prompts/askai_system_prompt.txt` | 人設 prompt |
+| `src/settings/prompts/askai_system_prompt.txt` | 人設 prompt（規則）|
+| `src/settings/prompts/persona_identity.txt` | 人設身份核心（琇紫） |
+| `src/settings/prompts/persona_examples.txt` | few-shot 風格示範對照 |
 | `src/settings/prompts/llm_context_safety_rules.json` | untrusted intro + asker_profile 白名單 |
+| `src/sys_settings/llm_settings.py` | prompt 三檔路徑設定 |
+| `src/commands/llm_commands.py:load_system_prompt` | 三檔拼接載入（identity → main → examples）|
 
 ---
 
