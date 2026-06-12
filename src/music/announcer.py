@@ -11,6 +11,13 @@ logger = logging.getLogger('discord_bot')
 MUSIC_RUNTIME_PATH = "settings/music_runtime.json"
 
 
+def _is_in_music_channel(cog, user) -> bool:
+    """檢查使用者是否正待在音樂語音頻道內（沒進來的人不准點歌）"""
+    vc_id = cog.config.voice_channel_id if getattr(cog, "config", None) else None
+    voice = getattr(user, "voice", None)
+    return bool(vc_id and voice and voice.channel and voice.channel.id == vc_id)
+
+
 class MusicControlView(discord.ui.View):
     """音樂控制面板按鈕（persistent view，重啟後仍可互動）"""
 
@@ -26,6 +33,11 @@ class MusicControlView(discord.ui.View):
     # ─── 第一排：點歌 + 歌單 + 收藏 ───
     @discord.ui.button(label="點歌", style=discord.ButtonStyle.primary, custom_id="music_request", emoji="🎵", row=0)
     async def request_song(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not _is_in_music_channel(self.cog, interaction.user):
+            await interaction.response.send_message(
+                "🎧 請先加入音樂語音頻道才能點歌喔！", ephemeral=True
+            )
+            return
         await interaction.response.send_modal(SongRequestModal(self.cog))
 
     @discord.ui.button(label="歌單", style=discord.ButtonStyle.secondary, custom_id="music_queue", emoji="📋", row=0)
@@ -157,6 +169,11 @@ class SongRequestModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
+        if not _is_in_music_channel(self.cog, interaction.user):
+            await interaction.followup.send(
+                "🎧 你已不在音樂語音頻道，已取消這次點歌。", ephemeral=True
+            )
+            return
         query = self.query.value.strip()
         try:
             song = await self.cog.player.request_song(query, interaction.user)

@@ -8,6 +8,9 @@ from .announcer import Announcer, MusicControlView
 
 logger = logging.getLogger('discord_bot')
 
+# 點歌者離開音樂頻道後，砍歌前的寬限秒數（避免短暫閃斷/重連誤砍）
+LEAVE_GRACE_SECONDS = 5
+
 
 class MusicCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -18,6 +21,7 @@ class MusicCog(commands.Cog):
         self._starting = False
         self._view_registered = False
         self._playlist_task: asyncio.Task | None = None
+        self._leave_tasks: set[asyncio.Task] = set()  # 追蹤點歌者離開的延遲處理 task，避免被 GC
 
     async def cog_load(self):
         """Cog 載入（由 add_cog 自動呼叫，只做輕量初始化）"""
@@ -39,6 +43,11 @@ class MusicCog(commands.Cog):
         if self._playlist_task and not self._playlist_task.done():
             self._playlist_task.cancel()
             self._playlist_task = None
+
+        # 取消尚未完成的「離開砍歌」延遲 task
+        for task in list(self._leave_tasks):
+            task.cancel()
+        self._leave_tasks.clear()
 
         # 停止 config watcher
         await RuntimeMusicConfig.stop_watcher()
@@ -102,21 +111,30 @@ class MusicCog(commands.Cog):
             and (after.channel is None or after.channel.id != channel_id)
         )
         if left_music_channel:
-            asyncio.create_task(self._handle_requester_left(member))
+            logger.info(
+                f"[MusicCog] 偵測到 {member.display_name}({member.id}) 離開音樂頻道，"
+                f"{LEAVE_GRACE_SECONDS} 秒後檢查其點歌"
+            )
+            # 必須保留 task 參照，否則可能在 sleep 期間被 GC 回收而不執行完
+            task = asyncio.create_task(self._handle_requester_left(member))
+            self._leave_tasks.add(task)
+            task.add_done_callback(self._leave_tasks.discard)
 
     async def _handle_requester_left(self, member):
-        """寬限 5 秒後，若點歌者仍未回到音樂頻道，移除他點的歌並公告"""
+        """寬限數秒後，若點歌者仍未回到音樂頻道，移除他點的歌並公告"""
         try:
-            await asyncio.sleep(5)
+            await asyncio.sleep(LEAVE_GRACE_SECONDS)
 
             channel = self.bot.get_channel(self.config.voice_channel_id)
             # 又回到音樂頻道就不處理（避免短暫閃斷/重連誤砍）
             if channel and any(
                 m.id == member.id for m in getattr(channel, "members", [])
             ):
+                logger.info(f"[MusicCog] {member.display_name} 已回到音樂頻道，保留其點的歌")
                 return
 
             dropped = await self.player.drop_requests_by(member.id)
+            logger.info(f"[MusicCog] {member.display_name} 離開後移除 {dropped} 首點歌")
             if dropped and channel:
                 try:
                     await channel.send(
