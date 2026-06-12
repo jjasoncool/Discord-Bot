@@ -53,12 +53,24 @@ class RollCallResponseView(discord.ui.View):
             return
 
         user_id = interaction.user.id
-        if self._target_user_id and user_id != self._target_user_id:
-            if not service.runtime.is_pending(user_id):
-                await interaction.response.send_message(
-                    "這不是你的點名訊息。", ephemeral=True
-                )
-                return
+
+        # 以 message_id 反查這則點名訊息真正對應的目標使用者，
+        # 避免重啟後 persistent view 的 _target_user_id 為 None 而失去綁定。
+        target_user_id = self._target_user_id
+        msg = interaction.message
+        if msg is not None:
+            for uid_str, info in service.runtime.pending.items():
+                if info.get("message_id") == msg.id:
+                    target_user_id = int(uid_str)
+                    break
+
+        # 只有被點名本人能回覆「自己的」點名訊息，
+        # 防止 A 透過 B 的按鈕解掉自己（或誤動）的點名。
+        if target_user_id is not None and user_id != target_user_id:
+            await interaction.response.send_message(
+                "這不是你的點名訊息，只有被點名本人可以回覆。", ephemeral=True
+            )
+            return
 
         if not service.runtime.is_pending(user_id):
             await interaction.response.send_message(

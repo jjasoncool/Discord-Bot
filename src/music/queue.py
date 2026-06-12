@@ -102,10 +102,15 @@ class MusicQueue:
     def is_interrupt_active(self) -> bool:
         return len(self.interrupt_queue) > 0
 
-    def clear_interrupts(self):
-        """只清除插播佇列，保留預設歌單"""
-        self.interrupt_queue.clear()
-        self.current = None
+    def remove_interrupts_by(self, user_id: int) -> int:
+        """移除指定使用者點的、尚未播放的插播歌，回傳移除數量"""
+        if not self.interrupt_queue:
+            return 0
+        before = len(self.interrupt_queue)
+        self.interrupt_queue = deque(
+            s for s in self.interrupt_queue if s.requested_by_id != user_id
+        )
+        return before - len(self.interrupt_queue)
 
     def clear_all(self):
         """清除所有佇列（含預設歌單）"""

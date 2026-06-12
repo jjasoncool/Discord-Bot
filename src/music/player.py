@@ -26,6 +26,7 @@ class MusicPlayer:
         self._task: asyncio.Task | None = None
         self._bg_tasks: set[asyncio.Task] = set()  # 追蹤背景下載 tasks
         self._replay = False  # 重播當前歌曲（不跳下一首）
+        self._reloading = False  # 重載歌單中，避免重複觸發
 
     def _has_active_voice(self) -> bool:
         return self.voice_client is not None and self.voice_client.is_connected()
@@ -327,8 +328,8 @@ class MusicPlayer:
                 self.queue.current = None
             await asyncio.sleep(0.5)
 
-    async def add_to_playlist(self, url: str):
-        """將歌單 URL 逐批加入主佇列（邊解析邊播，不等全部完成）"""
+    async def _fetch_playlist_songs(self, url: str) -> list[Song]:
+        """解析歌單 URL，回傳 Song 清單（純抓取，不動佇列）"""
         loop = asyncio.get_event_loop()
         try:
             entries = await loop.run_in_executor(
@@ -336,9 +337,9 @@ class MusicPlayer:
             )
         except Exception as e:
             logger.error(f"[MusicPlayer] 歌單解析失敗: {e}")
-            return
+            return []
 
-        batch = []
+        songs = []
         for entry in entries:
             if not entry:
                 continue
@@ -349,25 +350,56 @@ class MusicPlayer:
             thumbnail = entry.get('thumbnail') or (
                 f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else None
             )
-            song = Song(
+            songs.append(Song(
                 title=entry.get('title', 'Unknown'),
                 url=song_url,
                 webpage_url=f"https://www.youtube.com/watch?v={video_id}" if video_id else song_url,
                 duration=int(entry.get('duration', 0) or 0),
                 thumbnail=thumbnail,
-            )
-            batch.append(song)
+            ))
+        return songs
 
-            # 每 5 首加入一批
-            if len(batch) >= 5:
-                self.queue.add_to_main(batch)
-                logger.info(f"[MusicPlayer] 歌單載入中... 已加入 {len(self.queue.main_queue)} 首")
-                batch = []
-                await asyncio.sleep(0)
-
-        if batch:
-            self.queue.add_to_main(batch)
+    async def add_to_playlist(self, url: str):
+        """將歌單 URL 逐批加入主佇列（邊解析邊播，不等全部完成）"""
+        songs = await self._fetch_playlist_songs(url)
+        for i in range(0, len(songs), 5):
+            self.queue.add_to_main(songs[i:i + 5])
+            logger.info(f"[MusicPlayer] 歌單載入中... 已加入 {len(self.queue.main_queue)} 首")
+            await asyncio.sleep(0)
         logger.info(f"[MusicPlayer] 歌單載入完成，共 {len(self.queue.main_queue)} 首")
+
+    async def reload_playlist(self) -> int | None:
+        """重新抓取最新線上歌單：清掉點歌與舊主歌單後換上新清單。
+
+        回傳新歌單歌曲數；若無預設歌單或抓取結果為空則不動舊歌單，回傳 None。
+        """
+        url = self.config.default_playlist_url
+        if not url or self._reloading:
+            return None
+
+        self._reloading = True
+        try:
+            # 先抓新歌單，成功才動佇列，避免抓失敗把歌單清空導致沒歌可播
+            songs = await self._fetch_playlist_songs(url)
+            if not songs:
+                logger.warning("[MusicPlayer] 重載歌單：抓取結果為空，保留舊歌單")
+                return None
+
+            self.queue.clear_all()  # 清掉點歌插播 + 舊主歌單
+            for i in range(0, len(songs), 5):
+                self.queue.add_to_main(songs[i:i + 5])
+                await asyncio.sleep(0)
+            self.queue.shuffle = self.config.shuffle  # 重新套用隨機狀態並決定下一首
+
+            # 跳過正在播的（舊）歌，讓播放迴圈從新歌單抓下一首
+            if self.voice_client and self.voice_client.is_playing():
+                self.voice_client.stop()
+
+            count = len(self.queue.main_queue)
+            logger.info(f"[MusicPlayer] 歌單已重載，共 {count} 首")
+            return count
+        finally:
+            self._reloading = False
 
     @staticmethod
     async def _get_peak_db(file_path: str) -> float | None:
@@ -458,8 +490,19 @@ class MusicPlayer:
         self.queue.add_interrupt(song)
         return song
 
-    def stop(self):
-        """停止播放，只清除插播佇列，保留預設歌單"""
-        self.queue.clear_interrupts()
-        if self.voice_client and self.voice_client.is_playing():
-            self.voice_client.stop()
+    async def drop_requests_by(self, user_id: int) -> int:
+        """移除某使用者點的歌：未播放的從插播佇列移除；
+        正在播放的若是他點的，立即停止（效果等同跳過）。回傳處理的歌曲總數。
+        （主歌單歌曲 requested_by_id 為 None，不會被誤砍。）"""
+        dropped = self.queue.remove_interrupts_by(user_id)
+
+        cur = self.queue.current
+        if cur and cur.requested_by_id == user_id:
+            # 停止當前歌曲，after callback 會讓播放迴圈抓下一首
+            if self.voice_client and self.voice_client.is_playing():
+                self.voice_client.stop()
+            dropped += 1
+
+        if dropped:
+            logger.info(f"[MusicPlayer] 已移除使用者 {user_id} 點的 {dropped} 首歌")
+        return dropped

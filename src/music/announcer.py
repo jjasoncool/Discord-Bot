@@ -89,11 +89,21 @@ class MusicControlView(discord.ui.View):
         else:
             await interaction.followup.send("目前沒有在播放", ephemeral=True)
 
-    @discord.ui.button(label="停止", style=discord.ButtonStyle.danger, custom_id="music_stop", emoji="⏹", row=1)
-    async def stop_music(self, interaction: discord.Interaction, button: discord.ui.Button):
+    # custom_id 沿用舊的 music_stop 以相容既有面板；
+    # 行為：清掉點歌 + 重新抓取最新線上歌單（同步 YouTube 上的加歌/刪歌）
+    @discord.ui.button(label="重置歌單", style=discord.ButtonStyle.danger, custom_id="music_stop", emoji="♻️", row=1)
+    async def reset_playlist(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
-        self.cog.player.stop()
-        await interaction.followup.send("⏹️ 音樂已停止", ephemeral=True)
+        count = await self.cog.player.reload_playlist()
+        if count is None:
+            await interaction.followup.send(
+                "⚠️ 無法重載歌單（未設定預設歌單或線上抓取失敗），維持原本播放。",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                f"♻️ 已清空點歌並重載最新線上歌單（共 {count} 首）。", ephemeral=True
+            )
 
     @discord.ui.button(label="重播", style=discord.ButtonStyle.secondary, custom_id="music_replay", emoji="🔄", row=1)
     async def replay_song(self, interaction: discord.Interaction, button: discord.ui.Button):

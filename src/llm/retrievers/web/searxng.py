@@ -84,8 +84,14 @@ async def fetch_web_results(
     started = time.monotonic()
 
     try:
+        # SearxNG botdetection 預期請求帶 X-Forwarded-For / X-Real-IP；
+        # 內網直連沒有 proxy，補一個值避免每次呼叫都在 searxng log 跳 warning。
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(settings.searxng_url, params=params) as resp:
+            async with session.get(
+                settings.searxng_url,
+                params=params,
+                headers={"X-Forwarded-For": "127.0.0.1"},
+            ) as resp:
                 if resp.status != 200:
                     body = await resp.text()
                     meta["error"] = f"http_{resp.status}"

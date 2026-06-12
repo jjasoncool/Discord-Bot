@@ -87,6 +87,51 @@ class MusicCog(commands.Cog):
         await asyncio.sleep(5)
         await self._start_if_ready()
 
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member, before, after):
+        """點歌者離開音樂語音頻道時，自動移除他點的歌（寬限 5 秒）"""
+        if member.bot or not self.player or not self.config:
+            return
+        channel_id = self.config.voice_channel_id
+        if not channel_id:
+            return
+
+        # 從音樂頻道離開（完全離開或切到別的頻道都算）
+        left_music_channel = (
+            before.channel is not None and before.channel.id == channel_id
+            and (after.channel is None or after.channel.id != channel_id)
+        )
+        if left_music_channel:
+            asyncio.create_task(self._handle_requester_left(member))
+
+    async def _handle_requester_left(self, member):
+        """寬限 5 秒後，若點歌者仍未回到音樂頻道，移除他點的歌並公告"""
+        try:
+            await asyncio.sleep(5)
+
+            channel = self.bot.get_channel(self.config.voice_channel_id)
+            # 又回到音樂頻道就不處理（避免短暫閃斷/重連誤砍）
+            if channel and any(
+                m.id == member.id for m in getattr(channel, "members", [])
+            ):
+                return
+
+            dropped = await self.player.drop_requests_by(member.id)
+            if dropped and channel:
+                try:
+                    await channel.send(
+                        embed=discord.Embed(
+                            description=f"👋 **{member.display_name}** 已離開，已移除其點的 {dropped} 首歌。",
+                            color=discord.Color.greyple(),
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(f"[MusicCog] 發送離開移除公告失敗: {e}")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"[MusicCog] 處理點歌者離開失敗: {e}", exc_info=True)
+
     async def _start_if_ready(self):
         """連線語音並啟動播放"""
         if not self.player:

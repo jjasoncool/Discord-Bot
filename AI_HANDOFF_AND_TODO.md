@@ -1007,3 +1007,63 @@ last_confirmed: 2026-03-31
 - [ ] 指令數量是否下降或更清楚
 - [ ] 正式環境是否已隔離開發命令
 - [ ] 是否維持可回滾（舊入口仍可用）
+
+---
+
+## 修正紀錄：幽靈點名按鈕越權 BUG（2026-06-12）
+
+<!-- @meta
+id: rollcall-button-auth-fix
+type: FIX
+status: confirmed
+last_confirmed: 2026-06-12
+-->
+
+**問題：** A 可以點 B 的點名按鈕，並解掉「A 自己」的點名（拿到豁免）。
+**根因：** `RollCallResponseView.respond` 只檢查「按的人是否 pending」，按鈕未真正綁定到該訊息的目標使用者；重啟後 persistent view 的 `_target_user_id=None`，連薄弱檢查都失效。
+**修正：** 以 `interaction.message.id` 反查 `runtime.pending` 取得該訊息真正的目標 `user_id`，只允許本人回覆自己的點名訊息（`src/commands/rollcall_commands.py`）。
+**待驗證：** 部署後實測「他人按按鈕被擋下、本人按可正常通過、重啟後仍正確綁定」。
+
+---
+
+## 變更紀錄：音樂「停止」按鈕改為「重置歌單 + 重載線上歌單」（2026-06-13）
+
+<!-- @meta
+id: music-reset-reload-playlist
+type: FEATURE
+status: confirmed
+last_confirmed: 2026-06-13
+-->
+
+**背景：** 舊「停止」按鈕(player.stop())其實只清點歌插播+跳當前歌，主歌單仍續播，名稱誤導；且線上歌單(default_playlist_url)改了內容後不重啟不會同步。
+
+**變更：**
+- 按鈕 `停止/⏹` → `重置歌單/♻️`（custom_id 仍為 `music_stop` 以相容既有面板），method 改名 `reset_playlist`（`src/music/announcer.py`）。
+- 新增 `MusicPlayer.reload_playlist()`（`src/music/player.py`）：重新抓取 `default_playlist_url` 最新清單 → 清空點歌+舊主歌單 → 換上新清單 → 套用 shuffle → 跳過當前舊歌續播。**先抓成功才換**，抓取失敗/空清單則保留舊歌單回傳 None，避免清空後沒歌可播。`_reloading` 旗標防重複觸發。
+- 抽出 `_fetch_playlist_songs()` 純抓取 helper，`add_to_playlist()` 與 `reload_playlist()` 共用。
+
+**待驗證：** 部署後實測 ① 線上歌單加/刪歌後按鈕能同步；② 抓取失敗時不會清空舊歌單；③ 點歌會被清空。
+
+**備註：** `MusicPlayer.stop()` 已無呼叫者（dead code），暫時保留未刪。
+
+---
+
+## 新功能：點歌者離開自動移除其點的歌（2026-06-13）
+
+<!-- @meta
+id: music-drop-requests-on-leave
+type: FEATURE
+status: confirmed
+last_confirmed: 2026-06-13
+-->
+
+**需求：** 有人進音樂頻道點歌就跑走，偵測其離開後自動砍掉他點的歌——未播放的移除、正在播放的等同跳過停止。
+
+**設計（資料已就緒：`song.requested_by_id` 點歌時已記錄）：**
+- `MusicQueue.remove_interrupts_by(user_id)`（`src/music/queue.py`）：移除某人尚未播放的插播歌。
+- `MusicPlayer.drop_requests_by(user_id)`（`src/music/player.py`）：未播放的移除 + 正在播的若是他點的則 `voice_client.stop()` 跳過。主歌單歌 `requested_by_id=None` 不會誤砍。
+- `MusicCog.on_voice_state_update` + `_handle_requester_left`（`src/music/cog.py`）：偵測離開音樂頻道（完全離開或切頻道都算）→ **寬限 5 秒**，若仍未回來才移除 → 在頻道發**簡短公告**。
+
+**行為共識：** 寬限 5 秒（避免閃斷誤砍）、移除後頻道簡短公告。
+
+**待驗證：** ① 點歌後離開 5 秒內回來不砍；② 超過 5 秒砍掉且公告；③ 正在播他的歌會直接跳過；④ 主歌單歌不受影響。
