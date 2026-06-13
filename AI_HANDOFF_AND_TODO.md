@@ -1067,3 +1067,28 @@ last_confirmed: 2026-06-13
 **行為共識：** 寬限 5 秒（避免閃斷誤砍）、移除後頻道簡短公告。
 
 **待驗證：** ① 點歌後離開 5 秒內回來不砍；② 超過 5 秒砍掉且公告；③ 正在播他的歌會直接跳過；④ 主歌單歌不受影響。
+
+---
+
+## 新功能：x.com / twitter.com 連結自動轉 fixupx 可預覽（2026-06-13）
+
+<!-- @meta
+id: twitter-link-fixupx
+type: FEATURE
+status: confirmed
+last_confirmed: 2026-06-13
+-->
+
+**需求：** x.com 影片貼到 Discord 不會載入預覽，bot 偵測後自動貼出可預覽的轉換網址。
+
+**設計：**
+- 新增獨立純函式模組 `src/utils/link_fix.py`（無 discord 相依，方便測試/擴充）：
+  - `TWITTER_STATUS_RE`：只比對含 `/status/<id>` 的貼文連結（涵蓋 x.com / twitter.com、www./mobile. 子網域、/photo//video/ 尾段），避免轉到個人首頁、搜尋等無意義連結。
+  - `rewrite_twitter_links(content) -> str | None`：回傳所有轉好的 `https://fixupx.com/...` 網址（多個換行串接、去重、去掉 query string），無可轉連結回傳 None。
+- `on_message`（`src/discord_bot.py`）：bot-self guard 後加一段，偵測到 → `message.channel.send(fixed_links)`，**並 `message.edit(suppress=True)` 壓掉原訊息失敗預覽卡**，皆包 try/except 記 warning。
+
+**行為共識（2026-06-13 修正）：** 用 fixupx.com、發新訊息 + **壓掉原訊息預覽卡**（方案A＋suppress）、全頻道生效。原訊息文字保留、作者身分不變。
+
+**部署需求：** Bot 需 **Manage Messages 權限**才能壓別人的預覽；缺權限只會記 warning、fixupx 新訊息仍正常發出。
+
+**待驗證：** 部署後實測 ① x.com 影片貼文會回 fixupx 連結並可預覽；② 原訊息的破圖/失敗預覽卡被壓掉；③ 純個人首頁連結不觸發；④ 一則訊息多連結會全轉；⑤ 缺 Manage Messages 權限時不會炸、僅略過壓制。

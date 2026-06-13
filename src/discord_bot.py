@@ -289,6 +289,23 @@ async def on_message(message):
     if message.author == bot.user:
         return
 
+    # 偵測 x.com / twitter.com 貼文連結，貼出 fixupx 可預覽版本
+    if message.content:
+        from utils.link_fix import rewrite_twitter_links
+        fixed_links = rewrite_twitter_links(message.content)
+        if fixed_links:
+            try:
+                await message.channel.send(fixed_links)
+            except Exception as exc:
+                logger.warning(f'發送 fixupx 預覽連結失敗: {exc}')
+            # 壓掉原訊息的失敗/破圖預覽卡（需 Manage Messages 權限，缺權限則略過）
+            try:
+                await message.edit(suppress=True)
+            except discord.Forbidden:
+                logger.warning('壓制原訊息預覽失敗：缺少 Manage Messages 權限')
+            except Exception as exc:
+                logger.warning(f'壓制原訊息預覽失敗: {exc}')
+
     # 記錄接收到的訊息
     if message.content:
         logger.debug(f'收到訊息: {message.content} (來自: {message.author}, 頻道: {message.channel.name} [ID: {message.channel.id}])')
