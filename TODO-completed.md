@@ -6,6 +6,7 @@
 
 | 日期 | 區塊 | 關鍵字 |
 |---|---|---|
+| 2026-06-15 | [fixupx 連結轉發：只轉影片 + 存在性防呆](#fixupx-連結轉發只轉影片--存在性防呆歸檔2026-06-15) | link_fix, select_video_links, cdn.syndication, get_token, react-tweet, fail-open, 影片才轉 |
 | 2026-04-27 | [Bahamut 專區整段歸檔](#bahamut-專區整段歸檔歸檔2026-04-27) | scraper 全流程 100%, 反爬基礎設施, 第三階段 RAG ingestion 未做 |
 | 2026-04-27 | [幽靈點名系統剩餘 TODO 歸檔](#幽靈點名系統剩餘-todo-歸檔歸檔2026-04-27) | 部署驗證, /server_manager 整合 |
 | 2026-04-27 | [askai 人物身份對照與 prompt 整合三輪重構](#askai-人物身份對照與-prompt-整合三輪重構歸檔2026-04-27) | #XXXX 錨點, mention boost, target_profile, profile 自我否定豁免, retire 退場, prompt 11→8 段精煉, persona 三路分流 |
@@ -27,6 +28,53 @@
 | 2026-03-26 | [Telegram 已解決問題集](#telegram-relay-通道連線問題2026-03-26-已解決) | 通道連線, 媒體重複, 時序, 副檔名, route key |
 | 2026-03-25 | [Telegram Relay 設計定案](#telegram-relay-設計定案--架構設定相容流程盤點2026-03-25已完成歸檔) | 架構, config, 路由, 六層設計 |
 | 2026-03-22 | [Telegram Scraper 專案交接](#telegram-scraper-專案交接2026-03-22已完成歸檔) | Docker, 模組化, forward 過濾, session |
+
+---
+
+## fixupx 連結轉發：只轉影片 + 存在性防呆（歸檔 2026-06-15）
+
+<!-- @meta
+id: twitter-link-fixupx
+type: FEATURE
+status: confirmed
+last_confirmed: 2026-06-15
+-->
+
+**演進：** 2026-06-13 首版（所有 x.com / twitter.com 貼文連結都轉 fixupx + 砍預覽）→ 2026-06-15 改成**只轉影片**。動機：使用者回報圖片貼文的 fixupx 預覽跟 Discord 原生預覽沒差別，轉了多此一舉，還會把原生預覽卡一起砍掉。
+
+**需求：** x.com **影片**貼到 Discord 不會載入預覽，bot 偵測後自動貼出可預覽的 fixupx 網址；**圖片貼文不轉**（保留 Discord 原生預覽）。
+
+**關鍵限制：** 光看網址分不出影片/圖片；x.com 對本專案 server 也只回 JS 空殼（實測 `Discordbot` UA 抓回 5KB script、無 og 標籤，Discord 抓得到是因為它在 x.com 那邊有白名單待遇，我們複製不出來），所以必須查貼文 metadata 才能判斷類型與存在性。
+
+**設計（`src/utils/link_fix.py`，無 discord 相依）：**
+- `TWITTER_STATUS_RE`：只比對含 `/status/<id>` 的貼文連結（涵蓋 x.com / twitter.com、www./mobile. 子網域、/photo//video/ 尾段），抓出 `user`/`id` named group；避免轉到個人首頁、搜尋等無意義連結。**第 1 層格式防呆（本地、免網路）。**
+- `get_token(id)`：移植 vercel/react-tweet 的 `getToken`，`((id/1e15)*π)` 轉 36 進位去 0 去點，供 syndication CDN 用（免金鑰、純計算）。實測 endpoint 只要 token「非空」就放行（亂打也回 200），仍照公式算正確值以防未來收緊。
+- `async _classify_tweet(session, id)`：查 `cdn.syndication.twimg.com/tweet-result`（8s timeout）回 `video` / `non_video` / `not_found` / `unknown`。**第 2 層存在性 + 類型判斷。**
+- `async select_video_links(content, session=None) -> str | None`：先跑 regex，**沒命中早退 None、不開 session、不連網**；命中才開 session（可注入，預設自開自關），逐一查類型，只在 `video` 或 `unknown` 時轉成 fixupx。
+- `rewrite_twitter_links`（全轉版純函式）保留給測試與不需類型判斷的場合。
+- `on_message`（`src/discord_bot.py`）：bot-self guard 後直接 `await select_video_links(message.content)`（格式擋掉/查詢/開 session 全收在函式內），有結果 → `channel.send(fixed_links)` + `message.edit(suppress=True)`，皆包 try/except 記 warning。
+
+**決策表：**
+| 查詢結果 | 動作 |
+|---|---|
+| 確定有影片（含 animated_gif） | ✅ 轉 fixupx + 砍預覽 |
+| 確定非影片（圖片/純文字） | ❌ 不轉 |
+| 404 / tombstone / 無貼文主體 | ❌ 不轉（防呆，服務的確定答案） |
+| 逾時 / 5xx / 空 body 無法解析 | ✅ 轉 + 砍預覽（fail-open，查詢服務掛掉不停擺） |
+
+一句話：**只在「確定有影片」或「服務掛掉問不到」時才轉；服務只要明確回答了（圖片 or 不存在），就尊重它。**
+
+**為何用 syndication CDN 不用 api.fxtwitter.com：** 原生 CDN 除非 x.com 本身倒否則不會消失；第三方代理（fxtwitter）會掛。fixupx 本體無 JSON API、api.fixupx.com 連不上。查類型走原生 CDN、顯示走 fixupx.com，查與顯示分離。
+
+**邊界：** `suppress=True` 是整則訊息一起砍，混合「影片連結+圖片連結」的訊息會連圖片原生預覽一起砍掉（罕見，已接受）；限流回 `{}` 會誤判成 not_found 不轉（罕見）。
+
+**部署需求：** Bot 需 **Manage Messages 權限**才能壓別人的預覽；缺權限只記 warning、fixupx 新訊息仍正常發出。
+
+**驗證（已完成）：** docker exec 在 discord-bot 容器（aiohttp 3.14.1）跑整合測試：影片→`video`→轉、jack/20 純文字→`non_video`→不轉、假 id→`not_found`→不轉、混合輸入只留影片那條、一般聊天/首頁連結早退 None、自開 session 路徑正常；token 算出 `5arc5735bxrdhz15s9vn29` 查得到正確 media；py_compile 兩檔通過。
+
+**待部署驗證：** ① `docker compose restart discord-bot` ② 影片貼文回 fixupx 並可預覽、原訊息預覽卡被砍；③ **圖片貼文不轉、保留原生預覽**；④ 已刪/亂打 id 不轉；⑤ syndication CDN 暫掛時 fail-open 照轉；⑥ 缺 Manage Messages 權限時不會炸、僅略過壓制。
+
+**參考：** [vercel/react-tweet getToken](https://github.com/vercel/react-tweet/blob/main/packages/react-tweet/src/api/fetch-tweet.ts)；早期研究見本檔 [X.com / Twitter 影片嵌入研究（歸檔 2026-04-22）](#xcom--twitter-影片嵌入研究歸檔2026-04-22)。
 
 ---
 

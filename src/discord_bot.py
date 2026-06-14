@@ -289,10 +289,12 @@ async def on_message(message):
     if message.author == bot.user:
         return
 
-    # 偵測 x.com / twitter.com 貼文連結，貼出 fixupx 可預覽版本
+    # 偵測 x.com / twitter.com 貼文連結，只在「影片貼文」時貼出 fixupx 可預覽版本。
+    # 圖片貼文 Discord 原生預覽就正常，不轉。格式擋掉/類型查詢/開 session 都收在
+    # select_video_links 內：非 x.com 訊息只付一次 regex 成本，命中才連網。
     if message.content:
-        from utils.link_fix import rewrite_twitter_links
-        fixed_links = rewrite_twitter_links(message.content)
+        from utils.link_fix import select_video_links
+        fixed_links = await select_video_links(message.content)
         if fixed_links:
             try:
                 await message.channel.send(fixed_links)
