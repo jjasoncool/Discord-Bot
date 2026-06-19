@@ -7,17 +7,19 @@
 防洗版：首次啟動以 ensure_seeded() 把目前 API 裡的文章全部標記已發，只發之後新增的。
 """
 import asyncio
+import io
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 import discord
 
 from services.base_monitor import BaseContentMonitor
 from utils.discord_content import post_to_channel
+from utils.logger_config import get_discord_bot_logger
 
-logger = logging.getLogger(__name__)
+logger = get_discord_bot_logger()
 
 # state 的 content_type（主題層）
 _CONTENT_TYPE = "it_article"
@@ -29,6 +31,9 @@ class ItArticleMonitor(BaseContentMonitor):
     """IT 文章（系統設備 / 硬體新知）監控器。"""
 
     EMBED_DESC_MAX = 4000  # Discord embed description 上限 ~4096，留餘裕
+    SEND_INTERVAL = 2.0    # 每篇之間的固定間隔（秒），避免 rate limit
+    SEND_MAX_ATTEMPTS = 3  # 單篇發送的最大嘗試次數（含首次）
+    SEND_RETRY_BACKOFF = 3.0  # 重試退避基數（秒），第 n 次等 backoff*n
 
     async def fetch_recent_it_articles(self, days: int = 3, limit: int = 50, tag: Optional[str] = None) -> List[Dict]:
         """從 scraper API 取最近的 IT 文章（舊→新，同日再依 hkepc_id 遞增穩定排序）。"""
@@ -99,47 +104,64 @@ class ItArticleMonitor(BaseContentMonitor):
     async def send_to_channel(self, channel_id: int, item: Dict, mark_sent: bool = True) -> bool:
         """發一篇 IT 文章到指定頻道（走 post_to_channel：文字→訊息、論壇→thread）。
 
+        Discord 5xx（暫時性伺服器錯誤）會自動重試 SEND_MAX_ATTEMPTS 次；
+        仍失敗則保留「未發」狀態，由下次 notify 自動補發。
         mark_sent=False 用於測試發送（不影響正式去重狀態、可重複發）。
         """
-        try:
-            channel = self.bot.get_channel(channel_id)
-            if not channel:
-                logger.error("找不到頻道 ID: %s", channel_id)
-                return False
-
-            embed = self.format_embed(item)
-
-            # 下載圖片成暫存附件（不存伺服器），交給 Discord CDN
-            files: List[discord.File] = []
-            images = item.get("images") or []
-            if images:
-                async with aiohttp.ClientSession() as session:
-                    for idx, img_url in enumerate(images, start=1):
-                        result = await self._download_image_as_file(img_url, session, max_retries=2)
-                        if not result:
-                            logger.warning("IT 文章圖片下載失敗，略過: %s", img_url)
-                            continue
-                        image_data, detected_ext = result
-                        filename = self._get_image_filename_with_ext(img_url, idx, detected_ext)
-                        files.append(discord.File(image_data, filename=filename))
-                if files:
-                    # 第一張內嵌進 embed（單一 embed 內呈現），其餘由 post_to_channel 後送
-                    embed.set_image(url=f"attachment://{files[0].filename}")
-
-            await post_to_channel(
-                channel,
-                embed=embed,
-                files=files or None,
-                thread_title=item.get("title"),
-                follow_up_label="**附圖（後續補送）**",
-            )
-            if mark_sent:
-                await self.mark_content_as_sent(_CONTENT_TYPE, item["hkepc_id"])
-            logger.info("成功發送 IT 文章 %s 到頻道 %s (mark_sent=%s)", item.get("hkepc_id"), channel_id, mark_sent)
-            return True
-        except Exception as e:
-            logger.error("發送 IT 文章到頻道失敗: %s", e, exc_info=True)
+        channel = self.bot.get_channel(channel_id)
+        if not channel:
+            logger.error("找不到頻道 ID: %s", channel_id)
             return False
+
+        embed = self.format_embed(item)
+
+        # 圖片先下載成「原始 bytes」（不存伺服器）；重試時用同一份 bytes 重建 discord.File，
+        # 避免 BytesIO 送過一次就被消耗。
+        image_blobs: List[Tuple[bytes, str]] = []
+        images = item.get("images") or []
+        if images:
+            async with aiohttp.ClientSession() as session:
+                for idx, img_url in enumerate(images, start=1):
+                    result = await self._download_image_as_file(img_url, session, max_retries=2)
+                    if not result:
+                        logger.warning("IT 文章圖片下載失敗，略過: %s", img_url)
+                        continue
+                    image_data, detected_ext = result
+                    raw = image_data.getvalue() if hasattr(image_data, "getvalue") else image_data
+                    image_blobs.append((raw, self._get_image_filename_with_ext(img_url, idx, detected_ext)))
+            if image_blobs:
+                # 第一張內嵌進 embed（單一 embed 內呈現），其餘由 post_to_channel 後送
+                embed.set_image(url=f"attachment://{image_blobs[0][1]}")
+
+        for attempt in range(1, self.SEND_MAX_ATTEMPTS + 1):
+            try:
+                files = [discord.File(io.BytesIO(raw), filename=fn) for raw, fn in image_blobs]
+                await post_to_channel(
+                    channel,
+                    embed=embed,
+                    files=files or None,
+                    thread_title=item.get("title"),
+                    follow_up_label="**附圖（後續補送）**",
+                )
+                if mark_sent:
+                    await self.mark_content_as_sent(_CONTENT_TYPE, item["hkepc_id"])
+                logger.info("成功發送 IT 文章 %s 到頻道 %s (mark_sent=%s)", item.get("hkepc_id"), channel_id, mark_sent)
+                return True
+            except discord.DiscordServerError as e:
+                # Discord 5xx 暫時性錯誤 → 退避後重試
+                if attempt < self.SEND_MAX_ATTEMPTS:
+                    wait = self.SEND_RETRY_BACKOFF * attempt
+                    logger.warning("發送 IT 文章 %s 撞 Discord 5xx(第 %s 次)，%.0f 秒後重試: %s",
+                                   item.get("hkepc_id"), attempt, wait, e)
+                    await asyncio.sleep(wait)
+                else:
+                    logger.error("發送 IT 文章 %s 連 %s 次撞 5xx，保留未發待下次補發: %s",
+                                 item.get("hkepc_id"), self.SEND_MAX_ATTEMPTS, e)
+                    return False
+            except Exception as e:
+                logger.error("發送 IT 文章 %s 到頻道失敗（非 5xx，不重試）: %s", item.get("hkepc_id"), e, exc_info=True)
+                return False
+        return False
 
     @staticmethod
     def _parse_published(value) -> Optional[datetime]:
@@ -181,11 +203,12 @@ class ItArticleMonitor(BaseContentMonitor):
             new_items = [it for it in items if not await self.is_content_sent(_CONTENT_TYPE, it["hkepc_id"])]
             if not new_items:
                 return
-            logger.info("[IT 文章排程] 找到 %s 篇新文章", len(new_items))
+            logger.info("[IT 文章排程] 找到 %s 篇待發文章", len(new_items))
             for it in new_items:
                 for channel_id in channel_ids:
-                    if await self.send_to_channel(channel_id, it):
-                        await asyncio.sleep(1)  # 避免頻率限制
+                    await self.send_to_channel(channel_id, it)
+                # 每篇之間固定間隔（不論成敗），避免 rate limit
+                await asyncio.sleep(self.SEND_INTERVAL)
         except Exception as e:
             logger.error("[IT 文章排程] 檢查新文章時發生錯誤: %s", e, exc_info=True)
 
