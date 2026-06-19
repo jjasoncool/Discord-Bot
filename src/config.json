@@ -10,7 +10,9 @@
       1276423699851116544
     ]
   },
-  "telegram_replay_from_message_id": null,
+  "telegram_replay_from_message_id": {
+    "seele_ww_leak": null
+  },
   "role_mapping": {
     "Trader": [
       1385895816572440717

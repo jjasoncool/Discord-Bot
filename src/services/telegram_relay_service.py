@@ -196,24 +196,44 @@ class TelegramMessageRepository:
                 str(int(message_pk)),
             )
 
-    async def get_pk_by_telegram_message_id(self, telegram_message_id: int) -> Optional[int]:
+    async def get_pk_by_telegram_message_id(
+        self,
+        telegram_message_id: int,
+        telegram_chat_id: Optional[int] = None,
+    ) -> Optional[int]:
         """根據 telegram_message_id 查詢對應的 message_pk。
 
         若該訊息屬於 media group，自動回傳 group 首則（最小 pk），
         確保重發時能觸發完整的 group 合併流程。
+
+        telegram_message_id 只在「同一來源（chat）內」唯一，跨來源會重號。
+        傳入 telegram_chat_id 可把查詢鎖定到單一來源，避免多來源時抓錯訊息；
+        不傳則沿用舊行為（不分來源、取最小 pk）。
         """
         if self.pool is None:
             raise RuntimeError("TelegramMessageRepository 尚未 connect")
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT id, grouped_id, telegram_chat_id
-                FROM telegram_messages
-                WHERE telegram_message_id = $1
-                ORDER BY id ASC LIMIT 1;
-                """,
-                int(telegram_message_id),
-            )
+            if telegram_chat_id is None:
+                row = await conn.fetchrow(
+                    """
+                    SELECT id, grouped_id, telegram_chat_id
+                    FROM telegram_messages
+                    WHERE telegram_message_id = $1
+                    ORDER BY id ASC LIMIT 1;
+                    """,
+                    int(telegram_message_id),
+                )
+            else:
+                row = await conn.fetchrow(
+                    """
+                    SELECT id, grouped_id, telegram_chat_id
+                    FROM telegram_messages
+                    WHERE telegram_message_id = $1 AND telegram_chat_id = $2
+                    ORDER BY id ASC LIMIT 1;
+                    """,
+                    int(telegram_message_id),
+                    int(telegram_chat_id),
+                )
             if row is None:
                 return None
 
@@ -469,17 +489,58 @@ class MessageRouteResolver:
 
         return True, "ok"
 
-    def get_replay_from_message_id(self) -> Optional[int]:
-        """從 config 讀取重發起始 telegram_message_id。"""
-        config = self._load_config()
-        raw = config.get("telegram_replay_from_message_id")
-        if raw is None:
+    @staticmethod
+    def _coerce_msg_id(raw: object) -> Optional[int]:
+        """把設定值轉成正整數的 telegram_message_id，無效則回 None。"""
+        if isinstance(raw, bool):  # JSON 的 true/false 會變 bool，要先擋掉
             return None
         try:
             parsed = int(raw)
         except (TypeError, ValueError):
             return None
         return parsed if parsed > 0 else None
+
+    def resolve_replay_msg_id(self, telegram_chat_id: int) -> Optional[int]:
+        """解析「這個來源」的重送起始 telegram_message_id。
+
+        支援兩種 config 格式：
+          - 新版（per-來源）: {"<來源名稱或 chat_id>": <message_id>}
+          - 舊版（全域）    : <message_id> 單一數字 → 套用到所有來源
+
+        新版的來源解析方式與 telegram_channel_routes 一致：
+        先用 chat_id 當 key，找不到再退回 telegram runtime 的 source_channel 名稱。
+        """
+        config = self._load_config()
+        raw = config.get("telegram_replay_from_message_id")
+        if raw is None:
+            return None
+
+        # 舊版：單一數字 = 全域重送
+        if not isinstance(raw, dict):
+            return self._coerce_msg_id(raw)
+
+        # 新版：per-來源 dict
+        val = raw.get(str(telegram_chat_id))
+        if val is None:
+            runtime_cfg = self._load_telegram_runtime_config()
+            source_channel = self._normalize_source_key(runtime_cfg.get("source_channel"))
+            if source_channel:
+                val = raw.get(source_channel)
+        return self._coerce_msg_id(val)
+
+    def get_all_replay_msg_ids(self) -> list[int]:
+        """列出所有設定的重送 message_id（不分來源），供開機時計算掃描起點用。"""
+        config = self._load_config()
+        raw = config.get("telegram_replay_from_message_id")
+        if raw is None:
+            return []
+        candidates = raw.values() if isinstance(raw, dict) else [raw]
+        result: list[int] = []
+        for value in candidates:
+            mid = self._coerce_msg_id(value)
+            if mid is not None and mid not in result:
+                result.append(mid)
+        return result
 
     def resolve_telegram_routes(self, telegram_chat_id: int) -> list[int]:
         config = self._load_config()
@@ -991,23 +1052,27 @@ class MessageRelayWorker:
         await self.repository.connect()
         await self.repository.ensure_relay_tables()
 
-        # 重發模式：從 config 讀取 telegram_message_id，轉換成 message_pk
+        # 重發模式：把所有來源設定的 telegram_message_id 換算成 message_pk，
+        # 取最小者當「掃描起點」（cursor 只是掃描下限，多倒帶只是多掃、靠 delivery_state
+        # 去重，安全；真正「哪些訊息要強制重送」由每則訊息依自己的來源各別判斷）。
         replay_from_pk: Optional[int] = None
-        replay_msg_id = self.route_resolver.get_replay_from_message_id()
-        if replay_msg_id is not None:
-            replay_from_pk = await self.repository.get_pk_by_telegram_message_id(replay_msg_id)
-            if replay_from_pk is None:
+        replay_msg_ids = self.route_resolver.get_all_replay_msg_ids()
+        for replay_msg_id in replay_msg_ids:
+            pk = await self.repository.get_pk_by_telegram_message_id(replay_msg_id)
+            if pk is None:
                 logger.warning(
                     "Telegram Relay 重送模式：找不到 telegram_message_id=%s 對應的訊息，忽略",
                     replay_msg_id,
                 )
+                continue
+            replay_from_pk = pk if replay_from_pk is None else min(replay_from_pk, pk)
 
         if replay_from_pk is not None:
             self._last_polled_pk = max(0, replay_from_pk - 1)
             await self.repository.set_runtime_cursor_pk(self._last_polled_pk)
             logger.warning(
-                "Telegram Relay 啟用重送模式：telegram_message_id=%s → message_pk=%s",
-                replay_msg_id, replay_from_pk,
+                "Telegram Relay 啟用重送模式：掃描起點 message_pk=%s（共 %d 個來源設定）",
+                replay_from_pk, len(replay_msg_ids),
             )
         else:
             saved_cursor = await self.repository.get_runtime_cursor_pk()
@@ -1291,10 +1356,14 @@ class MessageRelayWorker:
         plan = self.render_adapter.render(message)
         published_count = 0
 
-        replay_msg_id = self.route_resolver.get_replay_from_message_id()
+        # 依「這則訊息的來源」各別判斷是否強制重送；查 pk 時帶上 chat_id 鎖定來源，
+        # 避免 telegram_message_id 跨來源重號時抓錯訊息。
+        replay_msg_id = self.route_resolver.resolve_replay_msg_id(message.telegram_chat_id)
         force_replay = False
         if replay_msg_id is not None:
-            replay_pk = await self.repository.get_pk_by_telegram_message_id(replay_msg_id)
+            replay_pk = await self.repository.get_pk_by_telegram_message_id(
+                replay_msg_id, message.telegram_chat_id,
+            )
             force_replay = replay_pk is not None and message_pk >= replay_pk
 
         for channel_id in route_ids:
