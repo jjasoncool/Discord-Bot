@@ -20,7 +20,7 @@ from services.intro_profile_service import (
 )
 from services.impression_moderation_service import ImpressionModerationService
 from llm.intro_rag_port import get_pgvector_intro_rag_port
-from telegram_scraper.tg_config import normalize_channel_identifier
+from settings.channel_registry import all_settings, get_setting, ChannelSetContext
 
 # 獲取 logger
 logger = logging.getLogger('discord_bot')
@@ -684,119 +684,30 @@ class ManagementCommands(commands.Cog):
         if not await self._check_guild_and_owner(interaction, owner_only=True):
             return
 
-        telegram_route_option_label = "Telegram 路由設定"
-
-        channel_types = {
-            "交易頻道": {"type": discord.ChannelType.forum, "key": "trade_forum_channel_id", "color": discord.Color.blue(), "desc": "交易記錄頻道"},
-            "交易紀錄封存": {"type": discord.ChannelType.forum, "key": "archive_channel_id", "color": discord.Color.dark_grey(), "desc": "交易紀錄封存頻道"},
-            "論壇文章頻道": {"type": discord.ChannelType.forum, "key": "forum_article_channel_id", "color": discord.Color.gold(), "desc": "自動發布論壇文章的論壇頻道"},
-            "購物車交付": {"type": discord.ChannelType.text, "key": "cart_delivery_channel_id", "color": discord.Color.green(), "desc": "購物車交付通知頻道"},
-            "官方文章更新": {"type": discord.ChannelType.text, "key": "article_monitor_channel_id", "color": discord.Color.orange(), "desc": "自動發送官方最新文章的頻道"},
-            telegram_route_option_label: {"type": discord.ChannelType.text, "key": "telegram_channel_routes", "color": discord.Color.teal(), "desc": "先輸入 Telegram 來源（名稱/chat_id），再綁定 Discord 文字頻道"},
-            "自我介紹頻道": {"type": discord.ChannelType.text, "key": "intro_channel_id", "color": discord.Color.purple(), "desc": "使用者填寫自我介紹的頻道"},
-            "音樂語音頻道": {"type": discord.ChannelType.voice, "key": "music_voice_channel_id", "color": discord.Color.red(), "desc": "音樂機器人掛機與點歌的語音頻道"},
-            "幽靈點名頻道": {"type": discord.ChannelType.text, "key": "rollcall_channel_id", "color": discord.Color.dark_orange(), "desc": "幽靈點名訊息與管理面板的文字頻道"},
-            "社群查詢頻道": {"type": discord.ChannelType.text, "key": "community_lookup_channel_id", "color": discord.Color.teal(), "desc": "社群 ID 查詢（PTT / 巴哈）的面板頻道"}
-        }
-
-        # 創建頻道類型選單
+        # 頻道功能定義一律來自 settings/channel_registry.py（單一來源）。
+        # 加功能 = 在 registry 加一筆；這裡只負責共用的「選單 → 選頻道 → 套用」流程。
         type_select = discord.ui.Select(
             placeholder="選擇要設定的頻道類型...",
             custom_id="management_set_channel_type_select",
             options=[
-                discord.SelectOption(label=channel_type, value=channel_type, description=info["desc"])
-                for channel_type, info in channel_types.items()
+                discord.SelectOption(label=s.label, value=s.label, description=s.desc)
+                for s in all_settings()
             ]
         )
 
         async def type_select_callback(interaction: discord.Interaction):
             selected_type = type_select.values[0]
-            if selected_type not in channel_types:
+            setting = get_setting(selected_type)
+            if setting is None:
                 await safe_send_interaction_message(interaction, f"無效的頻道類型：{selected_type}。請重試。", ephemeral=True)
                 return
 
-            if selected_type == telegram_route_option_label:
-                class TelegramRouteInputModal(discord.ui.Modal):
-                    def __init__(self):
-                        super().__init__(title="設定 Telegram 路由", timeout=300)
-                        self.telegram_source = discord.ui.TextInput(
-                            label="Telegram 來源（名稱或 chat_id）",
-                            placeholder="例如：Seele_WW_leak、@Seele_WW_leak、-1001234567890",
-                            required=True,
-                            max_length=128,
-                        )
-                        self.target_channel = discord.ui.ChannelSelect(
-                            placeholder="選擇要轉發的 Discord 文字頻道...",
-                            min_values=1,
-                            max_values=1,
-                            channel_types=[discord.ChannelType.text],
-                            required=True,
-                        )
-                        self.add_item(self.telegram_source)
-                        self.add_item(discord.ui.Label(text="Discord 目標頻道", component=self.target_channel))
-
-                    async def on_submit(self, modal_interaction: discord.Interaction):
-                        source_raw = self.telegram_source.value.strip()
-                        source_key = normalize_channel_identifier(source_raw).lower()
-
-                        if not source_key:
-                            await safe_send_interaction_message(modal_interaction, "來源值不可為空，請重新設定。", ephemeral=True)
-                            return
-
-                        if not self.target_channel.values:
-                            await safe_send_interaction_message(modal_interaction, "請選擇 Discord 目標頻道。", ephemeral=True)
-                            return
-
-                        selected_channel = self.target_channel.values[0]
-                        selected_channel_id = int(getattr(selected_channel, "id", 0) or 0)
-                        if selected_channel_id <= 0:
-                            await safe_send_interaction_message(modal_interaction, "選擇的頻道無效，請重試。", ephemeral=True)
-                            return
-
-                        config_file = "config.json"
-                        config = ChannelConfig.load_config(config_file, caller="ManagementCommands")
-                        routes = config.get("telegram_channel_routes")
-                        if not isinstance(routes, dict):
-                            routes = {}
-
-                        raw_existing = routes.get(source_key, [])
-                        if isinstance(raw_existing, list):
-                            existing_ids = raw_existing
-                        elif raw_existing in (None, ""):
-                            existing_ids = []
-                        else:
-                            existing_ids = [raw_existing]
-
-                        normalized_ids: list[int] = []
-                        for rid in existing_ids:
-                            try:
-                                rid_int = int(rid)
-                            except (TypeError, ValueError):
-                                continue
-                            if rid_int > 0 and rid_int not in normalized_ids:
-                                normalized_ids.append(rid_int)
-
-                        if selected_channel_id not in normalized_ids:
-                            normalized_ids.append(selected_channel_id)
-
-                        routes[source_key] = normalized_ids
-                        config["telegram_channel_routes"] = routes
-                        ChannelConfig.save_config(config, config_file, caller="ManagementCommands")
-
-                        await safe_send_interaction_message(
-                            modal_interaction,
-                            (
-                                f"✅ 已新增 Telegram 路由：`{source_key}` -> <#{selected_channel_id}>\n"
-                                f"目前目標頻道數：{len(normalized_ids)}"
-                            ),
-                            ephemeral=True,
-                        )
-
-                await interaction.response.send_modal(TelegramRouteInputModal())
+            # 特殊輸入流程（例如 Telegram 路由用 modal），由 handler 自行接管互動
+            if setting.custom_handler is not None:
+                await setting.custom_handler(interaction)
                 return
 
-            channel_info = channel_types[selected_type]
-            channels = [channel for channel in interaction.guild.channels if channel.type == channel_info["type"]]
+            channels = [channel for channel in interaction.guild.channels if channel.type == setting.channel_type]
             if not channels:
                 await safe_send_interaction_message(interaction, f"此伺服器中沒有找到{selected_type}頻道！", ephemeral=True)
                 return
@@ -807,7 +718,7 @@ class ManagementCommands(commands.Cog):
                     label=channel.name,
                     value=str(channel.id),
                     description=f"ID: {channel.id}",
-                    emoji="📝" if channel_info["type"] == discord.ChannelType.text else ("🔊" if channel_info["type"] == discord.ChannelType.voice else "📌")
+                    emoji="📝" if setting.channel_type == discord.ChannelType.text else ("🔊" if setting.channel_type == discord.ChannelType.voice else "📌")
                 )
                 for channel in channels
             ]
@@ -819,49 +730,26 @@ class ManagementCommands(commands.Cog):
             async def on_select_callback(interaction, selected_value):
                 selected_channel_id = int(selected_value)
                 channel = interaction.guild.get_channel(selected_channel_id)
-                if channel and channel.type == channel_info["type"]:
+                if channel and channel.type == setting.channel_type:
                     # 儲存設定到 JSON 檔案
                     config_file = "config.json"
                     config = ChannelConfig.load_config(config_file, caller="ManagementCommands")
 
-                    config[channel_info["key"]] = selected_channel_id
+                    config[setting.config_key] = selected_channel_id
 
                     auto_panel_note = ""
-                    if channel_info["key"] == "intro_channel_id" and isinstance(channel, discord.TextChannel):
-                        try:
-                            panel_message, deleted_old = await self._replace_intro_panel_message(
-                                interaction.guild,
-                                channel,
-                                config,
-                            )
-                            auto_panel_note = f"\n🤖 已自動發送填寫面板:{panel_message.jump_url}"
-                            if deleted_old:
-                                auto_panel_note += "\n🧹 舊頻道面板已刪除。"
-                        except Exception as e:
-                            logger.error(f"設定自我介紹頻道後自動發送面板失敗: {e}", exc_info=True)
-                            runtime_cfg = _load_intro_panel_runtime_config()
-                            runtime_cfg.pop("intro_panel_message_id", None)
-                            _save_intro_panel_runtime_config(ChannelConfig.DEFAULT_ID)
-                            auto_panel_note = "\n⚠️ 自動發送面板失敗，系統會在下一次有人送出表單時自動重新 bump。"
-
-                    elif channel_info["key"] == "community_lookup_channel_id" and isinstance(channel, discord.TextChannel):
-                        # 設定完頻道後，自動部署社群查詢 panel
-                        community_cog = self.bot.get_cog("CommunityLookupCommands")
-                        if community_cog is None:
-                            auto_panel_note = "\n⚠️ CommunityLookupCommands Cog 尚未載入，面板未自動部署"
-                        else:
-                            try:
-                                # 先寫 config（下面 save 仍會跑），讓 get_panel_channel 能讀到
-                                ChannelConfig.save_config(config, config_file, caller="ManagementCommands")
-                                panel_message, deleted_old = await community_cog.replace_community_panel_message(
-                                    interaction.guild, channel,
-                                )
-                                auto_panel_note = f"\n🤖 已自動部署社群查詢面板：{panel_message.jump_url}"
-                                if deleted_old:
-                                    auto_panel_note += "\n🧹 舊頻道面板已刪除。"
-                            except Exception as e:
-                                logger.error(f"設定社群查詢頻道後自動部署面板失敗: {e}", exc_info=True)
-                                auto_panel_note = "\n⚠️ 自動部署面板失敗，可稍後手動重發"
+                    if setting.on_set is not None:
+                        # 設定後動作（行為定義在 channel_registry.py 各功能旁）
+                        ctx = ChannelSetContext(
+                            guild=interaction.guild,
+                            channel=channel,
+                            config=config,
+                            bot=self.bot,
+                            save=lambda: ChannelConfig.save_config(config, config_file, caller="ManagementCommands"),
+                        )
+                        note = await setting.on_set(ctx)
+                        if note:
+                            auto_panel_note = note
 
                     ChannelConfig.save_config(config, config_file, caller="ManagementCommands")
 
@@ -879,16 +767,16 @@ class ManagementCommands(commands.Cog):
                 channel_options,
                 lambda page: f"選擇一個{selected_type}頻道... (第 {page + 1} 頁)" if len(channel_options) > ITEMS_PER_PAGE else f"選擇一個{selected_type}頻道...",
                 f"選擇{selected_type}頻道",
-                lambda page: f"請從以下選項中選擇一個{selected_type}頻道作為{channel_info['desc']}。(第 {page + 1} 頁)" if len(channel_options) > ITEMS_PER_PAGE else f"請從以下選項中選擇一個{selected_type}頻道作為{channel_info['desc']}",
-                channel_info["color"],
+                lambda page: f"請從以下選項中選擇一個{selected_type}頻道作為{setting.desc}。(第 {page + 1} 頁)" if len(channel_options) > ITEMS_PER_PAGE else f"請從以下選項中選擇一個{selected_type}頻道作為{setting.desc}",
+                setting.color,
                 on_select_callback,
-                custom_id_prefix=f"management_set_channel_{channel_info['key']}"
+                custom_id_prefix=f"management_set_channel_{setting.config_key}"
             )
 
             embed = discord.Embed(
                 title=f"選擇{selected_type}頻道",
-                description=f"請從以下選項中選擇一個{selected_type}頻道作為{channel_info['desc']}。" + (f" (第 {current_page + 1} 頁)" if len(channel_options) > ITEMS_PER_PAGE else ""),
-                color=channel_info["color"]
+                description=f"請從以下選項中選擇一個{selected_type}頻道作為{setting.desc}。" + (f" (第 {current_page + 1} 頁)" if len(channel_options) > ITEMS_PER_PAGE else ""),
+                color=setting.color
             )
             await interaction.response.edit_message(embed=embed, view=channel_view)
 
