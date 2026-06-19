@@ -21,6 +21,8 @@ staged_diff.txt
 src/telegram_scraper/session/
 src/telegram_scraper/media/
 src/services/sent_articles.db
+src/services/sent_articles.db-shm
+src/services/sent_articles.db-wal
 src/settings/music_runtime.json
 src/settings/rollcall_runtime.json
 src/settings/community_panel_runtime.json
