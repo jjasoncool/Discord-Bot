@@ -16,8 +16,8 @@ from bs4 import BeautifulSoup
 from utils.logger_config import get_discord_bot_logger, get_article_monitor_logger
 from utils.discord_content import (
     sanitize_forum_thread_title,
-    chunk_discord_files,
     get_forum_tags,
+    post_to_channel,
 )
 from .base_monitor import BaseContentMonitor
 
@@ -257,61 +257,25 @@ class PTTMonitor(BaseContentMonitor):
                 len(files),
             )
 
-            initial_files = files[:10]
-            remaining_files = files[10:]
             if len(files) > 10:
                 logger.warning(
-                    "PTT 附件超過 Discord 單則上限，將分批發送: board=%s article_id=%s total=%s initial=%s remaining=%s",
+                    "PTT 附件超過 Discord 單則上限，將分批發送: board=%s article_id=%s total=%s",
                     post.get('board'),
                     post.get('article_id'),
                     len(files),
-                    len(initial_files),
-                    len(remaining_files),
                 )
 
-            create_thread_kwargs = {
-                "name": thread_title,
-                "content": thread_content,
-                "applied_tags": applied_tags,
-            }
-            if initial_files:
-                create_thread_kwargs["files"] = initial_files
-
-            try:
-                created = await channel.create_thread(**create_thread_kwargs)
-            except discord.HTTPException as e:
-                logger.error(
-                    "使用附件建立 PTT forum thread 失敗，改用純文字 fallback: board=%s article_id=%s err=%s",
-                    post.get('board'),
-                    post.get('article_id'),
-                    e,
-                    exc_info=True,
-                )
-                fallback_kwargs = {
-                    "name": thread_title,
-                    "content": thread_content,
-                    "applied_tags": applied_tags,
-                }
-                created = await channel.create_thread(**fallback_kwargs)
-                remaining_files = files
-
-            thread = created.thread if hasattr(created, 'thread') else created
-
-            if thread and remaining_files:
-                remaining_chunks = chunk_discord_files(remaining_files, chunk_size=10)
-                for batch_index, chunk in enumerate(remaining_chunks, start=1):
-                    logger.info(
-                        "開始補送 PTT 剩餘圖片批次: board=%s article_id=%s batch=%s size=%s",
-                        post.get('board'),
-                        post.get('article_id'),
-                        batch_index,
-                        len(chunk),
-                    )
-                    if batch_index == 1:
-                        await thread.send("**本文附圖（超過 10 張後續補送）**", files=chunk)
-                    else:
-                        await thread.send(files=chunk)
-                    await asyncio.sleep(0.5)
+            # 改走共用 post_to_channel：建立 forum thread + 首則最多 10 張附件 +
+            # 其餘自動分批補送 + 帶附件失敗自動退純文字 fallback（原本手寫的這幾段都收進接口）
+            sent_message = await post_to_channel(
+                channel,
+                content=thread_content,
+                files=files,
+                thread_title=thread_title,
+                tags=applied_tags,
+                follow_up_label="**本文附圖（超過 10 張後續補送）**",
+            )
+            thread = sent_message.channel if sent_message else None
 
             comments = post.get('comments') or []
             if thread and comments:

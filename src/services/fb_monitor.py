@@ -13,6 +13,7 @@ from typing import List, Dict, Optional
 from urllib.parse import urlparse, urlunparse
 
 from utils.logger_config import get_discord_bot_logger
+from utils.discord_content import post_to_channel
 from .base_monitor import BaseContentMonitor
 
 logger = get_discord_bot_logger()
@@ -175,7 +176,9 @@ class FBMonitor(BaseContentMonitor):
             images = fb_post.get('images', [])
 
             # 1) 先送主文 + 第1張圖片（附件）
+            # 改走共用 post_to_channel：文字頻道→發訊息、論壇頻道→自動開 thread
             embed.set_image(url=None)  # 禁止以 URL 連結方式顯示圖片
+            sent_message = None
             if images:
                 first_image_url = images[0]
                 async with aiohttp.ClientSession() as session:
@@ -186,14 +189,17 @@ class FBMonitor(BaseContentMonitor):
                         main_filename = self._get_image_filename_with_ext(first_image_url, 1, detected_ext)
                         main_file = discord.File(image_data, filename=main_filename)
                         embed.set_image(url=f"attachment://{main_filename}")
-                        await channel.send(embed=embed, files=[main_file])
+                        sent_message = await post_to_channel(channel, embed=embed, files=[main_file], thread_title=embed.title)
                         logger.info(f"[FB_FLOW] 📤 主文+第1張圖片發送完成: {main_filename}")
                     else:
-                        await channel.send(embed=embed)
+                        sent_message = await post_to_channel(channel, embed=embed, thread_title=embed.title)
                         logger.warning(f"[FB_FLOW] ❌ 第 1 張主圖下載失敗，僅發送主文: {first_image_url}")
             else:
-                await channel.send(embed=embed)
+                sent_message = await post_to_channel(channel, embed=embed, thread_title=embed.title)
                 logger.info("[FB_FLOW] 📤 發送 FB 主文完成（無圖片）")
+
+            # 後續補圖的目標：論壇→剛建立的 thread、文字→原頻道
+            followup_target = sent_message.channel if sent_message else channel
 
             if images:
                 logger.info(f"[FB_FLOW] 總共有 {len(images)} 張圖片，將以正序分段發送")
@@ -223,7 +229,7 @@ class FBMonitor(BaseContentMonitor):
 
                         if files:
                             await asyncio.sleep(0.5)
-                            await channel.send(files=files)
+                            await followup_target.send(files=files)
                             logger.info(f"[FB_FLOW] ✅ 第 {i+1} 批已發送 {len(files)} 張")
                         else:
                             logger.warning(f"[FB_FLOW] 第 {i+1} 批沒有可發送圖片")

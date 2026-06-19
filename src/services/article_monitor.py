@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import List, Dict, Optional
 from bs4 import BeautifulSoup
 from utils.logger_config import get_discord_bot_logger, get_article_monitor_logger
+from utils.discord_content import post_to_channel
 
 from .base_monitor import BaseContentMonitor
 
@@ -308,7 +309,10 @@ class ArticleMonitor(BaseContentMonitor):
                 attachment_images.append(image_url)
 
             # 發送主文 + 第 1 張圖片（附件）
+            # 改走共用 post_to_channel：文字頻道→發訊息、論壇頻道→自動開 thread
+            # （回傳首則訊息，後續補圖用 sent_message.channel 才能正確送進 thread）
             embed.set_image(url=None)  # 禁止以 URL 連結方式顯示圖片
+            sent_message = None
             if attachment_images:
                 first_image_url = attachment_images[0]
                 async with aiohttp.ClientSession() as session:
@@ -319,14 +323,17 @@ class ArticleMonitor(BaseContentMonitor):
                         first_filename = self._get_image_filename_with_ext(first_image_url, 1, detected_ext)
                         first_file = discord.File(image_data, filename=first_filename)
                         embed.set_image(url=f"attachment://{first_filename}")
-                        await channel.send(embed=embed, files=[first_file])
+                        sent_message = await post_to_channel(channel, embed=embed, files=[first_file], thread_title=embed.title)
                         logger.info(f"📤 發送文章主文+第1張圖片完成: {first_filename}")
                     else:
-                        await channel.send(embed=embed)
+                        sent_message = await post_to_channel(channel, embed=embed, thread_title=embed.title)
                         logger.warning(f"❌ 第 1 張主圖下載失敗，僅發送主文: {first_image_url}")
             else:
-                await channel.send(embed=embed)
+                sent_message = await post_to_channel(channel, embed=embed, thread_title=embed.title)
                 logger.info("📤 發送文章主文完成（無圖片）")
+
+            # 後續補圖的目標：論壇→剛建立的 thread、文字→原頻道
+            followup_target = sent_message.channel if sent_message else channel
 
             logger.info("🧭 進入其餘圖片發送流程（正序）")
 
@@ -361,8 +368,8 @@ class ArticleMonitor(BaseContentMonitor):
                         logger.info(f"📎 準備發送 {len(files)} 個圖片附件...")
                         await asyncio.sleep(0.5)  # 短暫延遲確保順序
 
-                        # 直接發送附件，不顯示提示訊息
-                        await channel.send(files=files)
+                        # 直接發送附件，不顯示提示訊息（送到 followup_target：thread 或原頻道）
+                        await followup_target.send(files=files)
                         logger.info(f"✅ 發送 {len(files)} 個圖片附件完成")
                     else:
                         logger.warning(f"批次 {i+1} 中沒有成功準備的附件。")
