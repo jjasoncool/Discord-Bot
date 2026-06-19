@@ -102,9 +102,11 @@ class ArticleCommands(commands.Cog):
         self.article_monitor = None
         self.fb_monitor = None
         self.ptt_monitor = None
+        self.it_article_monitor = None
         self.monitoring_task = None
         self.fb_monitoring_task = None
         self.ptt_monitoring_task = None
+        self.it_article_monitoring_task = None
         self._bahamut_sync_started_at = None  # 批次同步開始時間
         self.monitored_channels = []
 
@@ -113,12 +115,14 @@ class ArticleCommands(commands.Cog):
         from services.article_monitor import ArticleMonitor
         from services.fb_monitor import FBMonitor
         from services.ptt_monitor import PTTMonitor
+        from services.it_article_monitor import ItArticleMonitor
         self.article_monitor = ArticleMonitor(self.bot)
         self.fb_monitor = FBMonitor(self.bot)
         self.ptt_monitor = PTTMonitor(self.bot)
+        self.it_article_monitor = ItArticleMonitor(self.bot)
         self.bot.add_view(ArticleManagerView(self))
         logger.info("已註冊 ArticleManagerView persistent view")
-        logger.info("官方文章更新器、FB 監控器、PTT 監控器已初始化")
+        logger.info("官方文章更新器、FB 監控器、PTT 監控器、IT 文章監控器已初始化")
 
     @app_commands.command(name="article_manager", description="官方文章更新管理中心")
     async def article_manager(self, interaction: discord.Interaction):
@@ -516,11 +520,12 @@ class ArticleCommands(commands.Cog):
     @app_commands.command(name="resend_article", description="根據 ID 重新發送文章或 FB 貼文")
     @app_commands.describe(
         id="要重新發送的內容 ID",
-        type="內容類型 (article 或 fb)"
+        type="內容類型 (article / fb / it_article)"
     )
     @app_commands.choices(type=[
         app_commands.Choice(name="article", value="article"),
         app_commands.Choice(name="fb", value="fb"),
+        app_commands.Choice(name="it_article", value="it_article"),
     ])
     async def resend_article(self, interaction: discord.Interaction, id: str, type: str = "article"):
         """根據 ID 重新發送文章或 FB 貼文到監控的頻道，用於測試"""
@@ -537,16 +542,25 @@ class ArticleCommands(commands.Cog):
                 await safe_send_interaction_message(interaction, "❌ 官方文章更新器未初始化", ephemeral=True)
                 return
 
-            # 檢查是否有監控的頻道
-            if not self.monitored_channels:
-                await safe_send_interaction_message(interaction, "❌ 沒有設定監控頻道，請先使用 `/article_manager` 開始監控。", ephemeral=True)
-                return
-
             content_type = type.lower()
             logger.info(f"[RESEND_ROUTE] 收到 /resend_article 請求: id={id}, type={content_type}")
-            if content_type not in ["article", "fb", "fb_post"]:
-                await safe_send_interaction_message(interaction, "❌ 內容類型必須是 'article' 或 'fb'", ephemeral=True)
+            if content_type not in ["article", "fb", "fb_post", "it_article"]:
+                await safe_send_interaction_message(interaction, "❌ 內容類型必須是 'article'、'fb' 或 'it_article'", ephemeral=True)
                 return
+
+            # 決定發送目標：it_article → 系統設備新知頻道；其餘 → article/fb 監控的頻道
+            if content_type == "it_article":
+                from utils.utils import ChannelConfig
+                hw_id = ChannelConfig.load_config(caller="resend_it_article").get("hardware_news_channel_id")
+                target_channels = [hw_id] if hw_id else []
+                if not target_channels:
+                    await safe_send_interaction_message(interaction, "❌ 尚未設定「系統設備新知」頻道，請先用 `/server_manager` 指定。", ephemeral=True)
+                    return
+            else:
+                target_channels = self.monitored_channels
+                if not target_channels:
+                    await safe_send_interaction_message(interaction, "❌ 沒有設定監控頻道，請先使用 `/article_manager` 開始監控。", ephemeral=True)
+                    return
 
             # 根據類型處理
             if content_type == "article":
@@ -562,7 +576,7 @@ class ArticleCommands(commands.Cog):
                 send_method = self.article_monitor.send_article_to_channel
                 logger.info(f"[RESEND_ROUTE] 路由到文章流程: article_id={article_id}")
 
-            else:  # fb or fb_post
+            elif content_type in ("fb", "fb_post"):
                 # 處理 FB 貼文
                 fb_db_id = self._parse_positive_int(id)
                 if fb_db_id is None:
@@ -580,13 +594,23 @@ class ArticleCommands(commands.Cog):
                 send_method = self.fb_monitor.send_fb_post_to_channel
                 logger.info(f"[RESEND_ROUTE] 路由到 FB 流程: fb_db_id={fb_db_id}")
 
+            else:  # it_article（系統設備新知 / IT快訊）
+                hkepc_id = self._parse_positive_int(id)
+                if hkepc_id is None:
+                    await safe_send_interaction_message(interaction, "❌ IT 文章 ID 必須是數字（hkepc_id）", ephemeral=True)
+                    return
+                content = await self.it_article_monitor.fetch_it_article_by_id(hkepc_id)
+                content_name = f"IT 文章 `{hkepc_id}`"
+                send_method = self.it_article_monitor.send_to_channel
+                logger.info(f"[RESEND_ROUTE] 路由到 IT 文章流程: hkepc_id={hkepc_id}")
+
             if not content:
                 await safe_send_interaction_message(interaction, f"❌ 找不到 {content_name}。", ephemeral=True)
                 return
 
-            # 發送到所有監控的頻道
+            # 發送到目標頻道
             success_count = 0
-            for channel_id in self.monitored_channels:
+            for channel_id in target_channels:
                 logger.info(f"[RESEND_ROUTE] 準備發送到頻道: channel_id={channel_id}, type={content_type}, id={id}")
                 success = await send_method(channel_id, content)
                 if success:
@@ -594,7 +618,7 @@ class ArticleCommands(commands.Cog):
 
             if success_count > 0:
                 channel_names = []
-                for channel_id in self.monitored_channels:
+                for channel_id in target_channels:
                     channel = self.bot.get_channel(channel_id)
                     channel_names.append(f"#{channel.name}" if channel else f"<#{channel_id}>")
 

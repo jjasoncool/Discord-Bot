@@ -32,6 +32,7 @@ class NotifyServer:
         self._handlers: Dict[str, Callable[..., Coroutine]] = {
             "bahamut": self._process_bahamut,
             "fb": self._process_fb,
+            "it_article": self._process_it_article,
         }
         # 來源 → 是否正在處理中（防止重複執行）
         self._processing: Dict[str, bool] = {}
@@ -161,6 +162,29 @@ class NotifyServer:
 
         except Exception as e:
             logger.error("FB 通知背景處理失敗: %s", e, exc_info=True)
+
+    async def _process_it_article(self, payload: Dict) -> None:
+        """IT 文章（系統設備新知）通知：拉最近未發的文章發到設定頻道。"""
+        try:
+            from services.it_article_monitor import ItArticleMonitor
+
+            config = ChannelConfig.load_config(caller="notify_server")
+            channel_id = config.get("hardware_news_channel_id")
+            if not channel_id:
+                logger.error("IT 文章通知處理失敗：config.json 未設定 hardware_news_channel_id")
+                return
+
+            monitor = ItArticleMonitor(self.bot)
+            # 首次（只一次）seed：>3 天舊文標記已發、3 天內保留；接著 check_and_send
+            # 會把「3 天內且未發」的實際發出。之後每次 notify 就是發新文。
+            seeded = await monitor.ensure_seeded()
+            if seeded >= 0:
+                logger.info("IT 文章首次 seed：%s 篇舊文標記已發，接著發 3 天內的", seeded)
+            await monitor.check_and_send_new(channel_ids=[channel_id])
+            logger.info("IT 文章通知處理完成")
+
+        except Exception as e:
+            logger.error("IT 文章通知背景處理失敗: %s", e, exc_info=True)
 
     async def _process_single_bahamut(self, monitor, forum_channel_id: int, thread_data: Dict, board_id: str) -> None:
         """背景處理單篇巴哈討論串。每篇獨立 task，由 snA 鎖保護不重複。"""
