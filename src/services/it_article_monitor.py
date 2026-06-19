@@ -39,7 +39,9 @@ class ItArticleMonitor(BaseContentMonitor):
         """從 scraper API 取最近的 IT 文章（舊→新，同日再依 hkepc_id 遞增穩定排序）。"""
         try:
             url = f"{self.scraper_api_url}/api/it_articles/recent"
-            params = {"days": days, "limit": limit, "order": "asc"}
+            # order=desc 取「最新」limit 篇（避免文章數 > limit 時，新文被截掉）；
+            # 下面再用 Python 排成 asc，讓發送維持舊→新的時序。
+            params = {"days": days, "limit": limit, "order": "desc"}
             if tag:
                 params["tag"] = tag  # aiohttp 會自動 URL-encode 中文 tag
             async with aiohttp.ClientSession() as session:
