@@ -254,6 +254,34 @@ class BahamutPostComment(Base):
         return f"<BahamutPostComment(parent_sn='{self.parent_sn}', comment_id='{self.comment_id}')>"
 
 
+class HardwareNews(Base):
+    """HKEPC 系統設備 / 硬體新知（IT快訊等 tag）。
+
+    去重鍵 = hkepc_id（HKEPC 文章數字 id），同一篇跨多個 tag 只會有一筆。
+    images_json 只存來源圖片 URL 清單（不存圖檔）；發送時由 bot 暫存下載成
+    Discord 附件，交給 Discord CDN 重新 host。
+    """
+    __tablename__ = 'hardware_news'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)  # 代理主鍵
+    hkepc_id = Column(Integer, unique=True, nullable=False, index=True)  # HKEPC 文章數字 id（去重鍵）
+    title = Column(String(500), nullable=False)
+    url = Column(String(1000), nullable=False)
+    author = Column(String(100))
+    introduction = Column(Text)        # 列表頁摘要
+    content = Column(Text)             # 內頁全文（markdown）
+    images_json = Column(Text)         # JSON 來源圖片 URL 清單（不存圖檔）
+    reference_url = Column(String(1000))  # 內文的外部參考連結
+    tags = Column(String(500))         # 文章 tag（多 tag 聯集，逗號分隔）
+    comment_count = Column(Integer, default=0)
+    published_at = Column(DateTime, index=True)  # 來源日期
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    def __repr__(self):
+        return f"<HardwareNews(hkepc_id={self.hkepc_id}, title='{(self.title or '')[:20]}')>"
+
+
 # 建立資料庫引擎
 engine = create_engine(
     DATABASE_CONFIG["url"],

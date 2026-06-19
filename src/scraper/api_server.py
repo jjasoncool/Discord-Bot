@@ -10,7 +10,7 @@ from pydantic import BaseModel
 import json
 from sqlalchemy import case
 
-from db.models import ArticleMenu, ArticleDetail, FBPost, FBImage, PTTPost, BahamutPost, BahamutPostComment, get_db_session
+from db.models import ArticleMenu, ArticleDetail, FBPost, FBImage, PTTPost, BahamutPost, BahamutPostComment, HardwareNews, get_db_session
 from sqlalchemy.orm import joinedload, subqueryload
 from utils.logger import get_logger
 
@@ -865,6 +865,107 @@ async def debug_table_structure(db: Session = Depends(get_db)):
     except Exception as e:
         logger.error(f"調試查詢失敗: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"調試查詢失敗: {str(e)}")
+
+# === IT 文章（系統設備 / 硬體新知）API — 主題層 it_articles，來源目前為 HKEPC ===
+
+class HardwareNewsResponse(BaseModel):
+    """HKEPC 硬體新知回應模型"""
+    id: int
+    hkepc_id: int
+    title: str
+    url: str
+    author: Optional[str]
+    introduction: Optional[str]
+    content: Optional[str]
+    images: List[str]              # 來源圖片 URL 清單（由 images_json 解析）
+    reference_url: Optional[str]
+    tags: Optional[str]
+    comment_count: int
+    published_at: Optional[str]
+    created_at: str
+
+
+class HardwareNewsListResponse(BaseModel):
+    """HKEPC 列表回應模型"""
+    success: bool
+    message: str
+    items: List[HardwareNewsResponse]
+    total_count: int
+
+
+class SingleHardwareNewsResponse(BaseModel):
+    """單篇 HKEPC 查詢回應模型"""
+    success: bool
+    item: Optional[HardwareNewsResponse] = None
+    message: Optional[str] = None
+
+
+def _hardware_news_to_response(row: HardwareNews) -> HardwareNewsResponse:
+    return HardwareNewsResponse(
+        id=row.id,
+        hkepc_id=row.hkepc_id,
+        title=row.title,
+        url=row.url,
+        author=row.author,
+        introduction=row.introduction,
+        content=row.content,
+        images=json.loads(row.images_json) if row.images_json else [],
+        reference_url=row.reference_url,
+        tags=row.tags,
+        comment_count=row.comment_count or 0,
+        published_at=row.published_at.isoformat() if row.published_at else None,
+        created_at=row.created_at.isoformat() if row.created_at else "",
+    )
+
+
+@app.get("/api/it_articles/recent", response_model=HardwareNewsListResponse)
+async def get_recent_it_articles(
+    days: int = 3,
+    limit: int = 50,
+    tag: Optional[str] = None,   # 依 tag 過濾（為將來不同 tag 發不同頻道鋪路）
+    order: str = "asc",          # asc=舊到新（適合依序發送），desc=新到舊
+    db: Session = Depends(get_db),
+):
+    """獲取最近的 HKEPC 硬體新知。"""
+    try:
+        start_date = datetime.now() - timedelta(days=days)
+        query = db.query(HardwareNews).filter(
+            (HardwareNews.published_at >= start_date) | (HardwareNews.created_at >= start_date)
+        )
+        if tag:
+            query = query.filter(HardwareNews.tags.like(f"%{tag}%"))
+
+        sort_col = HardwareNews.published_at
+        query = query.order_by(sort_col.asc() if order == "asc" else sort_col.desc())
+        rows = query.limit(limit).all()
+
+        items = [_hardware_news_to_response(r) for r in rows]
+        return HardwareNewsListResponse(
+            success=True,
+            message=f"成功獲取 {len(items)} 篇硬體新知",
+            items=items,
+            total_count=len(items),
+        )
+    except Exception as e:
+        logger.error(f"查詢 HKEPC 硬體新知時發生錯誤: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"查詢 HKEPC 失敗: {str(e)}")
+
+
+@app.get("/api/it_articles/{hkepc_id}", response_model=SingleHardwareNewsResponse)
+async def get_it_article_by_id(
+    hkepc_id: int,
+    db: Session = Depends(get_db),
+):
+    """根據 HKEPC 文章 id 取得單篇。"""
+    try:
+        row = db.query(HardwareNews).filter(HardwareNews.hkepc_id == hkepc_id).first()
+        if not row:
+            return SingleHardwareNewsResponse(success=False, message=f"找不到 hkepc_id={hkepc_id} 的文章")
+        return SingleHardwareNewsResponse(success=True, item=_hardware_news_to_response(row))
+    except Exception as e:
+        logger.error(f"查詢 HKEPC 文章 {hkepc_id} 時發生錯誤: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"查詢 HKEPC 文章失敗: {str(e)}")
+
 
 if __name__ == "__main__":
     import uvicorn

@@ -10,7 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy import case, func
 
-from .models import ArticleMenu, ArticleDetail, SystemState, FBPost, FBImage, PTTPost, BahamutPost, BahamutPostComment
+from .models import ArticleMenu, ArticleDetail, SystemState, FBPost, FBImage, PTTPost, BahamutPost, BahamutPostComment, HardwareNews
 from utils.datetime_utils import parse_datetime
 from utils.logger import get_logger
 
@@ -507,6 +507,87 @@ class DatabaseManager:
 
         except Exception as e:
             self.logger.error(f"儲存 PTT 貼文失敗: {str(e)}", exc_info=True)
+            return None
+
+    def get_hardware_news_ids_with_content(self, hkepc_ids: list) -> set:
+        """回傳這批 hkepc_id 中『已存在且已有 content』者（L2 去重，可跳過內頁抓取）。"""
+        if not hkepc_ids:
+            return set()
+        try:
+            rows = self.session.query(HardwareNews.hkepc_id).filter(
+                HardwareNews.hkepc_id.in_(list(hkepc_ids)),
+                HardwareNews.content.is_not(None),
+                HardwareNews.content != "",
+            ).all()
+            return {r[0] for r in rows}
+        except Exception as e:
+            self.logger.error(f"查詢 HKEPC 既有 content 失敗: {str(e)}", exc_info=True)
+            return set()
+
+    def save_hardware_news(self, item: dict) -> Optional[HardwareNews]:
+        """upsert 一筆 HKEPC 硬體新知，以 hkepc_id 去重（L3）。
+
+        content / images_json / reference_url 只在新值有料時覆蓋，
+        避免「之後只抓到列表頁」把既有內頁全文洗掉。
+        """
+        try:
+            hkepc_id = item.get("hkepc_id")
+            url = item.get("url")
+            if not hkepc_id or not url:
+                self.logger.warning("略過 HKEPC 文章：缺少 hkepc_id/url")
+                return None
+
+            now = datetime.utcnow()
+            insert_stmt = sqlite_insert(HardwareNews).values(
+                hkepc_id=hkepc_id,
+                title=item.get("title") or "",
+                url=url,
+                author=item.get("author"),
+                introduction=item.get("introduction"),
+                content=item.get("content"),
+                images_json=item.get("images_json"),
+                reference_url=item.get("reference_url"),
+                tags=item.get("tags"),
+                comment_count=item.get("comment_count", 0),
+                published_at=item.get("published_at"),
+                created_at=now,
+                updated_at=now,
+            )
+            excluded = insert_stmt.excluded
+            update_stmt = insert_stmt.on_conflict_do_update(
+                index_elements=[HardwareNews.hkepc_id],
+                set_={
+                    "title": excluded.title,
+                    "url": excluded.url,
+                    "author": excluded.author,
+                    "introduction": excluded.introduction,
+                    "content": case(
+                        (func.length(func.coalesce(excluded.content, "")) > func.length(func.coalesce(HardwareNews.content, "")), excluded.content),
+                        else_=HardwareNews.content,
+                    ),
+                    "images_json": case(
+                        (excluded.images_json.is_not(None), excluded.images_json),
+                        else_=HardwareNews.images_json,
+                    ),
+                    "reference_url": case(
+                        (excluded.reference_url.is_not(None), excluded.reference_url),
+                        else_=HardwareNews.reference_url,
+                    ),
+                    "tags": excluded.tags,
+                    "comment_count": excluded.comment_count,
+                    "published_at": case(
+                        (excluded.published_at.is_not(None), excluded.published_at),
+                        else_=HardwareNews.published_at,
+                    ),
+                    "updated_at": now,
+                }
+            )
+            self.session.execute(update_stmt)
+            self.session.flush()
+            return self.session.query(HardwareNews).filter(HardwareNews.hkepc_id == hkepc_id).first()
+
+        except Exception as e:
+            self.logger.error(f"儲存 HKEPC 文章失敗: {str(e)}", exc_info=True)
             return None
 
     # ---------------- Bahamut Post 區段 ----------------

@@ -239,6 +239,39 @@ def start_api_server():
     )
 
 
+def hkepc_scrape_task():
+    """HKEPC 爬蟲任務（系統設備 / 硬體新知）。
+
+    首次（DB 無 hardware_news）抓 first_run_limit 篇種子；之後每輪抓 pages_per_tag 頁。
+    """
+    container = ServiceContainer()
+    hkepc_service = None
+    try:
+        logger.info("開始執行 HKEPC 爬蟲任務")
+        container.create_database_tables()
+
+        hkepc_service = container.create_hkepc_scraper_service()
+
+        from db.models import HardwareNews
+        existing = hkepc_service.db_manager.session.query(HardwareNews).count()
+        first_run = existing == 0
+
+        result = hkepc_service.scrape(first_run=first_run)
+        hkepc_service.db_manager.commit()
+        saved = result.get("saved", 0)
+        logger.info(
+            "HKEPC 爬蟲任務完成: first_run=%s fetched=%s saved=%s",
+            first_run, result.get("fetched"), saved,
+        )
+        # push：抓完通知 bot 立刻發（it_article 主題層）
+        _notify_discord_bot("it_article", {"count": saved})
+    except Exception as e:
+        logger.error(f"HKEPC 爬蟲任務發生未預期錯誤: {str(e)}", exc_info=True)
+    finally:
+        if hkepc_service is not None:
+            hkepc_service.db_manager.close()
+
+
 def main():
     """主程式入口"""
     # 記錄啟動資訊
@@ -264,10 +297,11 @@ def main():
     schedule.every(1).hours.do(_run_in_thread(fb_scrape_task))
     schedule.every(1).hours.do(_run_in_thread(ptt_scrape_task))
     schedule.every(1).hours.do(_run_in_thread(bahamut_scrape_task))
+    schedule.every(1).hours.do(_run_in_thread(hkepc_scrape_task))
 
     # 立即執行一次（各自獨立 thread，不互相等）
     logger.info("執行初始爬蟲任務（各論壇並行）")
-    for task in [fb_scrape_task, main_scrape_task, ptt_scrape_task, bahamut_scrape_task]:
+    for task in [fb_scrape_task, main_scrape_task, ptt_scrape_task, bahamut_scrape_task, hkepc_scrape_task]:
         threading.Thread(target=task, daemon=True).start()
 
     # 啟動定時任務循環

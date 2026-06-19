@@ -67,10 +67,25 @@ BAHAMUT_CONFIG = {
     "export_sample_json": False,
 }
 
+# HKEPC 抓取設定（系統設備 / 硬體新知）
+# tags：要抓的 tag 清單，未來要新增類型直接在這加一個字串即可，例如 "顯示卡"、"處理器"、"AI"。
+#       同一篇文章可能同時掛多個 tag，跨 tag 重複會在 scraper 內以 hkepc_id 去重。
+HKEPC_CONFIG = {
+    "base_url": "https://www.hkepc.com",
+    "tags": ["IT快訊"],          # 要抓的 tag（可擴充）
+    "pages_per_tag": 3,          # 定期每個 tag 抓幾頁（每頁約 5 篇）
+    "first_run_limit": 50,       # 首次（DB 空）種子抓滿幾篇後停
+    "timeout": 20,
+    "human_delay_min": (0.35, 0.9),  # 抓內頁之間的隨機延遲
+    # UA 不寫死：HkepcScraperService 繼承 BaseScraperClient，
+    # 由 curl_cffi impersonate 輪換池自動帶（TLS 指紋 + UA + HTTP/2 一致）。
+}
+
 # 個別 Logger 的 log level 覆蓋（不設定的 logger 使用預設 LOG_LEVEL）
 # 可用值：DEBUG, INFO, WARNING, ERROR
 LOGGER_LEVELS = {
     "bahamut_scraper": "WARNING",
     "fb_scraper": "INFO",
     "ptt_scraper": "INFO",
+    "hkepc_scraper": "INFO",
 }
