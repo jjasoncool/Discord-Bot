@@ -111,6 +111,10 @@ class StateDB:
             return
         self._db = await aiosqlite.connect(str(self.db_path))
         self._db.row_factory = aiosqlite.Row
+        # WAL：允許並發讀寫、跨連線讀到已 commit 的資料（避免長連線視圖不一致）；
+        # busy_timeout：撞鎖時等待而非立即失敗。
+        await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.execute("PRAGMA busy_timeout=5000")
         await self._db.executescript(_CREATE_TABLES_SQL)
         # 漸進式 migration（column 已存在會跳過）
         for sql in _MIGRATIONS_SQL:
