@@ -726,7 +726,7 @@ last_confirmed: 2026-04-18
 
 **P1（體驗優化）：**
 - [ ] `/pause` 與 `/resume` 按鈕
-- [ ] 多歌單管理（切換不同預設歌單）
+- [x] 多歌單管理（多歌單下拉，可複選合併播放）— 2026-06-20，詳見下方變更紀錄
 - [ ] 快取空間管理（LRU 清理、磁碟用量監控）
 
 **P2（進階功能）：**
@@ -1046,6 +1046,42 @@ last_confirmed: 2026-06-13
 **待驗證：** 部署後實測 ① 線上歌單加/刪歌後按鈕能同步；② 抓取失敗時不會清空舊歌單；③ 點歌會被清空。
 
 **備註：** `MusicPlayer.stop()` 已無呼叫者（dead code），暫時保留未刪。
+
+---
+
+## 變更紀錄：多歌單下拉（可複選合併播放）（2026-06-20）
+
+<!-- @meta
+id: music-multi-playlist-select
+type: FEATURE
+status: implemented_pending_verify
+last_confirmed: 2026-06-20
+-->
+
+**需求：** 控制面板加一個 Discord 多選下拉（multi-select），可勾選一個歌單只播該歌單、勾多個則合併播放、全勾＝全部合併；預設全部合併。需相容現況的單一歌單設定，且歌單名稱可自動抓 YouTube 標題（不用手打）。
+
+**設定檔（`src/settings/music_runtime.json`）— key 為 `playlist_url`，多型：**
+- 字串：`"playlist_url": "https://...&list=..."`
+- 字串陣列：`"playlist_url": ["url1", "url2"]`
+- 物件陣列：`"playlist_url": [{"name": "華語", "url": "..."}, {"url": "..."}]`（`name` 可省略＝自動抓 YouTube 歌單標題）
+- `active_playlists`（選用）：`"all"` 或 key/名稱陣列；記住使用者下拉選擇、重啟後沿用，預設全部。machine 寫入用 key。
+- **向後相容**：沒有 `playlist_url` 時自動讀舊 key `default_playlist_url`（字串）。
+
+**識別與命名設計：**
+- 每個歌單算一個穩定 `key`（`list=` id ＞ video id ＞ url 截斷），下拉 value 與 `active_playlists` 持久化都用 key，與「可能自動抓/變動的名稱」解耦。
+- 顯示名稱：自訂 name ＞ 自動抓的 YouTube 標題 ＞ 後備。自動標題在背景抓取（`YTDLSource.extract_playlist_title()` 用 `playlistend=1` 快速；載入歌單時也順手快取），抓到後 `refresh_panel()`。
+
+**變更：**
+- `src/music/config.py`：新增 `playlist_key()` 與 `Playlist(key,url,name=None)`；`MusicConfig` 用 `playlists`/`active_keys`，property `default_playlist_url`/`active_urls`/`has_playlists`。`_parse_playlists()` 解析多型 `playlist_url`（＋舊 key 相容），`_resolve_active()` 回 key（接受 key 或名稱）。watcher 監看 `playlist_url`/`default_playlist_url`/`active_playlists`。
+- `src/music/ytdl.py`：`_extract_playlist_sync()` 改回傳 `(title, entries)`；新增 `extract_playlist_title()`。
+- `src/music/player.py`：`_playlist_titles` 標題快取；`_fetch_playlist_songs()` 順手快取標題；新增 `load_active_playlists()`/`_rebuild_main_from_urls()`（多歌單合併、先抓成功才換）/`set_active_playlists(keys)`（切換＋持久化）/`resolve_playlist_titles()`/`display_name()`。`reload_playlist()` 重載「目前選取集合」。
+- `src/music/announcer.py`：`PlaylistSelect`（value=key, label=顯示名稱）放進 **ephemeral 彈出面板** `PlaylistEditView`，不常駐主面板。主面板「重置歌單 ♻️」按鈕改名 **「編輯歌單 🎚️」**（custom_id 仍 `music_stop` 相容既有面板）。
+- `src/music/cog.py`：啟動載入改 `load_active_playlists()`，gate 改 `has_playlists`；新增背景 `_prewarm_playlist_titles()`（預抓名稱）；新增 `refresh_playlist_config()`（force_reload + 抓名稱，不動佇列）。
+- **「編輯歌單 🎚️」按鈕流程**：按下 → `refresh_playlist_config()` 立即重讀 `music_runtime.json`（不等 5 秒 watcher）+ 補抓歌單名稱 → 若 **≥2 個歌單**則彈出 ephemeral 多選清單讓使用者挑（選好由 `PlaylistSelect.callback` → `set_active_playlists()` 重建並持久化）；若 **0~1 個**則直接 `reload_playlist()` 重載最新線上歌單。使用者編輯 `playlist_url`（新增/刪改歌單）後按一下即套用，**免重啟**。
+
+**待驗證（部署後）：** ① 單一歌單／舊 `default_playlist_url`：按「編輯歌單」直接重載、不彈清單；② 填多個歌單：按「編輯歌單」彈出 ephemeral 多選清單，預設全勾合併；③ 清單勾單一個只播該歌單、勾多個合併；④ 沒填 name 時清單顯示 YouTube 歌單標題；⑤ 抓取失敗保留舊歌單；⑥ 重啟後沿用上次選擇；⑦ 編輯設定檔新增歌單後，按「編輯歌單」即出現新歌單（免重啟）。
+
+**待 user 提供：** 把第二條（含以後更多）歌單連結填進 `playlist_url`（名稱可不填）。
 
 ---
 

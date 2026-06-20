@@ -128,14 +128,36 @@ class YTDLSource:
 
     @staticmethod
     def _extract_playlist_sync(url: str):
-        """同步提取歌單，使用 lazy extraction 逐首產出"""
+        """同步提取歌單，使用 lazy extraction 逐首產出。回傳 (playlist_title, entries)。"""
         ydl_opts = YTDLSource.YTDL_OPTIONS.copy()
         ydl_opts['extract_flat'] = 'in_playlist'
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
+            if not info:
+                return (None, [])
+            title = info.get('title')
             if 'entries' not in info:
-                return [info] if info else []
-            return [e for e in info['entries'] if e]
+                return (title, [info])
+            return (title, [e for e in info['entries'] if e])
+
+    @staticmethod
+    async def extract_playlist_title(url: str) -> str | None:
+        """只抓歌單標題（playlistend=1，不展開整份歌單，快速），供自動命名用"""
+        loop = asyncio.get_event_loop()
+
+        def _extract():
+            opts = YTDLSource.YTDL_OPTIONS.copy()
+            opts['extract_flat'] = 'in_playlist'
+            opts['playlistend'] = 1  # 只需第一筆即可拿到歌單標題
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                return info.get('title') if info else None
+
+        try:
+            return await loop.run_in_executor(None, _extract)
+        except Exception as e:
+            logger.warning(f"[YTDLSource] 抓取歌單標題失敗: {e}")
+            return None
 
     @staticmethod
     async def extract_single(url: str) -> dict:

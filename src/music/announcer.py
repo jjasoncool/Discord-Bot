@@ -18,6 +18,60 @@ def _is_in_music_channel(cog, user) -> bool:
     return bool(vc_id and voice and voice.channel and voice.channel.id == vc_id)
 
 
+class PlaylistSelect(discord.ui.Select):
+    """歌單多選下拉：勾選一個只播該歌單，勾多個則合併播放（全勾＝全部合併）。
+
+    放在「編輯歌單」按鈕彈出的 ephemeral 面板中，不常駐在主控制面板上。
+    """
+
+    def __init__(self, cog):
+        self.cog = cog
+        playlists = cog.config.playlists
+        active = set(cog.config.active_keys)
+        player = getattr(cog, "player", None)
+        options = []
+        for i, p in enumerate(playlists):
+            # 顯示名稱：自訂 > 自動抓的 YouTube 標題 > 後備
+            name = player.display_name(p) if player else (p.name or f"歌單{i + 1}")
+            options.append(discord.SelectOption(
+                label=name[:100],
+                value=p.key[:100],
+                default=(p.key in active),
+                emoji="🎵",
+            ))
+        super().__init__(
+            placeholder="選擇要播放的歌單（可複選，全選＝合併）",
+            min_values=1,                 # 至少留一個，避免清空成沒歌可播
+            max_values=max(1, len(options)),  # 可全選＝全部合併播放
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        keys = list(self.values)
+        count = await self.cog.player.set_active_playlists(keys)
+        # 顯示用名稱（從選單 option 的 label 反查，避免顯示醜醜的 key）
+        label_map = {opt.value: opt.label for opt in self.options}
+        label = "、".join(label_map.get(k, k) for k in keys)
+        if count is None:
+            await interaction.followup.send(
+                f"⚠️ 已切換為「{label}」，但線上抓取失敗或為空，維持原本播放。",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                f"🎶 已切換歌單為「{label}」，共 {count} 首。", ephemeral=True
+            )
+
+
+class PlaylistEditView(discord.ui.View):
+    """「編輯歌單」彈出的多選面板（ephemeral，短時效，不需 persistent）"""
+
+    def __init__(self, cog):
+        super().__init__(timeout=180)
+        self.add_item(PlaylistSelect(cog))
+
+
 class MusicControlView(discord.ui.View):
     """音樂控制面板按鈕（persistent view，重啟後仍可互動）"""
 
@@ -102,19 +156,33 @@ class MusicControlView(discord.ui.View):
             await interaction.followup.send("目前沒有在播放", ephemeral=True)
 
     # custom_id 沿用舊的 music_stop 以相容既有面板；
-    # 行為：清掉點歌 + 重新抓取最新線上歌單（同步 YouTube 上的加歌/刪歌）
-    @discord.ui.button(label="重置歌單", style=discord.ButtonStyle.danger, custom_id="music_stop", emoji="♻️", row=1)
-    async def reset_playlist(self, interaction: discord.Interaction, button: discord.ui.Button):
+    # 行為：重讀 music_runtime.json 歌單設定（套用新增/刪改的歌單，免重啟），
+    #       2 個以上歌單→彈出多選清單讓使用者挑；只有 0~1 個→直接重載最新線上歌單。
+    @discord.ui.button(label="編輯歌單", style=discord.ButtonStyle.secondary, custom_id="music_stop", emoji="🎚️", row=1)
+    async def edit_playlist(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
-        count = await self.cog.player.reload_playlist()
+        # 先重讀設定 + 補抓歌單名稱，讓彈出的清單顯示最新歌單與正確名稱
+        await self.cog.refresh_playlist_config()
+        playlists = self.cog.config.playlists if self.cog.config else []
+
+        if len(playlists) >= 2:
+            await interaction.followup.send(
+                "🎚️ 選擇要播放的歌單（可複選，全選＝合併播放）：",
+                view=PlaylistEditView(self.cog),
+                ephemeral=True,
+            )
+            return
+
+        # 只有 0~1 個歌單，沒得選 → 直接重載套用（等同舊的重置：同步線上加/刪歌）
+        count = await self.cog.player.reload_playlist() if self.cog.player else None
         if count is None:
             await interaction.followup.send(
-                "⚠️ 無法重載歌單（未設定預設歌單或線上抓取失敗），維持原本播放。",
+                "⚠️ 目前沒有可用歌單，請先在設定檔 playlist_url 填入歌單連結。",
                 ephemeral=True,
             )
         else:
             await interaction.followup.send(
-                f"♻️ 已清空點歌並重載最新線上歌單（共 {count} 首）。", ephemeral=True
+                f"♻️ 已重載最新線上歌單（共 {count} 首）。", ephemeral=True
             )
 
     @discord.ui.button(label="重播", style=discord.ButtonStyle.secondary, custom_id="music_replay", emoji="🔄", row=1)

@@ -21,6 +21,7 @@ class MusicCog(commands.Cog):
         self._starting = False
         self._view_registered = False
         self._playlist_task: asyncio.Task | None = None
+        self._title_task: asyncio.Task | None = None  # 背景自動抓歌單名稱
         self._leave_tasks: set[asyncio.Task] = set()  # 追蹤點歌者離開的延遲處理 task，避免被 GC
 
     async def cog_load(self):
@@ -43,6 +44,11 @@ class MusicCog(commands.Cog):
         if self._playlist_task and not self._playlist_task.done():
             self._playlist_task.cancel()
             self._playlist_task = None
+
+        # 取消自動命名 task
+        if self._title_task and not self._title_task.done():
+            self._title_task.cancel()
+            self._title_task = None
 
         # 取消尚未完成的「離開砍歌」延遲 task
         for task in list(self._leave_tasks):
@@ -174,7 +180,11 @@ class MusicCog(commands.Cog):
             await self.announcer.cleanup_old_panel()
             await self.announcer.send_idle_panel()
 
-            if self.config.default_playlist_url:
+            # 背景預抓未自訂名稱的歌單標題（≥2 個歌單才會用到「編輯歌單」多選清單）
+            if len(self.config.playlists) >= 2:
+                self._title_task = asyncio.create_task(self._prewarm_playlist_titles())
+
+            if self.config.has_playlists:
                 # 歌單載完、shuffle 設好、跳到上次位置後才啟動播放迴圈，
                 # 避免迴圈搶先從半載的佇列抓到錯誤的第一首
                 self._playlist_task = asyncio.create_task(self._load_playlist_background())
@@ -183,13 +193,39 @@ class MusicCog(commands.Cog):
         finally:
             self._starting = False
 
-    async def _load_playlist_background(self):
-        """背景載入預設歌單 → 設定 shuffle / 跳轉 → 啟動播放迴圈"""
+    async def refresh_playlist_config(self):
+        """「編輯歌單」按鈕按下時：立即重讀 music_runtime.json（不等 5 秒 watcher）
+        並補抓未自訂名稱的歌單標題，讓彈出的多選清單顯示最新歌單與正確名稱。
+
+        只更新設定與名稱，不動佇列；實際切換/重載由使用者在多選清單挑選後觸發。
+        """
+        new_config = RuntimeMusicConfig.force_reload()
+        if new_config:
+            self.config = new_config
+            if self.player:
+                self.player.config = new_config
+        if self.player:
+            try:
+                await self.player.resolve_playlist_titles()
+            except Exception as e:
+                logger.warning(f"[MusicCog] 重讀設定時抓歌單名稱失敗: {e}")
+
+    async def _prewarm_playlist_titles(self):
+        """背景預抓歌單 YouTube 標題（自動命名）填入快取，讓之後按「編輯歌單」彈出清單即時顯示名稱"""
         try:
-            logger.info("[MusicCog] 開始背景載入預設歌單...")
-            await self.player.add_to_playlist(self.config.default_playlist_url)
+            await self.player.resolve_playlist_titles()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning(f"[MusicCog] 預抓歌單名稱失敗: {e}")
+
+    async def _load_playlist_background(self):
+        """背景載入選取的歌單集合 → 設定 shuffle / 跳轉 → 啟動播放迴圈"""
+        try:
+            logger.info(f"[MusicCog] 開始背景載入歌單：{self.config.active_keys}")
+            await self.player.load_active_playlists()
             count = len(self.player.queue.main_queue)
-            logger.info(f"[MusicCog] 預設歌單已載入（{count} 首可播放）")
+            logger.info(f"[MusicCog] 歌單已載入（{count} 首可播放）")
 
             # 恢復 shuffle 狀態
             self.player.queue.shuffle = self.config.shuffle

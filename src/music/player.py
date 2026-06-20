@@ -9,7 +9,7 @@ from discord.ext import commands
 logger = logging.getLogger('discord_bot')
 from .queue import MusicQueue
 from .ytdl import YTDLSource
-from .config import MusicConfig, MUSIC_RUNTIME_PATH
+from .config import MusicConfig, MUSIC_RUNTIME_PATH, playlist_key
 from .models import Song
 from .exceptions import QueueEmptyError
 
@@ -27,6 +27,7 @@ class MusicPlayer:
         self._bg_tasks: set[asyncio.Task] = set()  # 追蹤背景下載 tasks
         self._replay = False  # 重播當前歌曲（不跳下一首）
         self._reloading = False  # 重載歌單中，避免重複觸發
+        self._playlist_titles: dict[str, str] = {}  # 歌單 key → YouTube 標題（自動命名快取）
 
     def _has_active_voice(self) -> bool:
         return self.voice_client is not None and self.voice_client.is_connected()
@@ -329,15 +330,18 @@ class MusicPlayer:
             await asyncio.sleep(0.5)
 
     async def _fetch_playlist_songs(self, url: str) -> list[Song]:
-        """解析歌單 URL，回傳 Song 清單（純抓取，不動佇列）"""
+        """解析歌單 URL，回傳 Song 清單（純抓取，不動佇列）。順便快取歌單標題供自動命名。"""
         loop = asyncio.get_event_loop()
         try:
-            entries = await loop.run_in_executor(
+            title, entries = await loop.run_in_executor(
                 None, lambda: YTDLSource._extract_playlist_sync(url)
             )
         except Exception as e:
             logger.error(f"[MusicPlayer] 歌單解析失敗: {e}")
             return []
+
+        if title:
+            self._playlist_titles[playlist_key(url)] = title
 
         songs = []
         for entry in entries:
@@ -360,34 +364,48 @@ class MusicPlayer:
         return songs
 
     async def add_to_playlist(self, url: str):
-        """將歌單 URL 逐批加入主佇列（邊解析邊播，不等全部完成）"""
+        """將單一歌單 URL 逐批加入主佇列（邊解析邊播，不等全部完成）"""
         songs = await self._fetch_playlist_songs(url)
         for i in range(0, len(songs), 5):
             self.queue.add_to_main(songs[i:i + 5])
             logger.info(f"[MusicPlayer] 歌單載入中... 已加入 {len(self.queue.main_queue)} 首")
             await asyncio.sleep(0)
-        logger.info(f"[MusicPlayer] 歌單載入完成，共 {len(self.queue.main_queue)} 首")
+        logger.info(f"[MusicPlayer] 單一歌單載入完成，共 {len(self.queue.main_queue)} 首")
 
-    async def reload_playlist(self) -> int | None:
-        """重新抓取最新線上歌單：清掉點歌與舊主歌單後換上新清單。
+    async def load_active_playlists(self):
+        """啟動時依目前選取的歌單集合載入（逐個歌單邊抓邊加，不清空舊佇列）"""
+        urls = self.config.active_urls
+        if not urls:
+            logger.info("[MusicPlayer] 沒有選取任何歌單，略過載入")
+            return
+        for url in urls:
+            await self.add_to_playlist(url)
+        logger.info(
+            f"[MusicPlayer] 啟動歌單載入完成，共 {len(self.queue.main_queue)} 首"
+            f"（{len(urls)} 個歌單）"
+        )
 
-        回傳新歌單歌曲數；若無預設歌單或抓取結果為空則不動舊歌單，回傳 None。
+    async def _rebuild_main_from_urls(self, urls: list[str]) -> int | None:
+        """先抓成功才換：抓取（可多個）歌單合併 → 清空點歌與舊主歌單 → 換上新清單。
+
+        回傳新歌單歌曲數；若無歌單或抓取結果全為空則不動舊歌單，回傳 None。
         """
-        url = self.config.default_playlist_url
-        if not url or self._reloading:
+        if not urls or self._reloading:
             return None
 
         self._reloading = True
         try:
-            # 先抓新歌單，成功才動佇列，避免抓失敗把歌單清空導致沒歌可播
-            songs = await self._fetch_playlist_songs(url)
-            if not songs:
-                logger.warning("[MusicPlayer] 重載歌單：抓取結果為空，保留舊歌單")
+            # 先抓新清單，成功才動佇列，避免抓失敗把歌單清空導致沒歌可播
+            all_songs: list[Song] = []
+            for url in urls:
+                all_songs.extend(await self._fetch_playlist_songs(url))
+            if not all_songs:
+                logger.warning("[MusicPlayer] 重建主歌單：抓取結果為空，保留舊歌單")
                 return None
 
             self.queue.clear_all()  # 清掉點歌插播 + 舊主歌單
-            for i in range(0, len(songs), 5):
-                self.queue.add_to_main(songs[i:i + 5])
+            for i in range(0, len(all_songs), 5):
+                self.queue.add_to_main(all_songs[i:i + 5])
                 await asyncio.sleep(0)
             self.queue.shuffle = self.config.shuffle  # 重新套用隨機狀態並決定下一首
 
@@ -396,10 +414,46 @@ class MusicPlayer:
                 self.voice_client.stop()
 
             count = len(self.queue.main_queue)
-            logger.info(f"[MusicPlayer] 歌單已重載，共 {count} 首")
+            logger.info(f"[MusicPlayer] 主歌單已重建，共 {count} 首（{len(urls)} 個歌單）")
             return count
         finally:
             self._reloading = False
+
+    async def reload_playlist(self) -> int | None:
+        """重置按鈕：重新抓取「目前選取的歌單集合」最新線上清單。"""
+        return await self._rebuild_main_from_urls(self.config.active_urls)
+
+    async def set_active_playlists(self, keys: list[str]) -> int | None:
+        """切換選取的歌單集合（以 key 指定）並持久化（重啟後保持），重建主歌單。
+
+        回傳新歌單歌曲數；抓取失敗/為空則保留舊歌單回傳 None（但仍記住使用者選擇）。
+        """
+        self.config.active_keys = list(keys)
+        count = await self._rebuild_main_from_urls(self.config.active_urls)
+        # 不論抓取結果如何都記住使用者的選擇，重啟後沿用
+        self._save_to_runtime("active_playlists", list(keys))
+        return count
+
+    async def resolve_playlist_titles(self) -> bool:
+        """為未自訂名稱、且尚未抓過標題的歌單抓取 YouTube 標題填入快取。
+
+        回傳是否有任何更新（供呼叫端決定要不要刷新面板）。
+        """
+        updated = False
+        for p in self.config.playlists:
+            if p.name:  # 使用者已自訂名稱 → 不用抓
+                continue
+            if p.key in self._playlist_titles:  # 載入歌單時已順便抓到
+                continue
+            title = await YTDLSource.extract_playlist_title(p.url)
+            if title:
+                self._playlist_titles[p.key] = title
+                updated = True
+        return updated
+
+    def display_name(self, playlist) -> str:
+        """歌單顯示名稱：自訂名稱 > 自動抓的 YouTube 標題 > 後備（歌單 key）"""
+        return playlist.name or self._playlist_titles.get(playlist.key) or f"歌單 {playlist.key}"
 
     @staticmethod
     async def _get_peak_db(file_path: str) -> float | None:
