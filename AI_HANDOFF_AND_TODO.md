@@ -25,6 +25,9 @@
 > 4. 保留可追溯來源，避免之後重複討論同一件事
 
 最後盤點紀錄（只保留近期；過往詳見 `TODO-completed.md` 各歸檔 entry）：
+- 2026-06-21（續）：**persona prompt 模組化 + 功能二 Phase B（認得人）+ 記憶設計定稿**。①**persona 重構**：把共用性格/語氣/色色分寸/§19§25 紅線/語言規則從 [askai_system_prompt.txt](src/settings/prompts/askai_system_prompt.txt) 搬進共用的 [persona_identity.txt](src/settings/prompts/persona_identity.txt)（/askai 留任務框架：回答風格/網路引用/人物對照）；ambient 與 /askai 從此**同一個琇紫**。內容等價、**順序微調 → 待 user 重測 /askai**。②**Phase B 認得人**：[ambient_reply.py](src/llm/ambient_reply.py) 接 `retrieve_rag_context_sync`（吃純 id，executor 跑，per-channel 60s 快取，embedding 走 Lemonade 獨立 port 不卸載 12B）→ persona card 進 `persona_context`。③**記憶設計定稿**（見功能二區塊 Phase C + 預設決策）：**只記本人中性偏好；敏感(健康/感情/家庭/財務)直接丟不存；他人/紅線丟；多次提到才升等(tentative→trusted≥2)；全自動零審核；治理＝AI 自我進化(抽取→升等→消化→淡忘)+選配監督面板**。靜態 py_compile PASS。**C（preference_fact 寫入管線）尚未實作**。
+- 2026-06-21：**功能二「AI 偶爾插話」Phase A 實作完成（待 docker 驗證）**。新增 [ambient_reply.py](src/llm/ambient_reply.py)（硬過濾→冷卻/上限→foreground 讓位→**12B 判斷**，沉默 sentinel `[PASS]` 不發送；@/reply 必回）。**插不插由 12B 決定、不擲骰**——「偶爾」靠冷卻+上限；機率退為 `judge_sampling_rate` 純減壓閥（預設 1.0 不作用，太吵才抽樣降載）。配套：`ambient_model: Gemma-4-12B-it-GGUF` 進 [llm_runtime_config.json](src/sys_settings/llm_runtime_config.json)（+ctx 8192）、`LLMRuntimeConfig.ambient_model` + `LLMService.resolve_ambient_model()`、`AmbientChatSettings`、[channel_registry](src/settings/channel_registry.py) 加「AI 插話頻道」、[lemonade_gate](src/llm/lemonade_gate.py) 加 `stream_busy/note_foreground_activity/foreground_recently_active`（/askai 兩處標 foreground）、`bot.ambient_tracker`、`on_message` create_task、[ambient_reply_prompt.txt](src/settings/prompts/ambient_reply_prompt.txt)。**Phase A 範圍調整**：判斷+生成合一次 12B 呼叫（非獨立 judge）、react 檔次延後、persona card(檔1) 移到 Phase B（Phase A 記憶＝`channel.history` 短期脈絡）。**未做**：真正優先序佇列（目前靠 foreground 讓位 + `stream_exclusive` 序列化；directed@ 仍可能在 /askai 窗口觸發 swap）。靜態：py_compile/JSON/standalone gate 測試皆 PASS（完整載入須 docker）。**下一步**：docker 驗證手感 → 調機率/冷卻 → Phase B（`retrieve_discord_context` 泛化吃 channel + persona/RAG 召回）。
+- 2026-06-20：**「AI 偶爾插話 / 閒聊」需求收斂 + 文件化（功能二）**。與使用者互動式確認後，把原本糾纏的需求**拆成兩個獨立功能**：①**功能一＝AI 的家**（專屬頻道、被叫必應、重度三層記憶）＝既有 [AI 私聊頻道 draft](#ai-私聊頻道--三層記憶機制規劃中)，**本輪暫放旁邊**；②**功能二＝AI 偶爾插話**（一般頻道白名單自發冒泡、@/reply 必回、全本地單流、輕量情境記憶）＝**新區塊** [AI 偶爾插話](#ai-偶爾插話--閒聊功能二規劃中)。**本輪定案共識（含模型分層）**：①**兩顆模型、同時只一顆常駐**（Lemonade 切模型會卸載另一顆）——新增背景常駐 **`Gemma-4-12B-it-GGUF`**（判斷＋插話＋傾聽＋記憶，跟既有 `moderation_model`/`personality_model` 同慣例），P0(`/askai`、功能一)才換 **`Gemma-4-26B-A4B-it-GGUF`**。②**優先序佇列 P0>P1>P2，只有 P0 觸發 swap，背景永不 ping-pong**（`/askai` keep_alive 窗口內插話/傾聽暫停）。③觸發＝免費硬過濾 + 冷卻(90s/6次) 前置 → **12B 即時判斷**（回/reaction/沉默），太熱才加機率減壓閥；@/reply 必回。④**記憶＝跨功能共享一層**，由 **12B「沒梗轉傾聽」順手寫入**（判斷=傾聽=記憶同一 pass）；v1 檔1（persona card）+ 檔2（`retrieve_discord_context` 情境召回），檔3（`preference_fact`）為 Phase C。**待使用者下指令才動 code**；Phase A→B→C。**前置技術債**：`retrieve_discord_context` 需從吃 `interaction` 泛化成吃 `channel`（檔2 前置）。
 - 2026-06-20：**/askai 網路搜尋兩處修正（參考連結數 + 體育題觸發）**。① **參考連結 3→5**：抓取 `top_k=5`（[llm_settings.py:218](src/sys_settings/llm_settings.py#L218)）一直全部塞進 `<web_context>`，但 [llm_service.py:316](src/services/llm_service.py#L316) 文末引用 directive 寫死「最多 3 個」卡住輸出 → 改「最多 5 個」對齊（軟性上限，LLM 仍可能引用少於 5 條；`llm_commands.py:482` 的 `outcome.results[:3]` 只是 debug log、不影響、保留）。② **體育題不觸發搜尋**：「請告訴我這周的世界足球賽比賽簡報」trace 的 `web_context_meta` 為 `triggered=false/reason=default`（根本沒打 SearXNG，是模型用無即時資料的記憶回場面話）。Root cause [intent.py](src/llm/retrievers/web/intent.py) 無體育主題群、且 SOFT 寫死「這週」對不上異體字「這周」。修法：新增 `_TOPIC_SPORTS`（足球/世界盃/NBA/英超/賽程/比分… **刻意不收 bare「比賽」「賽」**）掛 HARD + `_ROUTE_RULES` 加 `news`/`week`；SOFT 的 `這週/上週/最近一週` 改 `這[週周]/…` 異體字容錯。新增 [src/test/test_web_intent.py](src/test/test_web_intent.py)（standalone importlib 跑 14 斷言全 PASS；本機無 `discord` 套件不能直跑 unittest，docker 內可）。**待部署驗證**：`docker compose restart discord-bot` 後重問足球題，`web_context_meta` 應為 `triggered=true/reason=hard/news/week` 且附參考連結。**未做（可選）**：`test_web_intent` 加進 docker-compose 啟動測試 gate（目前只跑 snapshot+spoiler）；體育詞表非窮舉（羽球/網球/瓊斯盃等未收）。
 
 ---
@@ -94,7 +97,8 @@ last_confirmed: 2026-03-31
 |---|---|---:|---|
 | Discord Bot / AI 對話能力 | 已有可用基礎能力 | 80% | [專案架構](#專案-ai-架構總覽) |
 | Context / Prompt 優化 | 含 askai 身份感 + 人物對照三輪重構 + 人設深度重構（和風含蓄/30熟女/包容派）+ 智慧女性風格重寫（2026-05-18）+ few-shot 範例檔，待部署驗證 | 97% | [Context 優化](#context--prompt-優化專區) |
-| AI 私聊頻道 + 三層記憶 | 規劃完成（含道德守門）；人設 prompt 已就位 | 10% | [AI 私聊頻道](#ai-私聊頻道--三層記憶機制規劃中) |
+| AI 偶爾插話 / 閒聊（功能二） | **Phase A+B 已實作（2026-06-21）**，待 docker 驗證；C（記憶寫入）待做 | 50% | [AI 偶爾插話](#ai-偶爾插話--閒聊功能二規劃中) |
+| AI 私聊頻道 + 三層記憶（功能一·姊妹案） | 規劃完成（含道德守門）；人設 prompt 已就位；**本輪暫放旁邊** | 10% | [AI 私聊頻道](#ai-私聊頻道--三層記憶機制規劃中) |
 | 使用者指令記憶 (/remember) | 規劃中（與 AI 私聊頻道互補） | 5% | [/remember 規劃](#使用者指令記憶-remember-未來工作) |
 | Reaction 統計 / 社群互動玩法 | 規劃中 | 5% | [Reaction TODO](#reaction-統計與社群互動玩法) |
 | 點歌機器人（Music Bot） | 已上線運作 | 85% | [點歌機器人](#點歌機器人專區) |
@@ -472,9 +476,14 @@ id: ai-chat-channel-memory
 type: TODO
 status: draft
 depends_on: [project-architecture, context-prompt-optimization]
-affects: [user-directive-memory]
+affects: [user-directive-memory, ambient-chat]
 last_confirmed: 2026-04-27
 -->
+
+> ⏸️ **本輪（2026-06-20）暫放旁邊。** 與新案 [AI 偶爾插話 / 閒聊（功能二）](#ai-偶爾插話--閒聊功能二規劃中) 切為**兩個獨立功能**：
+> - **功能一（本案）= AI 的家**：專屬頻道、你去找他「被叫必應、一定回答」、重度三層記憶。
+> - **功能二（新案）= AI 偶爾插話**：一般頻道自發冒泡、@ 才必回、輕量情境記憶。
+> 兩案的「偏好事實記憶」未來收斂為**共享一層**（一個寫入器、兩功能召回），詳見功能二區塊。
 
 > **目標：** 在每個 guild 指定一個「AI 私聊頻道」。在該頻道內，AI（柔喵）以 30 熟女姊姊人設自然加入閒聊（不需要 `/askai` 指令），透過長期累積建立三層記憶——使用者偏好事實 + AI 自己的觀點/默契 + 既有人設。讓 AI 能像真朋友一樣記得「你愛吃鮭魚」、「我之前覺得 X」這類細節，且具備道德判斷不被惡意污染。
 
@@ -644,6 +653,150 @@ last_confirmed: 2026-04-27
 | `src/llm/context_retriever.py` | SQL 多撈兩種 profile_kind + sensitivity 過濾 | P4, P5, P6 |
 | `src/services/llm_service.py` | 整合 reply_gate + vision describer 到主流程 | P2, P3 |
 | `src/sys_settings/llm_settings.py` | 新增 gating model + vision model 設定 | P2, P3 |
+
+---
+
+## AI 偶爾插話 / 閒聊（功能二）（規劃中）
+
+<!-- @meta
+id: ambient-chat
+type: TODO
+status: draft
+depends_on: [project-architecture, context-prompt-optimization]
+affects: [ai-chat-channel-memory]
+last_confirmed: 2026-06-20
+-->
+
+> **目標：** 在白名單的一般聊天頻道裡，AI（柔喵）**沒人叫也會偶爾冒一句**，讓群聊更活；被 **@ 或 reply 時一定回**。定位是「彩蛋式偶爾插話」，**不是**功能一那種「專屬頻道全程參與」。寧可少講講得巧，也不要每句都插變噪音。
+
+### 與功能一（AI 的家）的分界
+
+| | 功能一：AI 的家 | 功能二：偶爾插話（本案） |
+|---|---|---|
+| 概念 | 你「去找他聊天」的地方 | 他在群裡「偶爾冒泡」 |
+| 觸發 | 進去講話**一定回** | 自發低機率 + **@/reply 必回** |
+| 場景 | 一個專屬頻道 | 一般頻道（白名單，可多個） |
+| 記憶 | 重度三層 + 道德守門 | 輕量情境記憶（檔1+檔2） |
+| 狀態 | 暫放旁邊 | **本輪主線** |
+
+### 模型與排隊（2026-06-20 定案的核心架構）
+
+**兩顆模型、同時只一顆常駐**（Lemonade「切模型會卸載另一顆」是硬約束，使用者確認）：
+
+| 角色 | 模型 | 服務 |
+|---|---|---|
+| 前景大模型（P0） | `Gemma-4-26B-A4B-it-GGUF`（既有，MoE 僅 ~4B 活躍） | `/askai`、功能一（AI 的家） |
+| **背景小模型（常駐底，P1/P2）** | **`Gemma-4-12B-it-GGUF`（新增）** | 插話判斷＋生成、傾聽＋記憶 |
+
+> 與既有 `moderation_model`(Qwen2.5-7B) / `personality_model`(Qwen3-14B) 同一個「角色專屬模型」慣例，加 `ambient_model` 即可（[llm_runtime_config.json](src/sys_settings/llm_runtime_config.json)）。選 12B dense 的理由是**佔 VRAM 小、load 快、適合常駐背景**（非運算更省——A4B 的 26B 反而活躍參數更少）。
+
+**優先序佇列（擴充現有 `stream_exclusive` / askai queue）**：
+
+| 序 | 工作 | 模型 | 能否觸發 swap |
+|---|---|---|---|
+| P0 | `/askai`、功能一 | 26B | ✅（前景值得） |
+| P1 | 插話判斷＋生成 | 12B | ❌ 只用當下常駐者；P0 一來就讓位 |
+| P2 | 傾聽＋記憶批次 | 12B | ❌ 閒置時才跑 |
+
+**鐵則：只有 P0 觸發換模型。** 12B 為預設常駐背景腦（靠插話/記憶活動保溫）；`/askai` 來 → swap 26B 並守 keep_alive，**這段期間插話/傾聽暫停**（不為背景又 swap 回去）；`/askai` 閒置夠久 → 落回 12B。swap 一輩子只由 P0 驅動，不 ping-pong。
+
+### 觸發設計（硬過濾前置 + 12B 判斷，零 swap）
+
+因 12B 本來就常駐，由它即時判斷每則訊息**零 swap**（前面我擔心的「判斷害大模型反覆卸載」在此政策下不成立）：
+
+1. **免費硬性過濾**：bot/自己、非白名單頻道、指令開頭、純連結、純附件、太短(<4字)或太長(>300字) → 連 12B 都不勞動。
+2. **冷卻 + 上限**：距上次插話 < 90 秒、本小時已插 ≥ 6 次 → 跳過（維持「偶爾」手感）。
+3. **12B 判斷**：過濾後交 12B 決定 **插話 / 只貼 reaction / 沉默(轉傾聽)**。
+4. **@/reply 覆蓋**：被 @ 它或 reply 它 → **必回**，跳過冷卻（預設只在白名單頻道）。
+5. **（備案減壓閥）** 頻道太熱、12B 每則判斷負載過高 → 在第 3 步前加機率抽樣，不每則都問。
+6. 過關 → `asyncio.create_task` 背景生成，不阻塞 `on_message`。
+
+### 生成（複用現有零件）
+
+- 插話由**常駐的 12B** 生成（`LLMService.generate_reply()`，傳 `model=ambient_model`）。
+- **system prompt = 共用人設身份（`persona_identity.txt`，琇紫，與 /askai 同一份）＋ 插話行為規則（`ambient_reply_prompt.txt`）**：插話與問答是同一個角色，只是換成「插話模式」（簡短、口語、允許 `[PASS]` 沉默）。可用 `AmbientChatSettings.use_shared_identity` 關閉疊加。**不含** askai 主規則與 few-shot 範例（保持輕量、避免問答框架）。
+- `allowed_mentions=none` 不 ping 人；不回 bot 訊息（防回音迴圈）。
+
+### 記憶（v1 = 檔1 + 檔2「情境記憶」；偏好事實走共享層）
+
+**核心決策：記憶是跨功能共享的一層**——同一個 pgvector 記憶池，一個寫入器負責沉澱，兩功能都召回。**寫入由常駐的 12B 在「沒梗轉傾聽」時順手做**（判斷=傾聽=記憶寫入，同一顆模型同一條 pass）。
+
+| 檔次 | 它會「記得」什麼 | 靠什麼 | v1 |
+|---|---|---|---|
+| 檔1 認得人 | 在跟誰講話、這人什麼調性 | `persona card`（已存在，直接讀） | ✅ |
+| 檔2 記得聊過什麼 | 最近/相關講過的話，接得上舊話題 | `retrieve_discord_context` 召回 | ✅ |
+| 檔3 記得人物偏好 | 「你愛吃鮭魚」這種原子事實 | 12B 傾聽 pass 抽 `preference_fact`（共享寫入器）→ 召回時讀 | ⏭️ Phase C |
+
+### Phase 切分
+
+#### A — 插話骨架（**已實作 2026-06-21，待 docker 驗證**）
+- [x] [llm_runtime_config.json](src/sys_settings/llm_runtime_config.json) 加 `ambient_model: "Gemma-4-12B-it-GGUF"` + `model_load_options` ctx_size 8192；`LLMRuntimeConfig` 加 `ambient_model` 欄位 + `LLMService.resolve_ambient_model()`。
+- [x] `channel_registry` 加 `register_channel("AI 插話頻道", text, "ambient_chat_channel_id", …)`（magenta）。
+- [x] `llm_settings.py` 新增 `AmbientChatSettings`（min/max 字數、cooldown 90s、hourly_cap 6、askai_grace 90s、silence_sentinel `[PASS]`、history_limit 12、`judge_sampling_rate=1.0` 減壓閥預設關閉）。**插不插由 12B 判斷，不用機率**；「偶爾」感靠冷卻+上限（冷卻期內連判斷都不跑）。
+- [x] `bot.ambient_tracker = {}`（[discord_bot.py](src/discord_bot.py)）。
+- [x] 模型協調（取代「優先序佇列」的最小落地）：[lemonade_gate.py](src/llm/lemonade_gate.py) 加 `stream_busy()` + `note_foreground_activity()` / `foreground_recently_active(grace)`；/askai 在 `_handle_askai_request` 起點與 worker `finally` 兩處標 foreground → 背景插話於 grace 窗口內讓位。**注意：尚未做真正的優先序佇列**，只做「foreground 活躍時背景讓位 + 共用 `stream_exclusive` 序列化」；directed(@) 仍會在 /askai 窗口觸發 swap（罕見、可接受）。
+- [x] 新檔 [src/llm/ambient_reply.py](src/llm/ambient_reply.py)：硬過濾 + 冷卻/上限 + foreground 讓位 + 機率 + @/reply 必回 + 12B 生成（`generate_reply(model=ambient_model)`，沉默 sentinel 不發送）。**Phase A 範圍調整**：(a) 判斷與生成**合為一次 12B 呼叫**（prompt 允許回 `[PASS]`＝沉默），未做獨立 judge；(b) **react 檔次延後**（Phase A 只有 回/沉默）；(c) **檔1 persona card 改到 Phase B**，Phase A 記憶＝近期 `channel.history` 短期脈絡（零 pgvector）。
+- [x] [discord_bot.py](src/discord_bot.py) `on_message` 加 `asyncio.create_task(maybe_ambient_reply(bot, message))`。
+- [x] 新 prompt [ambient_reply_prompt.txt](src/settings/prompts/ambient_reply_prompt.txt)（純「插話行為」規則、`[PASS]` 沉默）；**system 疊用共用身份 `persona_identity.txt`（琇紫）→ 插話與 /askai 同一角色**。注意：這是 bot 自己的「身份 prompt」；「認得別人是誰」的 per-user persona card 仍在 Phase B。
+- **靜態檢查**：全檔 py_compile PASS；JSON valid；lemonade_gate 協調函式 standalone 測試 PASS（本機無 discord 套件，完整載入須在 docker）。
+- **待 docker 驗證**：`docker compose restart discord-bot` → `/setch` 設「AI 插話頻道」→ 該頻道閒聊看是否偶爾插話、@ 必回、非白名單靜默、/askai 進行時讓位。
+- **可調手感（config 起始值）**：base_probability、cooldown_seconds、hourly_cap、askai_grace_seconds。
+
+#### B — 認得人（persona card 召回；檔1 提前到此）
+- [ ] `ambient_reply` 接 `retrieve_rag_context_sync(question, guild_id, requester_user_id, participant_user_ids, …)`（吃純 id、**不需 interaction 重構**），把在場成員 persona card 轉成 `persona_context` 餵 `generate_reply`。
+- [ ] participant_user_ids ＝ 近期 `channel.history` 的發言者 + 當前作者；executor 跑（sync LlamaIndex）；best-effort（失敗→None）。
+- [ ] per-channel persona 短 TTL 快取（~60s），避免 armed 期間每則都打 pgvector。embedding 走 Lemonade 獨立 port（**不卸載 12B**，無 swap 風險）。
+- **驗收**：群裡有 persona card 的人講話，琇紫接話帶得出對方調性；沒卡的人也不會卡住（degrade 成只有對話脈絡）。
+- **延後（非 v1 必要）**：`retrieve_discord_context` 泛化吃 channel 的 hybrid 長期對話召回——觸碰 /askai 核心、風險高，等 B 的 persona 召回不夠用再做。
+
+#### C — 偏好事實 preference_fact（檔3：自我進化、全自動、自他分流）
+> 政策（2026-06-21 定案）：**只記「本人講自己」的中性偏好；敏感(健康/感情/家庭/財務)一律自動丟、不存；他人評他人/紅線自動丟。多次提到才升等。全自動、零審核佇列。**
+- [ ] 寫入器 `PgVectorIntroRAGPort.index_preference_fact()`（仿 `index_auto_personality`），`profile_kind="preference_fact"`，metadata：`{author_id, fact, category, confidence, status(tentative|trusted), mention_count, first_seen, last_seen}`。
+- [ ] 抽取批次 `preference_extractor`（閒置窗口、12B、replay cursor）：掃插話頻道訊息 → 抽**本人自我揭露的中性偏好** + confidence；prompt 內嵌守門（自他分流、紅線丟、敏感丟）。
+- [ ] **corroboration**：抽到的 fact 比對既有同人相似 fact → `mention_count++`；首見 `tentative`（不公開引用），不同時間 ≥2 次升 `trusted`（才會被召回）；`/remember` 直接 trusted。
+- [ ] 召回：`ambient_reply` 撈該成員 `trusted` preference_fact（只讀），併進 persona_context。
+- [ ] **自我進化迴圈**（閒置批次）：consolidation（合併重複、衝突取新記「以前X現在Y」）、decay（久未重提降權/封存）。
+- [ ] 隱私公告：綁定插話頻道時自動置頂公告 + 改 channel topic（明示會被觀察記憶）。
+- [ ] **選配**監督面板（不擋流程）：查/改/刪某人記憶、禁記黑名單；複用 `/personality_extract` 的「AI 提案→人審」UI 模式。
+- **驗收**：本人講過愛吃鮭魚且被提 ≥2 次 → 之後相關話題自然帶出；敏感/他人/紅線輸入確認不入庫；衝突取新；久未提的淡出。
+
+### 預設決策（還可改）
+
+| 決策點 | 預設值 |
+|---|---|
+| 觸發場景 | 一般頻道白名單（可多個） |
+| 模型 | 背景 `Gemma-4-12B-it-GGUF`（常駐底，判斷+插話+傾聽）；P0 才換 `Gemma-4-26B-A4B-it-GGUF` |
+| 排隊 | 優先序佇列 P0>P1>P2；只有 P0 觸發 swap，背景永不 ping-pong |
+| 插話判斷 | 12B 即時判（回/reaction/沉默）；前置硬過濾 + 冷卻；太熱才加機率減壓閥 |
+| 冷卻 / 每小時上限 | 90 秒 / 6 次（起始值，待調手感） |
+| @/reply 處理 | 必回，覆蓋冷卻；預設只在白名單頻道 |
+| v1 記憶深度 | B＝認得人（persona card 召回）；C＝偏好事實 preference_fact（與 B 一起做） |
+| 記憶範圍（防污染第一刀） | **只記「本人講自己」的中性偏好**；他人評他人/紅線自動丟 |
+| 敏感自我揭露 | **直接丟、不存**（健康/感情/家庭/財務）；當下仍可由 channel.history 體貼回應，事後不留檔 |
+| 升等（corroboration） | 首見 `tentative`不公開引用；不同時間 ≥2 次升 `trusted` 才召回；`/remember` 直接 trusted |
+| 治理 | AI 自我進化（抽取→升等→消化→淡忘，全自動）；人類監督面板為**選配**、不擋流程 |
+| 衝突 / 淡忘 | 衝突自動取新（記「以前X現在Y」）；久未重提降權/封存 |
+| 連發/沉默 | prompt 允許回空＝沉默；冷卻避免洗版 |
+
+### 風險與注意
+- **回音迴圈**：一律排除 bot 訊息（含 `message.author.bot`），不只排除自己。
+- **swap ping-pong**：背景(P1/P2)絕不為自己換模型；只有 P0 驅動 swap，且 `/askai` keep_alive 窗口內插話/傾聽暫停。若實測 12B 常駐底跟 `/askai` 使用頻率打架，退路是插話也改跑 26B（少一顆但回 swap）。
+- **12B 連續判斷負載**：熱門頻道每則都過 12B 可能吃資源 → 用第 5 步機率減壓閥抽樣。
+- **記憶污染**（檔3）：抽取道德守門 + confidence；功能二只讀，污染風險集中在共享寫入器治理。
+
+### 涉及檔案（預估）
+
+| 檔案 | 角色 | Phase |
+|---|---|---|
+| `src/sys_settings/llm_runtime_config.json` | 加 `ambient_model` + load options | A |
+| `src/sys_settings/llm_settings.py` | `LLMRuntimeConfig` 加 `ambient_model` 欄位 + `AmbientChatSettings` | A |
+| `src/settings/channel_registry.py` | 加「AI 插話頻道」綁定 | A |
+| `src/services/llm_service.py` | 優先序佇列 + 背景不 swap 規則 + ambient_model 解析 | A |
+| `src/llm/ambient_reply.py`（新） | 硬過濾 + 12B 判斷 + 背景生成 | A |
+| `src/discord_bot.py` | `on_message` 加 ambient 分支 | A |
+| `src/settings/prompts/ambient_reply_prompt.txt`（新） | 輕量插話人設 | A |
+| `src/llm/context_retriever.py` | `retrieve_discord_context` 泛化吃 channel | B |
+| `src/llm/preference_extractor.py`（與功能一共用） | 12B 傾聽 → 偏好事實抽取（共享層） | C |
 
 ---
 

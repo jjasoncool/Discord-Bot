@@ -64,6 +64,7 @@ class MyBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix='!', intents=intents)
         self.echo_tracker = {}
+        self.ambient_tracker = {}  # 功能二：per-channel 插話冷卻/計數狀態
         self.telegram_relay_worker = None
 
     async def setup_hook(self):
@@ -367,6 +368,11 @@ async def on_message(message):
         enqueue_raw_message(message)
         if should_trigger_flush():
             asyncio.create_task(flush_raw_buffer())
+
+    # 功能二：AI 偶爾插話 / 閒聊（背景判斷，不阻塞訊息處理；自身過濾白名單頻道與 bot 訊息）
+    if not message.author.bot and message.guild is not None:
+        from llm.ambient_reply import maybe_ambient_reply
+        asyncio.create_task(maybe_ambient_reply(bot, message))
 
     # 繼續處理命令
     await bot.process_commands(message)

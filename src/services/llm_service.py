@@ -187,6 +187,14 @@ class LLMService:
         """對外提供本次請求最終模型名稱（供記錄/觀測使用）。"""
         return self._resolve_runtime_model(override_model)
 
+    def resolve_ambient_model(self) -> Optional[str]:
+        """背景插話/傾聽（功能二）用的小模型名稱；未設定回 None（呼叫端視為停用）。"""
+        runtime_config = self._load_runtime_config_cached()
+        if runtime_config is None:
+            return None
+        candidate = (runtime_config.ambient_model or "").strip()
+        return candidate or None
+
     def resolve_request_think(self, override_think: Optional[bool] = None) -> bool:
         """對外提供本次請求最終 think 設定（觀測用）。
 

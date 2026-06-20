@@ -14,6 +14,7 @@ from discord.ext import commands
 
 import llm
 from llm.logger_factory import get_or_create_file_logger
+from llm.lemonade_gate import note_foreground_activity
 from services.llm_service import LLMService
 from sys_settings.llm_settings import AskAICommandSettings, AskAIWebSettings
 from utils.utils import safe_send_interaction_message, check_guild
@@ -330,6 +331,8 @@ class LLMCommands(commands.Cog):
                 if not completion.done():
                     completion.set_exception(exc)
             finally:
+                # 請求結束時再記一次：大模型 keep_alive 仍熱，背景插話續讓位至 grace 過後
+                note_foreground_activity()
                 ASKAI_QUEUE.task_done()
 
     async def _handle_askai_request(
@@ -344,6 +347,9 @@ class LLMCommands(commands.Cog):
         # askai_response_history.jsonl / llm_anomaly.log）— 出錯時複製此 ID 即可一次定位
         trace_id = f"ask-{str(interaction.user.id)[-4:]}-{int(time.time() * 1000)}"
         logger.info("askai 開始 trace=%s user_id=%s q=%r", trace_id, interaction.user.id, question[:30])
+
+        # 標記前景（大模型）活動：功能二的背景插話會在此窗口內讓位，避免換模型 ping-pong
+        note_foreground_activity()
 
         system_prompt = load_system_prompt()
 

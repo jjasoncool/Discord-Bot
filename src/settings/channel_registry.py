@@ -324,3 +324,14 @@ register_channel(
     color=discord.Color.blue(),
     desc="自動發送IT快訊（系統設備／硬體新知）的文字頻道",
 )
+
+
+# 功能二「AI 偶爾插話 / 閒聊」白名單頻道（純綁定）；ambient_reply 之後讀這個 key。
+# 只在此頻道內 AI 才會自發冒泡 + @ 必回；未設定則整個功能靜默。
+register_channel(
+    "AI 插話頻道",
+    discord.ChannelType.text,
+    "ambient_chat_channel_id",
+    color=discord.Color.magenta(),
+    desc="AI 會在此頻道偶爾插話閒聊；被 @ 一定回（功能二）",
+)

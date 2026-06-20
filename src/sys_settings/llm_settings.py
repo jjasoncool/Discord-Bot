@@ -136,6 +136,8 @@ class LLMRuntimeConfig(BaseModel):
     embed_model: str
     moderation_model: str | None = None
     personality_model: str | None = None
+    # 背景插話/傾聽用的小模型（功能二）；None 代表沿用主 model
+    ambient_model: str | None = None
     backends: dict[str, BackendProfile] = Field(default_factory=dict)
     # 舊欄位：保留以避免舊 config 載入失敗；新 config 應將 think 放進 backends.ollama.extra_body
     think: bool = True
@@ -236,6 +238,61 @@ class AskAIWebSettings(BaseSettings):
     ) -> Tuple[Any, ...]:
         """允許 init > env > dotenv > file secrets 的覆寫順序。"""
         return (init_settings, env_settings, dotenv_settings, file_secret_settings)
+
+
+class AmbientChatSettings(BaseSettings):
+    """功能二「AI 偶爾插話 / 閒聊」設定（集中常數來源，不使用 env 覆寫）。
+
+    觸發哲學：硬性過濾（零成本）→ 冷卻/上限 → 機率（偶爾感 + 減壓閥）→ 背景生成。
+    被 @ 或 reply 機器人時走 must-reply，覆蓋冷卻與機率。
+    與 /askai 共用 Lemonade 單流；`/askai` 活躍窗口內背景插話暫停，避免換模型 ping-pong。
+    """
+
+    enabled: bool = True
+    # 綁定頻道的 config.json key（由 channel_registry「AI 插話頻道」寫入）
+    channel_config_key: str = "ambient_chat_channel_id"
+    # 插話「行為」規則（簡短、允許沉默…）；人設身份另由 identity_path 疊上
+    prompt_path: str = "/app/settings/prompts/ambient_reply_prompt.txt"
+    # 共用人設身份（琇紫）：與 /askai 同一份，讓插話與問答是同一個角色
+    use_shared_identity: bool = True
+    identity_path: str = "/app/settings/prompts/persona_identity.txt"
+
+    # 背景上下文：抓近期幾則當短期對話記憶
+    history_limit: int = 12
+    # Phase B 認得人：召回在場成員 persona card（intro/impression/auto_personality）
+    persona_top_k: int = 5
+    persona_cache_seconds: float = 60.0  # per-channel persona 快取，避免 armed 期間每則打 pgvector
+
+    # 觸發門檻：插不插由 12B 判斷，「偶爾」感由冷卻 + 每小時上限保證（不用機率）
+    min_chars: int = 4               # 太短（貼圖式單字）不插
+    max_chars: int = 300             # 太長（長篇貼文）不插
+    cooldown_seconds: float = 90.0   # 同頻道兩次自發插話的最短間隔；冷卻期內連判斷都不跑（省 12B）
+    hourly_cap: int = 6              # 同頻道每小時自發插話上限
+    # 減壓閥（預設關閉）：1.0 = 每則都讓 12B 判斷；頻道太吵、12B 負載過高時才調 < 1.0 抽樣降載
+    judge_sampling_rate: float = 1.0
+
+    # 與 /askai 的讓位：foreground 活躍此秒數內，背景插話暫停（防換模型 ping-pong）
+    askai_grace_seconds: float = 90.0
+
+    # 模型回此 sentinel（或空字串）代表「沒梗」→ 不發送
+    silence_sentinel: str = "[PASS]"
+
+    model_config = SettingsConfigDict(
+        extra="ignore",
+        frozen=True,
+    )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: Any,
+        env_settings: Any,
+        dotenv_settings: Any,
+        file_secret_settings: Any,
+    ) -> Tuple[Any, ...]:
+        """停用 env/dotenv，僅接受初始化參數與 class 預設值。"""
+        return (init_settings,)
 
 
 def load_context_safety_rules(path: str | Path) -> LLMContextSafetyRules:
