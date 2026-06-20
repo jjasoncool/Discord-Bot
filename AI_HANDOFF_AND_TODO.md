@@ -26,18 +26,6 @@
 
 最後盤點紀錄（只保留近期；過往詳見 `TODO-completed.md` 各歸檔 entry）：
 - 2026-06-20：**/askai 網路搜尋兩處修正（參考連結數 + 體育題觸發）**。① **參考連結 3→5**：抓取 `top_k=5`（[llm_settings.py:218](src/sys_settings/llm_settings.py#L218)）一直全部塞進 `<web_context>`，但 [llm_service.py:316](src/services/llm_service.py#L316) 文末引用 directive 寫死「最多 3 個」卡住輸出 → 改「最多 5 個」對齊（軟性上限，LLM 仍可能引用少於 5 條；`llm_commands.py:482` 的 `outcome.results[:3]` 只是 debug log、不影響、保留）。② **體育題不觸發搜尋**：「請告訴我這周的世界足球賽比賽簡報」trace 的 `web_context_meta` 為 `triggered=false/reason=default`（根本沒打 SearXNG，是模型用無即時資料的記憶回場面話）。Root cause [intent.py](src/llm/retrievers/web/intent.py) 無體育主題群、且 SOFT 寫死「這週」對不上異體字「這周」。修法：新增 `_TOPIC_SPORTS`（足球/世界盃/NBA/英超/賽程/比分… **刻意不收 bare「比賽」「賽」**）掛 HARD + `_ROUTE_RULES` 加 `news`/`week`；SOFT 的 `這週/上週/最近一週` 改 `這[週周]/…` 異體字容錯。新增 [src/test/test_web_intent.py](src/test/test_web_intent.py)（standalone importlib 跑 14 斷言全 PASS；本機無 `discord` 套件不能直跑 unittest，docker 內可）。**待部署驗證**：`docker compose restart discord-bot` 後重問足球題，`web_context_meta` 應為 `triggered=true/reason=hard/news/week` 且附參考連結。**未做（可選）**：`test_web_intent` 加進 docker-compose 啟動測試 gate（目前只跑 snapshot+spoiler）；體育詞表非窮舉（羽球/網球/瓊斯盃等未收）。
-- 2026-06-15：**fixupx 轉發改「只轉影片」+ 存在性防呆，已實作完成並歸檔**。圖片貼文不再轉（原生預覽沒差別）；查類型走 Twitter 原生 syndication CDN（token 移植 react-tweet），顯示走 fixupx；影片/服務掛掉→轉，圖片/404→不轉。詳見 `TODO-completed.md` [fixupx 連結轉發：只轉影片 + 存在性防呆](TODO-completed.md)（含決策表、設計、驗證、待部署驗證清單）。
-- 2026-05-11：**修 lemonade 對 chat stream + 背景 embedding 併發的失敗（`no_choices` 假象）**。Root cause：5/4 補的 snapshot log 攢到 3 筆 `no_choices` 事故，raw body 都是 `{'error': {'type': 'network_error', 'message': 'CURL error: ...'}}`，這是 lemonade gateway 內部 CURL 轉發到 downstream backend(port 8002, llama.cpp) 失敗時的回應，但 lemonade 用 `200 OK + error envelope` 回 client，破壞 HTTP 語意，導致 bot 走 `no_choices` 分支且不重試。比對 `discord_bot.log` 三次失敗的時間軸（21:48:14 / 21:49:40 / 22:03:31），全部都是 **`/askai` LLM stream 進行中 → 1–4 秒前 `on_message 批次處理 pgvector`（[chat_persistence.py:152](src/llm/chat_persistence.py#L152) `flush_buffer` 觸發的 batch embedding）** → LLM 連線被 lemonade reset。`/askai` 內部 RAG embedding 與 chat 是序列的不會自己撞，會撞的是背景 flush。**修法**：① 新增 [src/llm/lemonade_gate.py](src/llm/lemonade_gate.py)：module-level `asyncio.Lock` + `stream_exclusive()` async context manager（純鎖、無自家狀態，繁中註解解釋為何只 lemonade 需要、為何 RAG embedding 不掛 gate）② [llm_service.py](src/services/llm_service.py) `chat_raw` 的 `self._client.chat_completion(...)` 那行外包 `async with stream_exclusive():`，snapshot 路徑留在 gate 外（admin 端點不參戰，盡早釋放鎖）③ [chat_persistence.py](src/llm/chat_persistence.py) `flush_buffer` 的 `loop.run_in_executor(_sync_write_batch / _sync_update_batch)` 包進 `async with stream_exclusive():`，buffer_lock 已先釋放避免卡新訊息入 buffer；對稱設計＝兩端互等，bg flush 等 chat 結束才打 embedding，chat 也等 flush 完才開始（典型 batch 14 筆 ≈ 2–3 秒、threshold trigger 30 筆 ≈ 4–6 秒，slash command `defer()` 後使用者只看到 thinking 多轉幾秒）④ **B1 兜底**：[llm_http_client.py](src/llm/llm_http_client.py) `_apost_json` 收到 200 後檢查 `data["error"]["type"] == "network_error"` → 主動 raise `httpx.ConnectError`，命中既有 `RequestError` 退避重試分支（2 次、1s/2s），用盡後 raise `LlmConnectionError` → `chat_raw` 既有 except 抓住寫 anomaly + snapshot，分類從假性 `no_choices` 改回真實的 `connection`。**設計準則**：① 對稱 gate 而非 peek/skip — bg flush 本來就不急（5 分鐘 interval），晚個幾秒不影響任何體感、訊息進 pgvector 延遲反而更短（5 分鐘 → 幾秒）② B3+B1 並行：B3 治觸發條件、B1 兜底 lemonade 自己的偶發 hiccup（即使所有 bot 端 embedding 已序列化，lemonade 對 downstream 的 CURL 仍可能因 GPU/驅動短暫卡頓失敗）③ 不去 lemonade repo 改 source — 工夫不對等，且就算上游修「200 改成 5xx」，bot 端對網路類錯誤退避重試也是應有的健壯性。**驗證**：AST parse 四個檔案全綠（lemonade_gate / chat_persistence / llm_service / llm_http_client）；未跑 unittest 因為 chat_persistence 既有測試不覆蓋此路徑、新邏輯純鎖無需特殊測試。**未做（後續可考慮）**：① sync 路徑 `_post_json` 沒對稱加 error envelope 偵測（bg flush 走 sync embedding，目前靠 gate 預防、不需重試；若觀察到 sync path 仍會撞可再補）② 去 lemonade GitHub 提 issue 回報「`network_error` should return 5xx not 200」。**待部署驗證**：① `docker compose restart discord-bot` ② 觸發 chat_persistence buffer 滿 30 筆 或等 5 分鐘 interval，同時跑 `/askai` → 不應再見到 `no_choices`，flush 與 chat 應自然錯開（log 不會出現 `on_message 批次處理 pgvector` 緊接 `LLM 回應格式異常` 的 pattern）③ 若仍有 lemonade 自爆 → 應看到退避重試（log 應有兩次重試延遲），最終分類為 `kind=connection` 而非 `no_choices`。
-- 2026-05-04：**askai log 觀測性補強（Phase D：失敗時 backend 狀態快照，多 backend 通用）**。動機：使用者回報 /askai 偶發失敗（`no_choices` + raw body 是 Lemonade 自家寫的「Network error: CURL error: Couldn't connect to server」），重啟 Lemonade 即恢復 — 但壞掉的當下沒有 backend 內部狀態（哪些 model 載著、有沒有 chat engine、VRAM 怎樣），事後無從定位是 swap 失敗 / vision projector 缺 / engine 子進程 zombie / VRAM 不足哪一條。診斷時釐清 raw body 的「Network error」字串是 **Lemonade gateway 內部 CURL 對它自己 chat engine subprocess 失敗** 的措辭，跟 bot ↔ Lemonade、跟物理網路無關；bot 端分類 `no_choices` 是正確的，缺的是 backend-side 證據。**修法**：① [llm_http_client.py](src/llm/llm_http_client.py) 新增 `async admin_get(path, timeout=2.0) -> dict` best-effort helper（任何錯誤吞掉、回 dict 描述；故障路徑用、不該進熱路徑；命名故意叫 `admin_get` 不叫 `lemonade_admin_get` 就是要通用）② [llm_service.py](src/services/llm_service.py) 加 module-level `_BACKEND_PROBES` registry（dict[backend → tuple of (label, path)]），目前覆蓋三個 backend：lemonade=(`/api/v1/health`, `/api/v1/system-info`)、ollama=(`/api/ps`, `/api/tags`)、vllm=(`/health`, `/v1/models`) — 加新 backend 只需在 registry 補一行 ③ 新增 `_snapshot_backend_state(trace_label, model, error_kind)`：依 `runtime.backend` 從 registry 查 probes，未註冊 backend 直接 return，並行 gather `admin_get(path)` 後寫 anomaly log（log 含 `backend=...` 標籤 + `probes={label: data}` dict，外層全包 try/except，admin probe 自爆只寫 warning，**絕不蓋掉原始 raise**）④ `chat_raw` 三個失敗點都接：`no_choices` / `empty_content` 分支 raise 前各加一行；`chat_completion()` 那行外包 try/except 捕 `LlmTimeoutError` / `LlmConnectionError` → 補 anomaly log（這條原本完全沒寫進 anomaly！）→ snapshot → re-raise。**測試**：[src/test/test_llm_snapshot.py](src/test/test_llm_snapshot.py) 9 unittest 全綠 — 四種失敗類型（no_choices / empty_content / connection / timeout）各觸發一次 snapshot；三個 backend 各自 dispatch 對的 probe path（lemonade / ollama / vllm）；未註冊 backend 跳過 snapshot 且不打 admin_get；admin probe 自爆時走 warning + 仍 raise 原本錯。docker exec import smoke 通過。既有 14 個 telegram_spoiler 測試也跑了確認沒誤傷。**設計準則**：故障路徑次要診斷不可影響主路徑；2s timeout 上限 + gather 並行控成本；用 registry 而非 if/elif 分支讓加 backend 變單行修改；命名 `admin_get` 跟 `_snapshot_backend_state` 都刻意去 backend 化以利後續複用（未來 watchdog / `/system_status` Discord 指令都可共用）。**順手做的 deploy-side gate**：[docker-compose.yaml](docker-compose.yaml) `discord-bot` 服務加 `command:` 覆蓋 dockerfile CMD：啟動前先 `python -m unittest test.test_llm_snapshot test.test_telegram_spoiler`，紅了 `&&` 短路、bot 不啟動（restart: always 會無限重啟、log 立刻可見）；綠了再 `exec python discord_bot.py`（`exec` 把 PID 1 給 python，讓 `docker compose stop` 的 SIGTERM 能直達 bot 而不被 bash 吃掉）。等同把 pre-commit hook 改成 pre-deploy gate — 比 hook 不版控、換機沒了的解法可靠，比手動跑測試不會忘。**待部署驗證**：① `docker compose restart discord-bot` 應該看到 `--- running startup tests ---` → 23 tests OK → `--- tests OK, starting bot ---` → bot 正常啟動 ② 重啟 Lemonade 中觸發一次 /askai → `llm_anomaly.log` 同 trace_id 應有 `connection trace=...` + `snapshot trace=... kind=connection backend=lemonade probes=...` 兩行 ③ 復原後正常 chat → 不應有 snapshot（只成功不寫 anomaly）。**未做（後續可考慮）**：依 raw body 含 `"Network error"` / `"CURL"` 把 `no_choices` reclassify 成新 kind（如 `backend_engine_unreachable`）讓 user 不用再被 Lemonade 措辭誤導；watchdog / Discord `/system_status` 指令共用 `admin_get` 的後續實作；目前先以 snapshot 提供 backend-side 證據已可定位。
-- 2026-04-29：**askai log 觀測性補強（Phase A+B）**。動機：使用者回報「LLM 回應格式異常」這類失敗，跨 `discord_bot.log` / `askai_prompt.txt` / `askai_response_history.jsonl` 沒共同 ID 串接，且 line 494 `無 choices` 路徑沒寫 anomaly log，raw response 完全沒留 → 一次 4/29 17:32 的失敗事故無法事後分析。**修法**：① [llm_commands.py](src/commands/llm_commands.py) `_handle_askai_request` 入口生成 `trace_id = ask-{user_id 末4碼}-{epoch_ms}`，並在進入時 INFO log 記下 trace+user+question[:30] ② [llm_service.py](src/services/llm_service.py) `chat_raw` / `generate_reply` 都加 `trace_id` 參數 ③ `chat_raw` line 494（no_choices 路徑）補 anomaly log 寫入 raw completion，與 line 510（empty_content 路徑）對稱 ④ `generate_reply` 改回傳 `GenerateReplyResult` dataclass（`reply` / `prompt_record_log` / `messages_sent` / `error_kind`），透過 `__iter__` 維持前兩欄 tuple unpacking 向後相容（impression_moderation_service.py 的 caller 不用改）⑤ `error_kind` 五分類：`no_choices` / `empty_content` / `http_error` / `timeout` / `connection` / `unknown` ⑥ 所有 ERROR log 帶 `trace=...` ⑦ `askai_prompt.txt` / `askai_prompt_debug.txt` 區塊 title 加 `trace=...` ⑧ `askai_response_history.jsonl` 每筆條目補 `trace_id` / `messages_sent`（最終送 LLM 的訊息，可重放）/ `error_kind` 欄位。**驗證**：docker exec 跑 import smoke test 通過；GenerateReplyResult tuple unpacking 通過。**未做（Phase C 暫不做）**：依模組切分 discord_bot.log；寫 `scripts/askai_trace.py` 自動 join 多檔輸出 timeline。**順手清理**：`logs/ollama_anomaly.log` 對應的舊 logger 是 LLM 重構前殘留（現在不是 Ollama 而是 wire client），目前未刪除留作未來議題。**待部署驗證**：① `docker compose restart discord-bot` ② 隨意觸發一次 /askai 觀察 `discord_bot.log` 出現 `askai 開始 trace=ask-...`；查 `askai_response_history.jsonl` 該筆條目應有 trace_id / messages_sent / error_kind=null（成功時）③ 故意觸發失敗（例如再問會被 safety filter 擋的 prompt）→ 應有 anomaly log + error_kind=no_choices。
-- 2026-04-29：**Telegram Relay 補丁：文字 spoiler 還原成 Discord `||...||`（已驗證完成）**。回報問題：頻道訊息「內鬼情報」類使用了 Telegram spoiler，relay 到 Discord 後沒包 `||`。查 DB 發現 `telegram_messages` 沒 entities 欄位，scraper [src/telegram_scraper/handlers.py](src/telegram_scraper/handlers.py) 只存 `raw_text` 把 `message.entities` 整個丟掉，relay [src/services/telegram_relay_service.py](src/services/telegram_relay_service.py) 的 `description = content[:4000]` 也沒做任何 entity 還原 → 屬實。**範圍**：使用者明確指示「圖片不處理 只針對文字」（`media_unread` 媒體 spoiler bug 與 relay embed 邊界 bug 暫不修）。**修法**：① [db.py](src/telegram_scraper/db.py) 加 `ALTER TABLE telegram_messages ADD COLUMN IF NOT EXISTS entities JSONB`；`upsert_message_only` 加 `entities` 參數，INSERT/UPDATE 都帶上（UPDATE 用 `COALESCE(entities, $7::jsonb)` 不覆寫舊值，所以歷史訊息走 history fetch UPDATE 路徑時會自動回填）② [handlers.py](src/telegram_scraper/handlers.py) 新增 `_serialize_entities()`：把 Telethon 的 `message.entities` 轉成 `[{type, offset, length}]`（保留全部 type，未來可擴 bold/italic）③ [telegram_relay_service.py](src/services/telegram_relay_service.py) `TelegramMessageRecord` 加 `entities`，repo query 加 `entities` 並用 `json.loads` 容錯讀回（asyncpg JSONB 可能回 str/list 都接）④ 新 module-level `apply_spoiler_entities(text, entities)`：filter `MessageEntitySpoiler` → 用 UTF-16-LE bytes 切片正確處理 BMP 外字元（emoji surrogate pair）→ 從後往前插 `||`；render 中先 wrap 再 truncate 4000，避免切到 markdown 中間。**測試**：[src/test/test_telegram_spoiler.py](src/test/test_telegram_spoiler.py) 14 個 unittest 全綠（ASCII / 中文 / emoji surrogate / 多 spoiler / 越界 / 邊界 / 混合 entity）。**部署驗證**：使用者透過既有 `telegram_replay_from_message_id` 機制（[config.json:13](src/config.json#L13)）從 #7267 強制重發 → DB 確認 #7268~#7272 都有 `MessageEntitySpoiler offset=17, length=N`（整段 spoiler，end_pos 對齊 text 尾端不越界），Discord 端確認 `||...||` 渲染正確。**未做（與本輪範圍無關，列為未來議題）**：媒體 spoiler bug（`handlers.py:178` 用 `media_unread` 應改 `media.spoiler`）、relay embed 第一張圖邊界 bug（`telegram_relay_service.py:831`）、`MessageEdited` 事件未監聽（已編輯訊息會跟 DB 偏移）、scraper NewMessage event 偶發漏接（如 #7244 漏抓 22 小時靠 history fetch 補上）。**新發現的副議題**：`telegram_relay_service.py:1294-1298` 的 force_replay 用 `message_pk` 而非 `telegram_message_id` 比較，後補的歷史訊息（pk 大於 replay 起點對應的 pk，但 telegram_message_id 小於 replay_msg_id）會被誤觸發強制重發 — 這次測試時 #7244 (msg_id=7244, pk=5813) 在設 `replay_from=7267` (pk=5620) 時被誤算進範圍重發了一次。
-- 2026-04-28：**LLM client 重構：拋掉 `openai` SDK 與 `llama-index-embeddings-openai`，改自寫 `httpx` wire 薄殼**。Root cause 是 commit `763d251`（chat 路徑切 OpenAI SDK）順手把 LlamaIndex embedding 包從 `-ollama` 換成 `-openai`，後者的 `OpenAIEmbedding.__init__` 在 init 階段對 model 名做 enum 白名單驗證，自訂 model 名（`Qwen3-Embedding-0.6B-GGUF`）直接拋 `ValueError`，`SafeLLMEmbedding` 一直 fallback 到 BM25 但沒被注意到。**修法**：① 新增 `src/llm/llm_http_client.py`（httpx 薄殼，~200 行；chat / embedding / list_models + 指數退避 retry）② `safe_llm_embedding.py` 改 subclass `llama_index.core.embeddings.BaseEmbedding`（核心介面穩定，避免 provider 子套件雷）③ `llm_service.py` 拋掉 `AsyncOpenAI` 改用 `LlmHttpClient`④ `LLMRuntimeConfig` 加 `backend` + `backends` profile 欄位，`extra_body` 來源由 config 決定，per-call Ollama-only knobs 只在 `backend=="ollama"` 時生效（vLLM 嚴格模式不會 4xx）⑤ `llm_runtime_config.json` 遷移到新 schema，三個後端 profile 都備好。Commit C1 (`8642806`) = code，C2 (`02a937c`) = deps cleanup。**設計準則**：綁協定（OpenAI dialect wire 自 2023 年沒動）不綁 SDK；wire 規格穩、SDK / 周邊套件不穩，長期成本最低。**待辦**：① 容器需 `docker compose restart discord-bot` 重抓 .env（`LLM_BASE_URL=13305`）並裝新 deps（C2 拔了 openai）② 重啟後驗 askai / moderation / 人格萃取三條路徑 + 觀察 `on_message` 寫 pgvector 不再 BM25 fallback ③ 啟動自我測試（`list_models()` 比對 4 個 model id）這次未做，可作為下次優化。
-- 2026-04-27：askai 人設深度重構（和風含蓄酸派 + 30 熟女貴氣母愛 + 摸摸頭包容 + 外貌設定）已落 prompt；同時規劃 [AI 私聊頻道 + 三層記憶機制](#ai-私聊頻道--三層記憶機制規劃中)（preference_fact / ai_self_memory / 視覺輸入 / 道德守門），跟既有 [/remember 規劃](#使用者指令記憶-remember-未來工作) 互補不取代。
-- 2026-04-27：handoff 大清理。三個已完成主線（Bahamut scraper + 反爬基礎設施、幽靈點名系統、社群 ID 查詢 Phase 0）整段移至 `TODO-completed.md`。Bahamut 第三階段 RAG ingestion 與幽靈點名剩餘 P1（部署驗證 + `/server_manager` 整合）併入歸檔當「未來工作 reference」，要做時從 archive 撈回。
-- 2026-04-27：askai 人物身份對照與 prompt 整合三輪重構完成並歸檔。①#XXXX 末 4 碼錨點全鏈路對齊 ②SQL 按 profile_kind 分流 + 補 auto_personality ③mention boost 修復 ④target_profile 提權結構 + 退場處理 + 自我否定豁免 ⑤askai_system_prompt 整合精煉（11 → 8 段、~700 tok/次）+ 角色設定加陪聊感 + 回答風格三梯度 + 客服反射禁令 + 撩的拿捏。詳見 `TODO-completed.md`。未來路線：`/remember`、Structured XML context、tool calling-based persona lookup。
-- 2026-04-23：DM 通知模組抽出 + 音樂面板收藏按鈕完成並歸檔。
-- 2026-04-22：X.com / Twitter 影片嵌入研究歸檔（純研究、無 code 異動）。
-- 2026-04-19：Ollama 服務穩定化三連（chat_raw 統一化 + keep_alive 參數 + 自動重試 + VRAM 優化）已歸檔。
 
 ---
 
@@ -248,49 +236,6 @@ last_confirmed: 2026-04-19
 -->
 
 > **目標：** 提升 bot 的群聊參與感與個性表現，讓回覆更自然、更有記憶感。
-
-### 已完成（2026-04-15 ~ 2026-04-18）
-
-> 詳細項目已歸檔至 `TODO-completed.md` 的「Context/Prompt 完整重構 + askai 身份感（歸檔 2026-04-18）」。
-> 摘要：context/prompt 格式重構、貼圖描述、on_message 持久化、自動人格萃取 pipeline、/askai 體驗優化（timeout / 抓取量 / 取消 / 排隊顯示）、LLM 服務穩定性修復（SafeOllamaEmbedding + HTTP 連線重用 + thread-safety）、/askai 發問者身份注入（`<asker_profile>` + `<latest_user_message from=...>` + persona 拆分 + 撞名偵測 `#xxxx` + safety rules 修飾）。
-
-### 已完成（2026-05-18：LLM HTTP client 通用錯誤護網）
-
-**症狀：** `/askai` 每次跑都跳兩個 warning：
-- `pgvector vector rank 嵌入問題失敗（降級為 BM25-only）: 'data'`
-- `member-profile vector retrieval 失敗（保留 SQL 結果）: 'data'`
-
-**根因：** `llm_http_client.py:embedding/aembedding` 直接 `data["data"]` 取 key，當後端（Lemonade / Ollama compat 層）回傳非 OpenAI shape（如 error envelope、ollama native shape）時 raise `KeyError: 'data'`，例外 str 出來就是 `'data'` 兩個字，無法判讀。原 sync `_post_json` 完全沒有 envelope unwrap，async `_apost_json` 也只認 `error.type == "network_error"`，其他 error type（如 model_not_loaded）會漏到下游撞牆。
-
-**改動：** [llm_http_client.py](src/llm/llm_http_client.py) 新增兩個 module-level helper，多 endpoint 通用：
-
-| Helper | 行為 | 應用 |
-|---|---|---|
-| `_unwrap_response_envelope(data)` | `error.type==network_error` → `ConnectError`（觸發退避重試）；其他 error envelope → `LlmAPIError(status=None)` 不重試；正常 payload 原樣回傳 | sync `_post_json` + async `_apost_json` 出口，所有 POST 端點自動受惠 |
-| `_require_json_key(data, key, *, op_label)` | 缺 key / 型別不符 → raise `LlmAPIError` 附 `keys=[...]` + sample；錯誤訊息含 op_label 區分入口 | `embedding()` / `aembedding()`；未來新 endpoint（rerank / classification 等）直接套 |
-
-**收益：** 下次同樣 warning 會直接顯示後端實際回了什麼（envelope error type / native shape / 空陣列），不必去 server log 對拍。Lemonade KEEP_ALIVE 跑掉導致的 model_not_loaded 等永久錯誤也會被正確識別、不無限退避。
-
----
-
-### 已完成（2026-05-18：智慧女性風格重寫 + few-shot 範例檔）
-
-**動機：** 原 `askai_system_prompt.txt` 的「姊姊 + 同盟 roast + 暗刺」與「母性溫度」內在矛盾；使用者要求轉向「Pekora mama 但更智慧」——溫柔為底、刺輕但準、看穿不說破、不重複不撤回。
-
-**改動內容：**
-- `src/settings/prompts/askai_system_prompt.txt` 重寫開場 3 行 + 【回答風格】1-4 + 【互動與語氣】1-3, 6 + 【色色模式】4 + 【語氣與禁忌】4-6（新增 6：失敗模式區擋空話智者 / 毒舌分析師）
-- 拿掉「禁止自我撤回」條（智慧女性的刺輕，不需要這條防線撐第二句）
-- 結尾反問規則鬆綁：客服式禁止照舊，**真誠好奇式反問允許**（觀察者語言）
-- 八卦/情緒回應長度從 4~8 句 → 3~5 句多留白
-- 加入「點規律而非點現象」原則
-- 新增 `src/settings/prompts/persona_examples.txt`（12 組正反例對照 few-shot；含色色降級範例）
-- `src/sys_settings/llm_settings.py` 加 `examples_file_path` 欄位
-- `src/commands/llm_commands.py` `load_system_prompt()` 改成讀三檔（identity → main → examples），examples 放最末利用 LLM 對尾端模仿力最強的特性；範例缺檔不影響主流程
-
-**設計重點：**
-- few-shot 採「禁止 ❌ / 示範 ✅」對照法（負例對壓制 failure mode 比純正例有效，token 多花 ~30% 值得）
-- 12 組情境覆蓋：熬夜、抽卡爆、技術搞砸、抱怨第三方、做對事、低潮、純技術求答、被邀 roast 自己人、自嘲示弱、閒聊、色色情境、色色降級
-- examples 跟 rules 拆檔 → 未來迭代範例不必動主規則
 
 ### 待處理
 
@@ -750,102 +695,6 @@ last_confirmed: 2026-04-07
 
 > Telegram Relay 已完成（歸檔至 `TODO-completed.md`）。
 
-### FB 貼文推送模式（2026-04-07 完成，待部署驗證）
-
-<!-- @meta
-id: fb-push-notify
-type: STATE
-status: confirmed
-depends_on: [cross-source-integration]
-affects: [project-architecture]
-last_confirmed: 2026-04-07
--->
-
-**起因：** post id=399「光耀灼痕——贊妮」DB 有 8 張圖，但 bot 收到 API 回傳 images 為空，Discord 貼文無圖。根因：輪詢模式下時間差 + FB CDN URL token 過期 + 無 URL 刷新機制。
-
-**變更（4 檔案）：**
-1. `src/scraper/main.py`：FB 抓完後呼叫 `_notify_discord_bot("fb")`
-2. `src/services/notify_server.py`：新增 `"fb"` handler → `_process_fb` → 呼叫 `FBMonitor.check_and_send_fb_posts()`
-3. `src/discord_bot.py`：移除 `_auto_start_fb_monitor` 輪詢（原每 600 秒）
-4. `src/scraper/services/fb_scraper_service.py`：`_merge_fields_for_duplicate` 圖片合併改為 `>=` 時更新（刷新 CDN token，但不縮水）
-5. `src/scraper/db/database.py`：`_update_fb_post` 圖片從「只新增」改為「全量替換」（URL 有變時刪舊插新）
-
-**流程（改後）：**
-> scraper 抓 FB → 寫 DB（URL 最新鮮） → POST /notify/fb → bot 從 API 拉資料 → 下載圖片 → 發送 Discord
-
-**注意事項：**
-- 舊貼文（不在 FB 首頁的）不會被重抓，其 CDN URL 過期後無法自動更新
-- `start_fb_monitoring()` 仍保留於 `fb_monitor.py`，可供手動指令使用
-
-### X.com / Twitter 影片嵌入研究（2026-04-22）
-
-<!-- @meta
-id: xcom-video-embed-research
-type: STATE
-status: draft
-depends_on: [cross-source-integration]
-affects: []
-last_confirmed: 2026-04-22
--->
-
-> **背景：** 使用者問 ermiana 類 Discord bot 為何能把 x.com 貼文影片直接轉成可播放 embed。結論記錄於此，若未來要在本專案加 x.com 來源可直接接手。
-
-**核心原理：**
-- Discord unfurler 會抓訊息裡 URL 的 `<meta>` 標籤（OpenGraph / Twitter Card）決定 embed 樣式
-- x.com 本身**不回傳 `og:video` 直連**，只給縮圖，所以 Discord 播不了
-- 第三方代理站 scrape 該 tweet 後重組一份含 `og:video` / `twitter:player:stream` 的 HTML，Discord 抓到就能直接播
-
-**常用代理網域（把 `x.com` / `twitter.com` 整段替換）：**
-- `fxtwitter.com`（最穩定、最主流）
-- `fixupx.com`（FxTwitter 對應 x.com 的新網域）
-- `vxtwitter.com`（另一派系）
-
-**Bot 極簡實作模式（若要自己做）：**
-1. `on_message` regex 抓 `x.com` / `twitter.com` URL
-2. 替換 domain 後重發
-3. `message.edit(suppress=True)` 或 webhook 模仿使用者身份，抑制原訊息 embed 避免雙重 embed
-
-**影片直連 JSON API（想自己解析用）：**
-- `GET https://api.fxtwitter.com/{user}/status/{id}` → 回 JSON
-- `media.videos[].url` 即 `.mp4` 直連
-- 免認證、免 API key
-
-**能力邊界（重要）：**
-
-| 功能 | 代理網域 | 說明 |
-|---|---|---|
-| 單篇貼文內容 | ✅ | 文字、作者、時間、媒體 |
-| 影片直連 | ✅ | `.mp4` URL |
-| 關鍵字 / hashtag / 使用者時間軸搜尋 | ❌ | 完全沒這能力，只吃「已知的 tweet URL」 |
-
-**代理網域底層靠什麼跑：**
-- Syndication API：`cdn.syndication.twimg.com/tweet-result?id={id}&token={derived}`
-- 原用途是讓部落格 / 新聞網站嵌入推文，免登入、免 key、免費
-- token 是前端用 tweet id 算出來的公式，任何人都能產
-- X 不關掉 syndication 的理由：關了全世界新聞網站的 embed 都會爛，對 X 自己的 SEO 是自殺
-- 舊的 `guest_token`（`/1.1/guest/activate.json`）**2023 年中被封殺**，Nitter / snscrape 就是那時死的，現在不可用
-
-**付費 vs 免費路線比較：**
-
-| 層面 | 官方 v2 API | Syndication（fxtwitter 等） |
-|---|---|---|
-| 要錢 | Basic $200/月 起 | 免費 |
-| 註冊 | 需申請 API key | 不需 |
-| 搜尋 / timeline | ✅ | ❌ |
-| SLA / 文件 | ✅ | **完全沒有** |
-| 隨時被關的風險 | 低 | 高（X 已有前例） |
-
-**若未來要在本專案加 x.com 來源，決策樹：**
-1. 「把 Discord 訊息裡的 x.com 連結轉成可播放影片」→ `on_message` domain replace，最省事，一小時可收工（見 [src/discord_bot.py](src/discord_bot.py)）
-2. 監控特定帳號新貼文 → 沒有免費穩定方案，需評估付費 v2 或放棄
-3. 關鍵字搜尋 → 代理網域做不到，只能走付費 v2 或改用其他社群（Threads / PTT / FB）
-4. 若做商業/長期依賴 → 不建議依賴 syndication，**X 能隨時關掉**
-
-**參考：**
-- FxTwitter 專案：https://github.com/FixTweet/FxTwitter
-
----
-
 ### 整合方案（按部就班）
 
 **優先整合順序（2026-03-25 共識）：**
@@ -1012,44 +861,6 @@ last_confirmed: 2026-03-31
 
 ---
 
-## 修正紀錄：幽靈點名按鈕越權 BUG（2026-06-12）
-
-<!-- @meta
-id: rollcall-button-auth-fix
-type: FIX
-status: confirmed
-last_confirmed: 2026-06-12
--->
-
-**問題：** A 可以點 B 的點名按鈕，並解掉「A 自己」的點名（拿到豁免）。
-**根因：** `RollCallResponseView.respond` 只檢查「按的人是否 pending」，按鈕未真正綁定到該訊息的目標使用者；重啟後 persistent view 的 `_target_user_id=None`，連薄弱檢查都失效。
-**修正：** 以 `interaction.message.id` 反查 `runtime.pending` 取得該訊息真正的目標 `user_id`，只允許本人回覆自己的點名訊息（`src/commands/rollcall_commands.py`）。
-**待驗證：** 部署後實測「他人按按鈕被擋下、本人按可正常通過、重啟後仍正確綁定」。
-
----
-
-## 變更紀錄：音樂「停止」按鈕改為「重置歌單 + 重載線上歌單」（2026-06-13）
-
-<!-- @meta
-id: music-reset-reload-playlist
-type: FEATURE
-status: confirmed
-last_confirmed: 2026-06-13
--->
-
-**背景：** 舊「停止」按鈕(player.stop())其實只清點歌插播+跳當前歌，主歌單仍續播，名稱誤導；且線上歌單(default_playlist_url)改了內容後不重啟不會同步。
-
-**變更：**
-- 按鈕 `停止/⏹` → `重置歌單/♻️`（custom_id 仍為 `music_stop` 以相容既有面板），method 改名 `reset_playlist`（`src/music/announcer.py`）。
-- 新增 `MusicPlayer.reload_playlist()`（`src/music/player.py`）：重新抓取 `default_playlist_url` 最新清單 → 清空點歌+舊主歌單 → 換上新清單 → 套用 shuffle → 跳過當前舊歌續播。**先抓成功才換**，抓取失敗/空清單則保留舊歌單回傳 None，避免清空後沒歌可播。`_reloading` 旗標防重複觸發。
-- 抽出 `_fetch_playlist_songs()` 純抓取 helper，`add_to_playlist()` 與 `reload_playlist()` 共用。
-
-**待驗證：** 部署後實測 ① 線上歌單加/刪歌後按鈕能同步；② 抓取失敗時不會清空舊歌單；③ 點歌會被清空。
-
-**備註：** `MusicPlayer.stop()` 已無呼叫者（dead code），暫時保留未刪。
-
----
-
 ## 變更紀錄：多歌單下拉（可複選合併播放）（2026-06-20）
 
 <!-- @meta
@@ -1083,25 +894,3 @@ last_confirmed: 2026-06-20
 **待驗證（部署後）：** ① 單一歌單／舊 `default_playlist_url`：按「編輯歌單」直接重載、不彈清單；② 填多個歌單：按「編輯歌單」彈出 ephemeral 多選清單，預設全勾合併；③ 清單勾單一個只播該歌單、勾多個合併；④ 沒填 name 時清單顯示 YouTube 歌單標題；⑤ 抓取失敗保留舊歌單；⑥ 重啟後沿用上次選擇；⑦ 編輯設定檔新增歌單後，按「編輯歌單」即出現新歌單（免重啟）。
 
 **待 user 提供：** 把第二條（含以後更多）歌單連結填進 `playlist_url`（名稱可不填）。
-
----
-
-## 新功能：點歌者離開自動移除其點的歌（2026-06-13）
-
-<!-- @meta
-id: music-drop-requests-on-leave
-type: FEATURE
-status: confirmed
-last_confirmed: 2026-06-13
--->
-
-**需求：** 有人進音樂頻道點歌就跑走，偵測其離開後自動砍掉他點的歌——未播放的移除、正在播放的等同跳過停止。
-
-**設計（資料已就緒：`song.requested_by_id` 點歌時已記錄）：**
-- `MusicQueue.remove_interrupts_by(user_id)`（`src/music/queue.py`）：移除某人尚未播放的插播歌。
-- `MusicPlayer.drop_requests_by(user_id)`（`src/music/player.py`）：未播放的移除 + 正在播的若是他點的則 `voice_client.stop()` 跳過。主歌單歌 `requested_by_id=None` 不會誤砍。
-- `MusicCog.on_voice_state_update` + `_handle_requester_left`（`src/music/cog.py`）：偵測離開音樂頻道（完全離開或切頻道都算）→ **寬限 5 秒**，若仍未回來才移除 → 在頻道發**簡短公告**。
-
-**行為共識：** 寬限 5 秒（避免閃斷誤砍）、移除後頻道簡短公告。
-
-**待驗證：** ① 點歌後離開 5 秒內回來不砍；② 超過 5 秒砍掉且公告；③ 正在播他的歌會直接跳過；④ 主歌單歌不受影響。
