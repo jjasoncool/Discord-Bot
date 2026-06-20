@@ -579,6 +579,11 @@ class MessageRouteResolver:
 class TelegramRenderAdapter:
     """Telegram 專屬格式邏輯（保留現有格式策略，不在 publisher 改文案）。"""
 
+    # Discord embed description 文件上限為 4096，但實測後端對接近上限的超長 embed
+    # 會回 500（error code 0）而非乾淨的 400；本頻道送成功的最長一筆為 3012 字。
+    # 保守取 3000 當「每段」上限：超過就切成多則連續發送（不截斷、不丟內容）。
+    _DESCRIPTION_MAX_CHARS = 3000
+
     def __init__(self, app_root: str = "/app") -> None:
         self.app_root = Path(app_root)
         self._runtime_config_path = self.app_root / "telegram_scraper" / "runtime_config.json"
@@ -613,6 +618,49 @@ class TelegramRenderAdapter:
         except Exception:
             return None
 
+    @staticmethod
+    def _split_text(text: str, limit: int) -> list[str]:
+        """把長文切成多段，每段長度 <= limit。
+
+        盡量在換行邊界切（其次空白），避免把句子或段落切斷；
+        都太靠前（不到半段）才硬切，以免切出過短的碎段。保留全文不丟內容。
+
+        暴雷標記安全：切點不會落在一對 `||` 中間；切完再平衡每段的 `||`，
+        若暴雷段跨越切點，前段補 `||` 收尾、下段補 `||` 開頭，避免標記破掉、暴雷外洩。
+        """
+        if len(text) <= limit:
+            return [text]
+
+        chunks: list[str] = []
+        remaining = text
+        while len(remaining) > limit:
+            window = remaining[:limit]
+            cut = window.rfind("\n")
+            if cut < limit // 2:
+                space_cut = window.rfind(" ")
+                cut = space_cut if space_cut >= limit // 2 else limit
+            # 避免把暴雷標記 || 從兩個 pipe 中間切開（讓整組 || 落到下一段）
+            if 0 < cut < len(remaining) and remaining[cut - 1] == "|" and remaining[cut] == "|":
+                cut -= 1
+            chunks.append(remaining[:cut].rstrip())
+            remaining = remaining[cut:].lstrip()
+        if remaining:
+            chunks.append(remaining)
+
+        # 平衡暴雷標記：每段 || 數須成對；落單代表暴雷段跨越切點，補成對並接到下一段
+        balanced: list[str] = []
+        carry_open = False
+        for chunk in chunks:
+            if carry_open:
+                chunk = "||" + chunk
+            if chunk.count("||") % 2 == 1:
+                chunk = chunk + "||"
+                carry_open = True
+            else:
+                carry_open = False
+            balanced.append(chunk)
+        return balanced
+
     def render(self, message: TelegramMessageRecord) -> RenderPlan:
         attachments: list[AttachmentSpec] = []
         seen_media_keys: set[str] = set()
@@ -644,25 +692,47 @@ class TelegramRenderAdapter:
                 )
             )
 
-        # 先以 entities 還原 spoiler 等格式，再做長度截斷，避免切到 markdown 中間
+        # 先以 entities 還原 spoiler 等格式，再依長度切成多段（保留全文，不截斷）
         rendered_text = apply_spoiler_entities(message.text or "", message.entities)
         content = rendered_text.strip()
-        description = content[:4000] + ("..." if len(content) > 4000 else "")
-
         source_name = message.chat_title or self._get_source_channel_name()
-        embed = discord.Embed(
-            title=source_name,
-            description=description or None,
-            color=0x2CA5E0,  # Telegram 藍
-            timestamp=message.message_date,
-        )
-        embed.set_footer(text=f"msg #{message.telegram_message_id}")
 
-        op = RenderOperation(op_type="send_message", content="", attachments=attachments, embed=embed)
+        chunks = self._split_text(content, self._DESCRIPTION_MAX_CHARS) if content else [""]
+        total = len(chunks)
+
+        # 切成多段時，用標題「（續）」＋頁碼 footer「i/n」讓讀者看得出是同一篇連續文章；
+        # 附件只掛在第一段，避免每段重送。
+        operations: list[RenderOperation] = []
+        for idx, chunk in enumerate(chunks):
+            if total == 1:
+                title = source_name
+                footer = f"msg #{message.telegram_message_id}"
+            elif idx == 0:
+                title = source_name
+                footer = f"msg #{message.telegram_message_id} · 1/{total}"
+            else:
+                title = f"{source_name}（續）"
+                footer = f"msg #{message.telegram_message_id} · {idx + 1}/{total}"
+
+            embed = discord.Embed(
+                title=title,
+                description=chunk or None,
+                color=0x2CA5E0,  # Telegram 藍
+                timestamp=message.message_date,
+            )
+            embed.set_footer(text=footer)
+            operations.append(
+                RenderOperation(
+                    op_type="send_message",
+                    content="",
+                    attachments=attachments if idx == 0 else [],
+                    embed=embed,
+                )
+            )
 
         return RenderPlan(
             target_type="text_channel",
-            operations=[op],
+            operations=operations,
             payload_meta={
                 "source": "telegram",
                 "message_pk": message.message_pk,
