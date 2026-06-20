@@ -4,7 +4,7 @@
   "embed_model": "Qwen3-Embedding-0.6B-GGUF",
   "moderation_model": "user.Qwen2.5-7B-Instruct-GGUF-Q4_K_M",
   "personality_model": "Qwen3-14B-GGUF",
-  "ambient_model": "Gemma-4-12B-it-GGUF",
+  "ambient_model": "gemma-4-12B-it-qat-GGUF-UD-Q4_K_XL",
   "backends": {
     "ollama": {
       "extra_body": {
@@ -27,7 +27,7 @@
         "Gemma-4-26B-A4B-it-GGUF": {
           "ctx_size": 12288
         },
-        "Gemma-4-12B-it-GGUF": {
+        "gemma-4-12B-it-qat-GGUF-UD-Q4_K_XL": {
           "ctx_size": 16384
         },
         "Qwen3-14B-GGUF": {

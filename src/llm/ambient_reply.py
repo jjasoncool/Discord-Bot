@@ -21,6 +21,7 @@ Phase A 記憶＝近期 `channel.history` 短期對話脈絡（不碰 RAG / pers
 from __future__ import annotations
 
 import asyncio
+import base64
 import functools
 import logging
 import random
@@ -83,8 +84,10 @@ def _load_ambient_prompt() -> str:
     """
     paths: list[Path] = []
     if _SETTINGS.use_shared_identity and _SETTINGS.identity_path:
-        paths.append(Path(_SETTINGS.identity_path))
-    paths.append(Path(_SETTINGS.prompt_path))
+        paths.append(Path(_SETTINGS.identity_path))      # 共用人格
+    if _SETTINGS.guardrails_path:
+        paths.append(Path(_SETTINGS.guardrails_path))    # 共用守則/限制
+    paths.append(Path(_SETTINGS.prompt_path))            # 插話行為
 
     key = tuple(
         (str(p), p.stat().st_mtime_ns if p.exists() else None) for p in paths
@@ -175,6 +178,14 @@ def _note_sent(tracker: dict) -> None:
     tracker["hour_count"] += 1
 
 
+def _name_with_anchor(author) -> str:
+    """顯示名稱 + #XXXX（user_id 後四碼），跟 persona card 標題對齊，穩定分辨同名/相似的人。"""
+    name = getattr(author, "display_name", None) or author.name
+    uid = str(getattr(author, "id", "") or "")
+    short = uid[-4:] if len(uid) >= 4 else ""
+    return f"{name}#{short}" if short else name
+
+
 async def _fetch_recent(
     message: discord.Message,
 ) -> tuple[Optional[list[str]], list[int]]:
@@ -193,7 +204,7 @@ async def _fetch_recent(
             text = (msg.content or "").strip()
             if not text:
                 continue
-            name = getattr(msg.author, "display_name", None) or msg.author.name
+            name = _name_with_anchor(msg.author)
             if len(text) > 200:
                 text = text[:200] + "…"
             collected.append(f"{name}: {text}")
@@ -280,43 +291,130 @@ def _resolve_target_channel_id() -> Optional[int]:
     return cid
 
 
+_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+
+
+def _has_image(message: discord.Message) -> bool:
+    """訊息是否含支援的圖片附件（用副檔名快判，不下載）。"""
+    return any(
+        (att.filename or "").lower().endswith(_IMAGE_EXTS)
+        for att in message.attachments
+    )
+
+
+async def _prepare_images(message: discord.Message) -> Optional[list[str]]:
+    """下載圖片附件 → base64（給 vision 模型）；silent best-effort，超限/失敗就跳過。"""
+    out: list[str] = []
+    for att in message.attachments:
+        if len(out) >= _SETTINGS.image_max_count:
+            break
+        if not (att.filename or "").lower().endswith(_IMAGE_EXTS):
+            continue
+        if att.size and att.size > _SETTINGS.image_max_bytes:
+            continue
+        try:
+            data = await att.read()
+        except Exception as exc:
+            logger.debug("ambient 讀取圖片失敗：%s", exc)
+            continue
+        if data:
+            out.append(base64.b64encode(data).decode("utf-8"))
+    return out or None
+
+
+# per-channel 序列處理狀態：同頻道同時只有一個 ambient 在跑。生成期間進來的訊息不平行觸發，
+# 只更新 latest / 標 pending；等這次跑完，再用「最新」對話狀態重新評估要不要插（@ 走 directed 優先答）。
+_PROC_STATE: dict = {}  # channel_id -> {running, pending, latest, directed}
+
+
+def _get_proc_state(channel_id: int) -> dict:
+    st = _PROC_STATE.get(channel_id)
+    if st is None:
+        st = {"running": False, "pending": False, "latest": None, "directed": None}
+        _PROC_STATE[channel_id] = st
+    return st
+
+
 async def maybe_ambient_reply(bot, message: discord.Message) -> None:
-    """on_message 背景進入點：判斷是否插話並（必要時）生成回覆。整段包 try 防炸 event loop。"""
+    """on_message 背景進入點：硬過濾 + 記憶沉澱 + per-channel 序列協調。整段包 try 防炸 event loop。"""
     try:
-        await _maybe_ambient_reply_inner(bot, message)
+        # ── 零成本硬性過濾（連協調都不用進）──
+        if not _SETTINGS.enabled:
+            return
+        if message.author.bot or message.guild is None:
+            return  # 不回 bot/自己、不處理 DM
+        ambient_model = _get_llm().resolve_ambient_model()
+        if not ambient_model:
+            return  # 未設定 ambient_model → 整個功能靜默
+        target_channel_id = _resolve_target_channel_id()
+        if target_channel_id is None or message.channel.id != target_channel_id:
+            return  # 非白名單頻道
+
+        # 記憶沉澱：每則（非指令、有內容）都收進緩衝（不受序列協調影響）
+        stripped = (message.content or "").strip()
+        if stripped and not _is_command_like(stripped):
+            enqueue_for_memory(message)
+
+        # ── per-channel 序列協調（以下到設旗標之間無 await → 原子）──
+        state = _get_proc_state(message.channel.id)
+        state["latest"] = message
+        if _is_directed(bot, message):
+            state["directed"] = message
+        if state["running"]:
+            state["pending"] = True   # 已有處理器在跑 → 只記新動靜，等它回來重評估
+            return
+        state["running"] = True
     except Exception as exc:
-        logger.warning("ambient_reply 例外：%s", exc, exc_info=True)
-
-
-async def _maybe_ambient_reply_inner(bot, message: discord.Message) -> None:
-    # ── 零成本硬性過濾 ───────────────────────────────────────────────
-    if not _SETTINGS.enabled:
+        logger.warning("ambient 入口例外：%s", exc, exc_info=True)
         return
-    if message.author.bot or message.guild is None:
-        return  # 不回 bot/自己（防回音迴圈）、不處理 DM
 
-    ambient_model = _get_llm().resolve_ambient_model()
-    if not ambient_model:
-        return  # 未設定 ambient_model → 整個功能靜默
+    # ── 序列處理迴圈（同頻道唯一）：跑完一輪後若有新動靜/待答的 @ 就用最新狀態再跑一輪 ──
+    try:
+        passes = 0
+        while True:
+            state["pending"] = False
+            directed_msg = state["directed"]
+            if directed_msg is not None:
+                state["directed"] = None
+                current, current_directed = directed_msg, True   # @ 優先答
+            else:
+                current, current_directed = state["latest"], False
+            if current is None:
+                break
+            try:
+                await _run_one_ambient_pass(bot, current, ambient_model, current_directed)
+            except Exception as exc:
+                logger.warning("ambient pass 例外 channel=%s：%s", message.channel.id, exc, exc_info=True)
+            passes += 1
+            # 沒有新動靜也沒有待答 @ → 收手；達上限也收手（避免超活躍頻道空燒 12B）
+            if (not state["pending"] and state["directed"] is None) or passes >= _SETTINGS.max_passes_per_burst:
+                break
+    finally:
+        state["running"] = False
 
-    target_channel_id = _resolve_target_channel_id()
-    if target_channel_id is None or message.channel.id != target_channel_id:
-        return  # 非白名單頻道
 
+async def _run_one_ambient_pass(
+    bot, message: discord.Message, ambient_model: str, directed: bool
+) -> None:
+    """單一插話評估：閘門（內容/冷卻/讓位/機率）→ 生成 → 送出。
+
+    message 已通過入口硬過濾（功能開、非 bot、白名單頻道、ambient_model 有設）；
+    directed 由入口判好傳入。記憶沉澱也已在入口做過。
+    """
     stripped = (message.content or "").strip()
-    directed = _is_directed(bot, message)
-
-    # 記憶沉澱：插話頻道每則（非指令、有內容）收進緩衝，背景閒置批次抽取偏好（不阻塞）
-    if stripped and not _is_command_like(stripped):
-        enqueue_for_memory(message)
+    has_image = _has_image(message)
 
     # ── 非被點名：再過內容/冷卻/讓位/機率 ────────────────────────────
     if not directed:
-        if not stripped or _is_command_like(stripped) or _is_link_only(stripped):
+        if _is_command_like(stripped):
             return
-        n = len(stripped)
-        if n < _SETTINGS.min_chars or n > _SETTINGS.max_chars:
-            return
+        if not has_image:
+            # 純文字才要求：非空、非純連結、長度在區間內（有圖則圖就是內容，放行）
+            if not stripped or _is_link_only(stripped):
+                return
+            n = len(stripped)
+            if n < _SETTINGS.min_chars or n > _SETTINGS.max_chars:
+                return
 
         tracker = _get_tracker(bot, message.channel.id)
         now = time.monotonic()
@@ -345,10 +443,25 @@ async def _maybe_ambient_reply_inner(bot, message: discord.Message) -> None:
     elif bot.user is not None:
         bot_display_name = bot.user.name
 
+    # 讓琇紫知道「當下是誰在跟它講話」——帶發話者顯示名稱 + #XXXX 錨點（跟 chat_history、
+    # persona card 對齊，多人也分得清）。guardrails 已說明 #XXXX 是內部碼、不可對外講出。
+    asker_display_name = _name_with_anchor(message.author)
+
     chat_context, participant_ids = await _fetch_recent(message)
     system_prompt = _load_ambient_prompt()
     trace_id = f"amb-{message.channel.id}-{int(time.time() * 1000)}"
-    prompt_text = stripped or "(對方只 @ 了我，沒有文字)"
+
+    # 看圖：有圖就準備 vision payload（QAT 12B 自帶 vision，不必換模型）
+    image_payload = await _prepare_images(message) if has_image else None
+    if not stripped and not image_payload and not directed:
+        return  # 圖沒抓成功又沒文字 → 沒東西可接
+
+    if stripped:
+        prompt_text = stripped
+    elif image_payload:
+        prompt_text = "(對方貼了一張圖)"
+    else:
+        prompt_text = "(對方只 @ 了我，沒有文字)"
 
     # Phase B：認得人——召回在場成員 persona card（best-effort）
     persona_cards = await _build_persona_context(message, prompt_text, participant_ids)
@@ -356,11 +469,12 @@ async def _maybe_ambient_reply_inner(bot, message: discord.Message) -> None:
     memory_lines = await recall_lines(message.guild.id, message.author.id)
     persona_context = ((persona_cards or []) + (memory_lines or [])) or None
 
-    # debug 摘要（discord_bot.log）：一眼看出三層 context 各抓到幾筆
+    # debug 摘要（discord_bot.log）：一眼看出三層 context 各抓到幾筆 + 有沒有圖
     logger.info(
-        "ambient 生成 trace=%s directed=%s model=%s | chat=%d persona=%d memory=%d",
+        "ambient 生成 trace=%s directed=%s model=%s | chat=%d persona=%d memory=%d img=%d",
         trace_id, directed, ambient_model,
         len(chat_context or []), len(persona_cards or []), len(memory_lines or []),
+        len(image_payload or []),
     )
 
     result = await _get_llm().generate_reply(
@@ -368,8 +482,10 @@ async def _maybe_ambient_reply_inner(bot, message: discord.Message) -> None:
         system=system_prompt,
         chat_context=chat_context,
         persona_context=persona_context,
+        images=image_payload,
         model=ambient_model,
         bot_display_name=bot_display_name,
+        asker_display_name=asker_display_name,
         trace_id=trace_id,
     )
 

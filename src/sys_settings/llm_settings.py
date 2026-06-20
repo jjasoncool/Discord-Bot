@@ -164,6 +164,7 @@ class AskAICommandSettings(BaseSettings):
 
     prompt_file_path: str = "/app/settings/prompts/askai_system_prompt.txt"
     identity_file_path: str = "/app/settings/prompts/persona_identity.txt"
+    guardrails_file_path: str = "/app/settings/prompts/persona_guardrails.txt"
     examples_file_path: str = "/app/settings/prompts/persona_examples.txt"
     prompt_log_path: str = "/logs/askai_prompt.txt"
     # askai_prompt：以時間輪替，並只保留固定份數
@@ -253,9 +254,11 @@ class AmbientChatSettings(BaseSettings):
     channel_config_key: str = "ambient_chat_channel_id"
     # 插話「行為」規則（簡短、允許沉默…）；人設身份另由 identity_path 疊上
     prompt_path: str = "/app/settings/prompts/ambient_reply_prompt.txt"
-    # 共用人設身份（琇紫）：與 /askai 同一份，讓插話與問答是同一個角色
+    # 插話人設＝共用人格 + 共用守則 + 插話行為（模組化拼裝）。不載 askai 的「深聊風格」那層，
+    # 所以 ambient 天生比較不端著，不必另維護一份精簡人格。
     use_shared_identity: bool = True
     identity_path: str = "/app/settings/prompts/persona_identity.txt"
+    guardrails_path: str = "/app/settings/prompts/persona_guardrails.txt"
 
     # 背景上下文：抓近期幾則當短期對話記憶（12B ctx 已調到 16384，可帶完整脈絡）
     history_limit: int = 12
@@ -271,6 +274,9 @@ class AmbientChatSettings(BaseSettings):
     max_chars: int = 300             # 太長（長篇貼文）不插
     cooldown_seconds: float = 90.0   # 同頻道兩次自發插話的最短間隔；冷卻期內連判斷都不跑（省 12B）
     hourly_cap: int = 6              # 同頻道每小時自發插話上限
+    # per-channel 序列處理：一輪 burst 內最多重評估幾次（生成期間有新訊息才重評估）；
+    # 防超活躍頻道無限重評估空燒 12B。冷卻 + 減壓閥才是主要節流。
+    max_passes_per_burst: int = 3
     # 減壓閥（預設關閉）：1.0 = 每則都讓 12B 判斷；頻道太吵、12B 負載過高時才調 < 1.0 抽樣降載
     judge_sampling_rate: float = 1.0
 
@@ -279,6 +285,10 @@ class AmbientChatSettings(BaseSettings):
 
     # 模型回此 sentinel（或空字串）代表「沒梗」→ 不發送
     silence_sentinel: str = "[PASS]"
+
+    # ── 看圖（ambient 模型需具 vision；QAT 12B 自帶 mmproj）──
+    image_max_count: int = 1             # 一次最多帶幾張圖（成本控制）
+    image_max_bytes: int = 5 * 1024 * 1024
 
     # ── Phase C 記憶寫入（preference_fact）──
     extractor_prompt_path: str = "/app/settings/prompts/preference_extractor_prompt.txt"
