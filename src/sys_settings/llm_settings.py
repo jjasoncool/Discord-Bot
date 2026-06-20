@@ -257,11 +257,14 @@ class AmbientChatSettings(BaseSettings):
     use_shared_identity: bool = True
     identity_path: str = "/app/settings/prompts/persona_identity.txt"
 
-    # 背景上下文：抓近期幾則當短期對話記憶
+    # 背景上下文：抓近期幾則當短期對話記憶（12B ctx 已調到 16384，可帶完整脈絡）
     history_limit: int = 12
     # Phase B 認得人：召回在場成員 persona card（intro/impression/auto_personality）
     persona_top_k: int = 5
     persona_cache_seconds: float = 60.0  # per-channel persona 快取，避免 armed 期間每則打 pgvector
+    # persona card 每行上限只當安全網（避免單張卡異常長），ctx 充足下設寬鬆即可
+    persona_line_max_chars: int = 500
+    persona_max_lines: int = 6
 
     # 觸發門檻：插不插由 12B 判斷，「偶爾」感由冷卻 + 每小時上限保證（不用機率）
     min_chars: int = 4               # 太短（貼圖式單字）不插
@@ -276,6 +279,21 @@ class AmbientChatSettings(BaseSettings):
 
     # 模型回此 sentinel（或空字串）代表「沒梗」→ 不發送
     silence_sentinel: str = "[PASS]"
+
+    # ── Phase C 記憶寫入（preference_fact）──
+    extractor_prompt_path: str = "/app/settings/prompts/preference_extractor_prompt.txt"
+    memory_min_confidence: float = 0.6   # 低於此不寫入（寧缺勿濫）
+    trusted_promote_at: int = 2          # 不同批次提到達此次數 → tentative 升 trusted（才會被召回）
+    memory_flush_threshold: int = 30     # 插話頻道訊息累積達此量觸發一次抽取批次
+    memory_recall_top_k: int = 6         # 召回時最多帶幾筆 trusted 偏好
+    memory_flush_interval_seconds: float = 180.0  # 背景排程多久檢查一次是否該 flush（閒置才真的跑）
+    memory_buffer_max: int = 300         # 記憶緩衝上限，超過丟最舊
+
+    # ── debug 觀測（debug 完可關 debug_log）──
+    debug_log: bool = True               # 把每次插話的完整 prompt 寫進檔案
+    debug_prompt_log_path: str = "/logs/ambient_prompt.txt"
+    debug_log_max_bytes: int = 5 * 1024 * 1024
+    debug_log_backup_count: int = 3
 
     model_config = SettingsConfigDict(
         extra="ignore",

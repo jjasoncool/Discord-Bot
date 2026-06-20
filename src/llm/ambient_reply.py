@@ -30,7 +30,9 @@ from typing import Optional
 
 import discord
 
+from llm.ambient_memory import enqueue_for_memory, recall_lines
 from llm.lemonade_gate import foreground_recently_active, stream_busy
+from llm.logger_factory import get_or_create_file_logger
 from services.llm_service import LLMService
 from sys_settings.llm_settings import AmbientChatSettings
 from utils.utils import ChannelConfig
@@ -135,6 +137,34 @@ def _get_tracker(bot, channel_id: int) -> dict:
     return tracker
 
 
+def _write_ambient_debug(
+    *, trace_id: str, prompt_record_log: str, outcome: str, reply: str
+) -> None:
+    """把實際送進 12B 的完整 prompt（含三層 context）寫進 ambient_prompt.txt，供 debug。
+
+    outcome: reply | pass | error:<kind>。看這個檔就能確認「上下文有沒有被組進去」。
+    """
+    if not _SETTINGS.debug_log:
+        return
+    try:
+        dbg = get_or_create_file_logger(
+            name="ambient_prompt_trace",
+            log_path=Path(_SETTINGS.debug_prompt_log_path),
+            mode="size",
+            max_bytes=_SETTINGS.debug_log_max_bytes,
+            backup_count=_SETTINGS.debug_log_backup_count,
+        )
+        line = "=" * 24
+        dbg.info(
+            f"\n{line} AMBIENT trace={trace_id} outcome={outcome} {line}\n"
+            f"{prompt_record_log}\n"
+            f"---- reply ----\n{reply or '(無)'}\n"
+            f"{line} END {line}\n"
+        )
+    except Exception as exc:
+        logger.warning("寫入 ambient debug prompt 失敗 trace=%s：%s", trace_id, exc)
+
+
 def _note_sent(tracker: dict) -> None:
     """送出插話後更新冷卻時刻與每小時計數（滾動 1 小時窗口）。"""
     now = time.monotonic()
@@ -176,15 +206,24 @@ async def _fetch_recent(
 
 
 def _rag_to_persona_lines(rag_context: Optional[list]) -> Optional[list[str]]:
-    """把 retrieve_rag_context_sync 的結果轉成 persona_context 文字行（認得人）。"""
+    """把 retrieve_rag_context_sync 的結果轉成 persona_context 文字行（認得人）。
+
+    截斷每行、限制行數——12B 實測常駐 ctx 4096，persona card 偏長會吃爆 context。
+    """
     if not rag_context:
         return None
+    max_chars = _SETTINGS.persona_line_max_chars
     lines: list[str] = []
     for item in rag_context:
         content = item.get("content")
         if not content or item.get("metadata") == "persona_card_header":
             continue
-        lines.append(content)
+        text = " ".join(str(content).split())
+        if len(text) > max_chars:
+            text = text[:max_chars] + "…"
+        lines.append(text)
+        if len(lines) >= _SETTINGS.persona_max_lines:
+            break
     return lines or None
 
 
@@ -267,6 +306,10 @@ async def _maybe_ambient_reply_inner(bot, message: discord.Message) -> None:
     stripped = (message.content or "").strip()
     directed = _is_directed(bot, message)
 
+    # 記憶沉澱：插話頻道每則（非指令、有內容）收進緩衝，背景閒置批次抽取偏好（不阻塞）
+    if stripped and not _is_command_like(stripped):
+        enqueue_for_memory(message)
+
     # ── 非被點名：再過內容/冷卻/讓位/機率 ────────────────────────────
     if not directed:
         if not stripped or _is_command_like(stripped) or _is_link_only(stripped):
@@ -307,8 +350,18 @@ async def _maybe_ambient_reply_inner(bot, message: discord.Message) -> None:
     trace_id = f"amb-{message.channel.id}-{int(time.time() * 1000)}"
     prompt_text = stripped or "(對方只 @ 了我，沒有文字)"
 
-    # Phase B：認得人——召回在場成員 persona card 當 persona_context（best-effort）
-    persona_context = await _build_persona_context(message, prompt_text, participant_ids)
+    # Phase B：認得人——召回在場成員 persona card（best-effort）
+    persona_cards = await _build_persona_context(message, prompt_text, participant_ids)
+    # Phase C：召回發話者的 trusted 偏好事實（best-effort）
+    memory_lines = await recall_lines(message.guild.id, message.author.id)
+    persona_context = ((persona_cards or []) + (memory_lines or [])) or None
+
+    # debug 摘要（discord_bot.log）：一眼看出三層 context 各抓到幾筆
+    logger.info(
+        "ambient 生成 trace=%s directed=%s model=%s | chat=%d persona=%d memory=%d",
+        trace_id, directed, ambient_model,
+        len(chat_context or []), len(persona_cards or []), len(memory_lines or []),
+    )
 
     result = await _get_llm().generate_reply(
         prompt=prompt_text,
@@ -320,20 +373,42 @@ async def _maybe_ambient_reply_inner(bot, message: discord.Message) -> None:
         trace_id=trace_id,
     )
 
-    if result.error_kind:
-        # 背景插話不對使用者噴 ⚠️ 錯誤訊息，靜默記 log 即可
-        logger.info("ambient 生成失敗 kind=%s trace=%s，略過", result.error_kind, trace_id)
-        return
-
     reply = (result.reply or "").strip()
     sentinel = _SETTINGS.silence_sentinel
-    if not reply or sentinel in reply:
-        # 模型自判「沒梗」→ 不發送（Phase C 會在此改為轉傾聽/抽記憶）
+    if result.error_kind:
+        outcome = f"error:{result.error_kind}"
+    elif not reply or sentinel in reply:
+        outcome = "pass"
+    else:
+        outcome = "reply"
+
+    # 把完整 prompt（含三層 context）寫進 ambient_prompt.txt，reply/pass/error 都記，方便 debug
+    _write_ambient_debug(
+        trace_id=trace_id, prompt_record_log=result.prompt_record_log,
+        outcome=outcome, reply=reply,
+    )
+
+    if result.error_kind:
+        logger.info("ambient 生成失敗 kind=%s trace=%s，略過", result.error_kind, trace_id)
+        return
+    if outcome == "pass":
+        # 模型自判「沒梗」→ 不發送（Phase C 之後在此轉傾聽/抽記憶）
         return
 
     try:
         if directed:
-            await message.reply(reply, mention_author=False)
+            try:
+                await message.reply(reply, mention_author=False)
+            except discord.HTTPException as reply_exc:
+                # 原訊息可能已被刪除（reply reference 失效，50035 Unknown message）→
+                # 退而求其次直接發到頻道，照樣回得到、只是沒有 reply 串接
+                logger.info(
+                    "ambient reply 失敗（原訊息可能已刪？）trace=%s：%s → 改直接發頻道",
+                    trace_id, reply_exc,
+                )
+                await message.channel.send(
+                    reply, allowed_mentions=discord.AllowedMentions.none()
+                )
         else:
             await message.channel.send(
                 reply, allowed_mentions=discord.AllowedMentions.none()

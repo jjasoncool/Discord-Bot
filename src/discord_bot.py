@@ -148,6 +148,23 @@ async def on_ready():
         bot._raw_persist_task_started = True
         logger.info("raw 訊息備份定期 flush 已啟動（每 %d 秒）", RAW_FLUSH_INTERVAL_SECONDS)
 
+    # 啟動功能二記憶（偏好事實）定期批次抽取（閒置才真的跑 12B）
+    from llm.ambient_memory import maybe_flush as _ambient_memory_flush
+    from sys_settings.llm_settings import AmbientChatSettings as _AmbientSettings
+    if not getattr(bot, '_ambient_memory_task_started', False):
+        _ambient_flush_interval = _AmbientSettings().memory_flush_interval_seconds
+
+        async def _periodic_ambient_memory_flush():
+            while True:
+                await asyncio.sleep(_ambient_flush_interval)
+                try:
+                    await _ambient_memory_flush()
+                except Exception as exc:
+                    logger.warning("定期 flush 插話記憶 buffer 失敗: %s", exc)
+        bot._ambient_memory_task = asyncio.create_task(_periodic_ambient_memory_flush())
+        bot._ambient_memory_task_started = True
+        logger.info("插話記憶定期抽取已啟動（每 %.0f 秒檢查）", _ambient_flush_interval)
+
     # 啟動人格萃取定期排程
     if not getattr(bot, '_personality_task_started', False):
         from datetime import datetime, timezone, timedelta

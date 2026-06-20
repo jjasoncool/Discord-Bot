@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 import threading
@@ -427,6 +428,122 @@ class PgVectorIntroRAGPort:
             await self._ainsert(doc_id=doc_id, text=text, metadata=metadata)
         except Exception as exc:
             logger.error("寫入 auto personality 至 pgvector 失敗: %s", exc, exc_info=True)
+
+    # ── 功能二記憶：使用者偏好事實 preference_fact（Phase C-1 儲存層）─────────
+    # 與 intro/impression/auto_personality 同表，用 profile_kind='preference_fact' 區分。
+    # 不同於前三者「一人一卡」，preference_fact 是「一人多筆原子事實」，doc_id 含 fact_key 雜湊。
+
+    @staticmethod
+    def _preference_doc_id(guild_id: int, author_id: int, fact_key: str) -> str:
+        """同一件偏好（同 fact_key）→ 同 doc_id → app 層 replace，不重複堆積。"""
+        key_hash = hashlib.sha1(
+            f"{guild_id}:{author_id}:{fact_key}".encode("utf-8")
+        ).hexdigest()[:12]
+        return f"preference_fact:{guild_id}:{author_id}:{key_hash}"
+
+    async def index_preference_fact(
+        self,
+        *,
+        guild_id: int,
+        author_id: int,
+        alias: str,
+        fact: str,
+        fact_key: str,
+        category: str,
+        confidence: float,
+        status: str,
+        mention_count: int,
+        first_seen: str,
+        last_seen: str,
+    ) -> str | None:
+        """寫入/更新一筆使用者偏好事實。回傳 doc_id（失敗回 None）。
+
+        status: "tentative"（首見、不公開引用）| "trusted"（≥2 次或 /remember，才會被召回）。
+        同 fact_key 重送＝replace（呼叫端先讀舊 mention_count 再 +1 帶進來）。
+        """
+        if not self._dependencies_ready():
+            return None
+        try:
+            doc_id = self._preference_doc_id(guild_id, author_id, fact_key)
+            text = (
+                f"[Preference Fact]\n"
+                f"alias: {alias or '-'}\n"
+                f"category: {category or '-'}\n"
+                f"fact: {fact or '-'}"
+            )
+            metadata = {
+                "doc_type": "member_profile",
+                "profile_kind": "preference_fact",
+                "guild_id": str(guild_id),
+                "author_id": str(author_id),
+                "alias": alias or "",
+                "doc_id": doc_id,
+                "fact": fact or "",
+                "fact_key": fact_key or "",
+                "category": category or "",
+                "confidence": f"{float(confidence):.2f}",
+                "status": status or "tentative",
+                "mention_count": str(int(mention_count)),
+                "first_seen": first_seen or "",
+                "last_seen": last_seen or "",
+            }
+            await self._ainsert(doc_id=doc_id, text=text, metadata=metadata)
+            return doc_id
+        except Exception as exc:
+            logger.error("寫入 preference_fact 至 pgvector 失敗: %s", exc, exc_info=True)
+            return None
+
+    def list_preference_facts(
+        self,
+        *,
+        guild_id: int,
+        author_id: int | None = None,
+        only_trusted: bool = False,
+    ) -> list[dict[str, str]]:
+        """直接 SQL 撈 preference_fact（給升等比對 / 召回 / 管理）。同步，呼叫端自行包 executor。"""
+        table = self._get_physical_table_name()
+        conditions = [
+            "metadata_->>'profile_kind' = 'preference_fact'",
+            "metadata_->>'guild_id' = %s",
+        ]
+        params: list[str] = [str(guild_id)]
+        if author_id is not None:
+            conditions.append("metadata_->>'author_id' = %s")
+            params.append(str(author_id))
+        if only_trusted:
+            conditions.append("metadata_->>'status' = 'trusted'")
+        where = " AND ".join(conditions)
+        rows: list[dict[str, str]] = []
+        try:
+            with self._get_db_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        SELECT metadata_->>'doc_id', metadata_->>'author_id',
+                               metadata_->>'alias', metadata_->>'fact',
+                               metadata_->>'fact_key', metadata_->>'category',
+                               metadata_->>'confidence', metadata_->>'status',
+                               metadata_->>'mention_count', metadata_->>'first_seen',
+                               metadata_->>'last_seen'
+                        FROM {table}
+                        WHERE {where};
+                        """,
+                        params,
+                    )
+                    cols = (
+                        "doc_id", "author_id", "alias", "fact", "fact_key",
+                        "category", "confidence", "status", "mention_count",
+                        "first_seen", "last_seen",
+                    )
+                    for record in cur.fetchall():
+                        rows.append({col: (record[i] or "") for i, col in enumerate(cols)})
+        except Exception as exc:
+            logger.error("查詢 preference_fact 失敗: %s", exc, exc_info=True)
+        return rows
+
+    def delete_preference_fact(self, *, doc_id: str) -> None:
+        """刪除一筆 preference_fact（管理用：刪錯 / 禁記）。同步，呼叫端自行包 executor。"""
+        self._delete_existing_doc(doc_id=doc_id)
 
 
 # --- module-level singleton ---
