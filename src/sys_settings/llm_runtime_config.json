@@ -28,7 +28,7 @@
           "ctx_size": 12288
         },
         "Gemma-4-12B-it-GGUF": {
-          "ctx_size": 8192
+          "ctx_size": 16384
         },
         "Qwen3-14B-GGUF": {
           "ctx_size": 32768

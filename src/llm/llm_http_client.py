@@ -319,9 +319,18 @@ class LlmHttpClient:
         retry 沒意義，直接拋 `LlmAPIError` / `LlmConnectionError` 出去。
         """
         url = self._host + "/api/v1/load"
+        # Lemonade /api/v1/load 用「平鋪」參數（ctx_size 等直接在 top-level，會翻成 llama-server 旗標）。
+        # save_options=True：把 ctx_size 持久化進 Lemonade 的 recipe_options.json
+        #   → 之後每次載入（含 /askai swap 後重載）模型都吃對的 ctx，不會回退預設 4096。
+        #
+        # ⚠️ 鐵則（違反會像 --embeddings 那次把整顆模型載掛、且被 save_options 永久存住）：
+        #   recipe_options（＝ config 的 model_load_options）**只准放非 reserved 的選項**（如 ctx_size）。
+        #   **絕不可放 Lemonade 的 reserved 旗標**（--embeddings / --ctx-size / --device / --gpu-layers …）——
+        #   那些由 Lemonade 依模型「標籤」自動管理；手動帶 + save_options = model_load_error 且永久毒化。
         body: dict[str, Any] = {
             "model_name": model_name,
-            "recipe_options": dict(recipe_options),
+            **dict(recipe_options),
+            "save_options": True,
         }
         try:
             resp = self._sync.post(url, json=body, timeout=timeout)
