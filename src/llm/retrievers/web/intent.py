@@ -36,6 +36,15 @@ _TOPIC_GAME_PATCH = (
 )
 _TOPIC_NEWS_PURE = ("公告", "開服", "維護")
 _TOPIC_REDDIT = ("reddit", "鄉民", "網友怎麼說", "討論度")
+# 體育賽事：賽程 / 比分 / 戰績類問句（時效性高，走 news + 一週）。
+# 刻意不收 bare「比賽」「賽」——太泛會誤觸（「遊戲的比賽機制」「比賽看法」）；
+# 用「世界盃 / 足球 / 賽程 / 球賽」這種帶體育語意的錨字。
+_TOPIC_SPORTS = (
+    "世界盃", "世足", "足球", "籃球", "棒球", "排球",
+    "賽程", "賽事", "賽果", "戰績", "比分", "球賽", "體育",
+    "季後賽", "總冠軍",
+    "nba", "mlb", "英超", "西甲", "歐冠", "歐國盃", "中職",
+)
 
 # === 純觸發 token（HARD 用；不對應特定 route）===
 # 新聞時序錨字：HARD + 純新聞 route 共用
@@ -67,6 +76,7 @@ _SEARCH_HARD = re.compile(
         _TRIGGER_NEWS_TIME, _TRIGGER_HARD_ONLY,
         _TOPIC_FINANCE_ZH, _TOPIC_FINANCE_INTL,
         _TOPIC_WEATHER, _TOPIC_GAME_PATCH, _TOPIC_NEWS_PURE, _TOPIC_REDDIT,
+        _TOPIC_SPORTS,
     ),
     re.IGNORECASE,
 )
@@ -80,7 +90,7 @@ _SEARCH_NEVER = re.compile(
 
 # 軟觸發：時間詞 + 實體動詞組合（剛剛/剛才 需在此處配動詞才會觸發，避免誤判）
 _SEARCH_SOFT = re.compile(
-    r"(最近|這週|這個月|前幾天|這兩天|這幾天|上週|最近一週|剛剛|剛才)"
+    r"(最近|這[週周]|這個月|前幾天|這兩天|這幾天|上[週周]|最近一[週周]|剛剛|剛才)"
     r".{0,30}"
     r"(發生|新|出|改|更|上線|推出|發布|開放|變化|漲|跌)"
 )
@@ -133,6 +143,9 @@ _ROUTE_RULES: tuple[tuple[re.Pattern[str], str | None, str | None, str | None], 
     (re.compile(_alt(_TOPIC_WEATHER)), None, "day", None),
     # 遊戲改版 / 軟體版本：通用 + 一週（news engines 對這類覆蓋太差）
     (re.compile(_alt(_TOPIC_GAME_PATCH), re.IGNORECASE), None, "week", None),
+    # 體育賽事：news + 一週（與遊戲改版不同，news engines 對足球 / NBA 等覆蓋良好；
+    # 賽程 / 比分時效約一週，故走 week 而非 day）
+    (re.compile(_alt(_TOPIC_SPORTS), re.IGNORECASE), "news", "week", None),
     # 純新聞 / 政治時事：news + 一週
     (re.compile(_alt(_TRIGGER_NEWS_TIME, _TOPIC_NEWS_PURE)), "news", "week", None),
     # Reddit / 鄉民 / 網友討論（網友說 inline，原因見上方說明）

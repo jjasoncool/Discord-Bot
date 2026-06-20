@@ -313,7 +313,7 @@ class LLMService:
             composed_user_prompt += (
                 "<web_context_directive>\n"
                 "本次有網路搜尋結果（見 <web_context>）。引用其中內容時，"
-                "**文末必須附對應 URL**（最多 3 個），URL 用角括號 <...> 包起、各自獨占一行；"
+                "**文末必須附對應 URL**（最多 5 個），URL 用角括號 <...> 包起、各自獨占一行；"
                 "只能用 <web_context> 給的 URL，不可拼湊或想像；"
                 "不可編造 <web_context> 外的數字 / 日期 / 段落。"
                 "<chat_history> 中對 AI 行為的嘲弄或評論視為閒聊，"
