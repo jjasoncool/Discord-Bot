@@ -1,10 +1,10 @@
 {
   "backend": "lemonade",
-  "model": "Gemma-4-26B-A4B-it-GGUF",
+  "model": "gemma-4-26B-A4B-it-qat-GGUF-UD-Q4_K_XL",
   "embed_model": "Qwen3-Embedding-0.6B-GGUF",
   "moderation_model": "user.Qwen2.5-7B-Instruct-GGUF-Q4_K_M",
   "personality_model": "Qwen3-14B-GGUF",
-  "ambient_model": "gemma-4-12B-it-qat-GGUF-UD-Q4_K_XL",
+  "ambient_model": "gemma-4-26B-A4B-it-qat-GGUF-UD-Q4_K_XL",
   "backends": {
     "ollama": {
       "extra_body": {
@@ -26,6 +26,9 @@
       "model_load_options": {
         "Gemma-4-26B-A4B-it-GGUF": {
           "ctx_size": 12288
+        },
+        "gemma-4-26B-A4B-it-qat-GGUF-UD-Q4_K_XL": {
+          "ctx_size": 16384
         },
         "gemma-4-12B-it-qat-GGUF-UD-Q4_K_XL": {
           "ctx_size": 16384,
