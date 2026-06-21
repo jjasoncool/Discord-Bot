@@ -28,7 +28,8 @@
           "ctx_size": 12288
         },
         "gemma-4-12B-it-qat-GGUF-UD-Q4_K_XL": {
-          "ctx_size": 16384
+          "ctx_size": 16384,
+          "llamacpp_args": "-sm none -mg 0"
         },
         "Qwen3-14B-GGUF": {
           "ctx_size": 32768
@@ -37,7 +38,8 @@
           "ctx_size": 4096
         },
         "Qwen3-Embedding-0.6B-GGUF": {
-          "ctx_size": 4096
+          "ctx_size": 4096,
+          "llamacpp_args": "-sm none -mg 1"
         }
       }
     },
