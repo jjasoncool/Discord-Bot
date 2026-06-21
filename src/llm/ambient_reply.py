@@ -409,6 +409,21 @@ def _log_skip(channel_id: int, reason: str) -> None:
         logger.info("ambient 跳過 channel=%s：%s", channel_id, reason)
 
 
+# 對「插話本身」的不滿訊號——抓到就收手（自發插話）。只收高把握、明顯針對插話的字眼，
+# 寧可偶爾誤收（多安靜一下沒差），也別漏掉群友已經喊停的情況。
+_CHIME_BACKOFF_WORDS = (
+    "尬聊", "閉嘴", "別吵", "話太多", "沒人問你", "你很煩", "吵死", "又是你", "別一直",
+)
+
+
+def _has_chime_backoff_signal(message: discord.Message, chat_context: Optional[list]) -> bool:
+    """近期對話是否出現對『插話本身』的不滿 → 自發插話該收手。掃觸發訊息 + 近期 chat_history。"""
+    blob = message.content or ""
+    if chat_context:
+        blob += " " + " ".join(chat_context)
+    return any(w in blob for w in _CHIME_BACKOFF_WORDS)
+
+
 async def _run_one_ambient_pass(
     bot, message: discord.Message, ambient_model: str, directed: bool
 ) -> None:
@@ -473,6 +488,14 @@ async def _run_one_ambient_pass(
     asker_display_name = _name_with_anchor(message.author)
 
     chat_context, participant_ids = await _fetch_recent(message)
+
+    # 降溫硬閘：自發插話時，若近期對話出現對「插話本身」的不滿（尬聊/閉嘴/話太多…），直接收手，
+    # 不勞動模型。沿用 chat_history 滑動視窗——抱怨滾出視窗後自然恢復，不需額外狀態。
+    # （被 @/reply 的 directed 不受影響：對方主動找它仍照常回。）
+    if not directed and _has_chime_backoff_signal(message, chat_context):
+        _log_skip(message.channel.id, "偵測到降溫訊號（尬聊/叫停）→ 收手")
+        return
+
     system_prompt = _load_ambient_prompt()
     trace_id = f"amb-{message.channel.id}-{int(time.time() * 1000)}"
 
