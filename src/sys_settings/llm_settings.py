@@ -273,10 +273,13 @@ class AmbientChatSettings(BaseSettings):
     min_chars: int = 4               # 太短（貼圖式單字）不插
     max_chars: int = 300             # 太長（長篇貼文）不插
     cooldown_seconds: float = 90.0   # 同頻道兩次自發插話的最短間隔；冷卻期內連判斷都不跑（省 12B）
-    hourly_cap: int = 6              # 同頻道每小時自發插話上限
+    hourly_cap: int = 20             # 同頻道每小時自發插話上限（太低會整個小時靜默）
     # per-channel 序列處理：一輪 burst 內最多重評估幾次（生成期間有新訊息才重評估）；
     # 防超活躍頻道無限重評估空燒 12B。冷卻 + 減壓閥才是主要節流。
     max_passes_per_burst: int = 3
+    # 看門狗：單一 pass 超過此秒數視為卡住 → 取消，避免一次生成卡死整個頻道的序列處理。
+    # 要夠長以容納冷載入(model load 30-60s)+生成。
+    pass_timeout_seconds: float = 180.0
     # 減壓閥（預設關閉）：1.0 = 每則都讓 12B 判斷；頻道太吵、12B 負載過高時才調 < 1.0 抽樣降載
     judge_sampling_rate: float = 1.0
 

@@ -362,6 +362,8 @@ async def maybe_ambient_reply(bot, message: discord.Message) -> None:
             state["directed"] = message
         if state["running"]:
             state["pending"] = True   # 已有處理器在跑 → 只記新動靜，等它回來重評估
+            if _SETTINGS.debug_log:
+                logger.info("ambient 吸收 channel=%s：處理器忙，待這輪跑完用最新狀態重評估", message.channel.id)
             return
         state["running"] = True
     except Exception as exc:
@@ -382,7 +384,15 @@ async def maybe_ambient_reply(bot, message: discord.Message) -> None:
             if current is None:
                 break
             try:
-                await _run_one_ambient_pass(bot, current, ambient_model, current_directed)
+                await asyncio.wait_for(
+                    _run_one_ambient_pass(bot, current, ambient_model, current_directed),
+                    timeout=_SETTINGS.pass_timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "ambient pass 逾時取消 channel=%s（>%.0fs）—— 釋放頻道、不鎖死",
+                    message.channel.id, _SETTINGS.pass_timeout_seconds,
+                )
             except Exception as exc:
                 logger.warning("ambient pass 例外 channel=%s：%s", message.channel.id, exc, exc_info=True)
             passes += 1
@@ -391,6 +401,12 @@ async def maybe_ambient_reply(bot, message: discord.Message) -> None:
                 break
     finally:
         state["running"] = False
+
+
+def _log_skip(channel_id: int, reason: str) -> None:
+    """記一則被跳過的原因（gated by debug_log）；幫忙 debug『為什麼沒插話』。"""
+    if _SETTINGS.debug_log:
+        logger.info("ambient 跳過 channel=%s：%s", channel_id, reason)
 
 
 async def _run_one_ambient_pass(
@@ -404,37 +420,46 @@ async def _run_one_ambient_pass(
     stripped = (message.content or "").strip()
     has_image = _has_image(message)
 
-    # ── 非被點名：再過內容/冷卻/讓位/機率 ────────────────────────────
+    cid = message.channel.id
+    # ── 非被點名：再過內容/冷卻/讓位/機率（跳過原因都記 log，方便 debug）────
     if not directed:
         if _is_command_like(stripped):
+            _log_skip(cid, "指令訊息")
             return
         if not has_image:
             # 純文字才要求：非空、非純連結、長度在區間內（有圖則圖就是內容，放行）
             if not stripped or _is_link_only(stripped):
+                _log_skip(cid, "空訊息或純連結")
                 return
             n = len(stripped)
             if n < _SETTINGS.min_chars or n > _SETTINGS.max_chars:
+                _log_skip(cid, f"長度 {n} 不在 {_SETTINGS.min_chars}~{_SETTINGS.max_chars}")
                 return
 
-        tracker = _get_tracker(bot, message.channel.id)
+        tracker = _get_tracker(bot, cid)
         now = time.monotonic()
         if now - tracker["last_ts"] < _SETTINGS.cooldown_seconds:
+            remain = _SETTINGS.cooldown_seconds - (now - tracker["last_ts"])
+            _log_skip(cid, f"冷卻中（剩 {remain:.0f}s）")
             return
         if now - tracker["hour_start"] >= 3600:
             tracker["hour_start"] = now
             tracker["hour_count"] = 0
         if tracker["hour_count"] >= _SETTINGS.hourly_cap:
+            _log_skip(cid, f"已達每小時上限（{_SETTINGS.hourly_cap}）")
             return
 
         # foreground（/askai、功能一）正在用模型或剛用過 → 讓位，避免換模型 ping-pong
         if stream_busy() or foreground_recently_active(_SETTINGS.askai_grace_seconds):
+            _log_skip(cid, "前景活躍/串流忙，讓位")
             return
 
         # 減壓閥（預設 1.0 不作用）：太吵時抽樣降載，避免每則都勞動 12B；插不插仍由 12B 決定
         if _SETTINGS.judge_sampling_rate < 1.0 and random.random() > _SETTINGS.judge_sampling_rate:
+            _log_skip(cid, "減壓閥抽樣跳過")
             return
     else:
-        tracker = _get_tracker(bot, message.channel.id)
+        tracker = _get_tracker(bot, cid)
 
     # ── 生成（12B；走 generate_reply → chat_raw 持 stream_exclusive）──
     bot_display_name = None
@@ -533,7 +558,10 @@ async def _run_one_ambient_pass(
         logger.warning("ambient 送出回覆失敗 trace=%s：%s", trace_id, exc)
         return
 
-    _note_sent(tracker)
+    # 只有「自發插話」才計入冷卻/每小時額度；被 @ 是 user 主動要的，不該吃掉自發的額度（否則
+    # 一直 @ 它測試就會把自發插話餓死、整個小時靜默）。
+    if not directed:
+        _note_sent(tracker)
     logger.info(
         "ambient 已插話 trace=%s 頻道=%s directed=%s",
         trace_id, message.channel.id, directed,
