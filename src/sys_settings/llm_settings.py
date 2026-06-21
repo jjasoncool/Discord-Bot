@@ -326,6 +326,60 @@ class AmbientChatSettings(BaseSettings):
         return (init_settings,)
 
 
+class DiaryReflectionSettings(BaseSettings):
+    """AI 每日日記回顧（v1）：每天在專屬頻道用琇紫口吻寫一段當天感想。
+
+    純表達、不改行為——只反映它對今天的感受，不影響它對任何人的插話態度。
+    與 ambient 共用人格/守則 prompt；社交來源預設＝插話頻道（ambient_chat_channel_id）。
+    """
+
+    enabled: bool = True
+    # 日記發布頻道（channel_registry「AI 日記頻道」寫入 config.json 的 key）
+    diary_channel_config_key: str = "ai_diary_channel_id"
+    # 回顧哪個頻道的互動（預設＝插話頻道，就是它的社交場）
+    source_channel_config_key: str = "ambient_chat_channel_id"
+
+    # 日記人設＝共用人格 + 共用守則 + 日記行為（與 ambient 同源，只換最後一層）
+    use_shared_identity: bool = True
+    identity_path: str = "/app/settings/prompts/persona_identity.txt"
+    guardrails_path: str = "/app/settings/prompts/persona_guardrails.txt"
+    prompt_path: str = "/app/settings/prompts/diary_reflection_prompt.txt"
+
+    # 排程（台北時區）：每天幾點寫日記
+    schedule_hour: int = 0
+    schedule_minute: int = 0
+
+    # 回顧範圍：過去幾小時、最多取最近幾則、每則截斷長度
+    lookback_hours: int = 24
+    max_messages: int = 120
+    max_chars_per_msg: int = 200
+
+    # 生成：model=None 用 ambient_model；think=None 用後端預設；日記長度上限（post 前安全截）
+    model: str | None = None
+    think: bool | None = None
+    max_diary_chars: int = 1500
+
+    # debug 觀測
+    debug_log: bool = True
+    debug_prompt_log_path: str = "/logs/diary_prompt.txt"
+    debug_log_max_bytes: int = 5 * 1024 * 1024
+    debug_log_backup_count: int = 3
+
+    model_config = SettingsConfigDict(extra="ignore", frozen=True)
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: Any,
+        env_settings: Any,
+        dotenv_settings: Any,
+        file_secret_settings: Any,
+    ) -> Tuple[Any, ...]:
+        """停用 env/dotenv，僅接受初始化參數與 class 預設值。"""
+        return (init_settings,)
+
+
 def load_context_safety_rules(path: str | Path) -> LLMContextSafetyRules:
     """讀取並驗證 safety rules JSON（嚴格模式：缺檔或缺值直接拋錯）。"""
     safety_path = Path(path)

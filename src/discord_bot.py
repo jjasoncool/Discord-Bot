@@ -265,6 +265,37 @@ async def on_ready():
         bot._personality_task_started = True
         logger.info("人格萃取定期排程已啟動（每日 04:00 UTC+8，含啟動補跑檢查）")
 
+    # 啟動 AI 每日日記排程（每天 00:00 台北時區，在日記頻道寫一段當天感想）
+    if not getattr(bot, '_diary_task_started', False):
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        DIARY_TZ = _tz(_td(hours=8))
+
+        async def _diary_schedule():
+            await asyncio.sleep(90)  # 等其他服務就緒
+            from llm.diary_reflection import run_daily_reflection
+            from sys_settings.llm_settings import DiaryReflectionSettings
+            ds = DiaryReflectionSettings()
+            while True:
+                try:
+                    now = _dt.now(DIARY_TZ)
+                    target = now.replace(
+                        hour=ds.schedule_hour, minute=ds.schedule_minute,
+                        second=0, microsecond=0,
+                    )
+                    if now >= target:
+                        target += _td(days=1)
+                    wait_seconds = (target - now).total_seconds()
+                    logger.info("AI 日記排程：下次 %s（等待 %.0f 秒）", target.isoformat(), wait_seconds)
+                    await asyncio.sleep(wait_seconds)
+                    await run_daily_reflection(bot)
+                except Exception as exc:
+                    logger.error("AI 日記排程失敗: %s", exc, exc_info=True)
+                    await asyncio.sleep(3600)  # 失敗後等 1 小時再試
+
+        bot._diary_task = asyncio.create_task(_diary_schedule())
+        bot._diary_task_started = True
+        logger.info("AI 日記定期排程已啟動（每日 00:00 UTC+8）")
+
     # 自動啟動官方文章更新
     await auto_start_article_monitor(bot)
     await auto_start_telegram_relay(bot)

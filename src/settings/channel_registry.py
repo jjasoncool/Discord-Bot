@@ -335,3 +335,13 @@ register_channel(
     color=discord.Color.magenta(),
     desc="AI 會在此頻道偶爾插話閒聊；被 @ 一定回（功能二）",
 )
+
+# AI 每日日記頻道（純綁定）；diary_reflection 每天 00:00 在此頻道用琇紫口吻寫一段當天感想。
+# 回顧的社交來源預設＝上面的插話頻道；未設定則整個日記功能靜默。
+register_channel(
+    "AI 日記頻道",
+    discord.ChannelType.text,
+    "ai_diary_channel_id",
+    color=discord.Color.dark_purple(),
+    desc="AI 每天凌晨在此頻道寫一段當天的日記感想",
+)

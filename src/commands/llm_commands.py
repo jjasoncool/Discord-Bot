@@ -1234,6 +1234,33 @@ class PersonalityCommands(commands.Cog):
         task = asyncio.create_task(_run_and_report())
         self._track_task(task)
 
+    @app_commands.command(
+        name="ai_diary", description="立即產生並發布 AI 今日日記（管理員限定）"
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def ai_diary_cmd(self, interaction: discord.Interaction):
+        """手動觸發每日日記（不必等到午夜）；用來測試與臨時補發。"""
+        if not interaction.guild:
+            await safe_send_interaction_message(
+                interaction, "⚠️ 僅限伺服器內使用。", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        from llm.diary_reflection import run_daily_reflection
+        try:
+            diary = await run_daily_reflection(self.bot)
+        except Exception as exc:
+            logger.error("手動 AI 日記失敗: %s", exc, exc_info=True)
+            diary = None
+        if diary:
+            await interaction.followup.send(
+                "🖊️ 今天的日記寫好、發到日記頻道了。", ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                "⚠️ 沒寫成——可能未設定 AI 日記頻道、或生成失敗（看 log）。", ephemeral=True
+            )
+
 
 async def setup(bot):
     await bot.add_cog(LLMCommands(bot))
