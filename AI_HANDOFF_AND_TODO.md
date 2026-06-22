@@ -385,6 +385,47 @@ Phase 1 三個玩法**共用同一張 DB**，不要拆開做。
 
 ---
 
+## Ambient 互動紀錄 + 正向學習（自我蒸餾 → 個性演化）
+
+<!-- 2026-06-22 -->
+
+### 目標
+讓琇紫從「群眾對它插話的反應」學習，逐步長出**被這個群塑形的個性**——但 **prompt 不能無限增長**：靠「蒸餾成固定大小的風格、覆寫」，不是「堆 few-shot」。
+
+### 已實作（Part A，已驗證；**反應捕捉待重啟生效**）
+- **`ai_interactions` 表**（pgvector 那個 Postgres，普通 SQL、軟連結、無硬 FK）。每次「真的開口」的插話寫一筆：
+  `directed / trigger_kind / trigger_author_id / trigger_message_id / trigger_text / context_snippet / reply_text / reply_message_id / trace_id`
+  + 反應證據欄 `reaction_count / positive_reactions / negative_reactions`。
+- **寫入**：`ambient_reply._record_ambient_interaction`（送出後 `asyncio.to_thread` 寫，best-effort）。
+- **反應＝群眾的隱式標籤**：`on_raw_reaction_add/remove` → 若被按的是 bot 插話（`ai_interactions_store.is_tracked_reply` 記憶體集合命中）→ `note_reaction` 用既有 `reaction_classifier`（讀 `emoji_dictionary.txt`，認得自訂 emoji）分類：agree/laugh=正向、negative=負向 → 更新該筆。
+- **日記讀**：`diary_reflection` 撈當天 `ai_interactions` 結構化餵入（自發/被問各幾次、當時在聊什麼、回了什麼、哪句有正向反應）。
+- 檔案：`src/llm/ai_interactions_store.py`(新)、`ambient_reply.py`、`diary_reflection.py`、`discord_bot.py`(on_ready 建表 + 反應 hook)。
+
+### Phase 2 — 自我蒸餾學習（**計畫，未實作**）
+核心：**蒸餾不堆疊**。定期把累積的正/負向插話歸納成一小段固定大小的「學到的風格」，**覆寫**不追加。
+- **資料來源/標記**：`ai_interactions`；正向＝`positive_reactions>0 且 negative_reactions=0`、負向＝`negative_reactions>0` 或事後有人說「尬聊」。（之後可加更強訊號：被回話 / 被 echo。）
+- **蒸餾 job**（複用排程範本，每 3~7 天一次）：撈近期正/負向插話 → LLM「歸納 3~6 條：你在這群講話最對味/最冷場的樣子（切入點、句式、梗的類型）」→ **與現有 learned_style 合併精煉**（累積、不重練）。
+- **輸出**：寫進新檔 `settings/prompts/learned_style.txt`（**長度上限 ~500 字 / ≤6 條，覆寫**）；`_load_ambient_prompt` 多組這一層（identity + guardrails + **learned_style** + 插話行為）；mtime 自動生效。
+- **不爆 prompt**：原始例子永不進 prompt，只有蒸餾後的原則進；固定大小覆寫。
+- **長出個性**：profile 隨更多正向資料演化 → 風格偏向這群會獎勵的樣子（仍在 base 人格框架內）。
+- **護欄**：learned_style 從屬於 guardrails/identity（只影響「怎麼講」、不碰安全紅線）；人類可讀可手改；某習慣不再得反應 → 下次蒸餾自然淡出（自我修正）。
+- **對稱**：等同把現有 `personality_extractor`（蒸餾成員個性）指向 bot 自己。
+
+### 節奏（已與 user 確認 2026-06-22）
+1. **表情/反應蒐集先建立、先上線**（Part A ✅，待重啟）。
+2. **先收集 1~2 週**，用日記觀察「這群到底會不會按反應」；若他們愛回話多過按讚 → 把「被回/被 echo」也納入標記。
+3. **有訊號再建 Phase 2 蒸餾**（先有資料再學，別蒸餾空氣）。
+
+### 涉及檔案（Phase 2 預估）
+| 檔案 | 角色 |
+|---|---|
+| `src/settings/prompts/learned_style.txt`（新） | 蒸餾出的固定大小「學到的風格」 |
+| `src/llm/self_distill.py`（新，暫名） | 撈 `ai_interactions` 正/負向 → LLM 蒸餾 → 覆寫 learned_style |
+| `src/llm/ambient_reply.py` `_load_ambient_prompt` | 多組 learned_style 一層 |
+| `src/discord_bot.py` | 蒸餾排程（每 3~7 天） |
+
+---
+
 ## 使用者指令記憶 (/remember) 未來工作
 
 <!-- @meta
