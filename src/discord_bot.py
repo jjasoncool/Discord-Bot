@@ -265,6 +265,13 @@ async def on_ready():
         bot._personality_task_started = True
         logger.info("人格萃取定期排程已啟動（每日 04:00 UTC+8，含啟動補跑檢查）")
 
+    # 確保 ai_interactions 互動紀錄表存在（插話寫入 + 日記讀取都靠它）
+    try:
+        from llm.ai_interactions_store import ensure_table as _ensure_ai_interactions
+        await asyncio.to_thread(_ensure_ai_interactions)
+    except Exception as _exc:
+        logger.error("ai_interactions 建表啟動失敗: %s", _exc, exc_info=True)
+
     # 啟動 AI 每日日記排程（每天 00:00 台北時區，在日記頻道寫一段當天感想）
     if not getattr(bot, '_diary_task_started', False):
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td
@@ -469,6 +476,16 @@ async def on_raw_reaction_add(payload):
         user_id=payload.user_id,
         action="add",
     )
+    # 若被按的是 bot 自己的插話 → 記成正向/負向證據（先查記憶體集合，命中才打 DB）
+    try:
+        from llm.ai_interactions_store import is_tracked_reply, note_reaction
+        mid = str(payload.message_id)
+        if is_tracked_reply(mid):
+            await asyncio.to_thread(
+                note_reaction, mid, payload.emoji.name, payload.emoji.id, "add"
+            )
+    except Exception as _exc:
+        logger.debug("ai_interactions 反應記錄略過(add): %s", _exc)
 
 
 @bot.event
@@ -484,6 +501,15 @@ async def on_raw_reaction_remove(payload):
         user_id=payload.user_id,
         action="remove",
     )
+    try:
+        from llm.ai_interactions_store import is_tracked_reply, note_reaction
+        mid = str(payload.message_id)
+        if is_tracked_reply(mid):
+            await asyncio.to_thread(
+                note_reaction, mid, payload.emoji.name, payload.emoji.id, "remove"
+            )
+    except Exception as _exc:
+        logger.debug("ai_interactions 反應記錄略過(remove): %s", _exc)
 
 async def auto_start_article_monitor(bot):
     """自動啟動官方文章更新功能"""
