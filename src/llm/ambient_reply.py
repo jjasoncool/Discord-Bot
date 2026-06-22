@@ -26,11 +26,13 @@ import functools
 import logging
 import random
 import time
+from datetime import timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 import discord
 
+from llm.ai_interactions_store import record_interaction
 from llm.ambient_memory import enqueue_for_memory, recall_lines
 from llm.lemonade_gate import foreground_recently_active, stream_busy
 from llm.logger_factory import get_or_create_file_logger
@@ -41,6 +43,9 @@ from utils.utils import ChannelConfig
 logger = logging.getLogger("discord_bot")
 
 _SETTINGS = AmbientChatSettings()
+
+# chat_history 每行標 [HH:MM] 發話時刻（台北時區）→ 讓模型判斷新舊/順序，鎖定最新、別翻舊帳
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 
 _DEFAULT_AMBIENT_PROMPT = (
     "你是 Discord 群裡的一位群友，個性溫和、偶爾俏皮。"
@@ -207,7 +212,8 @@ async def _fetch_recent(
             name = _name_with_anchor(msg.author)
             if len(text) > 200:
                 text = text[:200] + "…"
-            collected.append(f"{name}: {text}")
+            ts = msg.created_at.astimezone(_TAIPEI_TZ).strftime("%H:%M")
+            collected.append(f"[{ts}] {name}: {text}")
     except Exception as exc:
         logger.debug("ambient 抓取頻道歷史失敗：%s", exc)
     collected.reverse()
@@ -424,6 +430,38 @@ def _has_chime_backoff_signal(message: discord.Message, chat_context: Optional[l
     return any(w in blob for w in _CHIME_BACKOFF_WORDS)
 
 
+async def _record_ambient_interaction(
+    *, message: discord.Message, directed: bool, stripped: str, has_image: bool,
+    chat_context: Optional[list], reply: str, sent_msg, trace_id: str,
+) -> None:
+    """把這次插話寫進 ai_interactions（best-effort；sync DB → to_thread 不阻塞 loop）。"""
+    try:
+        if stripped:
+            trigger_kind = "text"
+        elif has_image:
+            trigger_kind = "image"
+        else:
+            trigger_kind = "mention"
+        # 它實際在回的那段對話：取 chat_history 末幾行（自發時末行已含觸發那句）
+        snippet = "\n".join(chat_context[-8:]) if chat_context else None
+        await asyncio.to_thread(
+            record_interaction,
+            guild_id=str(message.guild.id) if message.guild else "",
+            channel_id=str(message.channel.id),
+            directed=directed,
+            trigger_kind=trigger_kind,
+            trigger_author_id=str(message.author.id),
+            trigger_message_id=str(message.id),
+            trigger_text=stripped or None,
+            context_snippet=snippet,
+            reply_text=reply,
+            reply_message_id=str(sent_msg.id) if sent_msg is not None else None,
+            trace_id=trace_id,
+        )
+    except Exception as exc:
+        logger.debug("ambient 互動紀錄寫入略過 trace=%s：%s", trace_id, exc)
+
+
 async def _run_one_ambient_pass(
     bot, message: discord.Message, ambient_model: str, directed: bool
 ) -> None:
@@ -504,15 +542,33 @@ async def _run_one_ambient_pass(
     if not stripped and not image_payload and not directed:
         return  # 圖沒抓成功又沒文字 → 沒東西可接
 
-    if stripped:
-        prompt_text = stripped
-    elif image_payload:
-        prompt_text = "(對方貼了一張圖)"
+    # ── 「最新訊息」框架（P1-5）：自發 vs 被點名分開包 ──
+    # 被 @/reply（directed）：對方真的在跟你說話 → 維持 <latest_user_message from=發話者>。
+    # 自發插話：把觸發訊息併進「你旁觀到的對話」，latest 換成中性自我提示、且不帶 from——
+    # 否則結構上會把「別人對別人說的話」（尤其含「你」）誤讀成在問機器人本人（→ 答非所問/尬聊）。
+    retrieval_query = stripped or "(圖片或無文字)"
+    if directed:
+        asker_for_bundle = asker_display_name
+        if stripped:
+            prompt_text = stripped
+        elif image_payload:
+            prompt_text = "(對方貼了一張圖)"
+        else:
+            prompt_text = "(對方只 @ 了我，沒有文字)"
     else:
-        prompt_text = "(對方只 @ 了我，沒有文字)"
+        asker_for_bundle = None
+        _ts = message.created_at.astimezone(_TAIPEI_TZ).strftime("%H:%M")
+        if stripped:
+            chat_context = (chat_context or []) + [f"[{_ts}] {asker_display_name}: {stripped}"]
+        elif image_payload:
+            chat_context = (chat_context or []) + [f"[{_ts}] {asker_display_name}: (貼了一張圖)"]
+        prompt_text = (
+            "（以上是你在群裡旁觀到的最新對話。最新一則是群友彼此在講話、不一定是對你說的——"
+            "先判斷適不適合插話；要插就接整段對話裡的具體一點，否則只輸出 [PASS]。）"
+        )
 
-    # Phase B：認得人——召回在場成員 persona card（best-effort）
-    persona_cards = await _build_persona_context(message, prompt_text, participant_ids)
+    # Phase B：認得人——召回在場成員 persona card（best-effort；用真正的觸發文字當檢索 query）
+    persona_cards = await _build_persona_context(message, retrieval_query, participant_ids)
     # Phase C：召回發話者的 trusted 偏好事實（best-effort）
     memory_lines = await recall_lines(message.guild.id, message.author.id)
     persona_context = ((persona_cards or []) + (memory_lines or [])) or None
@@ -533,7 +589,7 @@ async def _run_one_ambient_pass(
         images=image_payload,
         model=ambient_model,
         bot_display_name=bot_display_name,
-        asker_display_name=asker_display_name,
+        asker_display_name=asker_for_bundle,
         trace_id=trace_id,
     )
 
@@ -559,10 +615,11 @@ async def _run_one_ambient_pass(
         # 模型自判「沒梗」→ 不發送（Phase C 之後在此轉傾聽/抽記憶）
         return
 
+    sent_msg = None
     try:
         if directed:
             try:
-                await message.reply(reply, mention_author=False)
+                sent_msg = await message.reply(reply, mention_author=False)
             except discord.HTTPException as reply_exc:
                 # 原訊息可能已被刪除（reply reference 失效，50035 Unknown message）→
                 # 退而求其次直接發到頻道，照樣回得到、只是沒有 reply 串接
@@ -570,11 +627,11 @@ async def _run_one_ambient_pass(
                     "ambient reply 失敗（原訊息可能已刪？）trace=%s：%s → 改直接發頻道",
                     trace_id, reply_exc,
                 )
-                await message.channel.send(
+                sent_msg = await message.channel.send(
                     reply, allowed_mentions=discord.AllowedMentions.none()
                 )
         else:
-            await message.channel.send(
+            sent_msg = await message.channel.send(
                 reply, allowed_mentions=discord.AllowedMentions.none()
             )
     except discord.HTTPException as exc:
@@ -588,4 +645,10 @@ async def _run_one_ambient_pass(
     logger.info(
         "ambient 已插話 trace=%s 頻道=%s directed=%s",
         trace_id, message.channel.id, directed,
+    )
+
+    # 互動紀錄（best-effort、不阻塞）：記下「自己這次說了什麼、對誰、在聊什麼」→ 日記/好感度的素材
+    await _record_ambient_interaction(
+        message=message, directed=directed, stripped=stripped, has_image=has_image,
+        chat_context=chat_context, reply=reply, sent_msg=sent_msg, trace_id=trace_id,
     )

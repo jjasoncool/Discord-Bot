@@ -261,7 +261,7 @@ class AmbientChatSettings(BaseSettings):
     guardrails_path: str = "/app/settings/prompts/persona_guardrails.txt"
 
     # 背景上下文：抓近期幾則當短期對話記憶（12B ctx 已調到 16384，可帶完整脈絡）
-    history_limit: int = 12
+    history_limit: int = 20
     # Phase B 認得人：召回在場成員 persona card（intro/impression/auto_personality）
     persona_top_k: int = 5
     persona_cache_seconds: float = 60.0  # per-channel persona 快取，避免 armed 期間每則打 pgvector
@@ -272,7 +272,7 @@ class AmbientChatSettings(BaseSettings):
     # 觸發門檻：插不插由 12B 判斷，「偶爾」感由冷卻 + 每小時上限保證（不用機率）
     min_chars: int = 4               # 太短（貼圖式單字）不插
     max_chars: int = 300             # 太長（長篇貼文）不插
-    cooldown_seconds: float = 90.0   # 同頻道兩次自發插話的最短間隔；冷卻期內連判斷都不跑（省 12B）
+    cooldown_seconds: float = 300.0  # 同頻道兩次自發插話的最短間隔（5 分鐘→真的「偶爾」）；冷卻期內連判斷都不跑
     hourly_cap: int = 20             # 同頻道每小時自發插話上限（太低會整個小時靜默）
     # per-channel 序列處理：一輪 burst 內最多重評估幾次（生成期間有新訊息才重評估）；
     # 防超活躍頻道無限重評估空燒 12B。冷卻 + 減壓閥才是主要節流。

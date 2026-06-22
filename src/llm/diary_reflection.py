@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import datetime, timedelta, timezone
@@ -18,6 +19,7 @@ from typing import Optional
 
 import discord
 
+from llm.ai_interactions_store import fetch_recent
 from llm.ambient_reply import _get_llm, _name_with_anchor
 from llm.logger_factory import get_or_create_file_logger
 from sys_settings.llm_settings import DiaryReflectionSettings
@@ -26,6 +28,7 @@ from utils.utils import ChannelConfig
 logger = logging.getLogger("discord_bot")
 
 _SETTINGS = DiaryReflectionSettings()
+_TAIPEI_TZ = timezone(timedelta(hours=8))  # 逐字稿標 [HH:MM] 發話時刻 → 日記能寫出時間感
 
 _DEFAULT_DIARY_PROMPT = (
     "你是 Discord 群裡的琇紫。夜深了，獨自在自己的頻道，寫一段今天的日記——"
@@ -81,7 +84,8 @@ async def _gather_day_transcript(channel: discord.abc.Messageable) -> list[str]:
             name = _name_with_anchor(msg.author)
             if len(text) > _SETTINGS.max_chars_per_msg:
                 text = text[: _SETTINGS.max_chars_per_msg] + "…"
-            lines.append(f"{name}: {text}")
+            ts = msg.created_at.astimezone(_TAIPEI_TZ).strftime("%H:%M")
+            lines.append(f"[{ts}] {name}: {text}")
     except Exception as exc:
         logger.warning("日記抓取頻道歷史失敗：%s", exc)
     lines.reverse()  # newest-first → 時序（舊→新）
@@ -108,6 +112,27 @@ def _write_diary_debug(*, trace_id: str, prompt_record_log: str, diary: str) -> 
         logger.warning("寫入日記 debug 失敗 trace=%s：%s", trace_id, exc)
 
 
+def _format_interactions(interactions: list) -> list[str]:
+    """把互動紀錄整理成日記可讀的結構化行：自發/被問 + 當時在聊什麼 + 你說了什麼。"""
+    if not interactions:
+        return []
+    spont = sum(1 for it in interactions if not it.get("directed"))
+    asked = len(interactions) - spont
+    pos_total = sum(1 for it in interactions if (it.get("positive_reactions") or 0) > 0)
+    lines = [
+        f"【你今天的插話紀錄：自發 {spont} 次、被問或被回 {asked} 次；"
+        f"其中 {pos_total} 句有人給正向反應】"
+    ]
+    for it in interactions[-30:]:
+        tag = "自發" if not it.get("directed") else "被問"
+        ctx = " ".join((it.get("trigger_text") or it.get("context_snippet") or "").split())[:60]
+        rep = " ".join((it.get("reply_text") or "").split())[:90]
+        pos = it.get("positive_reactions") or 0
+        react = f"（大家給了 {pos} 個正向反應）" if pos else ""
+        lines.append(f"· [{tag}] 當時在聊「{ctx}」→ 你說：{rep}{react}")
+    return lines
+
+
 async def run_daily_reflection(bot) -> Optional[str]:
     """跑一次每日日記：抓社交頻道 24h 互動 → 生成 → po 到日記頻道。回傳發出的日記文字（或 None）。"""
     if not _SETTINGS.enabled:
@@ -127,6 +152,19 @@ async def run_daily_reflection(bot) -> Optional[str]:
     source_channel = bot.get_channel(source_cid) if source_cid else None
     transcript = await _gather_day_transcript(source_channel) if source_channel else []
 
+    # 互動紀錄（結構化）：今天它自己插了哪幾次、自發還是被問、當時在聊什麼、回了什麼
+    interactions = (
+        await asyncio.to_thread(
+            fetch_recent, str(source_cid), hours=_SETTINGS.lookback_hours, limit=80
+        )
+        if source_cid else []
+    )
+    # 組合素材：先「你今天的插話紀錄」（結構化），再「今天群裡的對話」（逐字稿）
+    combined_context = _format_interactions(interactions)
+    if transcript:
+        combined_context.append("【今天群裡的對話】")
+        combined_context.extend(transcript)
+
     bot_display_name = None
     guild = getattr(diary_channel, "guild", None)
     if guild is not None and guild.me is not None:
@@ -140,12 +178,13 @@ async def run_daily_reflection(bot) -> Optional[str]:
     prompt_text = "（現在是深夜，群裡安靜下來了。回顧今天，寫一段你自己的日記。）"
 
     logger.info(
-        "日記生成 trace=%s model=%s 來源訊息=%d", trace_id, model, len(transcript)
+        "日記生成 trace=%s model=%s 來源訊息=%d 互動=%d",
+        trace_id, model, len(transcript), len(interactions),
     )
     result = await llm.generate_reply(
         prompt=prompt_text,
         system=_load_diary_prompt(),
-        chat_context=transcript or None,
+        chat_context=combined_context or None,
         model=model,
         think=_SETTINGS.think,
         bot_display_name=bot_display_name,
