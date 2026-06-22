@@ -34,8 +34,10 @@ import discord
 
 from llm.ai_interactions_store import record_interaction
 from llm.ambient_memory import enqueue_for_memory, recall_lines
+from llm.emoji_text_utils import is_emoji_or_symbol_only, replace_custom_emoji_with_description
 from llm.lemonade_gate import foreground_recently_active, stream_busy
 from llm.logger_factory import get_or_create_file_logger
+from llm.sticker_cache import get_sticker_text
 from services.llm_service import LLMService
 from sys_settings.llm_settings import AmbientChatSettings
 from utils.utils import ChannelConfig
@@ -191,6 +193,21 @@ def _name_with_anchor(author) -> str:
     return f"{name}#{short}" if short else name
 
 
+def _semantic_msg_text(msg: discord.Message) -> str:
+    """訊息文字 + 語意化自訂表情（<:name:id>→:描述:）+ 貼圖描述。
+
+    跟 /askai（chat_persistence._build_persist_text）同一套，讓插話/日記也讀得懂貼圖與
+    自訂 emoji——否則只看到 <:name:id> 代碼，且純貼圖（無文字）訊息會被當空訊息整則跳過。
+    """
+    text = replace_custom_emoji_with_description((msg.content or "").strip())
+    if msg.stickers:
+        parts = [s for s in (get_sticker_text(st) for st in msg.stickers) if s]
+        if parts:
+            sticker_part = " ".join(parts)
+            text = f"{text} {sticker_part}" if text else sticker_part
+    return text
+
+
 async def _fetch_recent(
     message: discord.Message,
 ) -> tuple[Optional[list[str]], list[int]]:
@@ -206,7 +223,7 @@ async def _fetch_recent(
         ):
             if not msg.author.bot and msg.author.id not in participant_ids:
                 participant_ids.append(msg.author.id)
-            text = (msg.content or "").strip()
+            text = _semantic_msg_text(msg)
             if not text:
                 continue
             name = _name_with_anchor(msg.author)
@@ -390,15 +407,10 @@ async def maybe_ambient_reply(bot, message: discord.Message) -> None:
             if current is None:
                 break
             try:
-                await asyncio.wait_for(
-                    _run_one_ambient_pass(bot, current, ambient_model, current_directed),
-                    timeout=_SETTINGS.pass_timeout_seconds,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "ambient pass 逾時取消 channel=%s（>%.0fs）—— 釋放頻道、不鎖死",
-                    message.channel.id, _SETTINGS.pass_timeout_seconds,
-                )
+                # 不外包 watchdog：生成逾時改由 generate_reply 的 timeout 控（只算「鎖內生成」、
+                # 不含「等鎖排隊」）→ 排在 /askai 後面時不會被誤砍。其餘 await（抓歷史 / 召回 /
+                # 送出）各自有 http/API 逾時，不會無限卡。
+                await _run_one_ambient_pass(bot, current, ambient_model, current_directed)
             except Exception as exc:
                 logger.warning("ambient pass 例外 channel=%s：%s", message.channel.id, exc, exc_info=True)
             passes += 1
@@ -484,6 +496,9 @@ async def _run_one_ambient_pass(
             if not stripped or _is_link_only(stripped):
                 _log_skip(cid, "空訊息或純連結")
                 return
+            if is_emoji_or_symbol_only(stripped):
+                _log_skip(cid, "只有表情/貼圖 → 不觸發自發插話")
+                return
             n = len(stripped)
             if n < _SETTINGS.min_chars or n > _SETTINGS.max_chars:
                 _log_skip(cid, f"長度 {n} 不在 {_SETTINGS.min_chars}~{_SETTINGS.max_chars}")
@@ -559,7 +574,7 @@ async def _run_one_ambient_pass(
         asker_for_bundle = None
         _ts = message.created_at.astimezone(_TAIPEI_TZ).strftime("%H:%M")
         if stripped:
-            chat_context = (chat_context or []) + [f"[{_ts}] {asker_display_name}: {stripped}"]
+            chat_context = (chat_context or []) + [f"[{_ts}] {asker_display_name}: {_semantic_msg_text(message)}"]
         elif image_payload:
             chat_context = (chat_context or []) + [f"[{_ts}] {asker_display_name}: (貼了一張圖)"]
         prompt_text = (
@@ -590,6 +605,9 @@ async def _run_one_ambient_pass(
         model=ambient_model,
         bot_display_name=bot_display_name,
         asker_display_name=asker_for_bundle,
+        # 生成 timeout＝鎖內生成的上限（chat_raw 的 timeout 在 stream_exclusive 取得後才開始算，
+        # 天生不含「等鎖排隊」時間）→ 取代外層 watchdog，避免排在 /askai 後面被誤砍。
+        timeout=int(_SETTINGS.pass_timeout_seconds),
         trace_id=trace_id,
     )
 

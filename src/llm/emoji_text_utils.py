@@ -105,3 +105,26 @@ def replace_custom_emoji_with_description(text: str) -> str:
     replaced = _CUSTOM_EMOJI_PATTERN.sub(_substitute, text)
     # 把連續空白壓成單一空白；頭尾 strip
     return re.sub(r"\s+", " ", replaced).strip()
+
+
+# unicode emoji / 符號（常見區段）——配合 _CUSTOM_EMOJI_PATTERN 判斷「整則只有表情符號」
+_UNICODE_EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001F300-\U0001FAFF"   # symbols & pictographs（含 supplemental / extended-A）
+    "\U0001F000-\U0001F0FF"   # 麻將/骰子/撲克
+    "\U0001F1E6-\U0001F1FF"   # 區域指示（國旗）
+    "\U00002600-\U000026FF"   # misc symbols
+    "\U00002700-\U000027BF"   # dingbats
+    "️‍⃣"      # variation selector / ZWJ / keycap
+    "]+"
+)
+
+
+def is_emoji_or_symbol_only(text: str) -> bool:
+    """文字去掉自訂 emoji `<:name:id>` 與 unicode emoji 後是不是空的（＝整則只有表情符號）。
+
+    給「不該對純表情訊息觸發回應」這類判斷共用，複用本模組既有的 custom emoji pattern。
+    """
+    leftover = _CUSTOM_EMOJI_PATTERN.sub("", text or "")
+    leftover = _UNICODE_EMOJI_PATTERN.sub("", leftover).strip()
+    return leftover == ""

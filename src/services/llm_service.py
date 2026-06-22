@@ -650,6 +650,7 @@ class LLMService:
         top_p: Optional[float] = None,
         repeat_penalty: Optional[float] = None,
         num_ctx: Optional[int] = None,
+        timeout: Optional[int] = None,
         asker_profile: Optional[str] = None,
         asker_display_name: Optional[str] = None,
         bot_display_name: Optional[str] = None,
@@ -691,6 +692,7 @@ class LLMService:
                 top_p=top_p,
                 repeat_penalty=repeat_penalty,
                 num_ctx=num_ctx,
+                timeout=timeout,
                 keep_alive=keep_alive,
                 trace_id=trace_id,
             )

@@ -20,7 +20,7 @@ from typing import Optional
 import discord
 
 from llm.ai_interactions_store import fetch_recent
-from llm.ambient_reply import _get_llm, _name_with_anchor
+from llm.ambient_reply import _get_llm, _name_with_anchor, _semantic_msg_text
 from llm.logger_factory import get_or_create_file_logger
 from sys_settings.llm_settings import DiaryReflectionSettings
 from utils.utils import ChannelConfig
@@ -78,7 +78,7 @@ async def _gather_day_transcript(channel: discord.abc.Messageable) -> list[str]:
         async for msg in channel.history(
             limit=_SETTINGS.max_messages, after=after, oldest_first=False
         ):
-            text = (msg.content or "").strip()
+            text = _semantic_msg_text(msg)
             if not text:
                 continue
             name = _name_with_anchor(msg.author)
