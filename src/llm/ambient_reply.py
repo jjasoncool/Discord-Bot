@@ -345,6 +345,29 @@ async def _prepare_images(message: discord.Message) -> Optional[list[str]]:
     return out or None
 
 
+async def _resolve_replied_to(
+    message: discord.Message,
+) -> Optional[discord.Message]:
+    """取「被回覆」的那則訊息（Discord 原生 reply 指向的訊息），給 prompt 標出指涉對象。
+
+    reference.resolved 三態：discord.Message（已快取）/ DeletedReferencedMessage（已刪）/
+    None（未在快取）。None 時用 message_id 補抓一次；已刪或抓不到一律回 None（best-effort，
+    只在訊息確實帶 reference 時才會打 API）。
+    """
+    ref = message.reference
+    if ref is None:
+        return None
+    resolved = getattr(ref, "resolved", None)
+    if isinstance(resolved, discord.Message):
+        return resolved
+    if ref.message_id is not None:
+        try:
+            return await message.channel.fetch_message(ref.message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+            logger.debug("ambient 補抓被回覆訊息失敗：%s", exc)
+    return None
+
+
 # per-channel 序列處理狀態：同頻道同時只有一個 ambient 在跑。生成期間進來的訊息不平行觸發，
 # 只更新 latest / 標 pending；等這次跑完，再用「最新」對話狀態重新評估要不要插（@ 走 directed 優先答）。
 _PROC_STATE: dict = {}  # channel_id -> {running, pending, latest, directed}
@@ -557,6 +580,26 @@ async def _run_one_ambient_pass(
     if not stripped and not image_payload and not directed:
         return  # 圖沒抓成功又沒文字 → 沒東西可接
 
+    # ── 被回覆訊息（Discord 原生 reply）：把指涉對象明確帶進 prompt，避免「他/這個」無錨點亂答 ──
+    # directed（@/reply 機器人）與自發插話都適用；best-effort，抓不到就略過。
+    replied_to_from: Optional[str] = None
+    replied_to_text: Optional[str] = None
+    replied_msg = await _resolve_replied_to(message)
+    if replied_msg is not None:
+        rtext = _semantic_msg_text(replied_msg)
+        if not rtext and _has_image(replied_msg):
+            rtext = "(一張圖)"
+        if rtext:
+            if len(rtext) > 200:
+                rtext = rtext[:200] + "…"
+            replied_to_from = _name_with_anchor(replied_msg.author)
+            replied_to_text = rtext
+        # 帶圖：被回覆訊息的圖也補進 vision payload（trigger 自己的圖優先，整體受 image_max_count 上限）
+        if _has_image(replied_msg):
+            ref_imgs = await _prepare_images(replied_msg)
+            if ref_imgs:
+                image_payload = ((image_payload or []) + ref_imgs)[:_SETTINGS.image_max_count]
+
     # ── 「最新訊息」框架（P1-5）：自發 vs 被點名分開包 ──
     # 被 @/reply（directed）：對方真的在跟你說話 → 維持 <latest_user_message from=發話者>。
     # 自發插話：把觸發訊息併進「你旁觀到的對話」，latest 換成中性自我提示、且不帶 from——
@@ -592,12 +635,12 @@ async def _run_one_ambient_pass(
         (persona_cards or []) + (memory_lines or []) + (tag_lines or [])
     ) or None
 
-    # debug 摘要（discord_bot.log）：一眼看出三層 context 各抓到幾筆 + 有沒有圖
+    # debug 摘要（discord_bot.log）：一眼看出三層 context 各抓到幾筆 + 有沒有圖 + 有沒有接到被回覆訊息
     logger.info(
-        "ambient 生成 trace=%s directed=%s model=%s | chat=%d persona=%d memory=%d img=%d",
+        "ambient 生成 trace=%s directed=%s model=%s | chat=%d persona=%d memory=%d img=%d reply_to=%d",
         trace_id, directed, ambient_model,
         len(chat_context or []), len(persona_cards or []), len(memory_lines or []),
-        len(image_payload or []),
+        len(image_payload or []), 1 if replied_to_text else 0,
     )
 
     result = await _get_llm().generate_reply(
@@ -609,6 +652,8 @@ async def _run_one_ambient_pass(
         model=ambient_model,
         bot_display_name=bot_display_name,
         asker_display_name=asker_for_bundle,
+        replied_to_from=replied_to_from,
+        replied_to_text=replied_to_text,
         # 生成 timeout＝鎖內生成的上限（chat_raw 的 timeout 在 stream_exclusive 取得後才開始算，
         # 天生不含「等鎖排隊」時間）→ 取代外層 watchdog，避免排在 /askai 後面被誤砍。
         timeout=int(_SETTINGS.pass_timeout_seconds),
