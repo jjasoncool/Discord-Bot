@@ -1193,6 +1193,7 @@ class PersonalityCommands(commands.Cog):
             ) -> None:
                 stage_map = {
                     "initializing": "初始化中",
+                    "sweeping": "整理招牌梗記憶中",
                     "grouped": "已完成分組",
                     "preparing": "準備批次資料",
                     "calling_llm": "正在呼叫 LLM",

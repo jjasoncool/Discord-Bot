@@ -7,11 +7,16 @@
 """
 from __future__ import annotations
 
+import asyncio
+import functools
 import logging
+import re
+from datetime import datetime, timezone
 from typing import Optional
 
 import discord
 
+from llm.intro_rag_port import get_pgvector_intro_rag_port
 from llm.lemonade_gate import foreground_recently_active, stream_busy
 from services.llm_service import LLMService
 from services.memory_service import get_memory_service
@@ -105,4 +110,89 @@ async def recall_lines(guild_id: int, user_id: int) -> Optional[list[str]]:
         return svc.format_recall(facts)
     except Exception as exc:
         logger.debug("ambient 記憶召回失敗：%s", exc)
+        return None
+
+
+_ALIAS_SANITIZE_RE = re.compile(r"[<>\[\]{}()\n\r\t`|\\〈-〟＀-／：-＠［-｀｛-･]")
+
+
+def _tag_effective_strength(row: dict, now: datetime) -> float:
+    """招牌梗即時衰減：mention_count × 0.5^(沉默天數/半衰期)。spicy 半衰期更短、淡得快。"""
+    try:
+        count = int(row.get("mention_count", "1") or "1")
+    except ValueError:
+        count = 1
+    days = 0.0
+    try:
+        last_dt = datetime.fromisoformat(row.get("last_seen", ""))
+        days = max(0.0, (now - last_dt).total_seconds() / 86400.0)
+    except Exception:
+        pass
+    halflife = (
+        _SETTINGS.tag_halflife_spicy_days if row.get("sensitivity") == "spicy"
+        else _SETTINGS.tag_halflife_low_days
+    )
+    return count * (0.5 ** (days / max(halflife, 1.0)))
+
+
+async def recall_signature_tags(
+    guild_id: int,
+    participant_ids: list[int],
+    guild: Optional[discord.Guild] = None,
+) -> Optional[list[str]]:
+    """召回在場成員的 trusted 招牌梗（批撈 + 即時衰減 + 三道閘）→ persona_context 行（best-effort）。
+
+    閘：suppressed 永不召回；spicy 在 dark-launch 期間不召回（寫庫但不 callback）；已離開 guild 不召回。
+    """
+    if not participant_ids:
+        return None
+    try:
+        port = get_pgvector_intro_rag_port()
+        loop = asyncio.get_running_loop()
+        rows = await loop.run_in_executor(
+            None,
+            functools.partial(
+                port.list_signature_tags,
+                guild_id=guild_id, author_ids=list(participant_ids), only_trusted=True,
+            ),
+        )
+        if not rows:
+            return None
+        now = datetime.now(timezone.utc)
+        scored: list[tuple] = []
+        for r in rows:
+            if r.get("suppressed") == "1":
+                continue
+            if r.get("sensitivity") == "spicy" and _SETTINGS.tag_spicy_dark_launch:
+                continue  # dark-launch：spicy 寫庫但不召回
+            try:
+                aid = int(r.get("author_id", "0"))
+            except (TypeError, ValueError):
+                aid = 0
+            member = None
+            if guild is not None:
+                member = guild.get_member(aid)
+                if member is None:
+                    continue  # 已離開 guild
+            eff = _tag_effective_strength(r, now)
+            if eff < _SETTINGS.tag_recall_floor:
+                continue
+            scored.append((eff, r, member, aid))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        lines: list[str] = []
+        for _eff, r, member, aid in scored[: _SETTINGS.tag_recall_top_k]:
+            # 現名優先（成員可能改暱稱）；附 #後四碼錨點，與 chat_history / persona card 的
+            # 「顯示名#後四碼」對齊，避免兩個同名成員在場時把 A 的梗安到 B（張冠李戴）。
+            raw_name = (getattr(member, "display_name", None) if member else None) \
+                or r.get("alias") or "某人"
+            name = _ALIAS_SANITIZE_RE.sub("", raw_name)[:20] or "某人"
+            anchor = f"#{str(aid)[-4:]}" if aid else ""
+            note = (
+                "（敏感梗，僅當對方此刻自己又玩到才順勢回扣）"
+                if r.get("sensitivity") == "spicy" else ""
+            )
+            lines.append(f"（{name}{anchor} 的招牌梗）{r.get('tag', '')}{note}")
+        return lines or None
+    except Exception as exc:
+        logger.debug("ambient 招牌梗召回失敗：%s", exc)
         return None

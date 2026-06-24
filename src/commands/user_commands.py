@@ -78,6 +78,51 @@ class StopAllMonitoringView(discord.ui.View):
                 return
         await safe_send_interaction_message(interaction, "您未設定任何監控！", ephemeral=True)
 
+
+class ForgetTagView(discord.ui.View):
+    """讓成員管理自己的招牌梗：選一個 → 軟性收回（不再回扣）或永久封鎖（不再回扣也不再學，留封鎖紀錄）。ephemeral。"""
+
+    def __init__(self, cog: "UserCommands", tags: list):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.selected_doc_id = None
+        options = []
+        for t in tags[:25]:
+            kind = "敏感梗" if t.get("sensitivity") == "spicy" else "一般梗"
+            already = "・已收回" if t.get("suppressed") == "1" else ""
+            options.append(discord.SelectOption(
+                label=(t.get("tag") or "?")[:80],
+                value=t.get("doc_id") or "-",
+                description=f"{kind}・被提及 {t.get('mention_count', '?')} 次{already}"[:100],
+            ))
+        self.tag_select = discord.ui.Select(
+            placeholder="選一個要處理的招牌梗…",
+            options=options, min_values=1, max_values=1,
+        )
+        self.tag_select.callback = self._on_select
+        self.add_item(self.tag_select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        self.selected_doc_id = self.tag_select.values[0]
+        await interaction.response.edit_message(
+            content=(
+                "已選好。請按下方按鈕決定怎麼處理：\n"
+                "・**停止回扣（軟性）**：我以後不再拿這個虧你，但紀錄還留著。\n"
+                "・**永久封鎖＋禁止再學（硬性）**：以後不再回扣、也不再學這個梗"
+                "（保留一筆封鎖紀錄，不會真的抹除原文）。"
+            ),
+            view=self,
+        )
+
+    @discord.ui.button(label="停止回扣（軟性）", style=discord.ButtonStyle.secondary)
+    async def suppress_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog._apply_forget_tag(interaction, self.selected_doc_id, blacklist=False)
+
+    @discord.ui.button(label="永久封鎖＋禁止再學", style=discord.ButtonStyle.danger)
+    async def block_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog._apply_forget_tag(interaction, self.selected_doc_id, blacklist=True)
+
+
 def load_monitored_channels():
     """從檔案中讀取監控設定"""
     global monitored_channels
@@ -508,6 +553,79 @@ class UserCommands(commands.Cog):
             color=discord.Color.greyple()
         )
         await safe_send_interaction_message(interaction, embed=embed, view=action_view, ephemeral=True)
+
+    @app_commands.command(
+        name="forget_tag",
+        description="管理機器人記住你的『招牌梗』：停止被回扣，或永久封鎖並禁止再學",
+    )
+    async def forget_tag_cmd(self, interaction: discord.Interaction):
+        """斜線命令：讓成員 opt-out 自己的招牌梗（只能管理自己的）。"""
+        logger.info(f'收到來自 {interaction.user} 的 /forget_tag 斜線命令')
+        if not await self._check_guild_and_owner(interaction, owner_only=False):
+            return
+        import asyncio
+        import functools
+        from llm.intro_rag_port import get_pgvector_intro_rag_port
+        port = get_pgvector_intro_rag_port()
+        loop = asyncio.get_running_loop()
+        try:
+            tags = await loop.run_in_executor(None, functools.partial(
+                port.list_signature_tags,
+                guild_id=interaction.guild.id, author_id=interaction.user.id,
+            ))
+        except Exception as exc:
+            logger.warning("forget_tag 撈取失敗：%s", exc)
+            tags = []
+        # 已封鎖的不再列出（已處理完）
+        tags = [t for t in tags if t.get("blacklisted") != "1"]
+        if not tags:
+            await safe_send_interaction_message(
+                interaction, "你目前沒有被我記住的招牌梗（或都已封鎖）。", ephemeral=True,
+            )
+            return
+        view = ForgetTagView(self, tags)
+        await safe_send_interaction_message(
+            interaction,
+            "這些是我記住、閒聊時可能會回扣你的『招牌梗』。選一個來處理：",
+            view=view, ephemeral=True,
+        )
+
+    async def _apply_forget_tag(
+        self, interaction: discord.Interaction, doc_id, *, blacklist: bool,
+    ):
+        """套用 opt-out。硬驗證 doc_id 屬本人（防偽造 component value）後才改旗標。"""
+        if not doc_id or doc_id == "-":
+            await interaction.response.send_message(
+                "請先從上面的選單選一個招牌梗。", ephemeral=True,
+            )
+            return
+        # doc_id 格式：signature_tag:{guild}:{author}:{hash}，第三段必須等於本人
+        parts = str(doc_id).split(":")
+        if len(parts) != 4 or parts[0] != "signature_tag" or parts[2] != str(interaction.user.id):
+            await interaction.response.send_message(
+                "這不是你的招牌梗，無法處理。", ephemeral=True,
+            )
+            return
+        await interaction.response.defer()
+        import asyncio
+        import functools
+        from llm.intro_rag_port import get_pgvector_intro_rag_port
+        port = get_pgvector_intro_rag_port()
+        loop = asyncio.get_running_loop()
+        ok = await loop.run_in_executor(None, functools.partial(
+            port.set_signature_tag_flags,
+            doc_id=doc_id,
+            suppressed=True,
+            blacklisted=True if blacklist else None,
+        ))
+        if ok:
+            msg = (
+                "已永久封鎖：之後不會再回扣，也不會再學這個梗。"
+                if blacklist else "好，我之後不會再拿這個虧你了。"
+            )
+        else:
+            msg = "處理失敗或找不到該梗，請稍後再試。"
+        await interaction.edit_original_response(content=msg, view=None)
 
     async def get_user_item_prices(self, user_id: int, guild: discord.Guild = None) -> dict:
         """根據用戶 ID 獲取物品價格資訊"""

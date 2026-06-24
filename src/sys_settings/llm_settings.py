@@ -302,6 +302,20 @@ class AmbientChatSettings(BaseSettings):
     memory_flush_interval_seconds: float = 180.0  # 背景排程多久檢查一次是否該 flush（閒置才真的跑）
     memory_buffer_max: int = 300         # 記憶緩衝上限，超過丟最舊
 
+    # ── 招牌梗 signature_tag（持久印象層；corroboration + 慢衰減；與 preference_fact 平行）──
+    tag_extractor_prompt_path: str = "/app/settings/prompts/signature_tag_extractor_prompt.txt"
+    tag_min_confidence: float = 0.7        # 比偏好嚴
+    tag_promote_at_low: int = 3            # low（外號/口頭禪）升 trusted 門檻
+    tag_promote_at_spicy: int = 5          # spicy（身材/調情）門檻更高；本人認領由守門階段保證，計數同樣每日去重
+    tag_count_cap: int = 6                 # mention_count 上限（耐久靠半衰期、不靠刷 count）
+    tag_recall_top_k: int = 4
+    tag_halflife_low_days: float = 45.0
+    tag_halflife_spicy_days: float = 20.0  # 敏感梗更快淡出
+    tag_recall_floor: float = 0.75         # 召回時 effective 強度門檻
+    tag_demote_floor: float = 0.4          # 低於此 → trusted 降 tentative
+    tag_archive_floor: float = 0.15        # 低於此 → 封存（delete）
+    tag_spicy_dark_launch: bool = True     # spicy 升級先寫庫、停 callback、只 log 人工抽看
+
     # ── debug 觀測（debug 完可關 debug_log）──
     debug_log: bool = True               # 把每次插話的完整 prompt 寫進檔案
     debug_prompt_log_path: str = "/logs/ambient_prompt.txt"

@@ -72,11 +72,28 @@ class MemoryService:
         return await ingest_preferences(guild_id=guild_id, candidates=candidates)
 
     async def observe(self, *, guild_id: int, messages: list[dict], model: str) -> dict:
-        """一步到位：抽取 + 寫入（功能二背景沉澱主入口）。"""
+        """一步到位：抽取 + 寫入（功能二背景沉澱主入口）。
+
+        並排跑兩條獨立抽取：偏好事實（preference_fact）+ 招牌梗（signature_tag）。
+        回傳偏好 stats（維持 maybe_flush 加總相容）；招牌梗自行 log 自己的 stats。
+        """
         from llm.preference_extractor import process_message_batch
-        return await process_message_batch(
+        pref_stats = await process_message_batch(
             guild_id=guild_id, messages=messages, model=model
         )
+        # 招牌梗抽取又是一段 26B 生成：偏好段跑完後再判一次前景閘，若 /askai 此刻已來就讓位
+        # （本批 tag 延後，靠後續 flush 補；避免多排一段背景生成擋在前景前面）。
+        try:
+            from llm.lemonade_gate import foreground_recently_active, stream_busy
+            from sys_settings.llm_settings import AmbientChatSettings
+            if stream_busy() or foreground_recently_active(AmbientChatSettings().askai_grace_seconds):
+                logger.info("signature_tag 抽取讓位前景（stream 忙或 /askai 近期活躍），本批延後")
+            else:
+                from llm.signature_tag_extractor import process_tag_batch
+                await process_tag_batch(guild_id=guild_id, messages=messages, model=model)
+        except Exception as exc:
+            logger.warning("signature_tag 批次失敗（不影響偏好抽取）：%s", exc, exc_info=True)
+        return pref_stats
 
     # ── 治理 ────────────────────────────────────────────────────────
     async def forget(self, *, doc_id: str) -> None:

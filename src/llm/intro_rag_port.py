@@ -545,6 +545,265 @@ class PgVectorIntroRAGPort:
         """刪除一筆 preference_fact（管理用：刪錯 / 禁記）。同步，呼叫端自行包 executor。"""
         self._delete_existing_doc(doc_id=doc_id)
 
+    # ── 功能二記憶：招牌梗 signature_tag（持久印象層；corroboration + 慢衰減）─────────
+    # 與 preference_fact 同表同形（profile_kind='signature_tag'），但治理更硬：歸屬必須是程式碼
+    # 驗證過的真實 sender、spicy 非對稱門檻、本人可 opt-out。與 preference_fact 平行維護（刻意
+    # 不共用 SQL：本層 list 多了 author_ids=ANY 批撈與多個治理欄，硬合併反而易漂移）。
+
+    @staticmethod
+    def _signature_tag_doc_id(guild_id: int, author_id: int, tag_key: str) -> str:
+        """同一個梗（同 tag_key）→ 同 doc_id → app 層 replace。author_id 必為驗證過的真實梗本人。"""
+        key_hash = hashlib.sha1(
+            f"{guild_id}:{author_id}:{tag_key}".encode("utf-8")
+        ).hexdigest()[:12]
+        return f"signature_tag:{guild_id}:{author_id}:{key_hash}"
+
+    # 結構符號黑名單：半形/全形括號、引號、分隔、標點、控制字元——一律剝除，避免在 prompt 內偽造結構。
+    # 〈-〟 蓋 〈〉《》「」『』【】〔〕…；＀-／、：-＠、［-｀、｛-･ 蓋全形標點/括號。
+    _STRUCT_CHARS_RE = re.compile(
+        r"[<>\[\]{}()\n\r\t`|/\\:;，。、；：！？!?～~　"
+        r"〈-〟＀-／：-＠［-｀｛-･]"
+    )
+    # 指令類關鍵詞（容忍夾雜空白；ignore previous 不論有無空白都吃）。
+    _INSTR_RE = re.compile(
+        r"(?i)system|assistant|ignore\s*previous|instruction|prompt|系\s*統\s*提\s*示|指\s*令|忽\s*略\s*前",
+    )
+
+    @classmethod
+    def _normalize_tag_text(cls, text: str) -> str:
+        """招牌梗正文硬約束：剝離偽結構符號／換行／指令類關鍵詞、≤20 字。短結構化梗本身抗注入。"""
+        if not text:
+            return ""
+        t = cls._STRUCT_CHARS_RE.sub("", text.strip())
+        t = cls._INSTR_RE.sub("", t)
+        return re.sub(r"\s+", " ", t).strip()[:20]
+
+    async def index_signature_tag(
+        self,
+        *,
+        guild_id: int,
+        author_id: int,
+        alias: str,
+        tag: str,
+        tag_key: str,
+        tag_kind: str,
+        sensitivity: str,
+        self_claimed: str,
+        confidence: float,
+        status: str,
+        mention_count: int,
+        first_seen: str,
+        last_seen: str,
+        last_corroborated_day: str = "",
+        suppressed: str = "0",
+        blacklisted: str = "0",
+    ) -> str | None:
+        """寫入/更新一筆招牌梗。回傳 doc_id（失敗回 None）。同 tag_key 重送＝replace。
+
+        sensitivity: 'low'（外號/口頭禪）| 'spicy'（身材/調情玩笑，非對稱高門檻+短半衰期）。
+        去重以 last_corroborated_day（UTC 日）為準：同一天再被提到不重複計 mention_count。
+        """
+        if not self._dependencies_ready():
+            return None
+        try:
+            doc_id = self._signature_tag_doc_id(guild_id, author_id, tag_key)
+            safe_tag = self._normalize_tag_text(tag)
+            text = (
+                f"[Signature Tag]\n"
+                f"alias: {alias or '-'}\n"
+                f"kind: {tag_kind or '-'}\n"
+                f"tag: {safe_tag or '-'}"
+            )
+            metadata = {
+                "doc_type": "member_profile",
+                "profile_kind": "signature_tag",
+                "guild_id": str(guild_id),
+                "author_id": str(author_id),
+                "alias": alias or "",
+                "doc_id": doc_id,
+                "tag": safe_tag or "",
+                "tag_key": tag_key or "",
+                "tag_kind": tag_kind or "",
+                "sensitivity": sensitivity or "low",
+                "self_claimed": "1" if str(self_claimed) in ("1", "True", "true") else "0",
+                "suppressed": str(suppressed),
+                "blacklisted": str(blacklisted),
+                "confidence": f"{float(confidence):.2f}",
+                "status": status or "tentative",
+                "mention_count": str(int(mention_count)),
+                "first_seen": first_seen or "",
+                "last_seen": last_seen or "",
+                "last_corroborated_day": last_corroborated_day or "",
+            }
+            await self._ainsert(doc_id=doc_id, text=text, metadata=metadata)
+            return doc_id
+        except Exception as exc:
+            logger.error("寫入 signature_tag 至 pgvector 失敗: %s", exc, exc_info=True)
+            return None
+
+    def list_signature_tags(
+        self,
+        *,
+        guild_id: int,
+        author_id: int | None = None,
+        author_ids: list[int] | None = None,
+        only_trusted: bool = False,
+    ) -> list[dict[str, str]]:
+        """撈 signature_tag（升等比對 / 召回 / 衰減 sweep）。支援 author_ids 批撈（=ANY，修 N+1）。"""
+        table = self._get_physical_table_name()
+        conditions = [
+            "metadata_->>'profile_kind' = 'signature_tag'",
+            "metadata_->>'guild_id' = %s",
+        ]
+        params: list = [str(guild_id)]
+        if author_ids:
+            conditions.append("metadata_->>'author_id' = ANY(%s)")
+            params.append([str(a) for a in author_ids])
+        elif author_id is not None:
+            conditions.append("metadata_->>'author_id' = %s")
+            params.append(str(author_id))
+        if only_trusted:
+            conditions.append("metadata_->>'status' = 'trusted'")
+        where = " AND ".join(conditions)
+        cols = (
+            "doc_id", "author_id", "alias", "tag", "tag_key", "tag_kind",
+            "sensitivity", "self_claimed", "suppressed", "blacklisted",
+            "confidence", "status", "mention_count", "first_seen", "last_seen",
+            "last_corroborated_day",
+        )
+        select_cols = ", ".join(f"metadata_->>'{c}'" for c in cols)
+        rows: list[dict[str, str]] = []
+        try:
+            with self._get_db_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"SELECT {select_cols} FROM {table} WHERE {where};", params)
+                    for record in cur.fetchall():
+                        rows.append({c: (record[i] or "") for i, c in enumerate(cols)})
+        except Exception as exc:
+            logger.error("查詢 signature_tag 失敗: %s", exc, exc_info=True)
+        return rows
+
+    def delete_signature_tag(self, *, doc_id: str) -> None:
+        """刪除一筆 signature_tag（封存 / 本人 forget）。同步，呼叫端自行包 executor。"""
+        self._delete_existing_doc(doc_id=doc_id)
+
+    def sweep_signature_tags(
+        self,
+        *,
+        guild_id: int,
+        halflife_low_days: float,
+        halflife_spicy_days: float,
+        demote_floor: float,
+        archive_floor: float,
+    ) -> dict[str, int]:
+        """招牌梗衰減 sweep（單一 transaction、純 metadata UPDATE/DELETE、**不重嵌入**）。
+
+        effective = mention_count × 0.5^(沉默天數/半衰期)，spicy 用較短半衰期、淡得快：
+          - effective < archive_floor      → 直接刪（GC 死梗）
+          - trusted 且 < demote_floor       → 降回 tentative（不再被 only_trusted 召回）
+        suppressed / blacklisted 一律不動（屬本人治理紀錄，GC 不得碰；blacklisted 留作禁學墓碑）。
+        回傳 {scanned, demoted, archived}。
+        """
+        from datetime import datetime, timezone
+
+        rows = self.list_signature_tags(guild_id=guild_id)
+        if not rows:
+            return {"scanned": 0, "demoted": 0, "archived": 0}
+        now = datetime.now(timezone.utc)
+        demote_ids: list[str] = []
+        archive_ids: list[str] = []
+        for r in rows:
+            if r.get("suppressed") == "1" or r.get("blacklisted") == "1":
+                continue
+            try:
+                count = int(r.get("mention_count", "1") or "1")
+            except ValueError:
+                count = 1
+            days = 0.0
+            try:
+                last_dt = datetime.fromisoformat(r.get("last_seen", ""))
+                days = max(0.0, (now - last_dt).total_seconds() / 86400.0)
+            except Exception:
+                pass
+            halflife = (
+                halflife_spicy_days if r.get("sensitivity") == "spicy" else halflife_low_days
+            )
+            eff = count * (0.5 ** (days / max(halflife, 1.0)))
+            doc_id = r.get("doc_id") or ""
+            if not doc_id:
+                continue
+            if eff < archive_floor:
+                archive_ids.append(doc_id)
+            elif r.get("status") == "trusted" and eff < demote_floor:
+                demote_ids.append(doc_id)
+        if not demote_ids and not archive_ids:
+            return {"scanned": len(rows), "demoted": 0, "archived": 0}
+        table = self._get_physical_table_name()
+        try:
+            with self._get_db_conn() as conn:
+                with conn.cursor() as cur:
+                    if archive_ids:
+                        cur.execute(
+                            f"DELETE FROM {table} WHERE metadata_->>'doc_id' = ANY(%s);",
+                            (archive_ids,),
+                        )
+                    if demote_ids:
+                        cur.execute(
+                            f"""
+                            UPDATE {table}
+                            SET metadata_ = jsonb_set(
+                                metadata_::jsonb, '{{status}}', '"tentative"'::jsonb
+                            )::json
+                            WHERE metadata_->>'doc_id' = ANY(%s);
+                            """,
+                            (demote_ids,),
+                        )
+        except Exception as exc:
+            logger.error("signature_tag sweep 失敗 guild=%s: %s", guild_id, exc, exc_info=True)
+            return {"scanned": len(rows), "demoted": 0, "archived": 0}
+        return {"scanned": len(rows), "demoted": len(demote_ids), "archived": len(archive_ids)}
+
+    def set_signature_tag_flags(
+        self,
+        *,
+        doc_id: str,
+        suppressed: bool | None = None,
+        blacklisted: bool | None = None,
+    ) -> bool:
+        """本人 opt-out：設 suppressed/blacklisted 旗標（純 metadata UPDATE、不重嵌入）。
+
+        suppressed=軟性收回（不再 callback，仍留庫）；blacklisted=永久封鎖（連同 suppress，且禁止
+        再學）。回傳是否有更新到列（doc_id 不存在 → False）。
+        """
+        import json as _json
+
+        updates: dict[str, str] = {}
+        if suppressed is not None:
+            updates["suppressed"] = "1" if suppressed else "0"
+        if blacklisted is not None:
+            updates["blacklisted"] = "1" if blacklisted else "0"
+        if not updates:
+            return False
+        expr = "metadata_::jsonb"
+        params: list = []
+        for k, v in updates.items():
+            expr = f"jsonb_set({expr}, '{{{k}}}', %s::jsonb)"
+            params.append(_json.dumps(v))  # → '"1"'，cast 成 jsonb 字串值
+        params.append(doc_id)
+        table = self._get_physical_table_name()
+        try:
+            with self._get_db_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"UPDATE {table} SET metadata_ = ({expr})::json "
+                        f"WHERE metadata_->>'doc_id' = %s;",
+                        params,
+                    )
+                    return cur.rowcount > 0
+        except Exception as exc:
+            logger.error("set_signature_tag_flags 失敗 doc_id=%s: %s", doc_id, exc, exc_info=True)
+            return False
+
 
 # --- module-level singleton ---
 # 為什麼：原本每個呼叫端 (`personality_extractor`, `management_commands`)

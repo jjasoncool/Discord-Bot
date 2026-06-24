@@ -33,7 +33,7 @@ from typing import Optional
 import discord
 
 from llm.ai_interactions_store import record_interaction
-from llm.ambient_memory import enqueue_for_memory, recall_lines
+from llm.ambient_memory import enqueue_for_memory, recall_lines, recall_signature_tags
 from llm.emoji_text_utils import is_emoji_or_symbol_only, replace_custom_emoji_with_description
 from llm.lemonade_gate import foreground_recently_active, stream_busy
 from llm.logger_factory import get_or_create_file_logger
@@ -586,7 +586,11 @@ async def _run_one_ambient_pass(
     persona_cards = await _build_persona_context(message, retrieval_query, participant_ids)
     # Phase C：召回發話者的 trusted 偏好事實（best-effort）
     memory_lines = await recall_lines(message.guild.id, message.author.id)
-    persona_context = ((persona_cards or []) + (memory_lines or [])) or None
+    # 招牌梗：召回在場成員的 trusted 標籤（衰減+三道閘；spicy 在 dark-launch 期間不召回）
+    tag_lines = await recall_signature_tags(message.guild.id, participant_ids, message.guild)
+    persona_context = (
+        (persona_cards or []) + (memory_lines or []) + (tag_lines or [])
+    ) or None
 
     # debug 摘要（discord_bot.log）：一眼看出三層 context 各抓到幾筆 + 有沒有圖
     logger.info(
