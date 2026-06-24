@@ -478,6 +478,39 @@ class LLMCommands(commands.Cog):
         if web_task is not None:
             try:
                 outcome = await web_task
+                # 窄路由（news / 限定 categories / 限時）查 0 筆時，改用 general 引擎、
+                # 去掉 categories/time_range 再撈一次。news engines 對空泛 query
+                # （如「最近重點新聞」）常 0 筆，general 引擎覆蓋廣得多。
+                # 僅在「真的 0 筆且非錯誤」時 fallback：timeout / http error 代表
+                # SearXNG 本身異常，重試無益；本來就是 general 無限時的就不重撈。
+                primary_narrow = (
+                    intent.categories is not None or intent.time_range is not None
+                )
+                if (
+                    not outcome.results
+                    and outcome.meta.get("error") is None
+                    and primary_narrow
+                ):
+                    logger.info(
+                        "/askai web fallback: 主搜 0 筆，改 general 引擎重試 (query=%s)",
+                        search_query[:80],
+                    )
+                    fallback_outcome = await llm.fetch_web_results(
+                        search_query,
+                        settings=WEB_SETTINGS,
+                        engines=None,      # → default_engines（general，覆蓋廣）
+                        categories=None,   # 不限類別
+                        time_range=None,   # 不限時間窗
+                        language=intent.language,
+                        logger_override=logger,
+                    )
+                    web_meta["fallback"] = {
+                        "attempted": True,
+                        "result_count": len(fallback_outcome.results),
+                        "error": fallback_outcome.meta.get("error"),
+                    }
+                    if fallback_outcome.results:
+                        outcome = fallback_outcome  # 採用 fallback（含其 meta）
                 web_meta.update(outcome.meta)
                 if outcome.results:
                     web_context = llm.format_web_context_lines(outcome.results)

@@ -1096,3 +1096,40 @@ last_confirmed: 2026-06-20
 **待驗證（部署後）：** ① 單一歌單／舊 `default_playlist_url`：按「編輯歌單」直接重載、不彈清單；② 填多個歌單：按「編輯歌單」彈出 ephemeral 多選清單，預設全勾合併；③ 清單勾單一個只播該歌單、勾多個合併；④ 沒填 name 時清單顯示 YouTube 歌單標題；⑤ 抓取失敗保留舊歌單；⑥ 重啟後沿用上次選擇；⑦ 編輯設定檔新增歌單後，按「編輯歌單」即出現新歌單（免重啟）。
 
 **待 user 提供：** 把第二條（含以後更多）歌單連結填進 `playlist_url`（名稱可不填）。
+
+---
+
+## 待決議題：/askai 空泛新聞 query 搜不到（2026-06-25）
+
+<!-- @meta
+id: askai-vague-news-query
+type: FEATURE
+status: implemented_pending_verify
+last_confirmed: 2026-06-25
+-->
+
+**現象：** 使用者問「幫我查詢最近重點新聞」，bot 回「我查不到什麼最新的即時新聞」，看似沒搜尋網頁。
+
+**診斷（已定案）：** 其實有搜。`should_search()` 正確 HARD 觸發（命中 查詢/新聞 → `categories=news, time_range=week`），清理後 query=`最近重點新聞`，SearXNG 也打了 news 引擎，但 **回 0 筆**（log：`SearXNG ok: 0 results ... query=最近重點新聞`）。0 筆 → `web_context=None`（`llm_commands.py` 約 482）→ prompt 不放 `<web_context>` 區塊（`llm_service.py:296` `if web_context:` 為假）→ 模型照 system prompt「空就老實說查不到」規則回應。根因：query 無主題錨字 + news 引擎 + week，三者最差組合。
+
+**「具體化」要先分兩種情況：** ① 真・無主題（只是要頭條）；② 有潛在主題但沒講明（本次 chat_history 整串在聊世界盃，故「最近重點新聞」很可能想問世界盃戰況）。
+
+**三條路線：**
+- A. 規則式改寫（零模型，改 `intent.py`）：偵測無錨字新聞 meta 請求，補時間/地區錨點。收益薄，regex 無法無中生有主題。
+- B. 0 筆 fallback 換引擎（零模型，改 `llm_commands.py`）：news 回 0 → 改 general 引擎（`google,bing,duckduckgo,brave`）＋去 time_range 重試一次。依據：log 中 general 引擎幾乎都穩定回 5 筆。只在失敗時觸發、happy path 零延遲。**AI 建議底線方案。**
+- C. LLM 改寫（真・具體化，新模組，可吃 chat_history 推斷潛在主題，例如本次可改成「世界盃足球 最新賽果」）：最強但多一趟模型（Lemonade 單流互斥，須共用已載入 gemma 避免換模型 ping-pong）、有幻覺主題風險、破壞 intent.py 零依賴哲學。**選配升級。**
+
+**AI 建議：** 先做 B 當底線，C 當選配；A 不單獨做（頂多併進 B 的 fallback query）。
+
+**已定案：採路線 B 並實作（2026-06-25）。**
+
+**變更：** `src/commands/llm_commands.py`（回收 web_task 處，約 480 行）。
+- 主搜回 0 筆、且 `outcome.meta.error is None`、且為窄路由（`intent.categories` 或 `intent.time_range` 非 None）時，自動再打一次 `fetch_web_results`：`engines=None`（→ `default_engines` general）、`categories=None`、`time_range=None`，language 沿用。
+- 有結果才用 fallback outcome（含其 meta）；無結果維持原 0 筆。
+- `web_meta["fallback"] = {attempted, result_count, error}` 供 debug。
+- 不重撈的情況：① 有 error（timeout/http，SearXNG 本身異常）；② 主搜本就 general 無限時（`primary_narrow` 為 False），重撈無益。
+- 未動 `intent.py`；intent 單元測試（隔離載入）全數通過。
+
+**待驗證（部署後）：** ① 下「幫我查詢最近重點新聞」應看到 log `web fallback: 主搜 0 筆，改 general 引擎重試`，且第二次回非 0 → prompt 出現 `<web_context>`；② 有主題的新聞 query（如世界盃）主搜就命中、不應觸發 fallback；③ SearXNG timeout 時不應重撈（log 無 fallback 行）。
+
+**未採用：** 路線 C（LLM/context-aware 改寫）保留為日後選配升級。
