@@ -4,7 +4,11 @@
 """
 
 from .tokenization import tokenize_for_retrieval
-from .context_retriever import retrieve_discord_context, retrieve_rag_context, retrieve_rag_context_sync
+from .context_retriever import (
+    retrieve_discord_context,
+    retrieve_rag_context_sync,
+    search_chat,
+)
 from .prompt_builder import build_askai_prompt_log
 from .persona_card_builder import build_persona_cards, extract_mentioned_user_ids
 from .retrievers.web import (
@@ -21,8 +25,8 @@ from .retrievers.web import (
 __all__ = [
     "tokenize_for_retrieval",
     "retrieve_discord_context",
-    "retrieve_rag_context",
     "retrieve_rag_context_sync",
+    "search_chat",
     "build_askai_prompt_log",
     "build_persona_cards",
     "extract_mentioned_user_ids",

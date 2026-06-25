@@ -24,9 +24,11 @@ import asyncio
 import base64
 import functools
 import logging
+import math
 import random
+import re
 import time
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -34,10 +36,15 @@ import discord
 
 from llm.ai_interactions_store import record_interaction
 from llm.ambient_memory import enqueue_for_memory, recall_lines, recall_signature_tags
-from llm.emoji_text_utils import is_emoji_or_symbol_only, replace_custom_emoji_with_description
+from llm.chat_line import (
+    fetch_recent_lines,
+    format_chat_line,
+    name_with_anchor,
+    semantic_message_text,
+)
+from llm.emoji_text_utils import is_emoji_or_symbol_only
 from llm.lemonade_gate import foreground_recently_active, stream_busy
 from llm.logger_factory import get_or_create_file_logger
-from llm.sticker_cache import get_sticker_text
 from services.llm_service import LLMService
 from sys_settings.llm_settings import AmbientChatSettings
 from utils.utils import ChannelConfig
@@ -185,29 +192,6 @@ def _note_sent(tracker: dict) -> None:
     tracker["hour_count"] += 1
 
 
-def _name_with_anchor(author) -> str:
-    """顯示名稱 + #XXXX（user_id 後四碼），跟 persona card 標題對齊，穩定分辨同名/相似的人。"""
-    name = getattr(author, "display_name", None) or author.name
-    uid = str(getattr(author, "id", "") or "")
-    short = uid[-4:] if len(uid) >= 4 else ""
-    return f"{name}#{short}" if short else name
-
-
-def _semantic_msg_text(msg: discord.Message) -> str:
-    """訊息文字 + 語意化自訂表情（<:name:id>→:描述:）+ 貼圖描述。
-
-    跟 /askai（chat_persistence._build_persist_text）同一套，讓插話/日記也讀得懂貼圖與
-    自訂 emoji——否則只看到 <:name:id> 代碼，且純貼圖（無文字）訊息會被當空訊息整則跳過。
-    """
-    text = replace_custom_emoji_with_description((msg.content or "").strip())
-    if msg.stickers:
-        parts = [s for s in (get_sticker_text(st) for st in msg.stickers) if s]
-        if parts:
-            sticker_part = " ".join(parts)
-            text = f"{text} {sticker_part}" if text else sticker_part
-    return text
-
-
 async def _fetch_recent(
     message: discord.Message,
 ) -> tuple[Optional[list[str]], list[int]]:
@@ -215,25 +199,15 @@ async def _fetch_recent(
 
     對話脈絡含機器人自己的話以維持連續性；participant_ids 只收非 bot，給 persona 召回用。
     """
-    collected: list[str] = []
-    participant_ids: list[int] = []
-    try:
-        async for msg in message.channel.history(
-            limit=_SETTINGS.history_limit, before=message
-        ):
-            if not msg.author.bot and msg.author.id not in participant_ids:
-                participant_ids.append(msg.author.id)
-            text = _semantic_msg_text(msg)
-            if not text:
-                continue
-            name = _name_with_anchor(msg.author)
-            if len(text) > 200:
-                text = text[:200] + "…"
-            ts = msg.created_at.astimezone(_TAIPEI_TZ).strftime("%H:%M")
-            collected.append(f"[{ts}] {name}: {text}")
-    except Exception as exc:
-        logger.debug("ambient 抓取頻道歷史失敗：%s", exc)
-    collected.reverse()
+    collected, participant_ids = await fetch_recent_lines(
+        message.channel,
+        tz=_TAIPEI_TZ,
+        limit=_SETTINGS.history_limit,
+        before=message,
+        max_len=200,
+        collect_participant_ids=True,
+        on_error=lambda exc: logger.debug("ambient 抓取頻道歷史失敗：%s", exc),
+    )
     if message.author.id not in participant_ids:
         participant_ids.append(message.author.id)
     return (collected or None, participant_ids)
@@ -299,6 +273,147 @@ async def _build_persona_context(
 
     _PERSONA_CACHE[message.channel.id] = (now, persona_context)
     return persona_context
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase D（實驗，預設關）：chat 歷史 callback
+# 撈「這個頻道」過去語意相關的舊訊息，relevance×importance×recency 三因子 gate 後，
+# 當「模糊印象」折進 persona_context。研究依據：Generative Agents 的 recency/importance/
+# relevance 檢索 + episodic/semantic 之分（避免精確複述瑣事＝避免 uncanny）。
+# importance 不另算，接 raw_message_store 已收集、沒人讀的 reaction salience。
+# ─────────────────────────────────────────────────────────────────────────────
+def _minmax(values: list[float]) -> list[float]:
+    """min-max 正規化到 [0,1]；全相同回 0.5（中性，不讓單因子主導）。"""
+    if not values:
+        return []
+    lo, hi = min(values), max(values)
+    if hi - lo < 1e-9:
+        return [0.5 for _ in values]
+    return [(v - lo) / (hi - lo) for v in values]
+
+
+def _callback_heuristic_salience(text: str) -> float:
+    """便宜的 salience 先驗（給沒 reaction 的訊息兜底）→ [0,1]。長度 + 問號 + 連結/實體感。"""
+    t = (text or "").strip()
+    if not t:
+        return 0.0
+    score = min(len(t) / 80.0, 1.0) * 0.5
+    if "?" in t or "？" in t:
+        score += 0.25
+    if re.search(r"https?://|@\w|[A-Za-z0-9]{4,}", t):
+        score += 0.25
+    return min(score, 1.0)
+
+
+def _callback_age_hours(ts_str: Optional[str], now: datetime) -> Optional[float]:
+    """ISO 時間字串 → 距今小時數；解析失敗回 None。"""
+    if not ts_str:
+        return None
+    try:
+        return max(0.0, (now - datetime.fromisoformat(ts_str)).total_seconds() / 3600.0)
+    except Exception:
+        return None
+
+
+async def _build_chat_callback_context(
+    message: discord.Message, query: str
+) -> Optional[list[str]]:
+    """Phase D：撈本頻道語意相關舊訊息，三因子 gate 後回「模糊印象」行（或 None）。
+
+    gate：① 絕對相關性地板 + ② 品質閘 → 算 relevance×importance×recency 合併分 →
+    ③ 高合併門檻 + ④ 小 N。撈不到夠格的就 None（多數情況）。預設關（callback_enabled）。
+    重模組（search_chat / raw_message_store）在此 lazy import——flag 關時零載入。
+    """
+    if not _SETTINGS.callback_enabled or not query or message.guild is None:
+        return None
+
+    from llm.context_retriever import search_chat
+    from llm.raw_message_store import get_reaction_salience
+
+    now = datetime.now(timezone.utc)
+    # ⑤ 排除近窗：只取比 (now - gap) 更舊的（chat metadata timestamp 為 isoformat，+00:00）
+    before_ts = (now - timedelta(hours=_SETTINGS.callback_recency_gap_hours)).isoformat()
+
+    try:
+        loop = asyncio.get_running_loop()
+        candidates = await loop.run_in_executor(
+            None,
+            functools.partial(
+                search_chat,
+                question=query,
+                limit=_SETTINGS.callback_candidate_pool,
+                logger=logger,
+                candidate_ids=None,                   # 全庫
+                channel_id=str(message.channel.id),   # 收斂本頻道（chat 無 guild_id）
+                before_timestamp=before_ts,
+                return_meta=True,
+            ),
+        )
+    except Exception as exc:
+        logger.debug("ambient chat callback 檢索失敗：%s", exc)
+        return None
+    if not candidates:
+        return None
+
+    # ① 絕對相關性地板 + ② 品質閘
+    survivors: list[dict] = []
+    for c in candidates:
+        dist = c.get("distance")
+        text = (c.get("text") or "").strip()
+        if dist is None or dist > _SETTINGS.callback_max_distance:
+            continue
+        if len(text) < _SETTINGS.callback_min_chars:
+            continue
+        if is_emoji_or_symbol_only(text) or _is_link_only(text):
+            continue
+        survivors.append({**c, "text": text})
+    if not survivors:
+        return None
+
+    # salience：reactions（主，接 raw_message_store）+ heuristic（兜底）
+    try:
+        reactions = await loop.run_in_executor(
+            None,
+            functools.partial(get_reaction_salience, [c["message_id"] for c in survivors]),
+        )
+    except Exception as exc:
+        logger.debug("ambient callback salience 讀取失敗：%s", exc)
+        reactions = {}
+
+    half_life = max(1.0, _SETTINGS.callback_recency_half_life_hours)
+    rel_raw, imp_raw, rec_raw = [], [], []
+    for c in survivors:
+        rel_raw.append(max(0.0, 1.0 - (c["distance"] / 2.0)))          # cosine 距離→相似度
+        react_score = 1.0 - math.exp(-reactions.get(c["message_id"], 0) / 2.0)
+        imp_raw.append(0.7 * react_score + 0.3 * _callback_heuristic_salience(c["text"]))
+        age_h = _callback_age_hours(c.get("timestamp"), now)
+        rec_raw.append(0.5 ** (age_h / half_life) if age_h is not None else 0.0)
+
+    rel, imp, rec = _minmax(rel_raw), _minmax(imp_raw), _minmax(rec_raw)
+    wr, wi, wc = (
+        _SETTINGS.callback_w_relevance,
+        _SETTINGS.callback_w_importance,
+        _SETTINGS.callback_w_recency,
+    )
+    scored = sorted(
+        ((wr * rel[i] + wi * imp[i] + wc * rec[i], c) for i, c in enumerate(survivors)),
+        key=lambda x: x[0],
+        reverse=True,
+    )
+
+    lines: list[str] = []
+    for score, c in scored:
+        if score < _SETTINGS.callback_min_score:
+            break  # 已排序，後面只更低
+        gist = " ".join(c["text"].split())[: _SETTINGS.callback_line_max_chars]
+        # 模糊框架：當「依稀印象」、不逐字、不報時間數字、不貼切可忽略（消 uncanny precision）
+        lines.append(
+            f"（依稀記得這頻道之前聊過類似的：「{gist}」——不確定細節，只有自然貼切時才順帶一提，"
+            f"用「好像/之前是不是」這種試探語氣，別精確複述）"
+        )
+        if len(lines) >= _SETTINGS.callback_top_k:
+            break
+    return lines or None
 
 
 def _resolve_target_channel_id() -> Optional[int]:
@@ -561,7 +676,7 @@ async def _run_one_ambient_pass(
 
     # 讓琇紫知道「當下是誰在跟它講話」——帶發話者顯示名稱 + #XXXX 錨點（跟 chat_history、
     # persona card 對齊，多人也分得清）。guardrails 已說明 #XXXX 是內部碼、不可對外講出。
-    asker_display_name = _name_with_anchor(message.author)
+    asker_display_name = name_with_anchor(message.author)
 
     chat_context, participant_ids = await _fetch_recent(message)
 
@@ -586,13 +701,13 @@ async def _run_one_ambient_pass(
     replied_to_text: Optional[str] = None
     replied_msg = await _resolve_replied_to(message)
     if replied_msg is not None:
-        rtext = _semantic_msg_text(replied_msg)
+        rtext = semantic_message_text(replied_msg)
         if not rtext and _has_image(replied_msg):
             rtext = "(一張圖)"
         if rtext:
             if len(rtext) > 200:
                 rtext = rtext[:200] + "…"
-            replied_to_from = _name_with_anchor(replied_msg.author)
+            replied_to_from = name_with_anchor(replied_msg.author)
             replied_to_text = rtext
         # 帶圖：被回覆訊息的圖也補進 vision payload（trigger 自己的圖優先，整體受 image_max_count 上限）
         if _has_image(replied_msg):
@@ -617,7 +732,10 @@ async def _run_one_ambient_pass(
         asker_for_bundle = None
         _ts = message.created_at.astimezone(_TAIPEI_TZ).strftime("%H:%M")
         if stripped:
-            chat_context = (chat_context or []) + [f"[{_ts}] {asker_display_name}: {_semantic_msg_text(message)}"]
+            # 觸發訊息本體不截斷（time_only 不帶日期，與近期視窗一致）；compact=False 保留原貌
+            chat_context = (chat_context or []) + [
+                format_chat_line(message, _TAIPEI_TZ, time_only=True, compact=False)
+            ]
         elif image_payload:
             chat_context = (chat_context or []) + [f"[{_ts}] {asker_display_name}: (貼了一張圖)"]
         prompt_text = (
@@ -631,16 +749,18 @@ async def _run_one_ambient_pass(
     memory_lines = await recall_lines(message.guild.id, message.author.id)
     # 招牌梗：召回在場成員的 trusted 標籤（衰減+三道閘；spicy 在 dark-launch 期間不召回）
     tag_lines = await recall_signature_tags(message.guild.id, participant_ids, message.guild)
+    # Phase D（實驗，預設關）：本頻道歷史 callback（三因子 gate 後的模糊印象）；用真正文字當 query
+    callback_lines = await _build_chat_callback_context(message, stripped)
     persona_context = (
-        (persona_cards or []) + (memory_lines or []) + (tag_lines or [])
+        (persona_cards or []) + (memory_lines or []) + (tag_lines or []) + (callback_lines or [])
     ) or None
 
-    # debug 摘要（discord_bot.log）：一眼看出三層 context 各抓到幾筆 + 有沒有圖 + 有沒有接到被回覆訊息
+    # debug 摘要（discord_bot.log）：一眼看出各層 context 各抓到幾筆 + 有沒有圖 + 有沒有接到被回覆訊息
     logger.info(
-        "ambient 生成 trace=%s directed=%s model=%s | chat=%d persona=%d memory=%d img=%d reply_to=%d",
+        "ambient 生成 trace=%s directed=%s model=%s | chat=%d persona=%d memory=%d callback=%d img=%d reply_to=%d",
         trace_id, directed, ambient_model,
         len(chat_context or []), len(persona_cards or []), len(memory_lines or []),
-        len(image_payload or []), 1 if replied_to_text else 0,
+        len(callback_lines or []), len(image_payload or []), 1 if replied_to_text else 0,
     )
 
     result = await _get_llm().generate_reply(

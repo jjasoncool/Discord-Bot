@@ -14,7 +14,7 @@ from typing import Any
 
 import discord
 
-from llm.sticker_cache import get_sticker_text
+from llm.chat_line import format_chat_line
 from llm.tokenization import tokenize_for_retrieval, tokens_for_debug
 from llm.persona_card_builder import (
     PERSONA_MAX_PARTICIPANTS,
@@ -63,6 +63,22 @@ _PERSISTED_MESSAGE_IDS: set[str] = set()
 _VECTOR_INDEX_CACHE: dict[tuple[str, str], Any] = {}
 # retrieve_rag_context_sync 走 run_in_executor，多個 /askai 並發可能競爭 index cache init
 _vector_index_lock = threading.Lock()
+
+
+def _pgvector_connect():
+    """開一條 pgvector(Postgres) 連線。
+
+    連線憑證集中一處：chat 向量搜尋（search_chat）與 member_profile 的 persona SQL
+    各 stage 都用同一份 creds，避免散落多處 drift。回傳 connection 物件，呼叫端照舊
+    `with _pgvector_connect() as conn:` 使用（語意與原本 inline psycopg2.connect 相同）。
+    """
+    return psycopg2.connect(
+        host=LLM_SETTINGS.pgvector_host,
+        port=LLM_SETTINGS.pgvector_port,
+        dbname=LLM_SETTINGS.pgvector_db,
+        user=LLM_SETTINGS.pgvector_user,
+        password=LLM_SETTINGS.pgvector_password,
+    )
 
 
 def _load_embed_model_name() -> str:
@@ -253,6 +269,116 @@ def _build_bm25_rank(
     return bm25_rank
 
 
+def search_chat(
+    *,
+    question: str,
+    limit: int,
+    logger: logging.Logger,
+    candidate_ids: list[str] | None = None,
+    channel_id: str | None = None,
+    before_timestamp: str | None = None,
+    return_meta: bool = False,
+):
+    """對 discord_chat 向量庫做語意搜尋。
+
+    這是 chat 語意搜尋的統一入口（facade）。/askai 的窗內重排與全庫歷史搜尋都走這支：
+
+    - candidate_ids 提供（/askai 現況）→ `message_id = ANY(...)` 限定在這批候選內重排
+      （窗內重排，行為等價）。
+    - candidate_ids=None → 開放全庫語意搜尋（歷史搜尋）。
+      ⚠ chat 文件未存 guild_id，全庫搜尋跨群安全需另帶 channel_id 收斂（見下）。
+    - channel_id：把結果收斂到單一頻道（chat 文件有 channel_id、無 guild_id）。
+    - before_timestamp（ISO 字串）：只取早於此時刻的訊息，用來排除近窗（chat metadata 的
+      timestamp 為 msg.created_at.isoformat()，帶 +00:00，字串 `<` 即時序比較）。
+
+    回傳格式由 return_meta 決定：
+    - return_meta=False（預設，/askai 用）→ list[str]：message_id 由近到遠。
+    - return_meta=True（callback 用）→ list[dict]：{message_id, text, distance, timestamp}，由近到遠。
+
+    回空 list 代表無結果或降級（psycopg2 缺、embedding/連線失敗等），caller 自行決定 fallback。
+    """
+    if psycopg2 is None:
+        return []
+
+    embed_model = _get_embed_model(logger)
+    if embed_model is None:
+        return []
+
+    # 指定了候選集卻是空的 → 無可搜（與舊行為一致：訊息全空時回空）
+    if candidate_ids is not None and not candidate_ids:
+        return []
+
+    try:
+        query_embedding = embed_model.get_query_embedding(question)
+    except Exception as exc:
+        logger.warning("pgvector chat 搜尋嵌入失敗（降級）: %s", exc)
+        return []
+
+    if not query_embedding:
+        return []
+
+    try:
+        table_name = HYBRID_RETRIEVAL_SETTINGS.get_chat_table_name()
+    except Exception as exc:
+        logger.warning("取得 chat table name 失敗: %s", exc)
+        return []
+
+    physical_table = f"data_{re.sub(r'[^a-zA-Z0-9_]', '', table_name)}"
+    # pgvector 的向量 literal 需以 '[v1,v2,...]' 字串形式帶入再 cast 成 vector。
+    vector_literal = "[" + ",".join(f"{float(v):.6f}" for v in query_embedding) + "]"
+
+    # 動態組 SELECT/WHERE；params 嚴格按 SQL 內 %s 出現順序（SELECT → WHERE → ORDER BY → LIMIT）。
+    select_cols = ["metadata_->>'message_id' AS mid"]
+    params: list[Any] = []
+    if return_meta:
+        # dist 的 %s 出現在 SELECT，必須最先 append（在 WHERE params 之前）
+        select_cols += ["text", "embedding <=> %s::vector AS dist", "metadata_->>'timestamp' AS ts"]
+        params.append(vector_literal)
+    where = ["metadata_->>'doc_type' = 'discord_chat'", "embedding IS NOT NULL"]
+    if candidate_ids is not None:
+        where.append("metadata_->>'message_id' = ANY(%s)")
+        params.append(candidate_ids)
+    if channel_id is not None:
+        where.append("metadata_->>'channel_id' = %s")
+        params.append(channel_id)
+    if before_timestamp is not None:
+        where.append("metadata_->>'timestamp' < %s")
+        params.append(before_timestamp)
+    params.append(vector_literal)      # ORDER BY embedding <=> %s::vector
+    params.append(max(1, limit))       # LIMIT %s
+
+    sql = f"""
+        SELECT {', '.join(select_cols)}
+        FROM {physical_table}
+        WHERE {' AND '.join(where)}
+        ORDER BY embedding <=> %s::vector
+        LIMIT %s
+    """
+
+    try:
+        with _pgvector_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall()
+    except Exception as exc:
+        logger.warning("pgvector chat 搜尋查詢失敗（降級）: %s", exc)
+        return []
+
+    if return_meta:
+        out: list[dict[str, Any]] = []
+        for mid, text, dist, ts in rows:
+            if not mid:
+                continue
+            out.append({
+                "message_id": str(mid),
+                "text": text or "",
+                "distance": float(dist) if dist is not None else None,
+                "timestamp": ts,
+            })
+        return out
+    return [str(row[0]) for row in rows if row[0]]
+
+
 def _build_vector_rank(
     *,
     question: str,
@@ -260,7 +386,7 @@ def _build_vector_rank(
     candidate_pool: int,
     logger: logging.Logger,
 ) -> dict[str, int]:
-    """建立向量檢索排名（message_id -> rank）— 查詢持久化 pgvector。
+    """建立向量檢索排名（message_id -> rank）— /askai 窗內重排，薄包 search_chat。
 
     設計意圖：BM25 負責字面，Vector 負責語意；兩路結果交給 RRF 融合。
     讀取 `chat_persistence` 寫入端累積的既有 embedding，避免每次 /askai 都重跑
@@ -269,14 +395,10 @@ def _build_vector_rank(
     Buffer gap：`chat_persistence` 有 30 筆/5 分鐘 buffer，極新的訊息可能尚未
     flush 到 pgvector，會缺 vector rank。但 `min_recent_context` 會無條件把
     最近 N 則選進 context，BM25 rank 也會補，整體召回影響可接受。
+
+    候選 = 本次抓到的視窗訊息（排除空內容），透過 search_chat 的 candidate_ids 限定，
+    故為「窗內重排」；要做全庫歷史搜尋改直接呼叫 search_chat(candidate_ids=None)。
     """
-    if psycopg2 is None:
-        return {}
-
-    embed_model = _get_embed_model(logger)
-    if embed_model is None:
-        return {}
-
     message_ids = [
         str(msg.id)
         for msg in messages
@@ -285,96 +407,33 @@ def _build_vector_rank(
     if not message_ids:
         return {}
 
-    try:
-        query_embedding = embed_model.get_query_embedding(question)
-    except Exception as exc:
-        logger.warning("pgvector vector rank 嵌入問題失敗（降級為 BM25-only）: %s", exc)
-        return {}
-
-    if not query_embedding:
-        return {}
-
-    try:
-        table_name = HYBRID_RETRIEVAL_SETTINGS.get_chat_table_name()
-    except Exception as exc:
-        logger.warning("取得 chat table name 失敗: %s", exc)
-        return {}
-
-    physical_table = f"data_{re.sub(r'[^a-zA-Z0-9_]', '', table_name)}"
-    limit = max(1, min(candidate_pool, len(message_ids)))
-
-    # pgvector 的向量 literal 需以 '[v1,v2,...]' 字串形式帶入再 cast 成 vector。
-    vector_literal = "[" + ",".join(f"{float(v):.6f}" for v in query_embedding) + "]"
-
-    try:
-        with psycopg2.connect(
-            host=LLM_SETTINGS.pgvector_host,
-            port=LLM_SETTINGS.pgvector_port,
-            dbname=LLM_SETTINGS.pgvector_db,
-            user=LLM_SETTINGS.pgvector_user,
-            password=LLM_SETTINGS.pgvector_password,
-        ) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    SELECT metadata_->>'message_id' AS mid
-                    FROM {physical_table}
-                    WHERE metadata_->>'doc_type' = 'discord_chat'
-                      AND metadata_->>'message_id' = ANY(%s)
-                      AND embedding IS NOT NULL
-                    ORDER BY embedding <=> %s::vector
-                    LIMIT %s
-                    """,
-                    (message_ids, vector_literal, limit),
-                )
-                rows = cur.fetchall()
-    except Exception as exc:
-        logger.warning("pgvector vector rank 查詢失敗（降級為 BM25-only）: %s", exc)
-        return {}
-
-    vector_rank: dict[str, int] = {}
-    for rank, (mid,) in enumerate(rows, start=1):
-        if mid:
-            vector_rank[str(mid)] = rank
-    return vector_rank
+    ordered = search_chat(
+        question=question,
+        limit=max(1, min(candidate_pool, len(message_ids))),
+        logger=logger,
+        candidate_ids=message_ids,
+    )
+    return {mid: rank for rank, mid in enumerate(ordered, start=1)}
 
 
 def _build_discord_context_item(msg: discord.Message, tz: timezone) -> dict[str, str]:
     """
     回傳包含元資料的 dict，確保可觀測性與後續 Debug 能力。
     同時將給 LLM 看的文字組合在 'content' 欄位中。
+
+    組行（名字錨點 / emoji 語意化 / 貼圖 / 時間戳）走共用的 format_chat_line，與 ambient /
+    日記同一份邏輯。`date` 欄供組裝層做「換日才印日期 header」，content 內的時間戳保留完整
+    YYYY-MM-DD（time_only=False）；若日後改成日期 header 模式，把這裡切 time_only=True 即可。
+    產出格式範例：[2026-02-26 14:30] 老哥#1234: 昨天抽卡又保底了 :哭哭貓:
     """
-    display_name = getattr(msg.author, "display_name", msg.author.name)
-    author_id = str(msg.author.id)
-    # 末 4 碼當穩定身份錨點，跟 persona card 標題的 alias#XXXX 對齊
-    # 完整 user_id 不進 prompt（降敏 + 省 token）；撞號代價只在 LLM 描述層
-    short_id = author_id[-4:] if len(author_id) >= 4 else ""
-    name_with_id = f"{display_name}#{short_id}" if short_id else display_name
-    time_str = msg.created_at.astimezone(tz).strftime("%Y-%m-%d %H:%M")
-    compact_content = " ".join(msg.content.split())
-
-    # 加入貼圖描述
-    if msg.stickers:
-        sticker_texts = []
-        for sticker in msg.stickers:
-            sticker_text = get_sticker_text(sticker)
-            if sticker_text:
-                sticker_texts.append(sticker_text)
-        if sticker_texts:
-            sticker_part = " ".join(sticker_texts)
-            compact_content = f"{compact_content} {sticker_part}" if compact_content else sticker_part
-
-    # 產出格式範例：[2026-02-26 14:30] 老哥#1234: 昨天抽卡又保底了 [貼圖：哭哭貓｜難過想哭的心情]
-    # author_id 完整保留在 metadata，避免 content 重複佔用 token。
-    formatted_text = f"[{time_str}] {name_with_id}: {compact_content}"
-
     return {
         "role": "user",
-        "content": formatted_text,
+        "content": format_chat_line(msg, tz),
         "message_id": str(msg.id),
-        "author_id": author_id,
-        "display_name": display_name,
-        "channel_id": str(msg.channel.id)
+        "author_id": str(msg.author.id),
+        "display_name": getattr(msg.author, "display_name", msg.author.name),
+        "channel_id": str(msg.channel.id),
+        "date": msg.created_at.astimezone(tz).strftime("%Y-%m-%d"),
     }
 
 
@@ -633,28 +692,6 @@ def retrieve_rag_context_sync(
     )
 
 
-async def retrieve_rag_context(
-    *,
-    question: str,
-    guild_id: int | None,
-    requester_user_id: int | None,
-    participant_user_ids: list[int] | None,
-    logger: logging.Logger,
-    top_k: int = 5,
-    mentioned_user_ids: list[str] | None = None,
-) -> tuple[list[dict[str, str]], dict[str, int | bool | str]]:
-    """async 版本（向後相容），內部直接呼叫同步實作。"""
-    return _retrieve_rag_context_impl(
-        question=question,
-        guild_id=guild_id,
-        requester_user_id=requester_user_id,
-        participant_user_ids=participant_user_ids,
-        logger=logger,
-        top_k=top_k,
-        mentioned_user_ids=mentioned_user_ids,
-    )
-
-
 def _retrieve_rag_context_impl(
     *,
     question: str,
@@ -715,13 +752,7 @@ def _retrieve_rag_context_impl(
     # Stage 1: 高精度 identity SQL
     if psycopg2 is not None and requester_user_id is not None:
         try:
-            with psycopg2.connect(
-                host=LLM_SETTINGS.pgvector_host,
-                port=LLM_SETTINGS.pgvector_port,
-                dbname=LLM_SETTINGS.pgvector_db,
-                user=LLM_SETTINGS.pgvector_user,
-                password=LLM_SETTINGS.pgvector_password,
-            ) as conn:
+            with _pgvector_connect() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         f"""
@@ -764,13 +795,7 @@ def _retrieve_rag_context_impl(
     # Stage 0: 聊天參與者關聯（除了 requester 以外的近期主角）
     if psycopg2 is not None and participant_ids:
         try:
-            with psycopg2.connect(
-                host=LLM_SETTINGS.pgvector_host,
-                port=LLM_SETTINGS.pgvector_port,
-                dbname=LLM_SETTINGS.pgvector_db,
-                user=LLM_SETTINGS.pgvector_user,
-                password=LLM_SETTINGS.pgvector_password,
-            ) as conn:
+            with _pgvector_connect() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         f"""
@@ -814,13 +839,7 @@ def _retrieve_rag_context_impl(
     # Stage 2: alias SQL 輔助
     if psycopg2 is not None and (alias_hints or mentioned_user_ids):
         try:
-            with psycopg2.connect(
-                host=LLM_SETTINGS.pgvector_host,
-                port=LLM_SETTINGS.pgvector_port,
-                dbname=LLM_SETTINGS.pgvector_db,
-                user=LLM_SETTINGS.pgvector_user,
-                password=LLM_SETTINGS.pgvector_password,
-            ) as conn:
+            with _pgvector_connect() as conn:
                 with conn.cursor() as cur:
                     like_values = [f"%{hint}%" for hint in alias_hints] or ["%__never_match__%"]
                     placeholders = ",".join(["%s"] * len(like_values))

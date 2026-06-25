@@ -329,6 +329,47 @@ async def flush_raw_buffer() -> dict[str, int]:
     return stats
 
 
+def get_reaction_salience(message_ids: list[str]) -> dict[str, int]:
+    """批次讀每則訊息的「不重複反應人數」當 salience 訊號（給 ambient callback 的 importance）。
+
+    讀 discord_messages_raw.reaction_breakdown(jsonb) 的 reactors 數；沒進 raw 表 / 無反應 → 0
+    （caller 自行視為 0）。sync——async caller 用 run_in_executor / to_thread。
+    失敗回空 dict（caller 降級為「全 0」，不影響主流程）。
+    """
+    if not message_ids:
+        return {}
+    ids = [str(m) for m in message_ids]
+    pool = _get_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT message_id, reaction_breakdown FROM discord_messages_raw "
+                "WHERE message_id = ANY(%s)",
+                (ids,),
+            )
+            rows = cur.fetchall()
+        conn.rollback()  # 唯讀查詢：rollback 結束 txn（不留 idle-in-transaction 回 pool）
+    except Exception as exc:
+        conn.rollback()
+        logger.warning("raw_message_store get_reaction_salience 失敗: %s", exc)
+        return {}
+    finally:
+        pool.putconn(conn)
+
+    out: dict[str, int] = {}
+    for mid, breakdown in rows:
+        # jsonb 多半已是 dict；少數 psycopg2 設定會回字串 → 補 json.loads（同 context_retriever 做法）
+        if isinstance(breakdown, str):
+            try:
+                breakdown = json.loads(breakdown)
+            except Exception:
+                breakdown = None
+        reactors = breakdown.get("reactors") if isinstance(breakdown, dict) else None
+        out[str(mid)] = len(reactors) if isinstance(reactors, dict) else 0
+    return out
+
+
 # ========== 同步 DB 操作（在 executor thread 執行）==========
 
 def _sync_flush(

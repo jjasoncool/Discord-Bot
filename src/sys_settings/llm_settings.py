@@ -269,6 +269,22 @@ class AmbientChatSettings(BaseSettings):
     persona_line_max_chars: int = 500
     persona_max_lines: int = 6
 
+    # ── 實驗：chat 歷史 callback（預設關，灰度開關）。撈「這個頻道」過去語意相關的舊訊息，
+    #    經 relevance×importance×recency 三因子 gate 後，當「模糊印象」折進 persona_context。
+    #    詳見 ambient_reply._build_chat_callback_context。所有門檻/權重待實測調。
+    callback_enabled: bool = True
+    callback_top_k: int = 1                          # 最多注入幾條（小 N，避免囉嗦）
+    callback_candidate_pool: int = 10               # pgvector 先撈幾條再 gate
+    callback_max_distance: float = 0.35             # ① 絕對相關性地板（cosine 距離，越小越近）
+    callback_min_score: float = 0.6                 # ③ 三因子合併分門檻（正規化後 [0,1]）
+    callback_recency_half_life_hours: float = 336.0 # recency 半衰期（時）；336≈2 週
+    callback_recency_gap_hours: float = 2.0         # ⑤ 比此時數更舊才算「過去」（排除近窗）
+    callback_min_chars: int = 8                     # ② 候選品質：太短不當回憶點
+    callback_w_relevance: float = 0.5               # 權重：relevance 最高（文不對題最糟）
+    callback_w_importance: float = 0.35
+    callback_w_recency: float = 0.15
+    callback_line_max_chars: int = 120              # 注入行截斷（模糊印象不需長）
+
     # 觸發門檻：插不插由 12B 判斷，「偶爾」感由冷卻 + 每小時上限保證（不用機率）
     min_chars: int = 4               # 太短（貼圖式單字）不插
     max_chars: int = 300             # 太長（長篇貼文）不插

@@ -20,7 +20,8 @@ from typing import Optional
 import discord
 
 from llm.ai_interactions_store import fetch_recent
-from llm.ambient_reply import _get_llm, _name_with_anchor, _semantic_msg_text
+from llm.ambient_reply import _get_llm
+from llm.chat_line import fetch_recent_lines
 from llm.logger_factory import get_or_create_file_logger
 from sys_settings.llm_settings import DiaryReflectionSettings
 from utils.utils import ChannelConfig
@@ -73,22 +74,14 @@ def _resolve_channel_id(config: dict, key: str) -> Optional[int]:
 async def _gather_day_transcript(channel: discord.abc.Messageable) -> list[str]:
     """抓社交頻道過去 lookback_hours 的訊息（最近 max_messages 則）→ 時序 chat_history 行。"""
     after = datetime.now(timezone.utc) - timedelta(hours=_SETTINGS.lookback_hours)
-    lines: list[str] = []
-    try:
-        async for msg in channel.history(
-            limit=_SETTINGS.max_messages, after=after, oldest_first=False
-        ):
-            text = _semantic_msg_text(msg)
-            if not text:
-                continue
-            name = _name_with_anchor(msg.author)
-            if len(text) > _SETTINGS.max_chars_per_msg:
-                text = text[: _SETTINGS.max_chars_per_msg] + "…"
-            ts = msg.created_at.astimezone(_TAIPEI_TZ).strftime("%H:%M")
-            lines.append(f"[{ts}] {name}: {text}")
-    except Exception as exc:
-        logger.warning("日記抓取頻道歷史失敗：%s", exc)
-    lines.reverse()  # newest-first → 時序（舊→新）
+    lines, _ = await fetch_recent_lines(
+        channel,
+        tz=_TAIPEI_TZ,
+        limit=_SETTINGS.max_messages,
+        after=after,
+        max_len=_SETTINGS.max_chars_per_msg,
+        on_error=lambda exc: logger.warning("日記抓取頻道歷史失敗：%s", exc),
+    )
     return lines
 
 
