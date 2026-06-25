@@ -36,19 +36,39 @@ _TOPIC_GAME_PATCH = (
 )
 _TOPIC_NEWS_PURE = ("公告", "開服", "維護")
 _TOPIC_REDDIT = ("reddit", "鄉民", "網友怎麼說", "討論度")
-# 體育賽事：賽程 / 比分 / 戰績類問句（時效性高，走 news + 一週）。
+# 體育賽事「報導 / 花絮」類問句（時效性中等，走 news + 一週）。
 # 刻意不收 bare「比賽」「賽」——太泛會誤觸（「遊戲的比賽機制」「比賽看法」）；
-# 用「世界盃 / 足球 / 賽程 / 球賽」這種帶體育語意的錨字。
+# 用「世界盃 / 足球 / 球賽」這種帶體育語意的錨字。
+# 注意：賽程 / 賽果 / 比分 / 場次 這類「即時數據」字已拆到下方 _TOPIC_SPORTS_LIVE，
+# 改走 general + 當日——news engines 撈不到比分站 / 賽程頁，對這類查詢只會回花絮
+# 特稿（隊醫最忙、最幸福的球迷⋯），答非所問。
+# 「戰績」刻意留在這裡（news + 一週）：中文多指「生涯 / 累計戰績」(選舉/業績/電競)，
+# 而非當日比分；壓成單日視窗會把歷史型查詢答壞，故不收進 live。
 _TOPIC_SPORTS = (
     "世界盃", "世足", "足球", "籃球", "棒球", "排球",
-    "賽程", "賽事", "賽果", "戰績", "比分", "球賽", "體育",
-    "季後賽", "總冠軍",
+    "賽事", "球賽", "體育",
+    "季後賽", "總冠軍", "戰績",
     "nba", "mlb", "英超", "西甲", "歐冠", "歐國盃", "中職",
 )
+# 體育即時數據（賽程 / 賽果 / 比分 / 場次）：時效性高，資料活在比分站 / 賽程頁 /
+# 官網（皆非 news 分類），故與上面「報導群」拆開，單獨走 general + 當日。
+#   • 賽程 / 賽果 / 比分：domain-specific，誤觸風險低 → 同時 HARD 觸發（見 *_HARD）。
+#   • 場次：與「現場 / 賣場 / 停車場 / 工作場 + 次X」等詞相連會誤觸（中文無詞界），
+#     故只進路由、不進 HARD；真實場次查詢通常另帶「今天 / 查 / 世足」等 HARD 字，
+#     仍會先觸發、再由本路由接走，不影響回報的「今天世足賽場次」案例。
+_TOPIC_SPORTS_LIVE_HARD = (
+    "賽程", "賽果", "比分",
+)
+_TOPIC_SPORTS_LIVE = _TOPIC_SPORTS_LIVE_HARD + ("場次",)
 
 # === 純觸發 token（HARD 用；不對應特定 route）===
-# 新聞時序錨字：HARD + 純新聞 route 共用
-_TRIGGER_NEWS_TIME = ("新聞", "最新", "今天", "今日", "本日", "昨天", "昨日")
+# 新聞時序錨字：HARD + 純新聞 route 共用。拆「今日」與「其餘」兩組：
+#   • _TRIGGER_NEWS_TODAY（今天 / 今日 / 本日）→ 明確指當天，走 news + day。
+#   • _TRIGGER_NEWS_TIME（新聞 / 最新 / 昨天 / 昨日）→ 時序較寬或不確定，走 news + week。
+# 「昨天 / 昨日」刻意留 week 不放 day：SearXNG 的 day≈過去 24h，會切掉昨天上半天，
+# 寧可用 week 完整涵蓋（超集），也不要漏掉昨天主新聞。
+_TRIGGER_NEWS_TODAY = ("今天", "今日", "本日")
+_TRIGGER_NEWS_TIME = ("新聞", "最新", "昨天", "昨日")
 # HARD-only：觸發但無特定 route，落入 default（categories/time_range/language 皆 None）
 _TRIGGER_HARD_ONLY = (
     # 即時狀態詞
@@ -73,10 +93,10 @@ def _alt(*groups: tuple[str, ...]) -> str:
 # 注意：剛剛/剛才 刻意不放 HARD（太泛、會誤觸「剛才那段翻成英文」），改進 SOFT 時間詞。
 _SEARCH_HARD = re.compile(
     _alt(
-        _TRIGGER_NEWS_TIME, _TRIGGER_HARD_ONLY,
+        _TRIGGER_NEWS_TODAY, _TRIGGER_NEWS_TIME, _TRIGGER_HARD_ONLY,
         _TOPIC_FINANCE_ZH, _TOPIC_FINANCE_INTL,
         _TOPIC_WEATHER, _TOPIC_GAME_PATCH, _TOPIC_NEWS_PURE, _TOPIC_REDDIT,
-        _TOPIC_SPORTS,
+        _TOPIC_SPORTS, _TOPIC_SPORTS_LIVE_HARD,  # 場次 不進 HARD（見上方註解）
     ),
     re.IGNORECASE,
 )
@@ -143,10 +163,19 @@ _ROUTE_RULES: tuple[tuple[re.Pattern[str], str | None, str | None, str | None], 
     (re.compile(_alt(_TOPIC_WEATHER)), None, "day", None),
     # 遊戲改版 / 軟體版本：通用 + 一週（news engines 對這類覆蓋太差）
     (re.compile(_alt(_TOPIC_GAME_PATCH), re.IGNORECASE), None, "week", None),
-    # 體育賽事：news + 一週（與遊戲改版不同，news engines 對足球 / NBA 等覆蓋良好；
-    # 賽程 / 比分時效約一週，故走 week 而非 day）
+    # 體育即時數據（賽程 / 賽果 / 比分 / 場次）：general + 當日。
+    # 必須排在下面的「體育報導」規則之前——這類字常與「世足 / NBA」等主題字同時出現
+    # （例：「今天世足賽最新場次」），先比中這條才能避開 news 路由。原因：賽程 / 比分
+    # 活在比分站 / 賽程頁 / 官網（非 news 分類），走 news engines 只會回花絮特稿；
+    # 改 general 引擎讓比分站浮上來，time_range=day 收斂到當日資料。
+    (re.compile(_alt(_TOPIC_SPORTS_LIVE), re.IGNORECASE), None, "day", None),
+    # 體育報導 / 花絮：news + 一週（news engines 對足球 / NBA 等「報導類」覆蓋良好；
+    # 但對賽程 / 比分這種即時數據覆蓋差，那類已由上一條 general 規則接走）
     (re.compile(_alt(_TOPIC_SPORTS), re.IGNORECASE), "news", "week", None),
-    # 純新聞 / 政治時事：news + 一週
+    # 今日新聞：news + 當日（「今天 / 今日 / 本日」明確指當天，time_range 收到 day；
+    # 排在下面 week 規則之前，「今天新聞」這種同時帶兩組的 query 才會落在 day）
+    (re.compile(_alt(_TRIGGER_NEWS_TODAY)), "news", "day", None),
+    # 純新聞 / 政治時事 / 最新 / 昨日：news + 一週
     (re.compile(_alt(_TRIGGER_NEWS_TIME, _TOPIC_NEWS_PURE)), "news", "week", None),
     # Reddit / 鄉民 / 網友討論（網友說 inline，原因見上方說明）
     (re.compile(_alt(_TOPIC_REDDIT) + r"|網友說", re.IGNORECASE), "social media", None, None),
