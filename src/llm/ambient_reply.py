@@ -315,6 +315,89 @@ def _callback_age_hours(ts_str: Optional[str], now: datetime) -> Optional[float]
         return None
 
 
+def _log_callback_debug(
+    *, query, candidates, survivors, reactions, rel, imp, rec, scored, chosen_n, target=None
+) -> None:
+    """候選級 debug（gated by callback_debug）：每筆候選的作者/距離/反應/三因子分/最終分/過哪關。
+
+    純 log、不影響回傳。讓調參時看得見「target 解析對不對、撈到的是誰的話、舊訊息是被距離擋還是計分輸」。
+    tag：drop:DIST/SHORT/QUAL（①②被刷）｜CHOSEN（採用）｜SCORE（合併分<門檻）｜TOPK（分夠但超過 N）。
+    a=作者 id 後四碼。mode：target=B（撈本人原話）｜topic（全作者）。
+    """
+    max_d, min_s = _SETTINGS.callback_max_distance, _SETTINGS.callback_min_score
+    survivor_mids = {c["message_id"] for c in survivors}
+    detail = {survivors[i]["message_id"]: (rel[i], imp[i], rec[i]) for i in range(len(survivors))}
+    score_by_mid = {c["message_id"]: s for s, c in scored}
+    chosen, n = set(), 0
+    for s, c in scored:                       # 與主流程一致：分夠且在前 top_k
+        if s < min_s or n >= _SETTINGS.callback_top_k:
+            break
+        chosen.add(c["message_id"]); n += 1
+
+    rows = []
+    for c in candidates:
+        mid, d = c.get("message_id"), c.get("distance")
+        a = (c.get("author_id") or "")[-4:] or "----"
+        snippet = " ".join((c.get("text") or "").split())[:30]
+        ds = f"{d:.3f}" if isinstance(d, (int, float)) else "None"
+        if mid not in survivor_mids:
+            text = (c.get("text") or "").strip()
+            tag = "DIST" if (d is None or d > max_d) else ("SHORT" if len(text) < _SETTINGS.callback_min_chars else "QUAL")
+            rows.append(f"  [drop:{tag}] a={a} d={ds} \"{snippet}\"")
+        else:
+            relv, impv, recv = detail.get(mid, (0.0, 0.0, 0.0))
+            sc = score_by_mid.get(mid, 0.0)
+            tag = "CHOSEN" if mid in chosen else ("SCORE" if sc < min_s else "TOPK")
+            rows.append(
+                f"  [{tag}] a={a} d={ds} react={reactions.get(mid, 0)} "
+                f"rel={relv:.2f} imp={impv:.2f} rec={recv:.2f} score={sc:.2f} \"{snippet}\""
+            )
+    logger.info(
+        "ambient callback debug query=%r mode=%s | pool=%d survivors=%d chosen=%d (d_max=%.2f min_score=%.2f)\n%s",
+        query[:60], (f"target:{target}" if target else "topic"),
+        len(candidates), len(survivors), chosen_n, max_d, min_s, "\n".join(rows) or "  (無候選)",
+    )
+
+
+async def _resolve_callback_target(message: discord.Message, query: str) -> Optional[str]:
+    """從 query 解析「在講誰」→ 唯一 target user_id；保守，模糊就回 None（退回 topic 模式）。
+
+    1) 明確 @mention（去掉 bot 自己）剛好一個 → 用它（最可靠）。
+    2) 否則別名解析（expand_alias_candidates → member_profile_store.find_user_ids_by_alias）
+       剛好命中一個 → 用它。
+    3) 0 / 多個 / 解析失敗 → None：寧缺勿濫，不硬猜、不撈錯人的話安到別人頭上。
+    """
+    if message.guild is None:
+        return None
+    from llm.persona_card_builder import expand_alias_candidates, extract_mentioned_user_ids
+
+    bot_id = str(message.guild.me.id) if message.guild.me else None
+    uniq_mentions = list(dict.fromkeys(m for m in extract_mentioned_user_ids(query) if m != bot_id))
+    if len(uniq_mentions) == 1:
+        return uniq_mentions[0]
+    if uniq_mentions:  # 多個 mention → 模糊，不猜
+        return None
+
+    aliases = expand_alias_candidates(query)
+    if not aliases:
+        return None
+    from llm.member_profile_store import get_member_profile_store
+    try:
+        loop = asyncio.get_running_loop()
+        uids = await loop.run_in_executor(
+            None,
+            functools.partial(
+                get_member_profile_store().find_user_ids_by_alias,
+                guild_id=message.guild.id, aliases=aliases,
+            ),
+        )
+    except Exception as exc:
+        logger.debug("callback target 別名解析失敗：%s", exc)
+        return None
+    uids = list(dict.fromkeys(uids))
+    return uids[0] if len(uids) == 1 else None
+
+
 async def _build_chat_callback_context(
     message: discord.Message, query: str
 ) -> Optional[list[str]]:
@@ -329,6 +412,15 @@ async def _build_chat_callback_context(
 
     from llm.context_retriever import search_chat
     from llm.raw_message_store import get_reaction_salience
+
+    # target 解析：在講某人 → B 模式（撈「目標本人」原話，author_id 過濾）；
+    # 解析不出唯一目標 → topic 模式（不分作者，現狀）。impression 層另在 Phase B 提供「集體印象」。
+    target_id = await _resolve_callback_target(message, query)
+    target_name = None
+    if target_id and target_id.isdigit():
+        m = message.guild.get_member(int(target_id))
+        target_name = m.display_name if m else None
+    dbg_target = target_name or (f"…{target_id[-4:]}" if target_id else None)  # debug 顯示用
 
     now = datetime.now(timezone.utc)
     # ⑤ 排除近窗：只取比 (now - gap) 更舊的（chat metadata timestamp 為 isoformat，+00:00）
@@ -346,6 +438,7 @@ async def _build_chat_callback_context(
                 candidate_ids=None,                   # 全庫
                 channel_id=str(message.channel.id),   # 收斂本頻道（chat 無 guild_id）
                 before_timestamp=before_ts,
+                author_id=target_id,                  # 有 target → 只撈本人原話；None → 全作者
                 return_meta=True,
             ),
         )
@@ -353,6 +446,9 @@ async def _build_chat_callback_context(
         logger.debug("ambient chat callback 檢索失敗：%s", exc)
         return None
     if not candidates:
+        if _SETTINGS.callback_debug:
+            _log_callback_debug(query=query, candidates=[], survivors=[], reactions={},
+                                rel=[], imp=[], rec=[], scored=[], chosen_n=0, target=dbg_target)
         return None
 
     # ① 絕對相關性地板 + ② 品質閘
@@ -368,6 +464,9 @@ async def _build_chat_callback_context(
             continue
         survivors.append({**c, "text": text})
     if not survivors:
+        if _SETTINGS.callback_debug:
+            _log_callback_debug(query=query, candidates=candidates, survivors=[], reactions={},
+                                rel=[], imp=[], rec=[], scored=[], chosen_n=0, target=dbg_target)
         return None
 
     # salience：reactions（主，接 raw_message_store）+ heuristic（兜底）
@@ -407,12 +506,24 @@ async def _build_chat_callback_context(
             break  # 已排序，後面只更低
         gist = " ".join(c["text"].split())[: _SETTINGS.callback_line_max_chars]
         # 模糊框架：當「依稀印象」、不逐字、不報時間數字、不貼切可忽略（消 uncanny precision）
-        lines.append(
-            f"（依稀記得這頻道之前聊過類似的：「{gist}」——不確定細節，只有自然貼切時才順帶一提，"
-            f"用「好像/之前是不是」這種試探語氣，別精確複述）"
-        )
+        if target_name:
+            # B 模式：撈到的是「目標本人」原話 → 框架成「TA 自己之前說過」
+            lines.append(
+                f"（{target_name}之前自己好像也說過類似的：「{gist}」——不確定細節，只有自然貼切時才"
+                f"順帶一提，用「好像/之前是不是」這種試探語氣，別精確複述）"
+            )
+        else:
+            lines.append(
+                f"（依稀記得這頻道之前聊過類似的：「{gist}」——不確定細節，只有自然貼切時才順帶一提，"
+                f"用「好像/之前是不是」這種試探語氣，別精確複述）"
+            )
         if len(lines) >= _SETTINGS.callback_top_k:
             break
+
+    if _SETTINGS.callback_debug:
+        _log_callback_debug(query=query, candidates=candidates, survivors=survivors,
+                            reactions=reactions, rel=rel, imp=imp, rec=rec, scored=scored,
+                            chosen_n=len(lines), target=dbg_target)
     return lines or None
 
 

@@ -284,6 +284,7 @@ class AmbientChatSettings(BaseSettings):
     callback_w_importance: float = 0.35
     callback_w_recency: float = 0.15
     callback_line_max_chars: int = 120              # 注入行截斷（模糊印象不需長）
+    callback_debug: bool = False                    # 調參用：把候選池/距離/三因子分/過哪關 log 進 discord_bot.log
 
     # 觸發門檻：插不插由 12B 判斷，「偶爾」感由冷卻 + 每小時上限保證（不用機率）
     min_chars: int = 4               # 太短（貼圖式單字）不插

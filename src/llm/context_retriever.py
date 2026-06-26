@@ -277,6 +277,7 @@ def search_chat(
     candidate_ids: list[str] | None = None,
     channel_id: str | None = None,
     before_timestamp: str | None = None,
+    author_id: str | None = None,
     return_meta: bool = False,
 ):
     """對 discord_chat 向量庫做語意搜尋。
@@ -290,10 +291,11 @@ def search_chat(
     - channel_id：把結果收斂到單一頻道（chat 文件有 channel_id、無 guild_id）。
     - before_timestamp（ISO 字串）：只取早於此時刻的訊息，用來排除近窗（chat metadata 的
       timestamp 為 msg.created_at.isoformat()，帶 +00:00，字串 `<` 即時序比較）。
+    - author_id：只取該作者說的訊息（callback target 模式用——撈「目標本人」原話）。
 
     回傳格式由 return_meta 決定：
     - return_meta=False（預設，/askai 用）→ list[str]：message_id 由近到遠。
-    - return_meta=True（callback 用）→ list[dict]：{message_id, text, distance, timestamp}，由近到遠。
+    - return_meta=True（callback 用）→ list[dict]：{message_id, text, distance, timestamp, author_id}，由近到遠。
 
     回空 list 代表無結果或降級（psycopg2 缺、embedding/連線失敗等），caller 自行決定 fallback。
     """
@@ -332,7 +334,10 @@ def search_chat(
     params: list[Any] = []
     if return_meta:
         # dist 的 %s 出現在 SELECT，必須最先 append（在 WHERE params 之前）
-        select_cols += ["text", "embedding <=> %s::vector AS dist", "metadata_->>'timestamp' AS ts"]
+        select_cols += [
+            "text", "embedding <=> %s::vector AS dist",
+            "metadata_->>'timestamp' AS ts", "metadata_->>'author_id' AS author",
+        ]
         params.append(vector_literal)
     where = ["metadata_->>'doc_type' = 'discord_chat'", "embedding IS NOT NULL"]
     if candidate_ids is not None:
@@ -344,6 +349,9 @@ def search_chat(
     if before_timestamp is not None:
         where.append("metadata_->>'timestamp' < %s")
         params.append(before_timestamp)
+    if author_id is not None:
+        where.append("metadata_->>'author_id' = %s")
+        params.append(author_id)
     params.append(vector_literal)      # ORDER BY embedding <=> %s::vector
     params.append(max(1, limit))       # LIMIT %s
 
@@ -366,7 +374,7 @@ def search_chat(
 
     if return_meta:
         out: list[dict[str, Any]] = []
-        for mid, text, dist, ts in rows:
+        for mid, text, dist, ts, author in rows:
             if not mid:
                 continue
             out.append({
@@ -374,6 +382,7 @@ def search_chat(
                 "text": text or "",
                 "distance": float(dist) if dist is not None else None,
                 "timestamp": ts,
+                "author_id": str(author) if author else "",
             })
         return out
     return [str(row[0]) for row in rows if row[0]]
