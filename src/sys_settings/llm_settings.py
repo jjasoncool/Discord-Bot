@@ -182,7 +182,7 @@ class AskAICommandSettings(BaseSettings):
     response_log_max_bytes: int = 20 * 1024 * 1024
     response_log_backup_count: int = 10
 
-    max_image_size_bytes: int = 5 * 1024 * 1024
+    max_image_size_bytes: int = 10 * 1024 * 1024
     askai_cooldown_count: int = 1
     askai_cooldown_seconds: float = 180.0
 
@@ -310,7 +310,7 @@ class AmbientChatSettings(BaseSettings):
     silence_sentinel: str = "[PASS]"
 
     # ── 看圖（ambient 模型需具 vision；QAT 12B 自帶 mmproj）──
-    image_max_count: int = 1             # 一次最多帶幾張圖（成本控制）
+    image_max_count: int = 5             # 一次最多帶幾張圖（上限；每張吃 context/成本，非每則都會滿）
     image_max_bytes: int = 5 * 1024 * 1024
 
     # ── Phase C 記憶寫入（preference_fact）──

@@ -823,7 +823,7 @@ class LLMCommands(commands.Cog):
 
         if image.size and image.size > MAX_IMAGE_SIZE_BYTES:
             await interaction.followup.send(
-                "⚠️ 圖片大小超過 5MB，請縮圖或換小一點的檔案。",
+                "⚠️ 圖片大小超過 10MB，請縮圖或換小一點的檔案。",
                 ephemeral=True,
             )
             return None
