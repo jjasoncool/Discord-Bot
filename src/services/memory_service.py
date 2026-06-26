@@ -1,7 +1,7 @@
 """MemoryService：跨功能共享的「記憶」單一接口（門面）。
 
 任何功能要用記憶，只 import 這個、呼叫語意清楚的方法，**不碰 pgvector / 12B / corroboration 細節**。
-底層委派給 `intro_rag_port`（儲存）與 `preference_extractor`（抽取/升等），門面穩定、底層可換。
+底層委派給 `member_profile_store`（儲存）與 `preference_extractor`（抽取/升等），門面穩定、底層可換。
 
 各功能怎麼用：
   - 功能二 ambient：`observe(...)`（背景沉澱）+ `recall(...)`（插話前帶記憶）
@@ -19,7 +19,7 @@ import logging
 import threading
 from typing import Optional
 
-from llm.intro_rag_port import get_pgvector_intro_rag_port
+from llm.member_profile_store import get_member_profile_store
 
 logger = logging.getLogger("discord_bot")
 
@@ -28,7 +28,7 @@ class MemoryService:
     """共享記憶門面。無狀態（只持有底層 port 單例），可安全共用。"""
 
     def __init__(self) -> None:
-        self._port = get_pgvector_intro_rag_port()
+        self._port = get_member_profile_store()
 
     # ── 讀（召回 / 查詢） ────────────────────────────────────────────
     async def recall(

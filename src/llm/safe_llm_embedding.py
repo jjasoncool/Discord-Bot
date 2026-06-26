@@ -220,7 +220,7 @@ def make_safe_llm_embedding(
 
     自動帶入後端類型 + 該 embedding model 在 `model_load_options` 裡的設定，
     讓 caller 不用重複組裝這些後端不可知的 wiring（context_retriever /
-    chat_persistence / intro_rag_port 三處共用）。
+    chat_persistence / member_profile_store 三處共用）。
     """
     backend = runtime_config.backend
     profile = runtime_config.backends.get(backend)

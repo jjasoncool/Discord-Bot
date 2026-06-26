@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from llm.intro_rag_port import get_pgvector_intro_rag_port
+from llm.member_profile_store import get_member_profile_store
 from services.llm_service import LLMService
 from sys_settings.llm_settings import AmbientChatSettings
 
@@ -168,7 +168,7 @@ async def ingest_signature_tags(
     }
     if not candidates:
         return stats
-    port = get_pgvector_intro_rag_port()
+    port = get_member_profile_store()
     loop = asyncio.get_running_loop()
     now_iso = datetime.now(timezone.utc).isoformat()
     today = datetime.now(timezone.utc).date().isoformat()

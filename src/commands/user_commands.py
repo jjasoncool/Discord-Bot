@@ -565,8 +565,8 @@ class UserCommands(commands.Cog):
             return
         import asyncio
         import functools
-        from llm.intro_rag_port import get_pgvector_intro_rag_port
-        port = get_pgvector_intro_rag_port()
+        from llm.member_profile_store import get_member_profile_store
+        port = get_member_profile_store()
         loop = asyncio.get_running_loop()
         try:
             tags = await loop.run_in_executor(None, functools.partial(
@@ -609,8 +609,8 @@ class UserCommands(commands.Cog):
         await interaction.response.defer()
         import asyncio
         import functools
-        from llm.intro_rag_port import get_pgvector_intro_rag_port
-        port = get_pgvector_intro_rag_port()
+        from llm.member_profile_store import get_member_profile_store
+        port = get_member_profile_store()
         loop = asyncio.get_running_loop()
         ok = await loop.run_in_executor(None, functools.partial(
             port.set_signature_tag_flags,

@@ -1,7 +1,9 @@
-"""Intro RAG 串接層（技術介接層）。
+"""member_profile 向量庫存取層（技術介接層）。
 
-職責：定義「如何把資料送進 RAG/向量庫」的介面。
+職責：定義「如何把 member_profile 各類資料（intro_profile / impression /
+auto_personality / preference_fact / signature_tag）讀寫進 pgvector」的介面與實作。
 不放業務流程判斷。
+（原名 intro_rag_port，因已長成通用的 member_profile store 而更名。）
 """
 from __future__ import annotations
 
@@ -34,7 +36,7 @@ logger = logging.getLogger("discord_bot")
 
 
 @runtime_checkable
-class IntroRAGPort(Protocol):
+class MemberProfileStore(Protocol):
     async def index_intro_profile(
         self,
         *,
@@ -73,7 +75,7 @@ class IntroRAGPort(Protocol):
         """將 LLM 自動萃取的人格描述寫入 RAG/向量資料庫。"""
 
 
-class NullIntroRAGPort:
+class NullMemberProfileStore:
     """預設 no-op 串接，尚未接真正向量庫前使用。"""
 
     async def index_intro_profile(
@@ -123,8 +125,8 @@ class NullIntroRAGPort:
         _ = (guild_id, author_id, alias, personality)
 
 
-class PgVectorIntroRAGPort:
-    """以 pgvector 實作的 IntroRAGPort。"""
+class PgVectorMemberProfileStore:
+    """以 pgvector 實作的 MemberProfileStore。"""
 
     def __init__(self) -> None:
         self.settings = LLMServiceSettings()
@@ -545,6 +547,45 @@ class PgVectorIntroRAGPort:
         """刪除一筆 preference_fact（管理用：刪錯 / 禁記）。同步，呼叫端自行包 executor。"""
         self._delete_existing_doc(doc_id=doc_id)
 
+    def find_user_ids_by_alias(self, *, guild_id: int, aliases: list[str]) -> list[str]:
+        """別名字串 → 該成員 user_id（給 ambient callback 解析「在講誰」）。同步；呼叫端包 executor。
+
+        以本人 alias（intro_profile / auto_personality，author_id=本人）＋ impression 的
+        target_alias（target_user_id=被描述者）做 substring ILIKE，回 distinct user_id。
+        回空＝沒對到；多筆由呼叫端判斷（保守：非唯一就不採用）。失敗回空（不影響主流程）。
+        """
+        if not aliases:
+            return []
+        table = self._get_physical_table_name()
+        like_values = [f"%{a}%" for a in aliases]
+        ph = ",".join(["%s"] * len(like_values))
+        uids: list[str] = []
+        try:
+            with self._get_db_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        SELECT DISTINCT uid FROM (
+                          SELECT metadata_->>'author_id' AS uid FROM {table}
+                          WHERE metadata_->>'doc_type'='member_profile'
+                            AND metadata_->>'guild_id'=%s
+                            AND metadata_->>'profile_kind' IN ('intro_profile','auto_personality')
+                            AND metadata_->>'alias' ILIKE ANY(ARRAY[{ph}])
+                          UNION
+                          SELECT metadata_->>'target_user_id' AS uid FROM {table}
+                          WHERE metadata_->>'doc_type'='member_profile'
+                            AND metadata_->>'guild_id'=%s
+                            AND metadata_->>'profile_kind'='impression'
+                            AND metadata_->>'target_alias' ILIKE ANY(ARRAY[{ph}])
+                        ) t WHERE uid IS NOT NULL AND uid <> '';
+                        """,
+                        [str(guild_id), *like_values, str(guild_id), *like_values],
+                    )
+                    uids = [r[0] for r in cur.fetchall() if r[0]]
+        except Exception as exc:
+            logger.error("find_user_ids_by_alias 失敗: %s", exc, exc_info=True)
+        return uids
+
     # ── 功能二記憶：招牌梗 signature_tag（持久印象層；corroboration + 慢衰減）─────────
     # 與 preference_fact 同表同形（profile_kind='signature_tag'），但治理更硬：歸屬必須是程式碼
     # 驗證過的真實 sender、spicy 非對稱門檻、本人可 opt-out。與 preference_fact 平行維護（刻意
@@ -807,20 +848,20 @@ class PgVectorIntroRAGPort:
 
 # --- module-level singleton ---
 # 為什麼：原本每個呼叫端 (`personality_extractor`, `management_commands`)
-# 都 new 一個 PgVectorIntroRAGPort，每個 instance 有自己的 _index / embed_model，
+# 都 new 一個 PgVectorMemberProfileStore，每個 instance 有自己的 _index / embed_model，
 # 每次呼叫 index.insert 都會開新的 HTTP 連線打 Ollama；
 # 大量請求下會塞爆 Windows ephemeral port 池（TIME_WAIT socket 累積）。
 # 改為全 process 共用單一 instance，內部 index 物件被 LlamaIndex 的 HTTP client 重用。
-_pgvector_intro_rag_port_singleton: PgVectorIntroRAGPort | None = None
+_member_profile_store_singleton: PgVectorMemberProfileStore | None = None
 _singleton_lock = threading.Lock()
 
 
-def get_pgvector_intro_rag_port() -> PgVectorIntroRAGPort:
-    """取得 PgVectorIntroRAGPort 單例。"""
-    global _pgvector_intro_rag_port_singleton
-    if _pgvector_intro_rag_port_singleton is not None:
-        return _pgvector_intro_rag_port_singleton
+def get_member_profile_store() -> PgVectorMemberProfileStore:
+    """取得 PgVectorMemberProfileStore 單例。"""
+    global _member_profile_store_singleton
+    if _member_profile_store_singleton is not None:
+        return _member_profile_store_singleton
     with _singleton_lock:
-        if _pgvector_intro_rag_port_singleton is None:
-            _pgvector_intro_rag_port_singleton = PgVectorIntroRAGPort()
-        return _pgvector_intro_rag_port_singleton
+        if _member_profile_store_singleton is None:
+            _member_profile_store_singleton = PgVectorMemberProfileStore()
+        return _member_profile_store_singleton

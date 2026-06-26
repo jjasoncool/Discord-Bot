@@ -16,7 +16,7 @@ from typing import Optional
 
 import discord
 
-from llm.intro_rag_port import get_pgvector_intro_rag_port
+from llm.member_profile_store import get_member_profile_store
 from llm.lemonade_gate import foreground_recently_active, stream_busy
 from services.llm_service import LLMService
 from services.memory_service import get_memory_service
@@ -147,7 +147,7 @@ async def recall_signature_tags(
     if not participant_ids:
         return None
     try:
-        port = get_pgvector_intro_rag_port()
+        port = get_member_profile_store()
         loop = asyncio.get_running_loop()
         rows = await loop.run_in_executor(
             None,

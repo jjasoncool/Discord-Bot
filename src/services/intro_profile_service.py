@@ -2,14 +2,14 @@
 
 說明：
 - 這裡放「流程邏輯」（何時呼叫、如何整理資料）。
-- 不放向量庫細節；向量串接由 llm.intro_rag_port 負責。
+- 不放向量庫細節；向量串接由 llm.member_profile_store 負責。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from llm.intro_rag_port import IntroRAGPort, NullIntroRAGPort
+from llm.member_profile_store import MemberProfileStore, NullMemberProfileStore
 
 
 @dataclass(frozen=True)
@@ -47,8 +47,8 @@ class IntroProfileServiceProtocol(Protocol):
 class IntroProfileService:
     """業務層：接住命令層事件，再委派給 RAG 串接層。"""
 
-    def __init__(self, rag_port: IntroRAGPort | None = None):
-        self.rag_port: IntroRAGPort = rag_port or NullIntroRAGPort()
+    def __init__(self, rag_port: MemberProfileStore | None = None):
+        self.rag_port: MemberProfileStore = rag_port or NullMemberProfileStore()
 
     async def on_intro_submitted(self, payload: IntroProfilePayload) -> None:
         await self.rag_port.index_intro_profile(

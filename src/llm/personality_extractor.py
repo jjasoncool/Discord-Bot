@@ -550,10 +550,10 @@ async def _run_personality_extraction_impl(
     if guild is not None:
         try:
             import asyncio as _aio0
-            from llm.intro_rag_port import get_pgvector_intro_rag_port
+            from llm.member_profile_store import get_member_profile_store
             from sys_settings.llm_settings import AmbientChatSettings
             _ac = AmbientChatSettings()
-            _port = get_pgvector_intro_rag_port()
+            _port = get_member_profile_store()
             if progress_callback:
                 progress_callback(
                     stage="sweeping", model=model, total_users=0,
@@ -657,8 +657,8 @@ async def save_personality_results(
     progress_callback: 每寫完一筆（不論成功/失敗）呼叫一次，收到 (written_success, total)。
     callback 內的例外會被吞掉，避免拖累寫入主流程。
     """
-    from llm.intro_rag_port import get_pgvector_intro_rag_port
-    rag_port = get_pgvector_intro_rag_port()
+    from llm.member_profile_store import get_member_profile_store
+    rag_port = get_member_profile_store()
     written = 0
     total = len(results)
     for uid, data in results.items():

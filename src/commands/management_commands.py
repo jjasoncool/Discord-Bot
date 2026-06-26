@@ -19,7 +19,7 @@ from services.intro_profile_service import (
     IntroProfileService,
 )
 from services.impression_moderation_service import ImpressionModerationService
-from llm.intro_rag_port import get_pgvector_intro_rag_port
+from llm.member_profile_store import get_member_profile_store
 from settings.channel_registry import all_settings, get_setting, ChannelSetContext
 
 # 獲取 logger
@@ -475,7 +475,7 @@ class ManagementCommands(commands.Cog):
     def __init__(self, bot, intro_profile_service: Optional[IntroProfileServiceProtocol] = None):
         self.bot = bot
         self.intro_profile_service: IntroProfileServiceProtocol = (
-            intro_profile_service or IntroProfileService(rag_port=get_pgvector_intro_rag_port())
+            intro_profile_service or IntroProfileService(rag_port=get_member_profile_store())
         )
 
     async def cog_load(self):
