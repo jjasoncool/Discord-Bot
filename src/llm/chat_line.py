@@ -55,6 +55,7 @@ def format_chat_line(
     time_only: bool = False,
     max_len: int | None = None,
     compact: bool = True,
+    self_id: int | None = None,
 ) -> str:
     """組一行聊天紀錄：`[時間] 顯示名#XXXX: 內容`。
 
@@ -64,8 +65,12 @@ def format_chat_line(
     - compact=True（預設，/askai 既有行為）→ 內容壓成單行（換行 / 多空白合一），
       避免單則內換行破壞 `[時間] 名: 內容` 行結構。compact=False → 保留原始空白
       （ambient / 日記既有行為；嚴格等價用）。
+    - self_id 設定且該則作者＝self_id（bot 自己）→ 名字後標「（你自己）」，讓模型在
+      混合的 chat_history 裡認得哪幾行是自己講的，不致把自己的話當成別人的。
     """
     name = name_with_anchor(msg.author)
+    if self_id is not None and getattr(msg.author, "id", None) == self_id:
+        name += "（你自己）"
     text = semantic_message_text(msg)
     if compact:
         text = " ".join(text.split())
@@ -85,6 +90,7 @@ async def fetch_recent_lines(
     after=None,
     max_len: int | None = None,
     collect_participant_ids: bool = False,
+    self_id: int | None = None,
     on_error: Optional[Callable[[Exception], None]] = None,
 ) -> tuple[list[str], Optional[list[int]]]:
     """抓近期頻道訊息 → 時序（舊→新）的 `[HH:MM] 名#XXXX: 內容` 行（time_only）。
@@ -115,7 +121,9 @@ async def fetch_recent_lines(
                 continue
             # compact=False：ambient / 日記歷史上不壓縮空白，保留原貌（嚴格等價）
             lines.append(
-                format_chat_line(msg, tz, time_only=True, max_len=max_len, compact=False)
+                format_chat_line(
+                    msg, tz, time_only=True, max_len=max_len, compact=False, self_id=self_id
+                )
             )
     except Exception as exc:  # noqa: BLE001 — best-effort，失敗回部分結果
         if on_error is not None:

@@ -198,7 +198,10 @@ async def _fetch_recent(
     """抓近期頻道訊息：回 (對話脈絡行[舊→新], 近期發言者 user_id)。
 
     對話脈絡含機器人自己的話以維持連續性；participant_ids 只收非 bot，給 persona 召回用。
+    bot 自己的行會被標「（你自己）」（self_id），讓模型在混合脈絡裡認得哪幾行是自己講的，
+    不致把自己的話當別人（gate #4「我剛插過沒」也靠這個認）。
     """
+    self_id = message.guild.me.id if message.guild and message.guild.me else None
     collected, participant_ids = await fetch_recent_lines(
         message.channel,
         tz=_TAIPEI_TZ,
@@ -206,6 +209,7 @@ async def _fetch_recent(
         before=message,
         max_len=200,
         collect_participant_ids=True,
+        self_id=self_id,
         on_error=lambda exc: logger.debug("ambient 抓取頻道歷史失敗：%s", exc),
     )
     if message.author.id not in participant_ids:
@@ -786,11 +790,13 @@ async def _run_one_ambient_pass(
         tracker = _get_tracker(bot, cid)
 
     # ── 生成（12B；走 generate_reply → chat_raw 持 stream_exclusive）──
+    # 帶 #XXXX 錨點（與 chat_history 裡 bot 自己的行 name_with_anchor 一致）→ 讓模型能精準
+    # 認出 chat_history 裡哪幾行是自己講的。guild.me 是 discord.py 即時提供的 bot Member（動態暱稱）。
     bot_display_name = None
     if message.guild.me is not None:
-        bot_display_name = message.guild.me.display_name
+        bot_display_name = name_with_anchor(message.guild.me)
     elif bot.user is not None:
-        bot_display_name = bot.user.name
+        bot_display_name = name_with_anchor(bot.user)
 
     # 讓琇紫知道「當下是誰在跟它講話」——帶發話者顯示名稱 + #XXXX 錨點（跟 chat_history、
     # persona card 對齊，多人也分得清）。guardrails 已說明 #XXXX 是內部碼、不可對外講出。

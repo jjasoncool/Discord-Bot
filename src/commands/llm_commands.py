@@ -15,6 +15,7 @@ from discord.ext import commands
 import llm
 from llm.logger_factory import get_or_create_file_logger
 from llm.lemonade_gate import note_foreground_activity
+from llm.chat_line import name_with_anchor
 from services.llm_service import LLMService
 from sys_settings.llm_settings import AskAICommandSettings, AskAIWebSettings
 from utils.utils import safe_send_interaction_message, check_guild
@@ -651,12 +652,14 @@ class LLMCommands(commands.Cog):
         target_model = self.llm_service.resolve_request_model()
         target_think = self.llm_service.resolve_request_think()
 
-        # Bot 自身身份：伺服器暱稱優先 → 全域 username → None（僅極端情境）
+        # Bot 自身身份：伺服器暱稱優先 → 全域 username → None（僅極端情境）。
+        # 帶 #XXXX 錨點，與 <bot_history> 區塊內各行的 name_with_anchor 格式一致，
+        # 讓 name 屬性精準對上塊內發言。
         bot_display_name = None
         if interaction.guild and interaction.guild.me:
-            bot_display_name = interaction.guild.me.display_name
+            bot_display_name = name_with_anchor(interaction.guild.me)
         elif interaction.client.user:
-            bot_display_name = interaction.client.user.name
+            bot_display_name = name_with_anchor(interaction.client.user)
 
         # 用 asyncio.Task 包裝，取消時可中斷 Ollama HTTP 請求
         llm_task = asyncio.create_task(self.llm_service.generate_reply(
