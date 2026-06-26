@@ -315,24 +315,31 @@ def _callback_age_hours(ts_str: Optional[str], now: datetime) -> Optional[float]
         return None
 
 
-def _log_callback_debug(
-    *, query, candidates, survivors, reactions, rel, imp, rec, scored, chosen_n, target=None
-) -> None:
-    """候選級 debug（gated by callback_debug）：每筆候選的作者/距離/反應/三因子分/最終分/過哪關。
+def _format_recalled_ts(ts_str: Optional[str]) -> str:
+    """ISO 時間字串 → 台北時區「YYYY-MM-DD HH:MM」（舊發言帶完整日期，讓模型知道多久以前）。"""
+    if not ts_str:
+        return "?"
+    try:
+        return datetime.fromisoformat(ts_str).astimezone(_TAIPEI_TZ).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return "?"
 
-    純 log、不影響回傳。讓調參時看得見「target 解析對不對、撈到的是誰的話、舊訊息是被距離擋還是計分輸」。
-    tag：drop:DIST/SHORT/QUAL（①②被刷）｜CHOSEN（採用）｜SCORE（合併分<門檻）｜TOPK（分夠但超過 N）。
-    a=作者 id 後四碼。mode：target=B（撈本人原話）｜topic（全作者）。
+
+def _log_callback_debug(
+    *, query, candidates, survivors, reactions, rel, imp, rec, scored, chosen_n, target=None, max_dist=None
+) -> None:
+    """候選級 debug（gated by callback_debug）：每筆候選的作者/距離/反應/三因子分/最終排序分/過哪關。
+
+    純 log、不影響回傳。調參就看這裡的真實距離 d=：相關的米拉舊話落哪、無關的落哪 → 把地板設中間。
+    tag：drop:DIST/SHORT/QUAL（被距離地板/品質閘刷掉）｜CHOSEN（採用）｜RANKOUT（過閘但排序輸、超過 top_k）。
+    a=作者 id 後四碼。mode：target:名字＝B（撈本人原話，地板較寬）｜topic（全作者，地板較嚴）。
+    合併分只用來排序、不當門檻——唯一相關性閘是 d ≤ 地板（max_dist）。
     """
-    max_d, min_s = _SETTINGS.callback_max_distance, _SETTINGS.callback_min_score
+    md = max_dist if max_dist is not None else _SETTINGS.callback_max_distance
     survivor_mids = {c["message_id"] for c in survivors}
     detail = {survivors[i]["message_id"]: (rel[i], imp[i], rec[i]) for i in range(len(survivors))}
     score_by_mid = {c["message_id"]: s for s, c in scored}
-    chosen, n = set(), 0
-    for s, c in scored:                       # 與主流程一致：分夠且在前 top_k
-        if s < min_s or n >= _SETTINGS.callback_top_k:
-            break
-        chosen.add(c["message_id"]); n += 1
+    chosen = {c["message_id"] for _s, c in scored[: _SETTINGS.callback_top_k]}  # 與主流程一致：排序前 top_k
 
     rows = []
     for c in candidates:
@@ -342,20 +349,20 @@ def _log_callback_debug(
         ds = f"{d:.3f}" if isinstance(d, (int, float)) else "None"
         if mid not in survivor_mids:
             text = (c.get("text") or "").strip()
-            tag = "DIST" if (d is None or d > max_d) else ("SHORT" if len(text) < _SETTINGS.callback_min_chars else "QUAL")
+            tag = "DIST" if (d is None or d > md) else ("SHORT" if len(text) < _SETTINGS.callback_min_chars else "QUAL")
             rows.append(f"  [drop:{tag}] a={a} d={ds} \"{snippet}\"")
         else:
             relv, impv, recv = detail.get(mid, (0.0, 0.0, 0.0))
             sc = score_by_mid.get(mid, 0.0)
-            tag = "CHOSEN" if mid in chosen else ("SCORE" if sc < min_s else "TOPK")
+            tag = "CHOSEN" if mid in chosen else "RANKOUT"
             rows.append(
                 f"  [{tag}] a={a} d={ds} react={reactions.get(mid, 0)} "
-                f"rel={relv:.2f} imp={impv:.2f} rec={recv:.2f} score={sc:.2f} \"{snippet}\""
+                f"rel={relv:.2f} imp={impv:.2f} rec={recv:.2f} sort={sc:.2f} \"{snippet}\""
             )
     logger.info(
-        "ambient callback debug query=%r mode=%s | pool=%d survivors=%d chosen=%d (d_max=%.2f min_score=%.2f)\n%s",
+        "ambient callback debug query=%r mode=%s | pool=%d survivors=%d chosen=%d (floor d<=%.2f)\n%s",
         query[:60], (f"target:{target}" if target else "topic"),
-        len(candidates), len(survivors), chosen_n, max_d, min_s, "\n".join(rows) or "  (無候選)",
+        len(candidates), len(survivors), chosen_n, md, "\n".join(rows) or "  (無候選)",
     )
 
 
@@ -401,10 +408,12 @@ async def _resolve_callback_target(message: discord.Message, query: str) -> Opti
 async def _build_chat_callback_context(
     message: discord.Message, query: str
 ) -> Optional[list[str]]:
-    """Phase D：撈本頻道語意相關舊訊息，三因子 gate 後回「模糊印象」行（或 None）。
+    """Phase D：撈本頻道語意相關舊訊息，回「模糊印象」行（或 None）。
 
-    gate：① 絕對相關性地板 + ② 品質閘 → 算 relevance×importance×recency 合併分 →
-    ③ 高合併門檻 + ④ 小 N。撈不到夠格的就 None（多數情況）。預設關（callback_enabled）。
+    閘：① 絕對距離地板（mode-specific：target 寬、topic 嚴）+ ② 品質閘。撈不到就 None。
+    relevance×importance×recency 合併分「只拿來排序」決定撈哪 top_k，不當門檻——這修掉了
+    舊版「只撈到一條 → min-max 給 0.5 → 被 min_score 拒」的 bug（常常 callback=0 的元兇）。
+    有 target → 撈本人原話（author 過濾）；無 → 全作者話題。預設開（callback_enabled）。
     重模組（search_chat / raw_message_store）在此 lazy import——flag 關時零載入。
     """
     if not _SETTINGS.callback_enabled or not query or message.guild is None:
@@ -451,12 +460,18 @@ async def _build_chat_callback_context(
                                 rel=[], imp=[], rec=[], scored=[], chosen_n=0, target=dbg_target)
         return None
 
-    # ① 絕對相關性地板 + ② 品質閘
+    # ① 絕對相關性地板（mode-specific：target 撈本人原話、低風險 → 放寬）+ ② 品質閘。
+    # 這個「絕對距離」才是真正的相關性閘；importance/recency 只拿來排序（見下），
+    # 不再用 min-max 正規化後的合併分當硬門檻——那會讓「只撈到一條」必被 0.5<門檻 坑掉。
+    max_dist = (
+        _SETTINGS.callback_target_max_distance if target_id
+        else _SETTINGS.callback_max_distance
+    )
     survivors: list[dict] = []
     for c in candidates:
         dist = c.get("distance")
         text = (c.get("text") or "").strip()
-        if dist is None or dist > _SETTINGS.callback_max_distance:
+        if dist is None or dist > max_dist:
             continue
         if len(text) < _SETTINGS.callback_min_chars:
             continue
@@ -466,7 +481,8 @@ async def _build_chat_callback_context(
     if not survivors:
         if _SETTINGS.callback_debug:
             _log_callback_debug(query=query, candidates=candidates, survivors=[], reactions={},
-                                rel=[], imp=[], rec=[], scored=[], chosen_n=0, target=dbg_target)
+                                rel=[], imp=[], rec=[], scored=[], chosen_n=0,
+                                target=dbg_target, max_dist=max_dist)
         return None
 
     # salience：reactions（主，接 raw_message_store）+ heuristic（兜底）
@@ -494,36 +510,27 @@ async def _build_chat_callback_context(
         _SETTINGS.callback_w_importance,
         _SETTINGS.callback_w_recency,
     )
+    # 合併分只拿來「排序」決定撈哪幾條，不再當 pass/fail 門檻（門檻＝上面的絕對距離）。
     scored = sorted(
         ((wr * rel[i] + wi * imp[i] + wc * rec[i], c) for i, c in enumerate(survivors)),
         key=lambda x: x[0],
         reverse=True,
     )
 
+    # 撈回的舊發言用標準 chat 行格式 `[時間] 作者#XXXX: 內容`——讓模型清楚「誰、何時」說的。
+    # 框架說明（依稀印象、別精確複述）改放 <recalled_context> 區塊的固定 header（見 llm_service）。
     lines: list[str] = []
-    for score, c in scored:
-        if score < _SETTINGS.callback_min_score:
-            break  # 已排序，後面只更低
+    for _score, c in scored[: _SETTINGS.callback_top_k]:
         gist = " ".join(c["text"].split())[: _SETTINGS.callback_line_max_chars]
-        # 模糊框架：當「依稀印象」、不逐字、不報時間數字、不貼切可忽略（消 uncanny precision）
-        if target_name:
-            # B 模式：撈到的是「目標本人」原話 → 框架成「TA 自己之前說過」
-            lines.append(
-                f"（{target_name}之前自己好像也說過類似的：「{gist}」——不確定細節，只有自然貼切時才"
-                f"順帶一提，用「好像/之前是不是」這種試探語氣，別精確複述）"
-            )
-        else:
-            lines.append(
-                f"（依稀記得這頻道之前聊過類似的：「{gist}」——不確定細節，只有自然貼切時才順帶一提，"
-                f"用「好像/之前是不是」這種試探語氣，別精確複述）"
-            )
-        if len(lines) >= _SETTINGS.callback_top_k:
-            break
+        aid = c.get("author_id") or ""
+        member = message.guild.get_member(int(aid)) if aid.isdigit() else None
+        author = name_with_anchor(member) if member else (f"某人#{aid[-4:]}" if len(aid) >= 4 else "某人")
+        lines.append(f"[{_format_recalled_ts(c.get('timestamp'))}] {author}: {gist}")
 
     if _SETTINGS.callback_debug:
         _log_callback_debug(query=query, candidates=candidates, survivors=survivors,
                             reactions=reactions, rel=rel, imp=imp, rec=rec, scored=scored,
-                            chosen_n=len(lines), target=dbg_target)
+                            chosen_n=len(lines), target=dbg_target, max_dist=max_dist)
     return lines or None
 
 
@@ -861,9 +868,9 @@ async def _run_one_ambient_pass(
     # 招牌梗：召回在場成員的 trusted 標籤（衰減+三道閘；spicy 在 dark-launch 期間不召回）
     tag_lines = await recall_signature_tags(message.guild.id, participant_ids, message.guild)
     # Phase D（實驗，預設關）：本頻道歷史 callback（三因子 gate 後的模糊印象）；用真正文字當 query
-    callback_lines = await _build_chat_callback_context(message, stripped)
+    callback_lines = await _build_chat_callback_context(message, stripped)  # → 獨立 <recalled_context>
     persona_context = (
-        (persona_cards or []) + (memory_lines or []) + (tag_lines or []) + (callback_lines or [])
+        (persona_cards or []) + (memory_lines or []) + (tag_lines or [])
     ) or None
 
     # debug 摘要（discord_bot.log）：一眼看出各層 context 各抓到幾筆 + 有沒有圖 + 有沒有接到被回覆訊息
@@ -879,6 +886,7 @@ async def _run_one_ambient_pass(
         system=system_prompt,
         chat_context=chat_context,
         persona_context=persona_context,
+        recalled_context=callback_lines,
         images=image_payload,
         model=ambient_model,
         bot_display_name=bot_display_name,

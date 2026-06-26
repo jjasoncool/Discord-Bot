@@ -229,6 +229,7 @@ class LLMService:
         chat_context: Optional[List[str]] = None,
         bot_history: Optional[List[str]] = None,
         persona_context: Optional[List[str]] = None,
+        recalled_context: Optional[List[str]] = None,
         target_profiles: Optional[List[str]] = None,
         web_context: Optional[List[str]] = None,
         images: Optional[List[str]] = None,
@@ -243,6 +244,8 @@ class LLMService:
         chat_context: 純文字聊天記錄（每則一個字串，例如 "[14:30] 老哥: 昨天抽卡又保底了"）
         bot_history: Bot 自身先前的回覆（獨立於 chat_history 額度外）
         persona_context: 自然語言人物描述（每人一個字串，例如 "「老哥」— 群裡的非酋代表"）
+        recalled_context: 從頻道過去語意檢索回來的「模糊印象/舊發言」（callback），放獨立的
+            <recalled_context> 區塊，與人物卡分開——它是「回憶起的過去脈絡」，不是某人的人物設定
         target_profiles: 發問者明確 mention（<@id>）的人物 persona card，獨立於 persona_context
             放在 <latest_user_message> 旁邊的 <target_profile> 區塊，提高 attention 優先序
         web_context: 網路搜尋結果（每筆一個字串，例如 "[1] 標題 — snippet (url)"）
@@ -257,8 +260,8 @@ class LLMService:
         composed_user_prompt = ""
 
         has_context = bool(
-            chat_context or bot_history or persona_context or target_profiles or web_context
-            or replied_to_text
+            chat_context or bot_history or persona_context or recalled_context
+            or target_profiles or web_context or replied_to_text
         )
         if has_context:
             composed_user_prompt += (
@@ -292,6 +295,19 @@ class LLMService:
             for line in persona_context:
                 composed_user_prompt += f"{self._sanitize_text(line)}\n"
             composed_user_prompt += "</other_member_profiles>\n\n"
+
+        if recalled_context:
+            # 從頻道過去語意檢索回的舊發言（含作者/時間），獨立成塊（與人物卡分開）。
+            # 框架放這裡的固定 header：當「依稀印象」、貼切才提、別精確複述時間/原句。
+            composed_user_prompt += "<recalled_context>\n"
+            composed_user_prompt += (
+                "（以下是從本頻道過去撈回、跟當下話題語意相近的舊發言，每行標了發話者與時間，"
+                "僅供你判斷「此刻有沒有關連」。只有自然貼切時才順帶一提，且要像「依稀記得、好像、"
+                "之前是不是」這種試探語氣——別精確複述時間或原句、別逐字唸出來。不貼切就完全忽略。）\n"
+            )
+            for line in recalled_context:
+                composed_user_prompt += f"{self._sanitize_text(line)}\n"
+            composed_user_prompt += "</recalled_context>\n\n"
 
         if web_context:
             composed_user_prompt += "<web_context>\n"
@@ -664,6 +680,7 @@ class LLMService:
         chat_context: Optional[List[str]] = None,
         bot_history: Optional[List[str]] = None,
         persona_context: Optional[List[str]] = None,
+        recalled_context: Optional[List[str]] = None,
         target_profiles: Optional[List[str]] = None,
         web_context: Optional[List[str]] = None,
         images: Optional[List[str]] = None,
@@ -696,6 +713,7 @@ class LLMService:
             chat_context=chat_context,
             bot_history=bot_history,
             persona_context=persona_context,
+            recalled_context=recalled_context,
             target_profiles=target_profiles,
             web_context=web_context,
             images=images,

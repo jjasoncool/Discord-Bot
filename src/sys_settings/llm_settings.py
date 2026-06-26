@@ -273,18 +273,21 @@ class AmbientChatSettings(BaseSettings):
     #    經 relevance×importance×recency 三因子 gate 後，當「模糊印象」折進 persona_context。
     #    詳見 ambient_reply._build_chat_callback_context。所有門檻/權重待實測調。
     callback_enabled: bool = True
-    callback_top_k: int = 1                          # 最多注入幾條（小 N，避免囉嗦）
-    callback_candidate_pool: int = 10               # pgvector 先撈幾條再 gate
-    callback_max_distance: float = 0.35             # ① 絕對相關性地板（cosine 距離，越小越近）
-    callback_min_score: float = 0.6                 # ③ 三因子合併分門檻（正規化後 [0,1]）
+    callback_top_k: int = 5                          # 最多注入幾條（實際筆數受距離地板限制：過閘的不足此數就更少）
+    callback_candidate_pool: int = 25               # pgvector 先撈幾條再 gate（要 > top_k，過濾後才有得挑滿）
+    # 唯一相關性閘＝絕對 cosine 距離地板（越小越近）。importance/recency 只排序、不當門檻。
+    # topic 模式（全作者）嚴；target 模式（撈本人原話、低風險）放寬。實值待開 callback_debug
+    # 看真實距離分布再調：把地板設在「相關舊話」與「無關舊話」距離的中間。
+    callback_max_distance: float = 0.50             # topic 模式地板（起點偏寬，先讓結果出來，再用 debug 收緊）
+    callback_target_max_distance: float = 0.70      # target 模式地板（更寬，因撈本人原話低風險）
     callback_recency_half_life_hours: float = 336.0 # recency 半衰期（時）；336≈2 週
-    callback_recency_gap_hours: float = 2.0         # ⑤ 比此時數更舊才算「過去」（排除近窗）
-    callback_min_chars: int = 8                     # ② 候選品質：太短不當回憶點
-    callback_w_relevance: float = 0.5               # 權重：relevance 最高（文不對題最糟）
+    callback_recency_gap_hours: float = 2.0         # 比此時數更舊才算「過去」（排除近窗）
+    callback_min_chars: int = 8                     # 候選品質：太短不當回憶點
+    callback_w_relevance: float = 0.5               # 排序權重：relevance 最高（文不對題最糟）
     callback_w_importance: float = 0.35
     callback_w_recency: float = 0.15
     callback_line_max_chars: int = 120              # 注入行截斷（模糊印象不需長）
-    callback_debug: bool = False                    # 調參用：把候選池/距離/三因子分/過哪關 log 進 discord_bot.log
+    callback_debug: bool = True                     # 調參用：把候選池/距離/三因子分/過哪關 log 進 discord_bot.log（調完關掉）
 
     # 觸發門檻：插不插由 12B 判斷，「偶爾」感由冷卻 + 每小時上限保證（不用機率）
     min_chars: int = 4               # 太短（貼圖式單字）不插
