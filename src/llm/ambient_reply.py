@@ -198,7 +198,7 @@ async def _fetch_recent(
     """抓近期頻道訊息：回 (對話脈絡行[舊→新], 近期發言者 user_id)。
 
     對話脈絡含機器人自己的話以維持連續性；participant_ids 只收非 bot，給 persona 召回用。
-    bot 自己的行會被標「（你自己）」（self_id），讓模型在混合脈絡裡認得哪幾行是自己講的，
+    bot 自己的行會被標「(你自己)」（self_id），讓模型在混合脈絡裡認得哪幾行是自己講的，
     不致把自己的話當別人（gate #4「我剛插過沒」也靠這個認）。
     """
     self_id = message.guild.me.id if message.guild and message.guild.me else None
@@ -210,6 +210,7 @@ async def _fetch_recent(
         max_len=200,
         collect_participant_ids=True,
         self_id=self_id,
+        thread_replies=True,  # 行加 reply 編號 threading（#N / ↩#M），讓「這/你/這貓」指代有錨
         on_error=lambda exc: logger.debug("ambient 抓取頻道歷史失敗：%s", exc),
     )
     if message.author.id not in participant_ids:
@@ -335,12 +336,14 @@ def _log_callback_debug(
     """候選級 debug（gated by callback_debug）：每筆候選的作者/距離/反應/三因子分/最終排序分/過哪關。
 
     純 log、不影響回傳。調參就看這裡的真實距離 d=：相關的米拉舊話落哪、無關的落哪 → 把地板設中間。
-    tag：drop:DIST/SHORT/QUAL（被距離地板/品質閘刷掉）｜CHOSEN（採用）｜RANKOUT（過閘但排序輸、超過 top_k）。
+    tag：drop:DIST/SHORT/QUAL（被距離地板/品質閘刷掉）｜CHOSEN（採用）｜RANKOUT（過閘但排序輸、超過 top_k）；
+    後綴 ·BF＝backfill 補滿進來的（距離其實超地板，因地板內不足 callback_min_results 才補）。
     a=作者 id 後四碼。mode：target:名字＝B（撈本人原話，地板較寬）｜topic（全作者，地板較嚴）。
-    合併分只用來排序、不當門檻——唯一相關性閘是 d ≤ 地板（max_dist）。
+    合併分只用來排序、不當門檻；相關性閘＝d ≤ 地板（max_dist），但數量不足 min 時會放寬地板 backfill。
     """
     md = max_dist if max_dist is not None else _SETTINGS.callback_max_distance
     survivor_mids = {c["message_id"] for c in survivors}
+    backfill_mids = {c["message_id"] for c in survivors if c.get("_backfill")}  # 補滿進來的（距離超地板）
     detail = {survivors[i]["message_id"]: (rel[i], imp[i], rec[i]) for i in range(len(survivors))}
     score_by_mid = {c["message_id"]: s for s, c in scored}
     chosen = {c["message_id"] for _s, c in scored[: _SETTINGS.callback_top_k]}  # 與主流程一致：排序前 top_k
@@ -358,15 +361,16 @@ def _log_callback_debug(
         else:
             relv, impv, recv = detail.get(mid, (0.0, 0.0, 0.0))
             sc = score_by_mid.get(mid, 0.0)
-            tag = "CHOSEN" if mid in chosen else "RANKOUT"
+            tag = ("CHOSEN" if mid in chosen else "RANKOUT") + ("·BF" if mid in backfill_mids else "")
             rows.append(
                 f"  [{tag}] a={a} d={ds} react={reactions.get(mid, 0)} "
                 f"rel={relv:.2f} imp={impv:.2f} rec={recv:.2f} sort={sc:.2f} \"{snippet}\""
             )
     logger.info(
-        "ambient callback debug query=%r mode=%s | pool=%d survivors=%d chosen=%d (floor d<=%.2f)\n%s",
+        "ambient callback debug query=%r mode=%s | pool=%d survivors=%d (bf=%d) chosen=%d (floor d<=%.2f, min=%d)\n%s",
         query[:60], (f"target:{target}" if target else "topic"),
-        len(candidates), len(survivors), chosen_n, md, "\n".join(rows) or "  (無候選)",
+        len(candidates), len(survivors), len(backfill_mids), chosen_n, md,
+        _SETTINGS.callback_min_results, "\n".join(rows) or "  (無候選)",
     )
 
 
@@ -465,23 +469,31 @@ async def _build_chat_callback_context(
         return None
 
     # ① 絕對相關性地板（mode-specific：target 撈本人原話、低風險 → 放寬）+ ② 品質閘。
-    # 這個「絕對距離」才是真正的相關性閘；importance/recency 只拿來排序（見下），
-    # 不再用 min-max 正規化後的合併分當硬門檻——那會讓「只撈到一條」必被 0.5<門檻 坑掉。
+    # 這個「絕對距離」是相關性閘；importance/recency 只拿來排序（見下），不用 min-max 合併分當
+    # 硬門檻——那會讓「只撈到一條」必被 0.5<門檻 坑掉。
+    # 補滿（backfill）：地板內過閘的不足 callback_min_results 時，用「過品質閘但距離超地板」的
+    # 最近候選兜底湊數，刻意放寬距離換數量；是否真的引用仍由模型端「不貼切就忽略」把關。
     max_dist = (
         _SETTINGS.callback_target_max_distance if target_id
         else _SETTINGS.callback_max_distance
     )
     survivors: list[dict] = []
+    backfill: list[dict] = []   # 過品質閘但距離 > 地板：補滿用（之後按距離近→遠取）
     for c in candidates:
         dist = c.get("distance")
         text = (c.get("text") or "").strip()
-        if dist is None or dist > max_dist:
+        if dist is None:
             continue
         if len(text) < _SETTINGS.callback_min_chars:
             continue
         if is_emoji_or_symbol_only(text) or _is_link_only(text):
             continue
-        survivors.append({**c, "text": text})
+        (survivors if dist <= max_dist else backfill).append({**c, "text": text})
+    if len(survivors) < _SETTINGS.callback_min_results and backfill:
+        backfill.sort(key=lambda c: c["distance"])  # 最近的先補
+        need = _SETTINGS.callback_min_results - len(survivors)
+        for c in backfill[:need]:
+            survivors.append({**c, "_backfill": True})
     if not survivors:
         if _SETTINGS.callback_debug:
             _log_callback_debug(query=query, candidates=candidates, survivors=[], reactions={},

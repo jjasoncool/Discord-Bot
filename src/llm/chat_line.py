@@ -56,6 +56,9 @@ def format_chat_line(
     max_len: int | None = None,
     compact: bool = True,
     self_id: int | None = None,
+    prefix: str = "",
+    suffix: str = "",
+    empty_placeholder: str | None = None,
 ) -> str:
     """組一行聊天紀錄：`[時間] 顯示名#XXXX: 內容`。
 
@@ -65,20 +68,78 @@ def format_chat_line(
     - compact=True（預設，/askai 既有行為）→ 內容壓成單行（換行 / 多空白合一），
       避免單則內換行破壞 `[時間] 名: 內容` 行結構。compact=False → 保留原始空白
       （ambient / 日記既有行為；嚴格等價用）。
-    - self_id 設定且該則作者＝self_id（bot 自己）→ 名字後標「（你自己）」，讓模型在
+    - self_id 設定且該則作者＝self_id（bot 自己）→ 名字後標「(你自己)」，讓模型在
       混合的 chat_history 裡認得哪幾行是自己講的，不致把自己的話當成別人的。
+    - prefix / suffix：在 `[時間]…內容` 前後接字串（給 reply threading 用：prefix 放被回覆
+      訊息的編號錨 `#N `、suffix 放回覆指標 ` ↩#M`）；預設空＝不影響既有 caller。
+    - empty_placeholder：內容為空（純圖等）時改用此字串當內容，讓「被回覆的純圖訊息」也能
+      成行被 ↩#N 指到（caller 仍可選擇對非目標的空訊息直接跳過、不傳此參數）。
     """
     name = name_with_anchor(msg.author)
     if self_id is not None and getattr(msg.author, "id", None) == self_id:
-        name += "（你自己）"
+        name += "(你自己)"
     text = semantic_message_text(msg)
+    if not text and empty_placeholder is not None:
+        text = empty_placeholder
     if compact:
         text = " ".join(text.split())
     if max_len is not None and len(text) > max_len:
         text = text[:max_len] + "…"
     fmt = "%H:%M" if time_only else "%Y-%m-%d %H:%M"
     ts = msg.created_at.astimezone(tz).strftime(fmt)
-    return f"[{ts}] {name}: {text}"
+    return f"{prefix}[{ts}] {name}: {text}{suffix}"
+
+
+def _reply_target_placeholder(msg) -> str:
+    """被回覆、但本身無文字（純圖/附件）的訊息，給個佔位內容讓它能成行被 ↩#N 指到。"""
+    atts = getattr(msg, "attachments", None) or []
+    for a in atts:
+        fn = (getattr(a, "filename", "") or "").lower()
+        if fn.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif")):
+            return "(圖)"
+    return "(附件)" if atts else "(訊息)"
+
+
+def _thread_render(msgs: list, tz: tzinfo, max_len: int | None, self_id: int | None) -> list[str]:
+    """把時序訊息渲染成帶 reply 編號 threading 的行。
+
+    clutter 隨「回覆邊數」而非行數成長：
+    - 只有「視窗內被回覆過」的訊息給短編號，前綴 `#N `；其餘行不加編號。
+    - 是回覆的行加後綴 ` ↩#M`（M＝被回那則的編號）；被回的在視窗外 → ` ↩(較早)`。
+    - 非目標的空訊息照舊整則跳過；但「被回覆的純圖訊息」改顯示 `(圖)` 一行（才指得到）。
+    回覆只會指向更早的訊息 → 目標必在其回覆者之前出現，編號無前向引用問題。
+    """
+    in_window = {m.id for m in msgs}
+
+    def _ref_id(m):
+        ref = getattr(m, "reference", None)
+        return getattr(ref, "message_id", None) if ref is not None else None
+
+    referenced = {rid for m in msgs if (rid := _ref_id(m)) is not None and rid in in_window}
+    thread_no: dict = {}
+    for m in msgs:
+        if m.id in referenced:
+            thread_no[m.id] = len(thread_no) + 1
+
+    lines: list[str] = []
+    for m in msgs:
+        is_target = m.id in thread_no
+        has_text = bool(semantic_message_text(m))
+        if not has_text and not is_target:
+            continue  # 非目標的空訊息照舊跳過（不增 token）
+        rid = _ref_id(m)
+        suffix = ""
+        if rid is not None:
+            suffix = f" ↩#{thread_no[rid]}" if rid in thread_no else " ↩(較早)"
+        lines.append(
+            format_chat_line(
+                m, tz, time_only=True, max_len=max_len, compact=False, self_id=self_id,
+                prefix=(f"#{thread_no[m.id]} " if is_target else ""),
+                suffix=suffix,
+                empty_placeholder=(None if has_text else _reply_target_placeholder(m)),
+            )
+        )
+    return lines
 
 
 async def fetch_recent_lines(
@@ -91,6 +152,7 @@ async def fetch_recent_lines(
     max_len: int | None = None,
     collect_participant_ids: bool = False,
     self_id: int | None = None,
+    thread_replies: bool = False,
     on_error: Optional[Callable[[Exception], None]] = None,
 ) -> tuple[list[str], Optional[list[int]]]:
     """抓近期頻道訊息 → 時序（舊→新）的 `[HH:MM] 名#XXXX: 內容` 行（time_only）。
@@ -103,9 +165,9 @@ async def fetch_recent_lines(
       oldest_first=False 抓最新、最後統一反轉，與既有行為一致）。
     - collect_participant_ids=True 時，回傳 (lines, 非 bot 發話者 id[出現序])；否則第二項為 None。
       lines 含 bot 自己的話以維持對話連續性；participant_ids 只收非 bot。
+    - thread_replies=True → 行加 reply 編號 threading（見 _thread_render）；預設 False＝既有扁平輸出。
     - on_error：抓取失敗時呼叫（讓 caller 決定 log 等級/訊息）；失敗仍回已收集到的部分。
     """
-    lines: list[str] = []
     pids: Optional[list[int]] = [] if collect_participant_ids else None
     hist_kwargs: dict = {"limit": limit}
     if before is not None:
@@ -113,20 +175,24 @@ async def fetch_recent_lines(
     if after is not None:
         hist_kwargs["after"] = after
         hist_kwargs["oldest_first"] = False  # 抓最新，最後反轉成時序（與舊行為一致）
+    msgs: list = []
     try:
         async for msg in channel.history(**hist_kwargs):
             if pids is not None and not msg.author.bot and msg.author.id not in pids:
                 pids.append(msg.author.id)
-            if not semantic_message_text(msg):  # 純空訊息（無文字/貼圖）整則跳過
-                continue
-            # compact=False：ambient / 日記歷史上不壓縮空白，保留原貌（嚴格等價）
-            lines.append(
-                format_chat_line(
-                    msg, tz, time_only=True, max_len=max_len, compact=False, self_id=self_id
-                )
-            )
+            msgs.append(msg)
     except Exception as exc:  # noqa: BLE001 — best-effort，失敗回部分結果
         if on_error is not None:
             on_error(exc)
-    lines.reverse()  # newest-first → 時序（舊→新）
+    msgs.reverse()  # newest-first → 時序（舊→新）
+
+    if thread_replies:
+        lines = _thread_render(msgs, tz, max_len, self_id)
+    else:
+        # compact=False：ambient / 日記歷史上不壓縮空白，保留原貌（嚴格等價）；空訊息整則跳過
+        lines = [
+            format_chat_line(m, tz, time_only=True, max_len=max_len, compact=False, self_id=self_id)
+            for m in msgs
+            if semantic_message_text(m)
+        ]
     return lines, pids

@@ -273,8 +273,11 @@ class AmbientChatSettings(BaseSettings):
     #    經 relevance×importance×recency 三因子 gate 後，當「模糊印象」折進 persona_context。
     #    詳見 ambient_reply._build_chat_callback_context。所有門檻/權重待實測調。
     callback_enabled: bool = True
-    callback_top_k: int = 5                          # 最多注入幾條（實際筆數受距離地板限制：過閘的不足此數就更少）
-    callback_candidate_pool: int = 25               # pgvector 先撈幾條再 gate（要 > top_k，過濾後才有得挑滿）
+    callback_top_k: int = 10                          # 最多注入幾條（上限／天花板）
+    callback_min_results: int = 5                     # 至少湊幾條：地板內過閘的不足此數時，用「過品質閘但距離超
+    #                                                  地板」的最近候選補滿（刻意放寬距離換數量；最終是否引用仍由
+    #                                                  模型端「不貼切就忽略」把關）。設 0 = 回到純距離地板、不補。
+    callback_candidate_pool: int = 25               # pgvector 先撈幾條再 gate（要 ≥ top_k，過濾/補滿後才有得挑）
     # 唯一相關性閘＝絕對 cosine 距離地板（越小越近）。importance/recency 只排序、不當門檻。
     # topic 模式（全作者）嚴；target 模式（撈本人原話、低風險）放寬。實值待開 callback_debug
     # 看真實距離分布再調：把地板設在「相關舊話」與「無關舊話」距離的中間。
