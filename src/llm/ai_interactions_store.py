@@ -9,6 +9,7 @@ event loop。所有函式 best-effort：失敗只記 log、不拋（互動紀錄
 from __future__ import annotations
 
 import logging
+import threading
 from collections import deque
 from typing import Any, Optional
 
@@ -20,6 +21,10 @@ logger = logging.getLogger("discord_bot")
 
 _TABLE = "ai_interactions"
 _settings: Optional[LLMServiceSettings] = None
+
+# 共用 embedding 實例（與 RAG/印象卡同一顆 embed model）；lazy 初始化，sync 路徑用。
+_embed_model: Any = None
+_embed_init_lock = threading.Lock()
 
 # 追蹤「最近 bot 自己插話的訊息 id」——反應事件先查這個記憶體集合，命中才打 DB，
 # 避免整個 server 每個反應都對 DB 做無謂 UPDATE。重啟後重填（只影響重啟前舊訊息的反應）。
@@ -69,6 +74,14 @@ CREATE INDEX IF NOT EXISTS idx_ai_interactions_author     ON {_TABLE} (trigger_a
 CREATE INDEX IF NOT EXISTS idx_ai_interactions_replymsg   ON {_TABLE} (reply_message_id);
 """
 
+# embedding 欄需要 vector extension，獨立一段執行：缺 extension 時不該拖垮基礎建表。
+# vector(1024) 對齊 pgvector_embed_dim（與 RAG/印象卡同一顆 embed model 的輸出維度）。
+_EMBED_DDL = f"""
+ALTER TABLE {_TABLE} ADD COLUMN IF NOT EXISTS embedding vector(1024);
+CREATE INDEX IF NOT EXISTS idx_ai_interactions_embedding
+  ON {_TABLE} USING hnsw (embedding vector_cosine_ops);
+"""
+
 
 def _get_settings() -> LLMServiceSettings:
     global _settings
@@ -88,6 +101,47 @@ def _get_conn():
     )
 
 
+def _get_embed_model():
+    """lazy 取得共用 embedding 實例（與 RAG/印象卡同源）。沿用其他 store 的組裝路徑。"""
+    global _embed_model
+    if _embed_model is not None:
+        return _embed_model
+    with _embed_init_lock:
+        if _embed_model is None:
+            from llm.safe_llm_embedding import make_safe_llm_embedding
+            from sys_settings.llm_settings import load_llm_runtime_config
+            s = _get_settings()
+            rc = load_llm_runtime_config(s.llm_runtime_model_path)
+            _embed_model = make_safe_llm_embedding(settings=s, runtime_config=rc)
+    return _embed_model
+
+
+def _embed_text(text: Optional[str]) -> Optional[list]:
+    """情境文字 → 向量（best-effort；失敗回 None、不拋，embedding 永遠不該拖垮主流程）。"""
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        # 公開 API（與 context_retriever 一致）：內部走 _get_text_embedding + 事件/限流包裝
+        return _get_embed_model().get_text_embedding(text)
+    except Exception as exc:
+        logger.warning("ai_interactions embed 失敗：%s", exc)
+        return None
+
+
+def _vec_literal(vec) -> Optional[str]:
+    """list[float] → pgvector 文字字面值 '[...]'（給 SQL 的 %s::vector 用）。空向量回 None。"""
+    if not vec:
+        return None
+    return "[" + ",".join(f"{float(x):.7g}" for x in vec) + "]"
+
+
+def _situation_text(trigger_text: Optional[str], context_snippet: Optional[str]) -> str:
+    """embedding 的對象＝「情境」：觸發文字 + 它在回的那段脈絡（語意召回靠它對齊當下場面）。"""
+    parts = [p.strip() for p in (trigger_text, context_snippet) if p and p.strip()]
+    return "\n".join(parts).strip()
+
+
 def ensure_table() -> None:
     """建表 + 索引（idempotent）。啟動時呼叫一次。"""
     try:
@@ -96,6 +150,15 @@ def ensure_table() -> None:
             with conn:
                 with conn.cursor() as cur:
                     cur.execute(_DDL)
+            # embedding 欄/索引獨立一段：缺 vector extension 時只記 warning，不拖垮基礎建表
+            try:
+                with conn:
+                    with conn.cursor() as cur:
+                        cur.execute(_EMBED_DDL)
+            except Exception as exc:
+                logger.warning(
+                    "ai_interactions embedding 欄/索引建立略過（缺 vector extension？）：%s", exc
+                )
         finally:
             conn.close()
         logger.info("ai_interactions 表已就緒")
@@ -116,9 +179,17 @@ def record_interaction(
     reply_text: str,
     reply_message_id: Optional[str],
     trace_id: Optional[str],
+    embedding: Optional[list] = None,
 ) -> None:
-    """寫入一筆插話紀錄（sync；async caller 用 asyncio.to_thread 包）。"""
+    """寫入一筆插話紀錄（sync；async caller 用 asyncio.to_thread 包）。
+
+    embedding：當下情境的向量。caller 沒帶就現算（情境＝觸發+脈絡）；embed 不出來就存 NULL，
+    純表示「這列暫不可語意召回」，不影響寫入。
+    """
     _track_reply_id(reply_message_id)  # 記住這則訊息 id，之後它收到的反應才認得出是 bot 插話
+    if embedding is None:
+        embedding = _embed_text(_situation_text(trigger_text, context_snippet))
+    emb_literal = _vec_literal(embedding)
     try:
         conn = _get_conn()
         try:
@@ -129,13 +200,13 @@ def record_interaction(
                         INSERT INTO {_TABLE}
                           (guild_id, channel_id, directed, trigger_kind, trigger_author_id,
                            trigger_message_id, trigger_text, context_snippet, reply_text,
-                           reply_message_id, trace_id)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                           reply_message_id, trace_id, embedding)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector)
                         """,
                         (
                             guild_id, channel_id, directed, trigger_kind, trigger_author_id,
                             trigger_message_id, trigger_text, context_snippet, reply_text,
-                            reply_message_id, trace_id,
+                            reply_message_id, trace_id, emb_literal,
                         ),
                     )
         finally:
@@ -213,3 +284,96 @@ def fetch_recent(
         logger.warning("ai_interactions 讀取失敗 channel=%s：%s", channel_id, exc)
     rows.reverse()  # newest-first → 時序
     return rows
+
+
+def fetch_similar_positive(
+    situation_text: str, *, k: int = 8, max_distance: float = 0.45, min_positive: int = 1
+) -> list[dict[str, Any]]:
+    """撈與當下情境語意相近、且被群裡按過正向反應（且無負向）的舊插話＝「打中過的好回答」。
+
+    回 [{trigger_text, context_snippet, reply_text, reply_message_id, positive_reactions,
+        directed, distance}]，按 cosine 距離由近到遠、且只留 distance <= max_distance 的。sync。
+    用途：當「風格靈感」注入 ambient（學味道、別照抄），不是事實來源。
+    """
+    lit = _vec_literal(_embed_text(situation_text))
+    if lit is None:
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        conn = _get_conn()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        SELECT trigger_text, context_snippet, reply_text, reply_message_id,
+                               positive_reactions, directed, (embedding <=> %s::vector) AS distance
+                        FROM {_TABLE}
+                        WHERE embedding IS NOT NULL
+                          AND positive_reactions >= %s
+                          AND negative_reactions = 0
+                        ORDER BY embedding <=> %s::vector
+                        LIMIT %s
+                        """,
+                        (lit, min_positive, lit, k),
+                    )
+                    for r in cur.fetchall():
+                        dist = r[6]
+                        if dist is None or float(dist) > max_distance:
+                            continue
+                        rows.append({
+                            "trigger_text": r[0], "context_snippet": r[1], "reply_text": r[2],
+                            "reply_message_id": r[3], "positive_reactions": r[4],
+                            "directed": r[5], "distance": float(dist),
+                        })
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("ai_interactions 相似召回失敗：%s", exc)
+    return rows
+
+
+def backfill_embeddings(*, batch: int = 50, max_rows: Optional[int] = None) -> int:
+    """回填 embedding IS NULL 且有情境文字的舊列（idempotent、best-effort）。
+
+    以 id 為游標往前走——即使某筆 embed 失敗也不會回頭重撈、不會卡死。啟動時於背景執行緒呼叫。
+    回傳本輪成功回填筆數。
+    """
+    done = 0
+    last_id = 0
+    try:
+        conn = _get_conn()
+        conn.autocommit = True  # 每筆 UPDATE 即時 commit，簡化交易、可隨時中止
+        try:
+            while True:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""SELECT id, trigger_text, context_snippet FROM {_TABLE}
+                            WHERE embedding IS NULL
+                              AND COALESCE(trigger_text, context_snippet, '') <> ''
+                              AND id > %s
+                            ORDER BY id LIMIT %s""",
+                        (last_id, batch),
+                    )
+                    fetched = cur.fetchall()
+                if not fetched:
+                    break
+                for rid, tt, cs in fetched:
+                    last_id = rid  # 游標前進（這筆 embed 失敗也不再重撈）
+                    lit = _vec_literal(_embed_text(_situation_text(tt, cs)))
+                    if lit is None:
+                        continue
+                    with conn.cursor() as cur2:
+                        cur2.execute(
+                            f"UPDATE {_TABLE} SET embedding=%s::vector WHERE id=%s", (lit, rid)
+                        )
+                    done += 1
+                    if max_rows is not None and done >= max_rows:
+                        logger.info("ai_interactions embedding 回填達上限 %d，先停", max_rows)
+                        return done
+            logger.info("ai_interactions embedding 回填完成：本輪 %d 筆", done)
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("ai_interactions embedding 回填中止（已完成 %d）：%s", done, exc)
+    return done

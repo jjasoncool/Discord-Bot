@@ -272,6 +272,17 @@ async def on_ready():
     except Exception as _exc:
         logger.error("ai_interactions 建表啟動失敗: %s", _exc, exc_info=True)
 
+    # v2 風格召回：背景回填既有列的 embedding（idempotent；embed 端就緒後逐批做，不阻塞啟動）。
+    # on_ready 可能 reconnect 重觸發 → 用 flag 避免重複起背景工作（回填本身也 idempotent，雙保險）。
+    if not getattr(bot, "_ai_emb_backfill_started", False):
+        bot._ai_emb_backfill_started = True
+        try:
+            from llm.ai_interactions_store import backfill_embeddings as _backfill_emb
+            asyncio.create_task(asyncio.to_thread(_backfill_emb))
+            logger.info("ai_interactions embedding 背景回填已排程")
+        except Exception as _exc:
+            logger.error("ai_interactions embedding 回填啟動失敗: %s", _exc, exc_info=True)
+
     # 啟動 AI 每日日記排程（每天 00:00 台北時區，在日記頻道寫一段當天感想）
     if not getattr(bot, '_diary_task_started', False):
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td

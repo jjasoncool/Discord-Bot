@@ -259,6 +259,19 @@ class AmbientChatSettings(BaseSettings):
     use_shared_identity: bool = True
     identity_path: str = "/app/settings/prompts/persona_identity.txt"
     guardrails_path: str = "/app/settings/prompts/persona_guardrails.txt"
+    # 風格對照範例（與 /askai 共用同一份 persona_examples.txt，人設共通不另維護）：
+    # 教模型別跟著頻道互嗆口吻下場補刀、保持隔一層看戲的熟女調性。
+    use_examples: bool = True
+    examples_path: str = "/app/settings/prompts/persona_examples.txt"
+
+    # ── 風格召回（v2）：撈「被群裡按過讚、且與當下情境語意相近」的舊插話，當靈感注入（學味道別照抄）。
+    #    走 ai_interactions.embedding（pgvector cosine）。保守起步：注入少、距離地板嚴；先 shadow 觀察。
+    style_refs_enabled: bool = True       # True=注入進 prompt；False=純 shadow（只記 log、不影響回覆）
+    style_refs_debug: bool = True         # 每次召回到什麼寫進 discord_bot.log（調參用，穩了再關）
+    style_refs_top_k: int = 8             # pgvector 先撈幾條最近鄰
+    style_refs_max_distance: float = 0.45 # cosine 距離地板（越小越像）；保守起步，看 debug 再放寬
+    style_refs_inject_count: int = 2      # 過地板後最多注入幾條（在池子裡抽樣 → 每次不同、不跳針）
+    style_refs_min_positive: int = 1      # 至少幾個正向反應才進召回池
 
     # 背景上下文：抓近期幾則當短期對話記憶（12B ctx 已調到 16384，可帶完整脈絡）
     history_limit: int = 20

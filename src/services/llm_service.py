@@ -230,6 +230,7 @@ class LLMService:
         bot_history: Optional[List[str]] = None,
         persona_context: Optional[List[str]] = None,
         recalled_context: Optional[List[str]] = None,
+        style_refs: Optional[List[str]] = None,
         target_profiles: Optional[List[str]] = None,
         web_context: Optional[List[str]] = None,
         images: Optional[List[str]] = None,
@@ -261,7 +262,7 @@ class LLMService:
 
         has_context = bool(
             chat_context or bot_history or persona_context or recalled_context
-            or target_profiles or web_context or replied_to_text
+            or style_refs or target_profiles or web_context or replied_to_text
         )
         if has_context:
             composed_user_prompt += (
@@ -308,6 +309,19 @@ class LLMService:
             for line in recalled_context:
                 composed_user_prompt += f"{self._sanitize_text(line)}\n"
             composed_user_prompt += "</recalled_context>\n\n"
+
+        if style_refs:
+            # 你過去在類似情境講過、且群裡反應不錯的話。只給「調子/招式」當範本，嚴禁照抄字句——
+            # 否則小模型會逐字複誦，反而跳針、失去個性。不貼切就完全忽略。
+            composed_user_prompt += "<style_refs>\n"
+            composed_user_prompt += (
+                "（以下是你過去在類似情境講過、而且群裡反應不錯的話，只用來提醒你「自己說話的調子與"
+                "招式」——比如怎麼隔一層看戲、怎麼機智回敬、刺要怎麼點到為止。**只學那個味道，千萬"
+                "別照抄字句、別逐字重複**；這次請用當下的話題、講你自己的新句子。不貼切就忽略。）\n"
+            )
+            for line in style_refs:
+                composed_user_prompt += f"{self._sanitize_text(line)}\n"
+            composed_user_prompt += "</style_refs>\n\n"
 
         if web_context:
             composed_user_prompt += "<web_context>\n"
@@ -681,6 +695,7 @@ class LLMService:
         bot_history: Optional[List[str]] = None,
         persona_context: Optional[List[str]] = None,
         recalled_context: Optional[List[str]] = None,
+        style_refs: Optional[List[str]] = None,
         target_profiles: Optional[List[str]] = None,
         web_context: Optional[List[str]] = None,
         images: Optional[List[str]] = None,
@@ -714,6 +729,7 @@ class LLMService:
             bot_history=bot_history,
             persona_context=persona_context,
             recalled_context=recalled_context,
+            style_refs=style_refs,
             target_profiles=target_profiles,
             web_context=web_context,
             images=images,

@@ -28,13 +28,14 @@ import math
 import random
 import re
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 import discord
 
-from llm.ai_interactions_store import record_interaction
+from llm.ai_interactions_store import fetch_similar_positive, record_interaction
 from llm.ambient_memory import enqueue_for_memory, recall_lines, recall_signature_tags
 from llm.chat_line import (
     fetch_recent_lines,
@@ -91,10 +92,12 @@ def _read_text_file(path: Path) -> str:
 
 
 def _load_ambient_prompt() -> str:
-    """組 ambient system prompt：共用人設身份（琇紫）+ 插話行為規則。
+    """組 ambient system prompt：共用人設身份（琇紫）+ 插話行為規則 + 風格對照範例。
 
     身份來自 `persona_identity.txt`（與 /askai 同一份），確保插話與問答是同一個角色；
-    行為來自 `ambient_reply_prompt.txt`（簡短、允許沉默）。以兩檔 mtime 組合快取。
+    行為來自 `ambient_reply_prompt.txt`（簡短、允許沉默）；最後疊上與 /askai 共用的
+    `persona_examples.txt`（風格對照範例，教它別跟著頻道互嗆下場補刀）。
+    以各檔 mtime 組合快取。
     """
     paths: list[Path] = []
     if _SETTINGS.use_shared_identity and _SETTINGS.identity_path:
@@ -102,6 +105,8 @@ def _load_ambient_prompt() -> str:
     if _SETTINGS.guardrails_path:
         paths.append(Path(_SETTINGS.guardrails_path))    # 共用守則/限制
     paths.append(Path(_SETTINGS.prompt_path))            # 插話行為
+    if _SETTINGS.use_examples and _SETTINGS.examples_path:
+        paths.append(Path(_SETTINGS.examples_path))      # 風格對照範例（克制 roast）
 
     key = tuple(
         (str(p), p.stat().st_mtime_ns if p.exists() else None) for p in paths
@@ -714,6 +719,71 @@ def _has_chime_backoff_signal(message: discord.Message, chat_context: Optional[l
     return any(w in blob for w in _CHIME_BACKOFF_WORDS)
 
 
+# style_refs（v2）：避免同一句「好回答」連續幾則都被當靈感 → 跳針。記最近注入過的 reply，下次優先避開。
+_RECENT_STYLE_REFS: "deque[str]" = deque(maxlen=40)
+_RECENT_STYLE_SET: set[str] = set()
+
+
+def _remember_style_ref(reply_text: str) -> None:
+    if not reply_text or reply_text in _RECENT_STYLE_SET:
+        return
+    if len(_RECENT_STYLE_REFS) == _RECENT_STYLE_REFS.maxlen:
+        _RECENT_STYLE_SET.discard(_RECENT_STYLE_REFS[0])  # 即將被擠出的最舊一筆
+    _RECENT_STYLE_REFS.append(reply_text)
+    _RECENT_STYLE_SET.add(reply_text)
+
+
+async def _build_style_refs(situation: str) -> Optional[list]:
+    """召回「與當下情境語意相近、且被群裡按過讚」的舊插話，抽樣成 <style_refs> 靈感行。
+
+    純風格參考（學味道、別照抄）；shadow 模式（style_refs_enabled=False）只記 log、不注入。
+    best-effort：任何失敗都回 None，不影響插話主流程。
+    """
+    if not situation or not situation.strip():
+        return None
+    try:
+        rows = await asyncio.to_thread(
+            fetch_similar_positive,
+            situation,
+            k=_SETTINGS.style_refs_top_k,
+            max_distance=_SETTINGS.style_refs_max_distance,
+            min_positive=_SETTINGS.style_refs_min_positive,
+        )
+    except Exception as exc:
+        logger.debug("style_refs 召回失敗：%s", exc)
+        return None
+    if not rows:
+        if _SETTINGS.style_refs_debug:
+            logger.info("ambient style_refs：無相近的高讚舊回覆（情境=%r）", situation[:40])
+        return None
+
+    # 先避開最近注入過的（壓跳針）；都用過了就退回全部，再抽樣 → 每次選到的不同、有變化
+    fresh = [r for r in rows if r["reply_text"] not in _RECENT_STYLE_SET]
+    pool = fresh or rows
+    n = min(_SETTINGS.style_refs_inject_count, len(pool))
+    picked = random.sample(pool, n) if n > 0 else []
+
+    if _SETTINGS.style_refs_debug:
+        logger.info(
+            "ambient style_refs 召回=%d 抽樣=%d enabled=%s | %s",
+            len(rows), len(picked), _SETTINGS.style_refs_enabled,
+            " ‖ ".join(
+                f"d={p['distance']:.2f}讚{p['positive_reactions']}「{p['reply_text'][:30]}」"
+                for p in picked
+            ),
+        )
+    if not _SETTINGS.style_refs_enabled or not picked:
+        return None  # shadow：只看 log、不真的注入
+
+    lines: list = []
+    for p in picked:
+        sit = " ".join((p.get("trigger_text") or p.get("context_snippet") or "").split())[:60]
+        rep = " ".join((p.get("reply_text") or "").split())
+        lines.append(f"・當時情境「{sit}」→ 你回了:「{rep}」")
+        _remember_style_ref(p["reply_text"])
+    return lines
+
+
 async def _record_ambient_interaction(
     *, message: discord.Message, directed: bool, stripped: str, has_image: bool,
     chat_context: Optional[list], reply: str, sent_msg, trace_id: str,
@@ -887,16 +957,19 @@ async def _run_one_ambient_pass(
     tag_lines = await recall_signature_tags(message.guild.id, participant_ids, message.guild)
     # Phase D（實驗，預設關）：本頻道歷史 callback（三因子 gate 後的模糊印象）；用真正文字當 query
     callback_lines = await _build_chat_callback_context(message, stripped)  # → 獨立 <recalled_context>
+    # Phase v2：風格召回——撈「被群裡按過讚、語意相近」的舊插話當靈感（學味道別照抄；shadow 可關）
+    style_ref_lines = await _build_style_refs(stripped)
     persona_context = (
         (persona_cards or []) + (memory_lines or []) + (tag_lines or [])
     ) or None
 
     # debug 摘要（discord_bot.log）：一眼看出各層 context 各抓到幾筆 + 有沒有圖 + 有沒有接到被回覆訊息
     logger.info(
-        "ambient 生成 trace=%s directed=%s model=%s | chat=%d persona=%d memory=%d callback=%d img=%d reply_to=%d",
+        "ambient 生成 trace=%s directed=%s model=%s | chat=%d persona=%d memory=%d callback=%d style=%d img=%d reply_to=%d",
         trace_id, directed, ambient_model,
         len(chat_context or []), len(persona_cards or []), len(memory_lines or []),
-        len(callback_lines or []), len(image_payload or []), 1 if replied_to_text else 0,
+        len(callback_lines or []), len(style_ref_lines or []),
+        len(image_payload or []), 1 if replied_to_text else 0,
     )
 
     result = await _get_llm().generate_reply(
@@ -905,6 +978,7 @@ async def _run_one_ambient_pass(
         chat_context=chat_context,
         persona_context=persona_context,
         recalled_context=callback_lines,
+        style_refs=style_ref_lines,
         images=image_payload,
         model=ambient_model,
         bot_display_name=bot_display_name,

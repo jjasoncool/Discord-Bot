@@ -440,6 +440,48 @@ Phase 1 三個玩法**共用同一張 DB**，不要拆開做。
 
 ---
 
+## 變更紀錄：插話人格「有時像屁孩噴人」修正（2026-06-29，A 已做、B 待決）
+
+使用者回報插話有時不像「從容和服熟女」、反而像屁孩噴人。看 `logs/ambient_prompt.txt` 對照實際回覆：**多數其實在人設上**（隔一層淡淡點評），走鐘集中在**一個情境——頻道在打遊戲互嗆對線時，它會跟著下場、借 gamer 嗆聲術語補刀**。典型：觸發「下路送爛」→ 回「既然都放棄治療了，那你們上中就當帶兩隻隊友打 5v3 吧」。
+
+**根因**：
+1. **結構破口（最關鍵）**：`persona_examples.txt`（「❌損友roast/同盟酸/毒舌 ✓智慧女性」對照範例）**只載入 /askai，沒載入插話**。`/askai` 組 prompt＝identity+guardrails+主prompt+examples（`llm_commands.py:115-117`）；插話 `_load_ambient_prompt` 只有 identity+guardrails+行為三份。最能教「別像損友補刀」的範例，缺席在最需要的模式。
+2. **行為層 license 失衡**：`ambient_reply_prompt.txt` 第二關鼓勵「放開/愛玩/老朋友回扣招牌梗」好幾行，「刺是偶爾」只一行，且**沒有一條明講「群裡互嗆對線時你不下場跟著嗆」**。本地模型本就鏡像周遭語域 → 跟著對線。
+
+**A（已做，待重啟）— 把範例載進插話**：
+- **與 /askai 共用同一份 `persona_examples.txt`**（人設共通，不另維護避免 drift；使用者 2026-06-29 拍板合併，原先短暫建過的 `persona_examples_ambient.txt` 子集檔已刪）。唯一新增內容＝原檔尾端加 **範例 13「群裡打遊戲互嗆對線→旁觀者別下場補刀」**（正打使用者抱怨的情境，用範例教、非硬規則）。
+- `AmbientChatSettings` 加 `use_examples=True` / `examples_path`(=persona_examples.txt)；`_load_ambient_prompt` 尾端疊 examples 層（順序＝identity+guardrails+行為+examples，與 askai 一致；mtime 快取自動納入）。
+- 改檔：`persona_examples.txt`(加範例13)、`sys_settings/llm_settings.py`、`llm/ambient_reply.py`。py_compile 通過、組裝順序已驗。
+
+**B（待你拍板，未做）— 第二關加硬規則「不下場對線」**：在 `ambient_reply_prompt.txt` 第二關加一條，明文「群裡互嗆/玩遊戲術語對線/口出穢語較勁時，你是看戲那個，不借同樣嗆聲口吻或遊戲對線術語（『放棄治療』『5v3』『有本事就…』就是下場了），刺永遠淡淡一句、隔一層、不補刀」。先做 A 觀察，B 視效果再決定（避免一次動太多人格條文難歸因）。
+
+**部署/驗證**：重啟 bot 生效。看 `logs/ambient_prompt.txt` 確認 system prompt 尾端有範例層、且遊戲互嗆情境是否不再下場補刀。
+
+---
+
+## 變更紀錄：V2 風格召回（style_refs）+ 從反應數據學個性（2026-06-30，已做待 reboot）
+
+**目標**：讓琇紫插話時，參考「**過去被群裡按過讚、且與當下情境語意相近**」的舊回覆當靈感 → 個性從群眾驗證過的數據長出來。**刻意不走「prose 蒸餾」**（弱 teacher 會把好句子蒸成笨句子，使用者擔心成立）→ 改「**召回真句子、不重寫**」，結構上免疫笨化。唯一 live 風險＝照抄跳針，用「抽樣輪替＋距離地板＋近期壓制＋只給情境→回覆配對＋prompt 明令別照抄」壓制。
+
+**資料層**（`ai_interactions`）：
+- 線上表已 `ALTER ADD COLUMN embedding vector(1024)` + hnsw cosine 索引（**純加欄、1281 列原資料未動**；`_EMBED_DDL` 也加進 `ensure_table`，獨立 try、缺 vector extension 不拖垮建表）。
+- `record_interaction` 加 `embedding` 參數：寫入時 embed「情境」(trigger_text+context_snippet)，embed 不出來存 NULL（不影響寫入）。
+- `backfill_embeddings()`：啟動時背景回填既有 1281 列（id 游標前進、idempotent、autocommit）；on_ready 在 `ensure_table` 後 `create_task(to_thread(...))`，有 `_ai_emb_backfill_started` flag 防重觸發。
+- `fetch_similar_positive(situation, k, max_distance, min_positive)`：cosine `<=>`，撈 `positive_reactions>0 且 negative_reactions=0`、距離地板內的舊插話。
+- embedding 走共用 `make_safe_llm_embedding`（與 RAG/印象卡同顆），公開 `get_text_embedding`；lazy singleton。
+
+**注入層**：
+- `llm_service._build_prompt_bundle` / `generate_reply` 加 `style_refs` 參數 → 渲染獨立 `<style_refs>` 區塊（框架：只學調子/招式、**嚴禁照抄字句**、不貼切就忽略）。
+- `ambient_reply._build_style_refs(situation)`：召回→避開近期注入過的（`_RECENT_STYLE_REFS` deque）→抽樣 `inject_count` 條→debug log→（shadow 時只 log 不注入）。接在 callback 之後、傳進 generate_reply；debug 摘要加 `style=%d`。
+
+**設定**（`AmbientChatSettings`，保守起步）：`style_refs_enabled=True`（False=純 shadow）、`style_refs_debug=True`、`top_k=8`、`max_distance=0.45`、`inject_count=2`、`min_positive=1`。
+
+**部署/驗證**：**reboot container 上線**。reboot 後：(1) 看 `discord_bot.log` 的「embedding 背景回填」跑完（1281 筆，約數分鐘）；(2) 看 `ambient style_refs 召回=…抽樣=…` log 判斷**相關性 + 會不會老抓同幾句**；(3) 看 `ambient_prompt.txt` 確認 `<style_refs>` 有進 prompt、且回覆**沒有逐字照抄**。跳針/不相關 → 調 `max_distance`（收緊）或 `style_refs_enabled=False`（一鍵關）。
+
+**待辦**：V3 心情（2 軸 transparent mood，JSON 存 `src/settings/ai_mood_state.json`、gitignore、tint-not-driver、寫進日記）尚未做；語意召回穩了再做。
+
+---
+
 ## 使用者指令記憶 (/remember) 未來工作
 
 <!-- @meta
