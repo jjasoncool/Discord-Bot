@@ -32,9 +32,9 @@ _SETTINGS = DiaryReflectionSettings()
 _TAIPEI_TZ = timezone(timedelta(hours=8))  # 逐字稿標 [HH:MM] 發話時刻 → 日記能寫出時間感
 
 _DEFAULT_DIARY_PROMPT = (
-    "你是 Discord 群裡的琇紫。夜深了，獨自在自己的頻道，寫一段今天的日記——"
-    "第一人稱、以你自己的感受為主，自然帶到今天群裡發生的事與大家的反應。"
-    "一到三小段，口語、不條列、不 markdown，只用繁體中文。"
+    "你是 Discord 群裡的琇紫，在自己的頻道寫一段今天的日記——第一人稱、以你自己的"
+    "感受為主，自然帶到今天群裡從早到晚發生的事與大家的反應。開頭別每天都從「夜深了」"
+    "之類的時間天氣起手，換個切入點。一到三小段，口語、不條列、不 markdown，只用繁體中文。"
 )
 
 
@@ -72,16 +72,35 @@ def _resolve_channel_id(config: dict, key: str) -> Optional[int]:
 
 
 async def _gather_day_transcript(channel: discord.abc.Messageable) -> list[str]:
-    """抓社交頻道過去 lookback_hours 的訊息（最近 max_messages 則）→ 時序 chat_history 行。"""
-    after = datetime.now(timezone.utc) - timedelta(hours=_SETTINGS.lookback_hours)
-    lines, _ = await fetch_recent_lines(
-        channel,
-        tz=_TAIPEI_TZ,
-        limit=_SETTINGS.max_messages,
-        after=after,
-        max_len=_SETTINGS.max_chars_per_msg,
-        on_error=lambda exc: logger.warning("日記抓取頻道歷史失敗：%s", exc),
-    )
+    """抓社交頻道過去 lookback_hours 的訊息，分時段平均取樣 → 時序 chat_history 行。
+
+    活躍頻道一天上千則，若只抓「最近 max_messages 則」會整段都是深夜、早上中午被截光
+    （日記只記得睡前那陣熱鬧）。改成把回顧視窗切成 transcript_buckets 個等長時段，每段
+    各取最近 per_bucket 則，確保從早到晚都有代表，再依時序串成一整天。
+    """
+    now = datetime.now(timezone.utc)
+    window_start = now - timedelta(hours=_SETTINGS.lookback_hours)
+    n_buckets = max(1, _SETTINGS.transcript_buckets)
+    per_bucket = max(1, _SETTINGS.max_messages // n_buckets)
+    span = timedelta(hours=_SETTINGS.lookback_hours) / n_buckets
+
+    lines: list[str] = []
+    counts: list[int] = []
+    for i in range(n_buckets):
+        b_start = window_start + span * i
+        b_end = now if i == n_buckets - 1 else window_start + span * (i + 1)
+        seg, _ = await fetch_recent_lines(
+            channel,
+            tz=_TAIPEI_TZ,
+            limit=per_bucket,
+            before=b_end,
+            after=b_start,
+            max_len=_SETTINGS.max_chars_per_msg,
+            on_error=lambda exc: logger.warning("日記抓取頻道歷史失敗：%s", exc),
+        )
+        lines.extend(seg)
+        counts.append(len(seg))
+    logger.info("日記逐字稿分時段取樣（每段最多 %d 則）：%s", per_bucket, counts)
     return lines
 
 
@@ -168,7 +187,7 @@ async def run_daily_reflection(bot) -> Optional[str]:
     llm = _get_llm()
     model = _SETTINGS.model or llm.resolve_ambient_model()
     trace_id = f"diary-{diary_cid}-{int(time.time())}"
-    prompt_text = "（現在是深夜，群裡安靜下來了。回顧今天，寫一段你自己的日記。）"
+    prompt_text = "（一天到了尾聲，回顧今天群裡從早到晚發生的事，寫一段你自己的日記。）"
 
     logger.info(
         "日記生成 trace=%s model=%s 來源訊息=%d 互動=%d",

@@ -427,6 +427,19 @@ Phase 1 三個玩法**共用同一張 DB**，不要拆開做。
 
 ---
 
+## 變更紀錄：日記「開頭都一樣 + 只記得晚上」修正（2026-06-29）
+
+使用者回報兩個獨立問題，各有源頭，已修（待重啟生效）：
+
+1. **只統整晚上、早上忘光光**（根因＝抓資料方式，非 prompt）。`diary_reflection._gather_day_transcript` 原本走 `fetch_recent_lines(after=now-24h, oldest_first=False, limit=120)`＝「24h 視窗裡抓**最新** 120 則」，活躍頻道從午夜往回數只到傍晚，早上中午被截光，`lookback_hours=24` 形同虛設。**改成分時段平均取樣**：把回顧視窗切成 `transcript_buckets`（預設 6）個等長時段（各 4h），每段各取最近 `max_messages//buckets`（180//6=30）則，再依時序串成一整天 → 早上中午一定有代表。新增 setting `transcript_buckets`，`max_messages` 120→180。會 log 每段取樣數（`日記逐字稿分時段取樣…`）方便觀察分佈。
+   - 次要：結構化互動 `ai_interactions_store.fetch_recent` 也是 `ORDER BY ts DESC LIMIT 80` 尾段截斷，但 bot 一天插話遠少於 80，多半涵蓋整天，暫不動。
+2. **日記開頭都從「夜深了」起手**（根因＝prompt 三處重複餵「深夜/安靜」+ 沒要求變化）。三處都改：`diary_reflection_prompt.txt`（去掉「現在夜深了，群裡安靜」開場、新增兩條規則：開頭別老是時間天氣起手要換切入點、回顧的是「一整天」看 `[HH:MM]` 別只盯深夜）、`diary_reflection.py` 的 `prompt_text` 與 fallback `_DEFAULT_DIARY_PROMPT` 同步去掉「深夜」字眼。
+
+**部署**：重啟 bot 生效。可用 `/ai_diary`（admin）手動觸發驗證；看 debug log `/logs/diary_prompt.txt` 確認逐字稿是否從早到晚都有、開頭是否不再公式化。
+**可微調**：`transcript_buckets` / `max_messages`（時段數與每段量）；傍晚細節若嫌薄可再加 `max_messages`。
+
+---
+
 ## 使用者指令記憶 (/remember) 未來工作
 
 <!-- @meta

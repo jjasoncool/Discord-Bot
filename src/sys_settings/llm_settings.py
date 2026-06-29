@@ -386,10 +386,12 @@ class DiaryReflectionSettings(BaseSettings):
     schedule_hour: int = 0
     schedule_minute: int = 0
 
-    # 回顧範圍：過去幾小時、最多取最近幾則、每則截斷長度
+    # 回顧範圍：過去幾小時、最多取幾則、每則截斷長度
     lookback_hours: int = 24
-    max_messages: int = 120
+    max_messages: int = 180
     max_chars_per_msg: int = 200
+    # 把回顧視窗切成幾個等長時段平均取樣（避免只抓到深夜那段、早上中午被截掉）
+    transcript_buckets: int = 6
 
     # 生成：model=None 用 ambient_model；think=None 用後端預設；日記長度上限（post 前安全截）
     model: str | None = None
