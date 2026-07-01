@@ -137,6 +137,30 @@ def parse_source_time(s) -> Optional[datetime]:
     return None
 
 
+async def _download_image_bytes(url: Optional[str], *, max_bytes: int = 8 * 1024 * 1024) -> Optional[bytes]:
+    """下載封面圖 bytes（best-effort）。失敗 / 非 200 / 過大 → None；只在記憶體用完即丟，不落地不進 DB。"""
+    if not url:
+        return None
+    try:
+        import aiohttp
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10, headers=headers) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.read()
+        if not data or len(data) > max_bytes:
+            return None
+        return data
+    except Exception as e:
+        logger.warning("[event] 封面圖下載失敗（略過圖）: %s", e)
+        return None
+
+
 # ── 規劃（純：不碰 discord/db；產出待建清單） ──
 
 @dataclass
@@ -238,8 +262,13 @@ async def maybe_schedule_events(
     url: Optional[str],
     channel_id: int,
     is_html: bool,
+    image_url: Optional[str] = None,
 ) -> None:
-    """偵測公告內活動時間並（依設定 dry-run / 實建）建立 Discord 伺服器活動。"""
+    """偵測公告內活動時間並（依設定 dry-run / 實建）建立 Discord 伺服器活動。
+
+    image_url：該篇 article/FB 貼文的封面圖，會下載後掛到活動當封面（best-effort，
+    不落地、不寫 DB）；下載失敗或無圖則活動無封面。
+    """
     try:
         import discord
         from utils.utils import ChannelConfig
@@ -273,6 +302,8 @@ async def maybe_schedule_events(
             return
 
         db = await get_shared_state_db()
+        cover_bytes = None      # 封面圖 bytes（best-effort、下載一次供本篇所有事件共用、不落地/不進 DB）
+        cover_fetched = False
         for p in planned:
             # 跨來源指紋去重總閘（擋 Article↔FB 雙報、重跑、FB 內部重複列）
             if await db.is_event_created(p.fingerprint):
@@ -286,16 +317,25 @@ async def maybe_schedule_events(
                             p.name, s8, e8, p.source, p.source_id, p.fingerprint)
                 continue
 
+            # 首次真要建時才下載封面圖（附加到活動、不寫 DB）
+            if not cover_fetched:
+                cover_bytes = await _download_image_bytes(image_url)
+                cover_fetched = True
+
+            create_kwargs = dict(
+                name=p.name,
+                start_time=p.start,
+                end_time=p.end,
+                entity_type=discord.EntityType.external,
+                privacy_level=discord.PrivacyLevel.guild_only,
+                location=LOCATION,
+                description=p.description,
+            )
+            if cover_bytes:
+                create_kwargs["image"] = cover_bytes
+
             try:
-                created = await guild.create_scheduled_event(
-                    name=p.name,
-                    start_time=p.start,
-                    end_time=p.end,
-                    entity_type=discord.EntityType.external,
-                    privacy_level=discord.PrivacyLevel.guild_only,
-                    location=LOCATION,
-                    description=p.description,
-                )
+                created = await guild.create_scheduled_event(**create_kwargs)
                 await db.record_created_event(
                     p.fingerprint,
                     discord_event_id=created.id,
@@ -330,6 +370,8 @@ async def schedule_from_article(bot, article: dict, channel_id: int) -> None:
             post_time=parse_source_time(article.get("start_time") or article.get("create_time")),
             url=f"https://wutheringwaves.kurogames.com/zh-tw/main/news/detail/{article.get('article_id')}",
             channel_id=channel_id, is_html=True,
+            image_url=(article.get("article_cover") or article.get("content_cover")
+                       or article.get("suggest_cover")),
         )
     except Exception as e:
         logger.warning("[event] article 活動偵測失敗（已吞）: %s", e)
@@ -345,6 +387,7 @@ async def schedule_from_fb(bot, fb_post: dict, channel_id: int) -> None:
             post_time=parse_source_time(fb_post.get("timestamp") or fb_post.get("created_at")),
             url=(fb_post.get("url") or fb_post.get("pfbid_url")),
             channel_id=channel_id, is_html=False,
+            image_url=(fb_post.get("images") or [None])[0],
         )
     except Exception as e:
         logger.warning("[event] fb 活動偵測失敗（已吞）: %s", e)
