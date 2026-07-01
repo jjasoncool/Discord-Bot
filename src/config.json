@@ -3,6 +3,7 @@
   "cart_delivery_channel_id": 1385600878572077196,
   "archive_channel_id": 1386274463590383737,
   "article_monitor_channel_id": 1276503458291126335,
+  "event_schedule_dry_run": false,
   "forum_article_channel_id": 1469276216589815879,
   "telegram_relay_enabled": true,
   "telegram_channel_routes": {
