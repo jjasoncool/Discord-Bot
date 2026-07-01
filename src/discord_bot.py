@@ -586,7 +586,11 @@ async def _auto_start_monitor_task(
 
 
 async def _auto_start_official_article_monitor(bot, article_commands, article_monitor_channel_id):
-    """自動啟動官方文章監控。"""
+    """自動啟動官方文章監控。
+
+    註：article 已改「推送」為主（scraper 爬完打 /notify/article → notify_server._process_relay）。
+    此輪詢降為 30 分 fallback safety net（webhook 漏掉時補發；去重靠 StateDB，不會重送）。
+    """
     def _get_channel(channel_id):
         return bot.get_channel(channel_id)
 
@@ -595,7 +599,7 @@ async def _auto_start_official_article_monitor(bot, article_commands, article_mo
             article_commands.monitored_channels.append(channel_id)
         await article_commands.article_monitor.start_monitoring(
             channel_ids=article_commands.monitored_channels,
-            check_interval=180,
+            check_interval=1800,  # 30 分 fallback（推送為主）
         )
 
     await _auto_start_monitor_task(

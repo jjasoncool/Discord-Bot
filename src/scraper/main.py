@@ -27,8 +27,8 @@ fb_retry_scheduled_at = None
 fb_task_running = False
 
 
-def main_scrape_task():
-    """主要爬蟲任務"""
+def article_scrape_task():
+    """官方文章爬蟲任務（爬完推送 /notify/article，對稱 fb_scrape_task）"""
     container = ServiceContainer()
 
     try:
@@ -41,6 +41,8 @@ def main_scrape_task():
 
         if success:
             logger.info("爬蟲任務執行成功")
+            # 推送通知 Discord Bot（改準即時，對稱 FB）；bot 端拉最近未發的文章發出
+            _notify_discord_bot("article", {})
         else:
             logger.warning("爬蟲任務執行失敗")
 
@@ -293,7 +295,7 @@ def main():
         return wrapper
 
     # 設定定時任務（各自獨立 thread）
-    schedule.every(15).minutes.do(_run_in_thread(main_scrape_task))
+    schedule.every(15).minutes.do(_run_in_thread(article_scrape_task))
     schedule.every(1).hours.do(_run_in_thread(fb_scrape_task))
     schedule.every(1).hours.do(_run_in_thread(ptt_scrape_task))
     schedule.every(1).hours.do(_run_in_thread(bahamut_scrape_task))
@@ -301,7 +303,7 @@ def main():
 
     # 立即執行一次（各自獨立 thread，不互相等）
     logger.info("執行初始爬蟲任務（各論壇並行）")
-    for task in [fb_scrape_task, main_scrape_task, ptt_scrape_task, bahamut_scrape_task, hkepc_scrape_task]:
+    for task in [fb_scrape_task, article_scrape_task, ptt_scrape_task, bahamut_scrape_task, hkepc_scrape_task]:
         threading.Thread(target=task, daemon=True).start()
 
     # 啟動定時任務循環

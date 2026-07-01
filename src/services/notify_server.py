@@ -10,6 +10,7 @@ endpoint：
 """
 import asyncio
 import logging
+from functools import partial
 from aiohttp import web
 from typing import Callable, Coroutine, Dict, Optional
 
@@ -19,6 +20,26 @@ from utils.utils import ChannelConfig
 logger = get_article_monitor_logger()
 
 NOTIFY_SERVER_PORT = 5000
+
+# 共用「拉最近並發送」來源註冊表（宣告式；同形狀來源收斂成單一 _process_relay）。
+# 巴哈刻意不在此表（單篇/批次＋forum slot/edit 是真特例，維持自有 _process_bahamut）。
+_RELAY_SOURCES: Dict[str, dict] = {
+    "fb": {
+        "config_key": "article_monitor_channel_id",
+        "module": "services.fb_monitor", "cls": "FBMonitor",
+        "method": "check_and_send_fb_posts",
+    },
+    "article": {
+        "config_key": "article_monitor_channel_id",
+        "module": "services.article_monitor", "cls": "ArticleMonitor",
+        "method": "check_and_send_new_articles",
+    },
+    "it_article": {
+        "config_key": "hardware_news_channel_id",
+        "module": "services.it_article_monitor", "cls": "ItArticleMonitor",
+        "method": "check_and_send_new", "seed": "ensure_seeded",
+    },
+}
 
 
 class NotifyServer:
@@ -31,8 +52,8 @@ class NotifyServer:
         # 來源 → 處理函式 的分派表
         self._handlers: Dict[str, Callable[..., Coroutine]] = {
             "bahamut": self._process_bahamut,
-            "fb": self._process_fb,
-            "it_article": self._process_it_article,
+            # fb / article / it_article 共用 _process_relay（宣告式註冊表）
+            **{src: partial(self._process_relay, src) for src in _RELAY_SOURCES},
         }
         # 來源 → 是否正在處理中（防止重複執行）
         self._processing: Dict[str, bool] = {}
@@ -145,46 +166,38 @@ class NotifyServer:
         except Exception as e:
             logger.error("巴哈通知背景處理失敗: %s", e, exc_info=True)
 
-    async def _process_fb(self, payload: Dict) -> None:
-        """FB 通知：從 Scraper API 拉最新貼文，逐一發送到 Discord。"""
-        try:
-            from services.fb_monitor import FBMonitor
+    async def _process_relay(self, source: str, payload: Dict) -> None:
+        """共用「拉最近並發送」處理：fb / article / it_article（依 _RELAY_SOURCES 註冊表）。
 
+        同形狀＝讀 config 某 channel key → 建 monitor → 呼叫其「拉最近並發送」方法。
+        it_article 多一個首次 seed 步驟（spec['seed']）；其餘來源無此步。
+        """
+        try:
+            spec = _RELAY_SOURCES[source]
             config = ChannelConfig.load_config(caller="notify_server")
-            channel_id = config.get("article_monitor_channel_id")
+            channel_id = config.get(spec["config_key"])
             if not channel_id:
-                logger.error("FB 通知處理失敗：config.json 未設定 article_monitor_channel_id")
+                logger.error("%s 通知處理失敗：config.json 未設定 %s", source, spec["config_key"])
                 return
 
-            monitor = FBMonitor(self.bot)
-            await monitor.check_and_send_fb_posts(channel_ids=[channel_id])
-            logger.info("FB 通知處理完成")
+            module = __import__(spec["module"], fromlist=[spec["cls"]])
+            monitor = getattr(module, spec["cls"])(self.bot)
+
+            # 選配首次 seed（it_article：>3 天舊文標記已發、3 天內保留）
+            seed_method = spec.get("seed")
+            if seed_method:
+                try:
+                    seeded = await getattr(monitor, seed_method)()
+                    if seeded is not None and seeded >= 0:
+                        logger.info("%s 首次 seed：%s 篇舊文標記已發", source, seeded)
+                except Exception as e:
+                    logger.warning("%s seed 失敗（續發新文）: %s", source, e)
+
+            await getattr(monitor, spec["method"])(channel_ids=[channel_id])
+            logger.info("%s 通知處理完成", source)
 
         except Exception as e:
-            logger.error("FB 通知背景處理失敗: %s", e, exc_info=True)
-
-    async def _process_it_article(self, payload: Dict) -> None:
-        """IT 文章（系統設備新知）通知：拉最近未發的文章發到設定頻道。"""
-        try:
-            from services.it_article_monitor import ItArticleMonitor
-
-            config = ChannelConfig.load_config(caller="notify_server")
-            channel_id = config.get("hardware_news_channel_id")
-            if not channel_id:
-                logger.error("IT 文章通知處理失敗：config.json 未設定 hardware_news_channel_id")
-                return
-
-            monitor = ItArticleMonitor(self.bot)
-            # 首次（只一次）seed：>3 天舊文標記已發、3 天內保留；接著 check_and_send
-            # 會把「3 天內且未發」的實際發出。之後每次 notify 就是發新文。
-            seeded = await monitor.ensure_seeded()
-            if seeded >= 0:
-                logger.info("IT 文章首次 seed：%s 篇舊文標記已發，接著發 3 天內的", seeded)
-            await monitor.check_and_send_new(channel_ids=[channel_id])
-            logger.info("IT 文章通知處理完成")
-
-        except Exception as e:
-            logger.error("IT 文章通知背景處理失敗: %s", e, exc_info=True)
+            logger.error("%s 通知背景處理失敗: %s", source, e, exc_info=True)
 
     async def _process_single_bahamut(self, monitor, forum_channel_id: int, thread_data: Dict, board_id: str) -> None:
         """背景處理單篇巴哈討論串。每篇獨立 task，由 snA 鎖保護不重複。"""

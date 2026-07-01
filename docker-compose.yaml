@@ -5,12 +5,14 @@ services:
       dockerfile: docker/discord_bot/dockerfile
     container_name: discord-bot
     restart: always
-    # 啟動前先跑相關 unittest（觀測機制 + telegram spoiler）；測試紅就 exit 1，
+    # 啟動前自動探索並跑 src/test/ 下所有 hermetic 單元測試（test_*.py）；測試紅就 exit 1，
     # compose 會無限重啟 → log 立刻可見。`exec` 把 PID 1 交給 python，讓 SIGTERM 能正確收。
+    # 加新測試＝建 test_<feature>.py 即可，無須改此行（不再手動維護列表、不會漏測）。
+    # 需 live 服務的整合測試放 test/integration/（it_*.py），不符 test_*.py → 自動排除出 gate。
     command: >
       bash -c "
-      echo '--- running startup tests ---' &&
-      python -m unittest test.test_llm_snapshot test.test_telegram_spoiler &&
+      echo '--- running startup tests (auto-discover) ---' &&
+      python -m unittest discover -s test -t . -p 'test_*.py' &&
       echo '--- tests OK, starting bot ---' &&
       exec python discord_bot.py
       "

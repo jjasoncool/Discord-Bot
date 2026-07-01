@@ -25,6 +25,7 @@
 > 4. 保留可追溯來源，避免之後重複討論同一件事
 
 最後盤點紀錄（只保留近期；過往詳見 `TODO-completed.md` 各歸檔 entry）：
+- 2026-07-01（活動公告自動建活動 — 全覆蓋版**已實作**，待 docker 驗證）：需求＝官方公告（FB+Article，皆進 `article_monitor_channel_id`）含「活動時間」+「伺服器時間」交集 → regex 解析時間 → **全自動**建 Discord 伺服器活動。**先用 articles.db 全 490 篇跑 4 視角對抗審查**（workflow），抓到並修掉 4 個真缺陷：①跨來源（Article↔FB 同活動雙報，如坎特蕾拉 #3736+FB #93）→ **指紋去重(normalize(title)+start+end)** 為 v1 強制；②相對起點「X版本更新後」不可壓貼文日（方向錯）→ **版本日回填**（查版本內容說明帖「更新維護時間」，解不到 SKIP）；③版本內容說明匯總帖整篇丟棄會漏建「只在匯總帖」的活動 → **逐活動 parse + 指紋去重補建**；④缺年/空白格式 → DATE 補容錯。**新檔**：[event_time_parser.py](src/services/event_time_parser.py)(純函式、strip HTML、雙詞閘門、錨點認詞不認✦、缺年/即日起/版本相對起點)、[event_scheduler.py](src/services/event_scheduler.py)(閘門=channel==config、版本日回填、指紋去重、clamp start 未來、create_scheduled_event external/location=「鳴潮」、**首批預設 dry-run**)、[test_event_time_parser.py](src/test/test_event_time_parser.py)(20 測試)、[test_notify_relay.py](src/test/test_notify_relay.py)。**改檔**：[state_db.py](src/services/state_db.py) 加 `created_events` 指紋表；[article_monitor.py](src/services/article_monitor.py)/[fb_monitor.py](src/services/fb_monitor.py) send 尾巴各掛 hook(best-effort)；[notify_server.py](src/services/notify_server.py) 共用 `_process_relay`+`_RELAY_SOURCES`(收斂 fb/article/it，**巴哈維持自有 handler**)+新增 article 來源；[scraper/main.py](src/scraper/main.py) 加 `_notify_discord_bot("article")`(改推送)；[discord_bot.py](src/discord_bot.py) article 輪詢 180s→1800s fallback；docker-compose 啟動 gate 加兩測試。**驗證**：20 parser 測試 PASS、全檔 py_compile PASS、dry-run（article 239 + FB 41 = 280 唯一活動、跨來源指紋擋掉 105 重複、6+ 相對起點版本日解不到 SKIP）。**未 commit**。**下一步**：①docker 重啟（套 notify_server/monitor/scraper 改動 + 跑啟動 gate）②看 `[event][dry-run]` log 確認待建清單合理 ③滿意後在 config.json 設 `"event_schedule_dry_run": false` 開全自動。**殘留風險（已記文件）**：跨來源指紋對「同名不同期循環活動」靠 start/end 精確；版本日回填依賴版本說明帖有「更新維護時間」欄。
 - 2026-06-25（插話除錯）：**修「B 回覆 A 再 @ 機器人問意見 → 看不到 A 寫什麼就亂答」**。根因：Discord 原生 reply 的 `message.reference` 全程只被 [_is_directed](src/llm/ambient_reply.py) 拿來判「是不是回覆機器人」，**被回覆訊息的內容從未進 prompt**；模型只拿到 `<latest_user_message>`(B 的字) + `<chat_history>`(B 之前 20 則, `history_limit=20`)。A 那句要嘛已滾出視窗、要嘛在視窗內但**沒有連結標記**告訴模型「B 的問句是衝著這行來的」→「他/這個/這樣」無指涉 → 腦補亂答。**修法**（本輪定案：範圍 b 含自發、帶圖、不去重、不碰 /askai）：①[ambient_reply.py](src/llm/ambient_reply.py) 新增 `_resolve_replied_to()`（reference.resolved 三態 Message/Deleted/None；None 時 `fetch_message` 補抓一次，best-effort）；directed 與自發插話都在 `generate_reply` 前算 `replied_to_from/_text`，並把被回覆訊息的圖也併進 vision payload（trigger 自己的圖優先、整體受 `image_max_count=1`）。②[llm_service.py](src/services/llm_service.py) `_build_prompt_bundle`/`generate_reply` 加 `replied_to_from/replied_to_text` 兩參數，在 `<latest_user_message>` **正上方**輸出 `<reply_to from="A#XXXX">…</reply_to>` + 一行指引（把「他/這個/這樣」對準 reply_to，別跟 chat_history 其他話題搞混）。③debug 摘要加 `reply_to=` 計數。py_compile PASS、callers 全 kwargs 不受影響、**未 commit**。**下一步**：docker 重啟 → 實測「B reply A → @機器人問意見」「reply 帶圖」兩情境，看 `ambient_prompt.txt` 有 `<reply_to>` 區塊且回答對準 A。**未做（可選）**：/askai 同缺口（本輪不碰）。
 - 2026-06-21（Telegram relay 除錯）：**長訊息 embed 撞 Discord 500、回放無限重試 — 已修截斷上限**。症狀：`message_pk=7616`（2026-05-21 舊訊息回放）每輪 `channel.send` 都 `500 Internal Server Error (error code 0)`、latency ~45s（discord.py 5xx 重試耗盡）。**實際查 DB 驗證**（telegram_data）：7616 文字 4091 字、無 media/控制字元/surrogate/壞 URL、title 15、timestamp 正常 → **payload 形式上合法**。對照本頻道 2138 筆成功訊息**最長僅 3012 字、超過 3500 字 0 筆成功** → 與成功訊息唯一差異就是長度。根因＝Discord 後端對接近 4096 上限的超長 embed description 回 500（非乾淨 400）；舊 code `content[:4000]` 剛好頂在地雷區；又因回放走 `force_replay` 跳過去重 → 同筆每輪重撞同一 500、卡死回放。**修法**：[TelegramRenderAdapter](src/services/telegram_relay_service.py#L579) 加 `_DESCRIPTION_MAX_CHARS=3000`（保守低於實測安全線 3012）當「每段」上限。**最終採分段而非截斷**（使用者要保留全文且看得出是連續文章）：新增 `_split_text()`（盡量在換行/空白邊界切、不切斷句子；**暴雷安全**：切點不落在 `||` 中間，切完平衡每段 `||`，暴雷跨段時前段補 `||` 收尾、下段補 `||` 開頭，標記不破、暴雷不外洩），`render()` 改成**每段產生一個 RenderOperation**（publisher 本就逐 operation 發送 → 自然多則）；續段標題加「（續）」、footer 加頁碼「i/n」，附件只掛第一段。實測 7616：4091 字 → 2 段（2790+1299，皆 ≤3000，段1 切在句末換行）。py_compile PASS、**未 commit**。**未做（未定案）**：回放「毒訊息」dead-letter（同筆連續失敗 N 次 → 略過，避免單筆永久堵塞補送）。**下一步**：部署後重跑回放，確認 7616 送成 2 則連續訊息、`telegram_relay_result` 由 `failed_or_skipped` 變 `published`、迴圈停止。**選配**：用 webhook 跑 `/tmp/discord_len_test.py` 長度掃描，坐實 500 門檻（目前未跑）。
 - 2026-06-21（部署除錯）：**Lemonade 兩個地基問題排除（embeddings + 12B ctx），功能二 Phase C 完整實作**。①**embeddings 501**：Lemonade llamacpp 只有模型帶 `embeddings` 標籤才傳 `--embeddings`（[issue #1745](https://github.com/lemonade-sdk/lemonade/issues/1745)）；user-pull 的 `Qwen3-Embedding` 沒標籤 → 501。修法＝補標籤 / 我在 config 加 `llamacpp_args:"--embeddings"`。embeddings 通 → RAG 滿血 + Phase C 寫入可運作。②**12B ctx 卡 4096**：根因是 bot 的 `/api/v1/load` 送 **nested `recipe_options`**，但 Lemonade 文件要**平鋪參數**（[server_spec](https://github.com/Mintplex-Labs/lemonade-sdk/blob/main/docs/server/server_spec.md)；ctx_size bug [#1817](https://github.com/lemonade-sdk/lemonade/issues/1817) 只在 vLLM、llamacpp 正常）→ 改 [llm_http_client.py:_lemonade_load_model](src/llm/llm_http_client.py) 送**平鋪 ctx_size**（不帶 reserved 旗標、不帶 `save_options`，避免污染使用者 Lemonade 持久設定）→ **12B ctx=16384**。連帶把為 4096 加的精簡放寬回完整（history 12/persona 5/recall 6）。
@@ -106,10 +107,86 @@ last_confirmed: 2026-03-31
 | 使用者指令記憶 (/remember) | 規劃中（與 AI 私聊頻道互補） | 5% | [/remember 規劃](#使用者指令記憶-remember-未來工作) |
 | Reaction 統計 / 社群互動玩法 | 規劃中 | 5% | [Reaction TODO](#reaction-統計與社群互動玩法) |
 | 點歌機器人（Music Bot） | 已上線運作 | 85% | [點歌機器人](#點歌機器人專區) |
+| 活動公告 → 自動建 Discord 活動 | **全覆蓋版已實作（2026-07-01），待 docker 部署驗證**；首批預設 dry-run | 85% | [活動公告自動建活動](#活動公告--自動建立-discord-伺服器活動規劃定案) |
 | 跨來源整合（Article/FB/PTT/TG） | 有方向，尚未全面收斂 | 35% | [跨來源整合](#跨來源整合專區) |
 | Discord Bot 管理入口 | 規劃中 | 10% | [管理 TODO](#discord-bot-管理入口與指令整理-todo) |
 
 > 已完成 / 過往工作（Bahamut scraper + 反爬基礎設施、幽靈點名核心 + DM、社群 ID 查詢 Phase 0、Telegram Relay、Music Bot 完整實作等）詳見 `TODO-completed.md`。
+
+---
+
+## 活動公告 → 自動建立 Discord 伺服器活動（規劃定案）
+
+<!-- @meta
+id: event-announce-auto-schedule
+type: DECISION
+status: confirmed
+last_confirmed: 2026-07-01
+depends_on: post_to_channel, notify_server, state_db, article_monitor, fb_monitor
+affects: scraper/main.py, notify_server, article_monitor, fb_monitor, discord_bot
+-->
+
+**目標**：把官方公告（FB／Article）裡同時含「活動時間」+「伺服器時間」的限時活動，解析出時間區間後**全自動**建成 Discord 伺服器活動（Guild Scheduled Event）。
+
+### 來源與觸發（定案）
+- 來源＝我們自己轉發的 **FB + Article**，兩者都發進 `article_monitor_channel_id`（FB 走 `notify_server._process_fb`、Article 改推送後同址；[notify_server.py:154](src/services/notify_server.py#L154) 已寫死此 key）。
+- **不走 on_message**：bot 自己的訊息被 [on_message:356](src/discord_bot.py#L356) 擋掉；且攔在轉發點拿得到原始 dict（全文＋真發布時間），比反推 embed 乾淨。
+- 偵測**寄生在轉發動作尾巴**（`send_*_to_channel` 成功後呼叫），不自建排程、不輪詢、不監聽 gateway。
+
+### 同時做的基礎改造：Article 改推送 + 共用模組（完整版，使用者選定）
+1. **Article 改準即時推送**（對稱 FB）：
+   - [scraper/main.py](src/scraper/main.py#L40) `main_scrape_task()` 成功後加 `_notify_discord_bot("article", {...})`（仿 fb [:73](src/scraper/main.py#L73)）。
+   - [notify_server](src/services/notify_server.py#L32) 派發表加 `"article"` 來源。
+   - [discord_bot.py](src/discord_bot.py#L549) 退役 `_auto_start_official_article_monitor` 輪詢 → **降為 30 分 fallback safety net**；FB 也補同一條 fallback（目前 FB 無保險絲，webhook 漏了就不發）。
+2. **共用模組（完整版）**：
+   - **觸發層**：notify_server 用宣告式 `_RELAY_SOURCES` 註冊表（source → {config_key, monitor_factory, method}）把 `fb / article / it_article` 收斂成單一 `_process_relay`；**巴哈維持自有 handler**（單篇/批次＋forum slot 是真特例）。配 `src/test/test_notify_relay.py` 守現役 FB/IT 推送。
+   - **偵測層**：`event_scheduler` 為唯一活動偵測模組，FB/Article 發送尾巴各呼叫一次，匯流同一 parser+scheduler。
+
+### 解析（純 regex，不上 LLM）—— 已對 articles.db 全 490 篇對抗審查（2026-07-01）
+- 理由：官方公告格式高度固定、幻覺日期在「自動建行事曆」不可逆；LLM 僅留逃生門。
+- **雙詞交集硬閘門**：stripped text 同時含「活動時間」AND（含「伺服器時間」OR「（UTC+8）」）。實測交集=219/490，能分辨真活動 vs 宣傳/售票/維護預告（使用者觀察「交集伺服器時間 通常是活動」獲驗證）。
+- **錨點認「詞」不認「符號」**：`活動時間[✦*：:\s　]*`——✦ 等裝飾不穩定，刻意忽略，只認「活動時間」四字。實證不會誤抓「✦開放條件✦／※…期間／活動時間結束後」散文。**加 negative lookahead** 排除「結束/及時/期間/內」散文字，讓 n 計的是「活動時間標籤」而非「活動時間詞」。
+- **DATE**：`(\d{4})[/年](\d{1,2})[/月](\d{1,2})日?\s*(\d{1,2})[:：](\d{2})`（日與時之間**可選空白**，相容 `YYYY/M/D HH:MM`）+ **缺年分支** `(\d{1,2})月(\d{1,2})日…`（年份用貼文 start_time 補；跨年 end<start 則 +1 年）。範圍符 `[~～\-－—至到]`。
+- **逐錨點抽出所有 range**（不再「恰好一個才建」）：一篇可含多個「活動時間」活動（含版本內容說明匯總帖），全部抽出，靠**指紋去重**決定建不建（見下）。
+- **缺時間成分預設（皆 UTC+8）**：有日期無時刻 → start 00:00、end 23:59；缺結束（永久開放）→ 跳過。
+- **相對起點（「X版本更新後」）**：**不可壓貼文日**（預告型貼文發文遠早於上線，方向性錯，實測偏差約 4 天）。改用**版本日回填**：解析同版本「內容說明」帖的「更新維護時間：YYYY年M月D日HH:00」；解析不到 → SKIP（寧可漏不可錯）。
+- **全自動「寧可漏不可錯」**：抓不到/不確定一律不建。
+
+### 去重（跨來源活動指紋，v1 強制）—— 對抗審查確認的最關鍵修正
+- **問題**：FB+Article 都進 `article_monitor_channel_id`，**同活動雙來源雙報**（實證：坎特蕾拉喚取同時在 Article #3736 與 FB #93，range 一致）；FB 內部亦重複（#7==#9 同 post_id、content_hash 不同）。純 article_id/fb_id 去重**無法擋跨來源雙建**。
+- **指紋** = `(normalize(title), start_utc8, end_utc8)`。normalize 剝 `[括號]`/✦裝飾/全形空白；**必含 start/end**（「聲弦滌蕩」13 篇、「回音盈域」10 篇為**同名不同期**循環活動，純標題會錯誤合併）。時間正規化到整分避免 1 分鐘差漏命中。
+- **建立前查指紋**：命中既有 `created_events` 即跳過。FB 去重改用 `post_id`（非自增 id）。
+- **匯總帖補建**：版本內容說明帖**逐活動 parse + 指紋去重**——有獨立貼文的被指紋擋掉（不重複）、只在匯總帖的補建（不漏，實證「唯你的長夏永不凋落」5/22~8/1 等只活在匯總帖）。降噪可只補非贈禮/簽到的玩法活動。
+- **冪等對照表** `created_events(event_fingerprint, discord_event_id, source_id)`：可冪等、可在偵測刪文/改期時撤銷/更新。
+- **首次上線 dry-run**：先輸出待建清單給人工核一輪，再開全自動（使用者已同意「錯了沒差再改」，dry-run 為首批保險）。
+
+### 時區 / Discord 限制（定案）
+- 伺服器時區 **UTC+8 固定**（壓 00:00、轉 UTC 都用它；台港服無 DST，等同 fixed +8）。
+- Discord 規定 scheduled event **start 必須在未來** → `start = max(now+5min, 解析start)`；即日起原始 00:00 寫進 description；clamp 後若 start≥end 則整則跳過。
+- `entity_type=external`，`location=`**「鳴潮」**（使用者選 b；多遊戲對應後續再抽），`description=` 原文摘要＋跳轉連結（FB `url`／文章連結）。
+- bot 為 **admin** → Manage Events 無虞。guild 活動上限 100。
+
+### 程式落點
+- `src/services/event_time_parser.py`：純函式 `text + post_time → list[ParsedEvent]`（一篇可多事件），無 discord/db/io 依賴、可單測。含 strip HTML、GATE、ANCHOR、DATE（缺年/空白）、相對起點標記。
+- `src/services/event_scheduler.py`：副作用層。閘門（`channel == config.article_monitor_channel_id`，即時讀）→ parse → 版本日回填（查 articles.db 版本說明帖，建 `{version→update_dt}` 快取）→ **指紋去重**（查 `created_events`）→ clamp → `guild.create_scheduled_event` → 寫指紋對照。全程 best-effort 不拋。dry-run 模式只輸出清單。
+- 去重儲存：沿用 [StateDB](src/services/state_db.py) 加 `created_events(event_fingerprint TEXT PK, discord_event_id, source, source_id, ts)`。
+- `src/test/test_event_time_parser.py`：用 [articles.db](src/scraper/articles.db) 真實樣本 + [fb_posts.json](src/scraper/data/fb_posts.json) 當測資（順補記憶「CI 要記起來」，接 docker 啟動測試 gate）。
+- hook：[article_monitor.send_article_to_channel](src/services/article_monitor.py#L275)／[fb_monitor.send_fb_post_to_channel](src/services/fb_monitor.py#L163) 尾巴各加 ~3 行（包 try/except，絕不拖垮轉發；仿 [ai_interactions_store](src/llm/ai_interactions_store.py) best-effort）。
+- **不碰 [post_to_channel](src/utils/discord_content.py#L64)**：守 additive 邊界。
+
+### 欄位對照（已查證）
+- article：`article_title` / `article_content_full`→`article_content`→`article_desc` / `start_time`→`create_time` / `article_id`。
+- fb：（無標題，從內文首行取）/ `text_md`→`text` / `timestamp`→`created_at` / `id` / `url`→`pfbid_url`。
+
+### 實作範圍（使用者 2026-07-01 定：v1+v2 全覆蓋一起上、容錯後修）
+- 全覆蓋 = 絕對起點 CREATE + 相對起點版本日回填 + 匯總帖逐活動補建 + **跨來源指紋去重（強制）** + 格式修補（空白/缺年）+ 首批 dry-run。
+- **基礎改造同步做**：article 改推送（scraper notify + notify_server article 來源 + 輪詢退役/30 分 fallback）+ 共用模組 `_process_relay`（收斂 fb/article/it，**巴哈維持自有 handler，零風險已驗證**）+ `test_notify_relay`。
+
+### 待辦 / 未決
+- 多遊戲 `location` 對應（目前固定「鳴潮」）後續再抽。
+- 公告事後改時間/刪文 → 用 `created_events` 對照表撤銷/更新（進階，可後補）。
+- 版本日回填依賴版本說明帖有「更新維護時間」欄；v1.1 #995 缺此欄 → 該版相對起點活動 fallback SKIP。
+- FB `content_hash` 對同 post_id 產生兩值（#7/#9）成因未明 → 指紋總閘可兜底，來源層待查。
 
 ---
 

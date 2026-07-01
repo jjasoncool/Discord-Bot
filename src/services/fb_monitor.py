@@ -237,6 +237,11 @@ class FBMonitor(BaseContentMonitor):
                 logger.info("[FB_FLOW] 無圖片可發送")
 
             await self.mark_content_as_sent('fbpost', fb_post['id'])
+
+            # 偵測活動公告 → 自動建 Discord 伺服器活動（欄位對應/best-effort 收在 event_scheduler）
+            from services.event_scheduler import schedule_from_fb
+            await schedule_from_fb(self.bot, fb_post, channel_id)
+
             logger.info(f"成功發送 FB 貼文 {fb_post['id']} 到頻道 {channel_id}")
             return True
 

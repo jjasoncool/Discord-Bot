@@ -72,6 +72,19 @@ CREATE TABLE IF NOT EXISTS bahamut_synced_comment (
     PRIMARY KEY (sn, comment_id)
 );
 
+-- 活動公告 → Discord 伺服器活動：跨來源活動指紋對照（去重 + 冪等 + 可撤銷）
+CREATE TABLE IF NOT EXISTS created_events (
+    event_fingerprint TEXT PRIMARY KEY,       -- normalize(title)|start|end
+    discord_event_id  INTEGER,                -- 建立的 Discord scheduled event id（dry-run 時為 NULL）
+    guild_id          INTEGER,
+    source            TEXT,                    -- 'article' | 'fb'
+    source_id         TEXT,                    -- article_id / fb post_id（來源追溯）
+    title             TEXT,
+    start_utc8        TEXT,
+    end_utc8          TEXT,
+    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- 社群 ID 查詢：每 (guild, source, lookup_id) 唯一 thread，採「日期 hybrid」
 CREATE TABLE IF NOT EXISTS community_lookup_threads (
     guild_id              INTEGER NOT NULL,
@@ -159,6 +172,54 @@ class StateDB:
         ) as cursor:
             rows = await cursor.fetchall()
         return {row[0] for row in rows}
+
+    # ── 活動公告 → Discord 活動：created_events（跨來源指紋去重） ──
+
+    async def is_event_created(self, fingerprint: str) -> bool:
+        """這個活動指紋是否已建過（跨來源去重的總閘）。"""
+        async with self.db.execute(
+            "SELECT 1 FROM created_events WHERE event_fingerprint=?",
+            (fingerprint,),
+        ) as cursor:
+            return await cursor.fetchone() is not None
+
+    async def record_created_event(
+        self,
+        fingerprint: str,
+        *,
+        discord_event_id: Optional[int],
+        guild_id: Optional[int],
+        source: str,
+        source_id: str,
+        title: str,
+        start_utc8: str,
+        end_utc8: str,
+    ) -> None:
+        """記錄已建立（或 dry-run 預定）的活動指紋。重複指紋保留首筆（INSERT OR IGNORE）。"""
+        await self.db.execute(
+            """INSERT OR IGNORE INTO created_events
+               (event_fingerprint, discord_event_id, guild_id, source, source_id,
+                title, start_utc8, end_utc8)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (fingerprint, discord_event_id, guild_id, source, str(source_id),
+             title, start_utc8, end_utc8),
+        )
+        await self.db.commit()
+
+    async def get_created_event(self, fingerprint: str) -> Optional[Dict]:
+        """取回指紋對應的已建活動（撤銷/更新用）。"""
+        async with self.db.execute(
+            """SELECT discord_event_id, guild_id, source, source_id, title, start_utc8, end_utc8
+               FROM created_events WHERE event_fingerprint=?""",
+            (fingerprint,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "discord_event_id": row[0], "guild_id": row[1], "source": row[2],
+            "source_id": row[3], "title": row[4], "start_utc8": row[5], "end_utc8": row[6],
+        }
 
     # ── Forum：forum_thread_state（PTT / Bahamut 共用） ──
 
