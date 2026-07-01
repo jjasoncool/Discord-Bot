@@ -206,6 +206,17 @@ class StateDB:
         )
         await self.db.commit()
 
+    async def delete_created_event_by_discord_id(self, discord_event_id: int) -> int:
+        """依 Discord event id 刪除 created_events 紀錄（Discord 端刪除/取消活動時連動）。
+
+        刪掉後該活動指紋不再擋重建 → 重送同來源貼文可重新建立。回傳刪除筆數。
+        """
+        cur = await self.db.execute(
+            "DELETE FROM created_events WHERE discord_event_id=?", (discord_event_id,)
+        )
+        await self.db.commit()
+        return cur.rowcount
+
     async def get_created_event(self, fingerprint: str) -> Optional[Dict]:
         """取回指紋對應的已建活動（撤銷/更新用）。"""
         async with self.db.execute(

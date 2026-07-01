@@ -472,6 +472,31 @@ async def on_raw_message_delete(payload):
     enqueue_raw_delete(payload.message_id)
 
 
+async def _cleanup_created_event(discord_event_id: int, reason: str) -> None:
+    """Discord 端刪除/取消伺服器活動 → 連動清 created_events 指紋（下次重送可重建）。"""
+    try:
+        from services.base_monitor import get_shared_state_db
+        db = await get_shared_state_db()
+        n = await db.delete_created_event_by_discord_id(discord_event_id)
+        if n:
+            logger.info("[event] Discord 活動%s → 連動清指紋 %s 筆 (event_id=%s)", reason, n, discord_event_id)
+    except Exception as e:
+        logger.warning("[event] 活動%s連動清指紋失敗 (event_id=%s): %s", reason, discord_event_id, e)
+
+
+@bot.event
+async def on_scheduled_event_delete(event):
+    """伺服器活動被刪除 → 連動清 created_events。"""
+    await _cleanup_created_event(event.id, "刪除")
+
+
+@bot.event
+async def on_scheduled_event_update(before, after):
+    """伺服器活動被取消（status→cancelled）→ 連動清 created_events。"""
+    if after.status == discord.EventStatus.cancelled:
+        await _cleanup_created_event(after.id, "取消")
+
+
 @bot.event
 async def on_raw_reaction_add(payload):
     """Reaction 增加 → 更新 raw 表結構化統計。
