@@ -6,6 +6,12 @@
 
 | 日期 | 區塊 | 關鍵字 |
 |---|---|---|
+| 2026-06-29 | [變更紀錄：日記「開頭都一樣 + 只記得晚上」修正](#變更紀錄日記開頭都一樣--只記得晚上修正歸檔-2026-07-02原-2026-06-29) | 從 handoff 歸檔 |
+| 2026-06-29 | [變更紀錄：插話人格「有時像屁孩噴人」修正](#變更紀錄插話人格有時像屁孩噴人修正歸檔-2026-07-02原-2026-06-29) | 從 handoff 歸檔 |
+| 2026-06-30 | [變更紀錄：V2 風格召回（style_refs）+ 從反應數據學個性](#變更紀錄v2-風格召回style_refs-從反應數據學個性歸檔-2026-07-02原-2026-06-30) | 從 handoff 歸檔 |
+| 2026-06-20 | [變更紀錄：多歌單下拉（可複選合併播放）](#變更紀錄多歌單下拉可複選合併播放歸檔-2026-07-02原-2026-06-20) | 從 handoff 歸檔 |
+| 2026-06-25 | [待決議題：/askai 空泛新聞 query 搜不到](#待決議題askai-空泛新聞-query-搜不到歸檔-2026-07-02原-2026-06-25) | 從 handoff 歸檔 |
+| 2026-06-21 | [handoff 盤點紀錄歸檔（歸檔 2026-07-02）](#handoff-盤點紀錄歸檔歸檔-2026-07-02) | handoff 盤點歸檔, 功能二 Phase A, persona 模組化, TG relay, Lemonade |
 | 2026-06-15 | [fixupx 連結轉發：只轉影片 + 存在性防呆](#fixupx-連結轉發只轉影片--存在性防呆歸檔2026-06-15) | link_fix, select_video_links, cdn.syndication, get_token, react-tweet, fail-open, 影片才轉 |
 | 2026-06-13 | [點歌者離開自動移除其點的歌](#點歌者離開自動移除其點的歌歸檔2026-06-20原2026-06-13) | music, drop_requests_by, on_voice_state_update, 寬限 5 秒 |
 | 2026-06-13 | [音樂「停止」按鈕改重置歌單+重載線上歌單](#音樂停止按鈕改為重置歌單--重載線上歌單歸檔2026-06-20原2026-06-13) | music, reload_playlist, 先抓成功才換, 後改名編輯歌單 |
@@ -41,6 +47,149 @@
 | 2026-03-22 | [Telegram Scraper 專案交接](#telegram-scraper-專案交接2026-03-22已完成歸檔) | Docker, 模組化, forward 過濾, session |
 
 ---
+
+## 變更紀錄：日記「開頭都一樣 + 只記得晚上」修正（歸檔 2026-07-02，原 2026-06-29）
+
+使用者回報兩個獨立問題，各有源頭，已修（待重啟生效）：
+
+1. **只統整晚上、早上忘光光**（根因＝抓資料方式，非 prompt）。`diary_reflection._gather_day_transcript` 原本走 `fetch_recent_lines(after=now-24h, oldest_first=False, limit=120)`＝「24h 視窗裡抓**最新** 120 則」，活躍頻道從午夜往回數只到傍晚，早上中午被截光，`lookback_hours=24` 形同虛設。**改成分時段平均取樣**：把回顧視窗切成 `transcript_buckets`（預設 6）個等長時段（各 4h），每段各取最近 `max_messages//buckets`（180//6=30）則，再依時序串成一整天 → 早上中午一定有代表。新增 setting `transcript_buckets`，`max_messages` 120→180。會 log 每段取樣數（`日記逐字稿分時段取樣…`）方便觀察分佈。
+   - 次要：結構化互動 `ai_interactions_store.fetch_recent` 也是 `ORDER BY ts DESC LIMIT 80` 尾段截斷，但 bot 一天插話遠少於 80，多半涵蓋整天，暫不動。
+2. **日記開頭都從「夜深了」起手**（根因＝prompt 三處重複餵「深夜/安靜」+ 沒要求變化）。三處都改：`diary_reflection_prompt.txt`（去掉「現在夜深了，群裡安靜」開場、新增兩條規則：開頭別老是時間天氣起手要換切入點、回顧的是「一整天」看 `[HH:MM]` 別只盯深夜）、`diary_reflection.py` 的 `prompt_text` 與 fallback `_DEFAULT_DIARY_PROMPT` 同步去掉「深夜」字眼。
+
+**部署**：重啟 bot 生效。可用 `/ai_diary`（admin）手動觸發驗證；看 debug log `/logs/diary_prompt.txt` 確認逐字稿是否從早到晚都有、開頭是否不再公式化。
+**可微調**：`transcript_buckets` / `max_messages`（時段數與每段量）；傍晚細節若嫌薄可再加 `max_messages`。
+
+---
+
+## 變更紀錄：插話人格「有時像屁孩噴人」修正（歸檔 2026-07-02，原 2026-06-29）
+
+使用者回報插話有時不像「從容和服熟女」、反而像屁孩噴人。看 `logs/ambient_prompt.txt` 對照實際回覆：**多數其實在人設上**（隔一層淡淡點評），走鐘集中在**一個情境——頻道在打遊戲互嗆對線時，它會跟著下場、借 gamer 嗆聲術語補刀**。典型：觸發「下路送爛」→ 回「既然都放棄治療了，那你們上中就當帶兩隻隊友打 5v3 吧」。
+
+**根因**：
+1. **結構破口（最關鍵）**：`persona_examples.txt`（「❌損友roast/同盟酸/毒舌 ✓智慧女性」對照範例）**只載入 /askai，沒載入插話**。`/askai` 組 prompt＝identity+guardrails+主prompt+examples（`llm_commands.py:115-117`）；插話 `_load_ambient_prompt` 只有 identity+guardrails+行為三份。最能教「別像損友補刀」的範例，缺席在最需要的模式。
+2. **行為層 license 失衡**：`ambient_reply_prompt.txt` 第二關鼓勵「放開/愛玩/老朋友回扣招牌梗」好幾行，「刺是偶爾」只一行，且**沒有一條明講「群裡互嗆對線時你不下場跟著嗆」**。本地模型本就鏡像周遭語域 → 跟著對線。
+
+**A（已做，待重啟）— 把範例載進插話**：
+- **與 /askai 共用同一份 `persona_examples.txt`**（人設共通，不另維護避免 drift；使用者 2026-06-29 拍板合併，原先短暫建過的 `persona_examples_ambient.txt` 子集檔已刪）。唯一新增內容＝原檔尾端加 **範例 13「群裡打遊戲互嗆對線→旁觀者別下場補刀」**（正打使用者抱怨的情境，用範例教、非硬規則）。
+- `AmbientChatSettings` 加 `use_examples=True` / `examples_path`(=persona_examples.txt)；`_load_ambient_prompt` 尾端疊 examples 層（順序＝identity+guardrails+行為+examples，與 askai 一致；mtime 快取自動納入）。
+- 改檔：`persona_examples.txt`(加範例13)、`sys_settings/llm_settings.py`、`llm/ambient_reply.py`。py_compile 通過、組裝順序已驗。
+
+**B（待你拍板，未做）— 第二關加硬規則「不下場對線」**：在 `ambient_reply_prompt.txt` 第二關加一條，明文「群裡互嗆/玩遊戲術語對線/口出穢語較勁時，你是看戲那個，不借同樣嗆聲口吻或遊戲對線術語（『放棄治療』『5v3』『有本事就…』就是下場了），刺永遠淡淡一句、隔一層、不補刀」。先做 A 觀察，B 視效果再決定（避免一次動太多人格條文難歸因）。
+
+**部署/驗證**：重啟 bot 生效。看 `logs/ambient_prompt.txt` 確認 system prompt 尾端有範例層、且遊戲互嗆情境是否不再下場補刀。
+
+---
+
+## 變更紀錄：V2 風格召回（style_refs）+ 從反應數據學個性（歸檔 2026-07-02，原 2026-06-30）
+
+**目標**：讓琇紫插話時，參考「**過去被群裡按過讚、且與當下情境語意相近**」的舊回覆當靈感 → 個性從群眾驗證過的數據長出來。**刻意不走「prose 蒸餾」**（弱 teacher 會把好句子蒸成笨句子，使用者擔心成立）→ 改「**召回真句子、不重寫**」，結構上免疫笨化。唯一 live 風險＝照抄跳針，用「抽樣輪替＋距離地板＋近期壓制＋只給情境→回覆配對＋prompt 明令別照抄」壓制。
+
+**資料層**（`ai_interactions`）：
+- 線上表已 `ALTER ADD COLUMN embedding vector(1024)` + hnsw cosine 索引（**純加欄、1281 列原資料未動**；`_EMBED_DDL` 也加進 `ensure_table`，獨立 try、缺 vector extension 不拖垮建表）。
+- `record_interaction` 加 `embedding` 參數：寫入時 embed「情境」(trigger_text+context_snippet)，embed 不出來存 NULL（不影響寫入）。
+- `backfill_embeddings()`：啟動時背景回填既有 1281 列（id 游標前進、idempotent、autocommit）；on_ready 在 `ensure_table` 後 `create_task(to_thread(...))`，有 `_ai_emb_backfill_started` flag 防重觸發。
+- `fetch_similar_positive(situation, k, max_distance, min_positive)`：cosine `<=>`，撈 `positive_reactions>0 且 negative_reactions=0`、距離地板內的舊插話。
+- embedding 走共用 `make_safe_llm_embedding`（與 RAG/印象卡同顆），公開 `get_text_embedding`；lazy singleton。
+
+**注入層**：
+- `llm_service._build_prompt_bundle` / `generate_reply` 加 `style_refs` 參數 → 渲染獨立 `<style_refs>` 區塊（框架：只學調子/招式、**嚴禁照抄字句**、不貼切就忽略）。
+- `ambient_reply._build_style_refs(situation)`：召回→避開近期注入過的（`_RECENT_STYLE_REFS` deque）→抽樣 `inject_count` 條→debug log→（shadow 時只 log 不注入）。接在 callback 之後、傳進 generate_reply；debug 摘要加 `style=%d`。
+
+**設定**（`AmbientChatSettings`，保守起步）：`style_refs_enabled=True`（False=純 shadow）、`style_refs_debug=True`、`top_k=8`、`max_distance=0.45`、`inject_count=2`、`min_positive=1`。
+
+**部署/驗證**：**reboot container 上線**。reboot 後：(1) 看 `discord_bot.log` 的「embedding 背景回填」跑完（1281 筆，約數分鐘）；(2) 看 `ambient style_refs 召回=…抽樣=…` log 判斷**相關性 + 會不會老抓同幾句**；(3) 看 `ambient_prompt.txt` 確認 `<style_refs>` 有進 prompt、且回覆**沒有逐字照抄**。跳針/不相關 → 調 `max_distance`（收緊）或 `style_refs_enabled=False`（一鍵關）。
+
+**待辦**：V3 心情（2 軸 transparent mood，JSON 存 `src/settings/ai_mood_state.json`、gitignore、tint-not-driver、寫進日記）尚未做；語意召回穩了再做。
+
+---
+
+## 變更紀錄：多歌單下拉（可複選合併播放）（歸檔 2026-07-02，原 2026-06-20）
+
+<!-- @meta
+id: music-multi-playlist-select
+type: FEATURE
+status: implemented_pending_verify
+last_confirmed: 2026-06-20
+-->
+
+**需求：** 控制面板加一個 Discord 多選下拉（multi-select），可勾選一個歌單只播該歌單、勾多個則合併播放、全勾＝全部合併；預設全部合併。需相容現況的單一歌單設定，且歌單名稱可自動抓 YouTube 標題（不用手打）。
+
+**設定檔（`src/settings/music_runtime.json`）— key 為 `playlist_url`，多型：**
+- 字串：`"playlist_url": "https://...&list=..."`
+- 字串陣列：`"playlist_url": ["url1", "url2"]`
+- 物件陣列：`"playlist_url": [{"name": "華語", "url": "..."}, {"url": "..."}]`（`name` 可省略＝自動抓 YouTube 歌單標題）
+- `active_playlists`（選用）：`"all"` 或 key/名稱陣列；記住使用者下拉選擇、重啟後沿用，預設全部。machine 寫入用 key。
+- **向後相容**：沒有 `playlist_url` 時自動讀舊 key `default_playlist_url`（字串）。
+
+**識別與命名設計：**
+- 每個歌單算一個穩定 `key`（`list=` id ＞ video id ＞ url 截斷），下拉 value 與 `active_playlists` 持久化都用 key，與「可能自動抓/變動的名稱」解耦。
+- 顯示名稱：自訂 name ＞ 自動抓的 YouTube 標題 ＞ 後備。自動標題在背景抓取（`YTDLSource.extract_playlist_title()` 用 `playlistend=1` 快速；載入歌單時也順手快取），抓到後 `refresh_panel()`。
+
+**變更：**
+- `src/music/config.py`：新增 `playlist_key()` 與 `Playlist(key,url,name=None)`；`MusicConfig` 用 `playlists`/`active_keys`，property `default_playlist_url`/`active_urls`/`has_playlists`。`_parse_playlists()` 解析多型 `playlist_url`（＋舊 key 相容），`_resolve_active()` 回 key（接受 key 或名稱）。watcher 監看 `playlist_url`/`default_playlist_url`/`active_playlists`。
+- `src/music/ytdl.py`：`_extract_playlist_sync()` 改回傳 `(title, entries)`；新增 `extract_playlist_title()`。
+- `src/music/player.py`：`_playlist_titles` 標題快取；`_fetch_playlist_songs()` 順手快取標題；新增 `load_active_playlists()`/`_rebuild_main_from_urls()`（多歌單合併、先抓成功才換）/`set_active_playlists(keys)`（切換＋持久化）/`resolve_playlist_titles()`/`display_name()`。`reload_playlist()` 重載「目前選取集合」。
+- `src/music/announcer.py`：`PlaylistSelect`（value=key, label=顯示名稱）放進 **ephemeral 彈出面板** `PlaylistEditView`，不常駐主面板。主面板「重置歌單 ♻️」按鈕改名 **「編輯歌單 🎚️」**（custom_id 仍 `music_stop` 相容既有面板）。
+- `src/music/cog.py`：啟動載入改 `load_active_playlists()`，gate 改 `has_playlists`；新增背景 `_prewarm_playlist_titles()`（預抓名稱）；新增 `refresh_playlist_config()`（force_reload + 抓名稱，不動佇列）。
+- **「編輯歌單 🎚️」按鈕流程**：按下 → `refresh_playlist_config()` 立即重讀 `music_runtime.json`（不等 5 秒 watcher）+ 補抓歌單名稱 → 若 **≥2 個歌單**則彈出 ephemeral 多選清單讓使用者挑（選好由 `PlaylistSelect.callback` → `set_active_playlists()` 重建並持久化）；若 **0~1 個**則直接 `reload_playlist()` 重載最新線上歌單。使用者編輯 `playlist_url`（新增/刪改歌單）後按一下即套用，**免重啟**。
+
+**待驗證（部署後）：** ① 單一歌單／舊 `default_playlist_url`：按「編輯歌單」直接重載、不彈清單；② 填多個歌單：按「編輯歌單」彈出 ephemeral 多選清單，預設全勾合併；③ 清單勾單一個只播該歌單、勾多個合併；④ 沒填 name 時清單顯示 YouTube 歌單標題；⑤ 抓取失敗保留舊歌單；⑥ 重啟後沿用上次選擇；⑦ 編輯設定檔新增歌單後，按「編輯歌單」即出現新歌單（免重啟）。
+
+**待 user 提供：** 把第二條（含以後更多）歌單連結填進 `playlist_url`（名稱可不填）。
+
+---
+
+## 待決議題：/askai 空泛新聞 query 搜不到（歸檔 2026-07-02，原 2026-06-25）
+
+<!-- @meta
+id: askai-vague-news-query
+type: FEATURE
+status: implemented_pending_verify
+last_confirmed: 2026-06-25
+-->
+
+**現象：** 使用者問「幫我查詢最近重點新聞」，bot 回「我查不到什麼最新的即時新聞」，看似沒搜尋網頁。
+
+**診斷（已定案）：** 其實有搜。`should_search()` 正確 HARD 觸發（命中 查詢/新聞 → `categories=news, time_range=week`），清理後 query=`最近重點新聞`，SearXNG 也打了 news 引擎，但 **回 0 筆**（log：`SearXNG ok: 0 results ... query=最近重點新聞`）。0 筆 → `web_context=None`（`llm_commands.py` 約 482）→ prompt 不放 `<web_context>` 區塊（`llm_service.py:296` `if web_context:` 為假）→ 模型照 system prompt「空就老實說查不到」規則回應。根因：query 無主題錨字 + news 引擎 + week，三者最差組合。
+
+**「具體化」要先分兩種情況：** ① 真・無主題（只是要頭條）；② 有潛在主題但沒講明（本次 chat_history 整串在聊世界盃，故「最近重點新聞」很可能想問世界盃戰況）。
+
+**三條路線：**
+- A. 規則式改寫（零模型，改 `intent.py`）：偵測無錨字新聞 meta 請求，補時間/地區錨點。收益薄，regex 無法無中生有主題。
+- B. 0 筆 fallback 換引擎（零模型，改 `llm_commands.py`）：news 回 0 → 改 general 引擎（`google,bing,duckduckgo,brave`）＋去 time_range 重試一次。依據：log 中 general 引擎幾乎都穩定回 5 筆。只在失敗時觸發、happy path 零延遲。**AI 建議底線方案。**
+- C. LLM 改寫（真・具體化，新模組，可吃 chat_history 推斷潛在主題，例如本次可改成「世界盃足球 最新賽果」）：最強但多一趟模型（Lemonade 單流互斥，須共用已載入 gemma 避免換模型 ping-pong）、有幻覺主題風險、破壞 intent.py 零依賴哲學。**選配升級。**
+
+**AI 建議：** 先做 B 當底線，C 當選配；A 不單獨做（頂多併進 B 的 fallback query）。
+
+**已定案：採路線 B 並實作（2026-06-25）。**
+
+**變更：** `src/commands/llm_commands.py`（回收 web_task 處，約 480 行）。
+- 主搜回 0 筆、且 `outcome.meta.error is None`、且為窄路由（`intent.categories` 或 `intent.time_range` 非 None）時，自動再打一次 `fetch_web_results`：`engines=None`（→ `default_engines` general）、`categories=None`、`time_range=None`，language 沿用。
+- 有結果才用 fallback outcome（含其 meta）；無結果維持原 0 筆。
+- `web_meta["fallback"] = {attempted, result_count, error}` 供 debug。
+- 不重撈的情況：① 有 error（timeout/http，SearXNG 本身異常）；② 主搜本就 general 無限時（`primary_narrow` 為 False），重撈無益。
+- 未動 `intent.py`；intent 單元測試（隔離載入）全數通過。
+
+**待驗證（部署後）：** ① 下「幫我查詢最近重點新聞」應看到 log `web fallback: 主搜 0 筆，改 general 引擎重試`，且第二次回非 0 → prompt 出現 `<web_context>`；② 有主題的新聞 query（如世界盃）主搜就命中、不應觸發 fallback；③ SearXNG timeout 時不應重撈（log 無 fallback 行）。
+
+**未採用：** 路線 C（LLM/context-aware 改寫）保留為日後選配升級。
+
+---
+
+## handoff 盤點紀錄歸檔（歸檔 2026-07-02）
+
+> 從 AI_HANDOFF 現況盤點列表移出的 2026-06-20 / 06-21 條目（完成或被後續工作取代），原文保留供追溯。
+
+- 2026-06-21（Telegram relay 除錯）：**長訊息 embed 撞 Discord 500、回放無限重試 — 已修截斷上限**。症狀：`message_pk=7616`（2026-05-21 舊訊息回放）每輪 `channel.send` 都 `500 Internal Server Error (error code 0)`、latency ~45s（discord.py 5xx 重試耗盡）。**實際查 DB 驗證**（telegram_data）：7616 文字 4091 字、無 media/控制字元/surrogate/壞 URL、title 15、timestamp 正常 → **payload 形式上合法**。對照本頻道 2138 筆成功訊息**最長僅 3012 字、超過 3500 字 0 筆成功** → 與成功訊息唯一差異就是長度。根因＝Discord 後端對接近 4096 上限的超長 embed description 回 500（非乾淨 400）；舊 code `content[:4000]` 剛好頂在地雷區；又因回放走 `force_replay` 跳過去重 → 同筆每輪重撞同一 500、卡死回放。**修法**：[TelegramRenderAdapter](src/services/telegram_relay_service.py#L579) 加 `_DESCRIPTION_MAX_CHARS=3000`（保守低於實測安全線 3012）當「每段」上限。**最終採分段而非截斷**（使用者要保留全文且看得出是連續文章）：新增 `_split_text()`（盡量在換行/空白邊界切、不切斷句子；**暴雷安全**：切點不落在 `||` 中間，切完平衡每段 `||`，暴雷跨段時前段補 `||` 收尾、下段補 `||` 開頭，標記不破、暴雷不外洩），`render()` 改成**每段產生一個 RenderOperation**（publisher 本就逐 operation 發送 → 自然多則）；續段標題加「（續）」、footer 加頁碼「i/n」，附件只掛第一段。實測 7616：4091 字 → 2 段（2790+1299，皆 ≤3000，段1 切在句末換行）。py_compile PASS、**未 commit**。**未做（未定案）**：回放「毒訊息」dead-letter（同筆連續失敗 N 次 → 略過，避免單筆永久堵塞補送）。**下一步**：部署後重跑回放，確認 7616 送成 2 則連續訊息、`telegram_relay_result` 由 `failed_or_skipped` 變 `published`、迴圈停止。**選配**：用 webhook 跑 `/tmp/discord_len_test.py` 長度掃描，坐實 500 門檻（目前未跑）。
+- 2026-06-21（部署除錯）：**Lemonade 兩個地基問題排除（embeddings + 12B ctx），功能二 Phase C 完整實作**。①**embeddings 501**：Lemonade llamacpp 只有模型帶 `embeddings` 標籤才傳 `--embeddings`（[issue #1745](https://github.com/lemonade-sdk/lemonade/issues/1745)）；user-pull 的 `Qwen3-Embedding` 沒標籤 → 501。修法＝補標籤 / 我在 config 加 `llamacpp_args:"--embeddings"`。embeddings 通 → RAG 滿血 + Phase C 寫入可運作。②**12B ctx 卡 4096**：根因是 bot 的 `/api/v1/load` 送 **nested `recipe_options`**，但 Lemonade 文件要**平鋪參數**（[server_spec](https://github.com/Mintplex-Labs/lemonade-sdk/blob/main/docs/server/server_spec.md)；ctx_size bug [#1817](https://github.com/lemonade-sdk/lemonade/issues/1817) 只在 vLLM、llamacpp 正常）→ 改 [llm_http_client.py:_lemonade_load_model](src/llm/llm_http_client.py) 送**平鋪 ctx_size**（不帶 reserved 旗標、不帶 `save_options`，避免污染使用者 Lemonade 持久設定）→ **12B ctx=16384**。連帶把為 4096 加的精簡放寬回完整（history 12/persona 5/recall 6）。
+  - **⚠️ 教訓（save_options 翻車）**：曾用 `llamacpp_args:"--embeddings"` + `save_options:true`，把 `--embeddings`（Lemonade reserved、由標籤管理）**baked 進持久 `recipe_options.json`** → 之後每次載入都 `model_load_error: --embeddings cannot be overridden`，embed model 整個掛掉、重啟還復發。**最終解**：`POST /api/v1/load {model_name, ctx_size, merge_args:false, save_options:true}` 一次覆寫掉持久的毒（`merge_args:false`＝不 merge 持久自訂 args）；或手動清 `%USERPROFILE%\.cache\lemonade\recipe_options.json` 的該筆。**結論：bot 絕不要送 reserved 旗標、也不要用 `save_options` 寫使用者的 Lemonade 設定。**③**Phase C 全鏈完成**（見功能二區塊，C-1~C-3 [x]）+ `MemoryService` 共享門面 + ambient debug 觀測（`/logs/ambient_prompt.txt`）+ reply 對已刪訊息 fallback 直接發頻道。**未 commit**。**下一步**：重啟 bot 套新設定 → 端到端測插話/記憶 → 之後做 C-4（consolidation/decay/觀測面板）。
+- 2026-06-21（續）：**persona prompt 模組化 + 功能二 Phase B（認得人）+ 記憶設計定稿**。①**persona 重構**：把共用性格/語氣/色色分寸/§19§25 紅線/語言規則從 [askai_system_prompt.txt](src/settings/prompts/askai_system_prompt.txt) 搬進共用的 [persona_identity.txt](src/settings/prompts/persona_identity.txt)（/askai 留任務框架：回答風格/網路引用/人物對照）；ambient 與 /askai 從此**同一個琇紫**。內容等價、**順序微調 → 待 user 重測 /askai**。②**Phase B 認得人**：[ambient_reply.py](src/llm/ambient_reply.py) 接 `retrieve_rag_context_sync`（吃純 id，executor 跑，per-channel 60s 快取，embedding 走 Lemonade 獨立 port 不卸載 12B）→ persona card 進 `persona_context`。③**記憶設計定稿**（見功能二區塊 Phase C + 預設決策）：**只記本人中性偏好；敏感(健康/感情/家庭/財務)直接丟不存；他人/紅線丟；多次提到才升等(tentative→trusted≥2)；全自動零審核；治理＝AI 自我進化(抽取→升等→消化→淡忘)+選配監督面板**。靜態 py_compile PASS。**C（preference_fact 寫入管線）尚未實作**。
+- 2026-06-21：**功能二「AI 偶爾插話」Phase A 實作完成（待 docker 驗證）**。新增 [ambient_reply.py](src/llm/ambient_reply.py)（硬過濾→冷卻/上限→foreground 讓位→**12B 判斷**，沉默 sentinel `[PASS]` 不發送；@/reply 必回）。**插不插由 12B 決定、不擲骰**——「偶爾」靠冷卻+上限；機率退為 `judge_sampling_rate` 純減壓閥（預設 1.0 不作用，太吵才抽樣降載）。配套：`ambient_model: Gemma-4-12B-it-GGUF` 進 [llm_runtime_config.json](src/sys_settings/llm_runtime_config.json)（+ctx 8192）、`LLMRuntimeConfig.ambient_model` + `LLMService.resolve_ambient_model()`、`AmbientChatSettings`、[channel_registry](src/settings/channel_registry.py) 加「AI 插話頻道」、[lemonade_gate](src/llm/lemonade_gate.py) 加 `stream_busy/note_foreground_activity/foreground_recently_active`（/askai 兩處標 foreground）、`bot.ambient_tracker`、`on_message` create_task、[ambient_reply_prompt.txt](src/settings/prompts/ambient_reply_prompt.txt)。**Phase A 範圍調整**：判斷+生成合一次 12B 呼叫（非獨立 judge）、react 檔次延後、persona card(檔1) 移到 Phase B（Phase A 記憶＝`channel.history` 短期脈絡）。**未做**：真正優先序佇列（目前靠 foreground 讓位 + `stream_exclusive` 序列化；directed@ 仍可能在 /askai 窗口觸發 swap）。靜態：py_compile/JSON/standalone gate 測試皆 PASS（完整載入須 docker）。**下一步**：docker 驗證手感 → 調機率/冷卻 → Phase B（`retrieve_discord_context` 泛化吃 channel + persona/RAG 召回）。
+- 2026-06-20：**「AI 偶爾插話 / 閒聊」需求收斂 + 文件化（功能二）**。與使用者互動式確認後，把原本糾纏的需求**拆成兩個獨立功能**：①**功能一＝AI 的家**（專屬頻道、被叫必應、重度三層記憶）＝既有 [AI 私聊頻道 draft](#ai-私聊頻道--三層記憶機制規劃中)，**本輪暫放旁邊**；②**功能二＝AI 偶爾插話**（一般頻道白名單自發冒泡、@/reply 必回、全本地單流、輕量情境記憶）＝**新區塊** [AI 偶爾插話](#ai-偶爾插話--閒聊功能二規劃中)。**本輪定案共識（含模型分層）**：①**兩顆模型、同時只一顆常駐**（Lemonade 切模型會卸載另一顆）——新增背景常駐 **`Gemma-4-12B-it-GGUF`**（判斷＋插話＋傾聽＋記憶，跟既有 `moderation_model`/`personality_model` 同慣例），P0(`/askai`、功能一)才換 **`Gemma-4-26B-A4B-it-GGUF`**。②**優先序佇列 P0>P1>P2，只有 P0 觸發 swap，背景永不 ping-pong**（`/askai` keep_alive 窗口內插話/傾聽暫停）。③觸發＝免費硬過濾 + 冷卻(90s/6次) 前置 → **12B 即時判斷**（回/reaction/沉默），太熱才加機率減壓閥；@/reply 必回。④**記憶＝跨功能共享一層**，由 **12B「沒梗轉傾聽」順手寫入**（判斷=傾聽=記憶同一 pass）；v1 檔1（persona card）+ 檔2（`retrieve_discord_context` 情境召回），檔3（`preference_fact`）為 Phase C。**待使用者下指令才動 code**；Phase A→B→C。**前置技術債**：`retrieve_discord_context` 需從吃 `interaction` 泛化成吃 `channel`（檔2 前置）。
+- 2026-06-20：**/askai 網路搜尋兩處修正（參考連結數 + 體育題觸發）**。① **參考連結 3→5**：抓取 `top_k=5`（[llm_settings.py:218](src/sys_settings/llm_settings.py#L218)）一直全部塞進 `<web_context>`，但 [llm_service.py:316](src/services/llm_service.py#L316) 文末引用 directive 寫死「最多 3 個」卡住輸出 → 改「最多 5 個」對齊（軟性上限，LLM 仍可能引用少於 5 條；`llm_commands.py:482` 的 `outcome.results[:3]` 只是 debug log、不影響、保留）。② **體育題不觸發搜尋**：「請告訴我這周的世界足球賽比賽簡報」trace 的 `web_context_meta` 為 `triggered=false/reason=default`（根本沒打 SearXNG，是模型用無即時資料的記憶回場面話）。Root cause [intent.py](src/llm/retrievers/web/intent.py) 無體育主題群、且 SOFT 寫死「這週」對不上異體字「這周」。修法：新增 `_TOPIC_SPORTS`（足球/世界盃/NBA/英超/賽程/比分… **刻意不收 bare「比賽」「賽」**）掛 HARD + `_ROUTE_RULES` 加 `news`/`week`；SOFT 的 `這週/上週/最近一週` 改 `這[週周]/…` 異體字容錯。新增 [src/test/test_web_intent.py](src/test/test_web_intent.py)（standalone importlib 跑 14 斷言全 PASS；本機無 `discord` 套件不能直跑 unittest，docker 內可）。**待部署驗證**：`docker compose restart discord-bot` 後重問足球題，`web_context_meta` 應為 `triggered=true/reason=hard/news/week` 且附參考連結。**未做（可選）**：`test_web_intent` 加進 docker-compose 啟動測試 gate（目前只跑 snapshot+spoiler）；體育詞表非窮舉（羽球/網球/瓊斯盃等未收）。
+
+---
+
 
 ## fixupx 連結轉發：只轉影片 + 存在性防呆（歸檔 2026-06-15）
 
