@@ -161,6 +161,14 @@ async def _download_image_bytes(url: Optional[str], *, max_bytes: int = 8 * 1024
         return None
 
 
+def _first_content_image(html_text: Optional[str]) -> Optional[str]:
+    """從 HTML 內文抓第一張 <img> 的 src（封面欄位皆空時的 fallback，對齊 embed 取圖）。"""
+    if not html_text:
+        return None
+    m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', html_text)
+    return m.group(1) if m else None
+
+
 # ── 規劃（純：不碰 discord/db；產出待建清單） ──
 
 @dataclass
@@ -215,14 +223,22 @@ def plan_events(
         if discord_start >= end:
             continue  # 已結束 / 區間無效
 
-        name_src = ev.title_hint or title or "鳴潮活動"
-        fp = event_fingerprint(name_src, logical_start, end)
+        # 顯示標題：單事件用「貼文自然標題」（article_title / FB 首行；一致、可讀）；
+        # 多事件（版本內容說明匯總帖）才用逐活動括號名區分。
+        headline = (title or "").strip()
+        if len(parsed) == 1 and headline:
+            display_name = headline
+        else:
+            display_name = ev.title_hint or headline or "鳴潮活動"
+
+        # 指紋核心維持原基準（優先括號核心名），不動已驗證的跨來源去重
+        fp = event_fingerprint(ev.title_hint or headline, logical_start, end)
         if fp in local_seen:
             continue
         local_seen.add(fp)
 
         planned.append(PlannedEvent(
-            name=name_src.strip()[:100] or "鳴潮活動",
+            name=(display_name.strip()[:100] or "鳴潮活動"),
             start=discord_start,
             logical_start=logical_start,
             end=end,
@@ -362,28 +378,33 @@ async def maybe_schedule_events(
 async def schedule_from_article(bot, article: dict, channel_id: int) -> None:
     """從官方文章 dict 觸發活動偵測。欄位對應集中於此，article_monitor 只需一行呼叫。"""
     try:
+        text = (article.get("article_content_full") or article.get("article_content")
+                or article.get("article_desc") or "")
+        # 封面：優先指定封面欄位，皆空則退用內文第一張圖（對齊 format_article_embed 取圖）
+        image_url = (article.get("article_cover") or article.get("content_cover")
+                     or article.get("suggest_cover") or _first_content_image(text))
         await maybe_schedule_events(
             bot, source="article", source_id=article.get("article_id"),
             title=article.get("article_title", ""),
-            text=(article.get("article_content_full") or article.get("article_content")
-                  or article.get("article_desc") or ""),
+            text=text,
             post_time=parse_source_time(article.get("start_time") or article.get("create_time")),
             url=f"https://wutheringwaves.kurogames.com/zh-tw/main/news/detail/{article.get('article_id')}",
             channel_id=channel_id, is_html=True,
-            image_url=(article.get("article_cover") or article.get("content_cover")
-                       or article.get("suggest_cover")),
+            image_url=image_url,
         )
     except Exception as e:
         logger.warning("[event] article 活動偵測失敗（已吞）: %s", e)
 
 
 async def schedule_from_fb(bot, fb_post: dict, channel_id: int) -> None:
-    """從 FB 貼文 dict 觸發活動偵測。FB 無標題（parser 從內文括號名抽）；純文字 is_html=False。"""
+    """從 FB 貼文 dict 觸發活動偵測。標題取內文首行（＝貼文標題，與 article_title 一致風格）。"""
     try:
+        text = fb_post.get("text_md") or fb_post.get("text") or ""
+        first_line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
         await maybe_schedule_events(
             bot, source="fb", source_id=fb_post.get("id"),
-            title="",
-            text=(fb_post.get("text_md") or fb_post.get("text") or ""),
+            title=first_line,
+            text=text,
             post_time=parse_source_time(fb_post.get("timestamp") or fb_post.get("created_at")),
             url=(fb_post.get("url") or fb_post.get("pfbid_url")),
             channel_id=channel_id, is_html=False,
