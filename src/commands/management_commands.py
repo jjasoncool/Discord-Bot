@@ -279,6 +279,11 @@ class IntroImpressionModal(discord.ui.Modal):
         self,
         intro_service: IntroProfileServiceProtocol,
         management_cog: "ManagementCommands",
+        *,
+        prefill_target: Optional[discord.abc.Snowflake] = None,
+        prefill_alias: str = "",
+        prefill_habit: str = "",
+        prefill_impression: str = "",
     ):
         super().__init__(title="填寫對他人印象", timeout=600)
 
@@ -286,16 +291,23 @@ class IntroImpressionModal(discord.ui.Modal):
         self.management_cog = management_cog
         self.moderation_service = ImpressionModerationService()
 
-        logger.info("intro_impression_modal_init: timeout=600, using Label-wrapped UserSelect (2.6.4 supported)")
+        logger.info(
+            "intro_impression_modal_init: timeout=600, using Label-wrapped UserSelect (2.6.4 supported), prefill=%s",
+            bool(prefill_impression or prefill_alias or prefill_habit or prefill_target),
+        )
 
         # UserSelect 本體（不要給 custom_id，讓 library 自動產生）
-        self.target_select: discord.ui.UserSelect = discord.ui.UserSelect(
+        # 有帶入上次對象時預選（default_values 需 discord.py 2.4+）
+        user_select_kwargs = dict(
             placeholder="請選擇你要填寫印象的對象...",
             min_values=1,
             max_values=1,
             required=True,   # 2.6+ 在 Modal 內生效
             row=0,
         )
+        if prefill_target is not None:
+            user_select_kwargs["default_values"] = [prefill_target]
+        self.target_select: discord.ui.UserSelect = discord.ui.UserSelect(**user_select_kwargs)
 
         # 關鍵：一定要用 Label 包裝（官方唯一合法寫法）
         select_label = discord.ui.Label(
@@ -309,6 +321,7 @@ class IntroImpressionModal(discord.ui.Modal):
             placeholder="例如：阿狗、一野...（若無可留白）",
             max_length=50,
             required=False,
+            default=(prefill_alias or None),
         )
         self.habit_text = discord.ui.TextInput(
             label="他常常在群裡面做什麼？(請簡答)",
@@ -316,6 +329,7 @@ class IntroImpressionModal(discord.ui.Modal):
             style=discord.TextStyle.short,
             max_length=100,
             required=False,
+            default=(prefill_habit or None),
         )
         self.impression = discord.ui.TextInput(
             label="你對他的整體印象",
@@ -323,6 +337,7 @@ class IntroImpressionModal(discord.ui.Modal):
             style=discord.TextStyle.paragraph,
             max_length=600,
             required=True,
+            default=(prefill_impression or None),
         )
 
         # 統一加入（減少重複 add_item）
@@ -376,14 +391,27 @@ class IntroImpressionModal(discord.ui.Modal):
                 moderation.score_real_interaction,
                 moderation.score_meaningfulness,
             )
+            # 帶入上次內容的重填按鈕，讓被擋的使用者不必整篇重打
+            retry_view = ImpressionRetryView(
+                self.intro_service,
+                self.management_cog,
+                target=selected_user,
+                alias=alias,
+                habit=habit,
+                impression=impression_text,
+            )
             await safe_send_interaction_message(
                 interaction,
                 (
                     "⚠️ 這則他人印象暫時無法提交。\n"
-                    "請改寫為與對象相關、可理解且具體的社群印象後再送出。"
+                    f"審核原因：{moderation.reason}\n\n"
+                    "你剛剛填的內容如下（可直接複製修改）：\n"
+                    f"```\n{impression_text}\n```\n"
+                    "點下方按鈕可帶入剛剛的內容重新編修後再送出。"
                 ),
                 ephemeral=True,
                 prefer_followup=True,
+                view=retry_view,
             )
             return
 
@@ -447,6 +475,47 @@ class IntroImpressionModal(discord.ui.Modal):
             await self.management_cog._auto_bump_intro_panel_after_submission(interaction)
         except Exception as e:
             logger.error(f"他人印象送出後自動 bump 面板失敗: {e}", exc_info=True)
+
+
+class ImpressionRetryView(discord.ui.View):
+    """他人印象被審核擋下後，讓使用者一鍵帶入上次內容重新編修再送出。
+
+    非持久化 view：只在 timeout 期間有效，逾時後按鈕失效，但訊息中已附原文可手動複製。
+    """
+
+    def __init__(
+        self,
+        intro_service: IntroProfileServiceProtocol,
+        management_cog: "ManagementCommands",
+        *,
+        target: discord.abc.Snowflake,
+        alias: str,
+        habit: str,
+        impression: str,
+        timeout: float = 600,
+    ):
+        super().__init__(timeout=timeout)
+        self.intro_service = intro_service
+        self.management_cog = management_cog
+        self._target = target
+        self._alias = alias
+        self._habit = habit
+        self._impression = impression
+
+    @discord.ui.button(label="✏️ 重新填寫（帶入剛剛內容）", style=discord.ButtonStyle.primary)
+    async def retry_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            IntroImpressionModal(
+                self.intro_service,
+                self.management_cog,
+                prefill_target=self._target,
+                prefill_alias=self._alias,
+                prefill_habit=self._habit,
+                prefill_impression=self._impression,
+            )
+        )
+
+
 class IntroPanelView(discord.ui.View):
     """自我介紹面板 persistent view"""
 
