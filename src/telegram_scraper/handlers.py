@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Any
 
@@ -194,12 +195,91 @@ def _serialize_entities(message: Any) -> list[dict] | None:
         length = getattr(ent, "length", None)
         if offset is None or length is None:
             continue
-        serialized.append({
+        item: dict = {
             "type": type(ent).__name__,
             "offset": int(offset),
             "length": int(length),
-        })
+        }
+        # 內嵌自訂表情（premium custom emoji）額外保留 document_id，
+        # relay 端才有辦法把它換成對應的 Discord App Emoji。
+        doc_id = getattr(ent, "document_id", None)
+        if doc_id is not None:
+            try:
+                item["document_id"] = int(doc_id)
+            except (TypeError, ValueError):
+                pass
+        serialized.append(item)
     return serialized or None
+
+
+async def _download_custom_emojis(
+    *,
+    message_pk: int,
+    entities: list[dict] | None,
+    client: Any,
+    media_dir: str,
+    db: TelegramDatabase,
+    log_prefix: str,
+) -> None:
+    """下載訊息內嵌的自訂表情檔（webp/tgs/webm）到共用 media 目錄。
+
+    以 document_id 去重（已下載過就跳過），並在下載後把帶 document_id 的
+    entities 覆寫回該訊息，確保 relay 讀得到 document_id。
+    """
+    if not entities:
+        return
+
+    doc_ids: list[int] = []
+    for ent in entities:
+        if isinstance(ent, dict) and ent.get("type") == "MessageEntityCustomEmoji":
+            did = ent.get("document_id")
+            if did is not None and int(did) not in doc_ids:
+                doc_ids.append(int(did))
+    if not doc_ids:
+        return
+
+    # 先把 entities（含 document_id）回填，即使表情已下載過也要確保 DB 有 document_id
+    try:
+        await db.update_message_entities(message_pk, entities)
+    except Exception as exc:
+        print(f"[{log_prefix}] 回填 entities 失敗 message_pk={message_pk}: {exc}")
+
+    known = await db.get_known_emoji_ids(doc_ids)
+    todo = [d for d in doc_ids if d not in known]
+    if not todo:
+        return
+
+    try:
+        from telethon.tl.functions.messages import GetCustomEmojiDocumentsRequest
+        documents = await client(GetCustomEmojiDocumentsRequest(document_id=todo))
+    except Exception as exc:
+        print(f"[{log_prefix}] 取自訂表情 document 失敗 ids={todo}: {exc}")
+        return
+
+    for doc in documents or []:
+        doc_id = int(getattr(doc, "id", 0) or 0)
+        if not doc_id:
+            continue
+        mime = getattr(doc, "mime_type", "") or ""
+        is_animated = mime == "application/x-tgsticker" or mime.startswith("video/")
+        target_path = os.path.join(media_dir, f"emoji_{doc_id}{_ext_from_mime(mime)}")
+        try:
+            file_path = await client.download_media(doc, file=target_path)
+        except Exception as exc:
+            print(f"[{log_prefix}] 下載自訂表情失敗 doc_id={doc_id}: {exc}")
+            continue
+        rel_path = _to_shared_media_rel_path(str(file_path), media_dir) if file_path else None
+        try:
+            await db.upsert_custom_emoji(
+                document_id=doc_id,
+                file_rel_path=rel_path,
+                mime_type=mime,
+                is_animated=is_animated,
+            )
+        except Exception as exc:
+            print(f"[{log_prefix}] 寫入自訂表情記錄失敗 doc_id={doc_id}: {exc}")
+        else:
+            print(f"[{log_prefix}] 自訂表情已下載 doc_id={doc_id} animated={is_animated} path={rel_path}")
 
 
 _chat_title_cache: dict[int, str | None] = {}
@@ -300,6 +380,22 @@ async def _process_message(
         else:
             print(f"[{log_prefix}] 媒體已存在，略過下載 message_pk={message_pk}")
 
+    # 2.5 下載內嵌自訂表情（premium custom emoji），供 relay 轉成 Discord App Emoji。
+    # 只在「即時新訊息」與「on-demand 重抓」時做；啟動歷史掃描（History）刻意跳過，
+    # 避免第一次重啟把全頻道歷史表情都抓一遍拖慢啟動 / 撞 Telegram rate limit。
+    if entities and log_prefix != "History":
+        try:
+            await _download_custom_emojis(
+                message_pk=message_pk,
+                entities=entities,
+                client=client,
+                media_dir=runtime_snapshot.media_dir,
+                db=db,
+                log_prefix=log_prefix,
+            )
+        except Exception as exc:
+            print(f"[{log_prefix}] 處理自訂表情時發生例外 message_pk={message_pk}: {exc}")
+
     # 3. 通知（僅新訊息才 NOTIFY）
     if inserted_new:
         await db.notify_new_message(message_pk)
@@ -349,4 +445,29 @@ async def handle_history_message(
         runtime_watcher=runtime_watcher,
         db=db,
         log_prefix="History",
+    )
+
+
+async def handle_refetch_message(
+    msg: Any,
+    chat_id: int | None,
+    client: Any,
+    config: TelegramConfig,
+    runtime_watcher: TelegramRuntimeConfigWatcher,
+    db: TelegramDatabase,
+) -> bool:
+    """處理 on-demand 重抓（relay 透過 pg NOTIFY 觸發）。
+
+    走與一般訊息相同的 _process_message，重點在補齊/回填內嵌自訂表情。
+    """
+    resolved_chat_id = getattr(msg, "chat_id", None) or chat_id
+    return await _process_message(
+        message=msg,
+        chat_id=resolved_chat_id,
+        raw_text=getattr(msg, "message", "") or "",
+        client=client,
+        config=config,
+        runtime_watcher=runtime_watcher,
+        db=db,
+        log_prefix="Refetch",
     )

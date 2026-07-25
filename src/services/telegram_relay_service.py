@@ -28,45 +28,89 @@ from telegram_scraper.tg_config import normalize_channel_identifier
 
 logger = logging.getLogger("discord_bot")
 
+# 觸發 scraper 端 on-demand 重抓的 pg NOTIFY channel（須與 telegram_scraper/runner.py 一致）
+EMOJI_REFETCH_CHANNEL = "telegram_emoji_refetch"
 
-def apply_spoiler_entities(text: str, entities: list[dict] | None) -> str:
-    """把 Telegram MessageEntitySpoiler 範圍轉成 Discord 的 `||...||` 暴雷標記。
 
-    Telegram 的 entity offset/length 以 UTF-16 code units 計，須先將文字轉為 UTF-16-LE
-    bytes 再切片，否則 BMP 外字元（部分 emoji / 罕字）會偏移。
-    其他 entity 類型（bold/italic 等）目前不處理。
+def apply_message_entities(
+    text: str,
+    entities: list[dict] | None,
+    resolve_emoji=None,
+) -> str:
+    """套用 Telegram entities：MessageEntitySpoiler → Discord `||...||`；
+    MessageEntityCustomEmoji → 對應的 Discord App Emoji 標記。
+
+    Telegram 的 entity offset/length 以 UTF-16 code units 計，須先轉成 UTF-16-LE
+    bytes 再切片，否則 BMP 外字元（部分 emoji / 罕字）會偏移。spoiler 與自訂表情
+    合併在同一次「由後往前」的改寫，避免兩種 entity 並存時位移失效。
+
+    resolve_emoji: callable(document_id:int) -> str|None，回傳該表情的 Discord 標記
+    （`<:name:id>`）；回 None 表示不替換（保留原本的 fallback emoji）。
     """
     if not text or not entities:
         return text
 
-    spoilers = [
-        ent for ent in entities
-        if isinstance(ent, dict) and ent.get("type") == "MessageEntitySpoiler"
-    ]
-    if not spoilers:
+    edits: list[dict] = []
+    for ent in entities:
+        if not isinstance(ent, dict):
+            continue
+        etype = ent.get("type")
+        offset = ent.get("offset")
+        length = ent.get("length")
+        if offset is None or length is None:
+            continue
+        try:
+            offset = int(offset)
+            length = int(length)
+        except (TypeError, ValueError):
+            continue
+        if length <= 0 or offset < 0:
+            continue
+
+        if etype == "MessageEntitySpoiler":
+            edits.append({"kind": "spoiler", "offset": offset, "length": length})
+        elif etype == "MessageEntityCustomEmoji" and resolve_emoji is not None:
+            doc_id = ent.get("document_id")
+            if doc_id is None:
+                continue
+            try:
+                markup = resolve_emoji(int(doc_id))
+            except Exception:
+                markup = None
+            if markup:
+                edits.append({
+                    "kind": "replace",
+                    "offset": offset,
+                    "length": length,
+                    "markup": markup,
+                })
+
+    if not edits:
         return text
 
     text_bytes = text.encode("utf-16-le")
-    open_marker = "||".encode("utf-16-le")
-    close_marker = "||".encode("utf-16-le")
+    marker = "||".encode("utf-16-le")
 
-    # 從後往前處理，避免插入記號後位移失效
-    for ent in sorted(spoilers, key=lambda e: int(e.get("offset", 0)), reverse=True):
-        offset_units = int(ent.get("offset", 0))
-        length_units = int(ent.get("length", 0))
-        if length_units <= 0:
-            continue
-        start = offset_units * 2
-        end = start + length_units * 2
+    # 由後往前套用，避免插入/替換後位移失效
+    for edit in sorted(edits, key=lambda e: e["offset"], reverse=True):
+        start = edit["offset"] * 2
+        end = start + edit["length"] * 2
         if start < 0 or end > len(text_bytes):
             continue
-        text_bytes = (
-            text_bytes[:start]
-            + open_marker
-            + text_bytes[start:end]
-            + close_marker
-            + text_bytes[end:]
-        )
+        if edit["kind"] == "spoiler":
+            text_bytes = (
+                text_bytes[:start]
+                + marker
+                + text_bytes[start:end]
+                + marker
+                + text_bytes[end:]
+            )
+        else:  # replace（自訂表情）
+            text_bytes = (
+                text_bytes[:start]
+                + edit["markup"].encode("utf-16-le")
+                + text_bytes[end:]
+            )
 
     return text_bytes.decode("utf-16-le")
 
@@ -161,6 +205,112 @@ class TelegramMessageRepository:
                 );
                 """
             )
+            # 自訂表情對照表（scraper 也會建；此處保險，避免 relay 先跑時查表報錯）
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS telegram_custom_emoji (
+                    document_id BIGINT PRIMARY KEY,
+                    file_rel_path TEXT,
+                    mime_type TEXT,
+                    is_animated BOOLEAN NOT NULL DEFAULT FALSE,
+                    discord_emoji_id BIGINT,
+                    discord_emoji_name TEXT,
+                    status TEXT NOT NULL DEFAULT 'downloaded',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+
+    async def get_custom_emoji(self, document_id: int) -> Optional[dict]:
+        """讀取一筆自訂表情對照（含下載檔路徑與已上傳的 Discord emoji 資訊）。"""
+        if self.pool is None:
+            raise RuntimeError("TelegramMessageRepository 尚未 connect")
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT document_id, file_rel_path, mime_type, is_animated,
+                       discord_emoji_id, discord_emoji_name, status
+                FROM telegram_custom_emoji
+                WHERE document_id = $1;
+                """,
+                int(document_id),
+            )
+        return dict(row) if row else None
+
+    async def mark_custom_emoji_uploaded(
+        self, document_id: int, discord_emoji_id: int, discord_emoji_name: str
+    ) -> None:
+        """回填上傳成功的 Discord App Emoji 資訊。"""
+        if self.pool is None:
+            raise RuntimeError("TelegramMessageRepository 尚未 connect")
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE telegram_custom_emoji
+                SET discord_emoji_id = $2, discord_emoji_name = $3,
+                    status = 'ok', updated_at = NOW()
+                WHERE document_id = $1;
+                """,
+                int(document_id),
+                int(discord_emoji_id),
+                discord_emoji_name,
+            )
+
+    async def mark_custom_emoji_status(self, document_id: int, status: str) -> None:
+        """標記自訂表情狀態（unsupported / failed 等）。"""
+        if self.pool is None:
+            raise RuntimeError("TelegramMessageRepository 尚未 connect")
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE telegram_custom_emoji
+                SET status = $2, updated_at = NOW()
+                WHERE document_id = $1;
+                """,
+                int(document_id),
+                status,
+            )
+
+    async def find_messages_by_id(self, id_value: int) -> list[dict]:
+        """用 db id 或 telegram_message_id 找訊息（供 /resend_article 解析）。
+
+        多頻道時 telegram_message_id 可能撞號 → 回傳多筆讓上層要求以 db id 消歧義。
+        """
+        if self.pool is None:
+            raise RuntimeError("TelegramMessageRepository 尚未 connect")
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, telegram_chat_id, telegram_message_id, chat_title
+                FROM telegram_messages
+                WHERE telegram_message_id = $1 OR id = $1
+                ORDER BY id;
+                """,
+                int(id_value),
+            )
+        return [dict(row) for row in rows]
+
+    async def send_pg_notify(self, channel: str, payload: str) -> None:
+        """對 telegram_data 發 pg_notify（用來觸發 scraper 端重抓）。"""
+        if self.pool is None:
+            raise RuntimeError("TelegramMessageRepository 尚未 connect")
+        async with self.pool.acquire() as conn:
+            await conn.execute("SELECT pg_notify($1, $2)", channel, payload)
+
+    async def get_present_emoji_ids(self, document_ids) -> set:
+        """回傳這批 document_id 中「已在對照表」的集合（scraper 已下載/處理完）。"""
+        if self.pool is None:
+            raise RuntimeError("TelegramMessageRepository 尚未 connect")
+        ids = [int(d) for d in document_ids]
+        if not ids:
+            return set()
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT document_id FROM telegram_custom_emoji WHERE document_id = ANY($1::bigint[]);",
+                ids,
+            )
+        return {int(row["document_id"]) for row in rows}
 
     async def get_runtime_cursor_pk(self) -> Optional[int]:
         if self.pool is None:
@@ -661,7 +811,7 @@ class TelegramRenderAdapter:
             balanced.append(chunk)
         return balanced
 
-    def render(self, message: TelegramMessageRecord) -> RenderPlan:
+    def render(self, message: TelegramMessageRecord, emoji_map: dict | None = None) -> RenderPlan:
         attachments: list[AttachmentSpec] = []
         seen_media_keys: set[str] = set()
 
@@ -692,8 +842,9 @@ class TelegramRenderAdapter:
                 )
             )
 
-        # 先以 entities 還原 spoiler 等格式，再依長度切成多段（保留全文，不截斷）
-        rendered_text = apply_spoiler_entities(message.text or "", message.entities)
+        # 先以 entities 還原 spoiler + 自訂表情，再依長度切成多段（保留全文，不截斷）
+        resolve_emoji = (lambda did: (emoji_map or {}).get(did)) if emoji_map else None
+        rendered_text = apply_message_entities(message.text or "", message.entities, resolve_emoji=resolve_emoji)
         content = rendered_text.strip()
         source_name = message.chat_title or self._get_source_channel_name()
 
@@ -706,13 +857,13 @@ class TelegramRenderAdapter:
         for idx, chunk in enumerate(chunks):
             if total == 1:
                 title = source_name
-                footer = f"msg #{message.telegram_message_id}"
+                footer = f"msg #{message.telegram_message_id} · db#{message.message_pk}"
             elif idx == 0:
                 title = source_name
-                footer = f"msg #{message.telegram_message_id} · 1/{total}"
+                footer = f"msg #{message.telegram_message_id} · db#{message.message_pk} · 1/{total}"
             else:
                 title = f"{source_name}（續）"
-                footer = f"msg #{message.telegram_message_id} · {idx + 1}/{total}"
+                footer = f"msg #{message.telegram_message_id} · db#{message.message_pk} · {idx + 1}/{total}"
 
             embed = discord.Embed(
                 title=title,
@@ -1070,6 +1221,119 @@ class DiscordMessagePublisher:
         return published_count
 
 
+class CustomEmojiResolver:
+    """把 Telegram 內嵌自訂表情（premium custom emoji）轉成 Discord App Emoji。
+
+    以全域 document_id 為 key（表情不屬於任何頻道）查對照表；未上傳過的就把下載好的
+    靜態表情（webp）轉成 PNG、上傳成 bot 私有的 Application Emoji、回填對照表。
+    Phase 1 只處理靜態；動態（tgs/webm）標記 unsupported、保留 fallback。
+    """
+
+    def __init__(self, bot, repository: "TelegramMessageRepository", app_root: Path) -> None:
+        self.bot = bot
+        self.repository = repository
+        self.app_root = Path(app_root)
+        self._app_emoji_by_name: Optional[dict] = None  # name -> discord.Emoji，快取
+
+    async def resolve(self, entities: list[dict] | None) -> dict:
+        """回傳 {document_id: '<:name:id>'}，只含成功解析的表情。"""
+        if not entities:
+            return {}
+        doc_ids: list[int] = []
+        for ent in entities:
+            if isinstance(ent, dict) and ent.get("type") == "MessageEntityCustomEmoji":
+                did = ent.get("document_id")
+                if did is not None and int(did) not in doc_ids:
+                    doc_ids.append(int(did))
+        result: dict = {}
+        for did in doc_ids:
+            try:
+                markup = await self._resolve_one(did)
+            except Exception as exc:
+                logger.warning("解析自訂表情失敗 doc=%s: %s", did, exc)
+                markup = None
+            if markup:
+                result[did] = markup
+        return result
+
+    async def _ensure_cache(self) -> None:
+        if self._app_emoji_by_name is not None:
+            return
+        try:
+            emojis = await self.bot.fetch_application_emojis()
+            self._app_emoji_by_name = {e.name: e for e in emojis}
+        except Exception as exc:
+            logger.warning("讀取 application emojis 失敗: %s", exc)
+            self._app_emoji_by_name = {}
+
+    async def _resolve_one(self, document_id: int) -> Optional[str]:
+        row = await self.repository.get_custom_emoji(document_id)
+        if row is None:
+            return None
+        # 已上傳過 → 直接用
+        if row.get("discord_emoji_id") and row.get("status") == "ok":
+            name = row.get("discord_emoji_name") or f"tg_{document_id}"
+            return f"<:{name}:{int(row['discord_emoji_id'])}>"
+        # 動態表情：Phase 1 不做
+        if row.get("is_animated"):
+            await self.repository.mark_custom_emoji_status(document_id, "unsupported")
+            return None
+        rel = row.get("file_rel_path")
+        if not rel:
+            return None
+        abs_path = self.app_root / rel
+        if not abs_path.exists():
+            logger.warning("自訂表情檔不存在: %s", abs_path)
+            return None
+
+        name = f"tg_{document_id}"
+        try:
+            image_bytes = self._to_png_bytes(abs_path)
+        except Exception as exc:
+            logger.warning("自訂表情轉檔失敗 doc=%s: %s", document_id, exc)
+            await self.repository.mark_custom_emoji_status(document_id, "failed")
+            return None
+
+        await self._ensure_cache()
+        existing = (self._app_emoji_by_name or {}).get(name)
+        if existing is not None:
+            await self.repository.mark_custom_emoji_uploaded(document_id, existing.id, name)
+            return f"<:{name}:{existing.id}>"
+
+        try:
+            emoji = await self.bot.create_application_emoji(name=name, image=image_bytes)
+        except Exception as exc:
+            logger.warning("建立 application emoji 失敗 doc=%s: %s", document_id, exc)
+            # 可能名稱已存在（競態）→ 重讀快取再試一次
+            self._app_emoji_by_name = None
+            await self._ensure_cache()
+            existing = (self._app_emoji_by_name or {}).get(name)
+            if existing is not None:
+                await self.repository.mark_custom_emoji_uploaded(document_id, existing.id, name)
+                return f"<:{name}:{existing.id}>"
+            await self.repository.mark_custom_emoji_status(document_id, "failed")
+            return None
+
+        if self._app_emoji_by_name is not None:
+            self._app_emoji_by_name[name] = emoji
+        await self.repository.mark_custom_emoji_uploaded(document_id, emoji.id, name)
+        return f"<:{name}:{emoji.id}>"
+
+    @staticmethod
+    def _to_png_bytes(abs_path: Path) -> bytes:
+        """把靜態表情（webp 等）轉成 <=128px 的 PNG bytes（符合 Discord emoji 限制）。"""
+        import io
+
+        from PIL import Image
+
+        with Image.open(abs_path) as im:
+            im = im.convert("RGBA")
+            im.thumbnail((128, 128))
+            buf = io.BytesIO()
+            im.save(buf, format="PNG")
+            return buf.getvalue()
+
+
 class MessageRelayWorker:
     """Telegram Relay Worker：LISTEN + 補償 polling + 去重。"""
 
@@ -1093,6 +1357,7 @@ class MessageRelayWorker:
         self.dsn = dsn
         self.notify_channel = notify_channel
         self.poll_interval_sec = poll_interval_sec
+        self._emoji_resolver = CustomEmojiResolver(bot, repository, render_adapter.app_root)
 
         self._running = False
         self._queue: asyncio.Queue[int] = asyncio.Queue(maxsize=5000)
@@ -1309,6 +1574,101 @@ class MessageRelayWorker:
             return None
         return channel  # type: ignore[return-value]
 
+    async def _resolve_custom_emojis(self, entities) -> dict:
+        """把訊息 entities 裡的自訂表情解析成 {document_id: markup}（best-effort）。"""
+        try:
+            return await self._emoji_resolver.resolve(entities)
+        except Exception as exc:
+            logger.warning("解析自訂表情整體失敗（略過）: %s", exc)
+            return {}
+
+    async def _wait_emoji_ready(self, message_pk: int, timeout: float = 15.0) -> bool:
+        """poll DB 直到該訊息的自訂表情都「entities 有 document_id」且「已下載進對照表」或逾時。
+
+        只檢查 entities 的 document_id 不夠——舊訊息可能先前已回填 document_id 但檔尚未下載，
+        會造成過早判定就緒、resolver 抓到空表。故一併確認對照表已有該表情。
+        """
+        waited = 0.0
+        interval = 0.5
+        while waited < timeout:
+            message = await self.repository.get_message_by_pk(message_pk)
+            if message is not None:
+                custom = [
+                    e for e in (message.entities or [])
+                    if isinstance(e, dict) and e.get("type") == "MessageEntityCustomEmoji"
+                ]
+                if not custom:
+                    return True  # 這則沒有自訂表情，無需等待
+                doc_ids = {int(e["document_id"]) for e in custom if e.get("document_id")}
+                if len(doc_ids) == len(custom):
+                    present = await self.repository.get_present_emoji_ids(doc_ids)
+                    if doc_ids <= present:
+                        return True
+            await asyncio.sleep(interval)
+            waited += interval
+        return False
+
+    async def resend_telegram_by_id(self, id_value: int) -> dict:
+        """/resend_article type:telegram 用：以 db id 或 telegram_message_id 重送一則。
+
+        流程：解析訊息 → 通知 scraper 即時重抓（補齊自訂表情）→ 等就緒 →
+        解析 App Emoji → 渲染 → 送到該來源路由頻道（略過 delivery_state 去重，強制送）。
+        """
+        candidates = await self.repository.find_messages_by_id(id_value)
+        if not candidates:
+            return {"ok": False, "reason": "not_found"}
+        if len(candidates) > 1:
+            return {"ok": False, "reason": "ambiguous", "candidates": candidates}
+
+        row = candidates[0]
+        message_pk = int(row["id"])
+        chat_id = int(row["telegram_chat_id"])
+        tg_msg_id = int(row["telegram_message_id"])
+
+        # 1. 通知 scraper 即時重抓（帶 chat_id，多頻道也抓對）
+        refetch_ok = False
+        try:
+            await self.repository.send_pg_notify(
+                EMOJI_REFETCH_CHANNEL,
+                json.dumps({"chat_id": chat_id, "message_id": tg_msg_id}),
+            )
+            refetch_ok = await self._wait_emoji_ready(message_pk, timeout=15.0)
+        except Exception as exc:
+            logger.warning("觸發重抓失敗（改用現有 DB 內容）: %s", exc)
+
+        # 2. 讀最新訊息 → 解析表情 → 渲染
+        message = await self.repository.get_message_by_pk(message_pk)
+        if message is None:
+            return {"ok": False, "reason": "not_found"}
+        emoji_map = await self._resolve_custom_emojis(message.entities)
+        plan = self.render_adapter.render(message, emoji_map=emoji_map)
+
+        # 3. 送到該來源的路由頻道
+        route_ids = self.route_resolver.resolve_telegram_routes(message.telegram_chat_id)
+        sent = 0
+        channels: list[int] = []
+        for channel_id in route_ids:
+            channel = await self._resolve_channel(channel_id)
+            if channel is None:
+                continue
+            sent += await self.publisher.publish_to_channel(channel, plan)
+            channels.append(channel_id)
+
+        custom_count = len([
+            e for e in (message.entities or [])
+            if isinstance(e, dict) and e.get("type") == "MessageEntityCustomEmoji"
+        ])
+        return {
+            "ok": True,
+            "sent": sent,
+            "channels": channels,
+            "refetch_ok": refetch_ok,
+            "emoji_found": custom_count,
+            "emoji_rendered": len(emoji_map),
+            "db_id": message_pk,
+            "telegram_message_id": tg_msg_id,
+        }
+
     # media group 等待同組訊息到齊的秒數
     _GROUP_WAIT_SEC = 3.0
     # 等待期間輪詢 DB 的間隔秒數
@@ -1423,7 +1783,9 @@ class MessageRelayWorker:
             self._mark_processed(message_pk)
             return
 
-        plan = self.render_adapter.render(message)
+        # 先解析內嵌自訂表情 → App Emoji（best-effort，失敗不影響發文）
+        emoji_map = await self._resolve_custom_emojis(message.entities)
+        plan = self.render_adapter.render(message, emoji_map=emoji_map)
         published_count = 0
 
         # 依「這則訊息的來源」各別判斷是否強制重送；查 pk 時帶上 chat_id 鎖定來源，

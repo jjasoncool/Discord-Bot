@@ -143,6 +143,93 @@ class TelegramDatabase:
                 """
             )
 
+            # 內嵌自訂表情（premium custom emoji）對照表。
+            # 以 Telegram 全域唯一的 document_id 當 key（表情屬於 emoji set、不屬於頻道，
+            # 故跨頻道可自動共用去重）。scraper 寫入 file_rel_path/mime/is_animated；
+            # relay 上傳 Discord App Emoji 後回填 discord_emoji_id/name + status=ok。
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS telegram_custom_emoji (
+                    document_id BIGINT PRIMARY KEY,
+                    file_rel_path TEXT,
+                    mime_type TEXT,
+                    is_animated BOOLEAN NOT NULL DEFAULT FALSE,
+                    discord_emoji_id BIGINT,
+                    discord_emoji_name TEXT,
+                    status TEXT NOT NULL DEFAULT 'downloaded',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+
+    async def get_known_emoji_ids(self, document_ids: list[int]) -> set[int]:
+        """回傳這批 document_id 中「已下載過檔案」的集合，供下載去重。"""
+        if self.pool is None:
+            raise RuntimeError("資料庫尚未 connect")
+        if not document_ids:
+            return set()
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT document_id
+                FROM telegram_custom_emoji
+                WHERE document_id = ANY($1::bigint[]) AND file_rel_path IS NOT NULL;
+                """,
+                [int(d) for d in document_ids],
+            )
+        return {int(row["document_id"]) for row in rows}
+
+    async def upsert_custom_emoji(
+        self,
+        *,
+        document_id: int,
+        file_rel_path: str | None,
+        mime_type: str | None,
+        is_animated: bool,
+    ) -> None:
+        """寫入/更新自訂表情下載記錄（只碰 scraper 負責的欄位，不動 relay 的上傳欄位）。"""
+        if self.pool is None:
+            raise RuntimeError("資料庫尚未 connect")
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO telegram_custom_emoji (
+                    document_id, file_rel_path, mime_type, is_animated
+                )
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (document_id) DO UPDATE SET
+                    file_rel_path = COALESCE(EXCLUDED.file_rel_path, telegram_custom_emoji.file_rel_path),
+                    mime_type = COALESCE(EXCLUDED.mime_type, telegram_custom_emoji.mime_type),
+                    is_animated = EXCLUDED.is_animated,
+                    updated_at = NOW();
+                """,
+                int(document_id),
+                file_rel_path,
+                mime_type,
+                bool(is_animated),
+            )
+
+    async def update_message_entities(self, message_pk: int, entities: list[dict] | None) -> None:
+        """覆寫某訊息的 entities（重抓後回填帶 document_id 的 entities 用）。
+
+        一般 upsert 對 entities 走 COALESCE 不覆寫；重抓時需強制刷新才能把
+        document_id 寫進去，故用獨立方法明確覆寫。
+        """
+        if self.pool is None:
+            raise RuntimeError("資料庫尚未 connect")
+        entities_json = json.dumps(entities) if entities else None
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE telegram_messages
+                SET entities = $2::jsonb, updated_at = NOW()
+                WHERE id = $1;
+                """,
+                int(message_pk),
+                entities_json,
+            )
+
     async def upsert_message_only(
         self,
         *,

@@ -519,13 +519,14 @@ class ArticleCommands(commands.Cog):
 
     @app_commands.command(name="resend_article", description="根據 ID 重新發送文章或 FB 貼文")
     @app_commands.describe(
-        id="要重新發送的內容 ID",
-        type="內容類型 (article / fb / it_article)"
+        id="要重新發送的內容 ID（telegram 用 db id 或 footer 的 msg #id）",
+        type="內容類型 (article / fb / it_article / telegram)"
     )
     @app_commands.choices(type=[
         app_commands.Choice(name="article", value="article"),
         app_commands.Choice(name="fb", value="fb"),
         app_commands.Choice(name="it_article", value="it_article"),
+        app_commands.Choice(name="telegram", value="telegram"),
     ])
     async def resend_article(self, interaction: discord.Interaction, id: str, type: str = "article"):
         """根據 ID 重新發送文章或 FB 貼文到監控的頻道，用於測試"""
@@ -538,14 +539,21 @@ class ArticleCommands(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         try:
+            content_type = type.lower()
+            logger.info(f"[RESEND_ROUTE] 收到 /resend_article 請求: id={id}, type={content_type}")
+
+            # Telegram：走 relay worker（重抓自訂表情 → 上傳 App Emoji → 重送），
+            # 與 article/fb 流程完全不同，且不需要 article_monitor。
+            if content_type == "telegram":
+                await self._handle_resend_telegram(interaction, id)
+                return
+
             if not self.article_monitor:
                 await safe_send_interaction_message(interaction, "❌ 官方文章更新器未初始化", ephemeral=True)
                 return
 
-            content_type = type.lower()
-            logger.info(f"[RESEND_ROUTE] 收到 /resend_article 請求: id={id}, type={content_type}")
             if content_type not in ["article", "fb", "fb_post", "it_article"]:
-                await safe_send_interaction_message(interaction, "❌ 內容類型必須是 'article'、'fb' 或 'it_article'", ephemeral=True)
+                await safe_send_interaction_message(interaction, "❌ 內容類型必須是 'article'、'fb'、'it_article' 或 'telegram'", ephemeral=True)
                 return
 
             # 決定發送目標：it_article → 系統設備新知頻道；其餘 → article/fb 監控的頻道
@@ -633,6 +641,54 @@ class ArticleCommands(commands.Cog):
         except Exception as e:
             logger.error(f"重新發送內容 {id} 失敗: {e}")
             await safe_send_interaction_message(interaction, f"❌ 重新發送內容時發生錯誤：{str(e)}", ephemeral=True)
+
+    async def _handle_resend_telegram(self, interaction: discord.Interaction, id: str) -> None:
+        """/resend_article type:telegram：透過 relay worker 重抓自訂表情並重送一則 Telegram 訊息。"""
+        worker = getattr(self.bot, "telegram_relay_worker", None)
+        if worker is None or not getattr(worker, "running", False):
+            await safe_send_interaction_message(interaction, "❌ Telegram Relay Worker 尚未啟動。", ephemeral=True)
+            return
+
+        msg_id = self._parse_positive_int(id)
+        if msg_id is None:
+            await safe_send_interaction_message(interaction, "❌ Telegram ID 必須是數字（db id 或 msg id）。", ephemeral=True)
+            return
+
+        logger.info(f"[RESEND_ROUTE] 路由到 Telegram 流程: id={msg_id}")
+        try:
+            result = await worker.resend_telegram_by_id(msg_id)
+        except Exception as e:
+            logger.error(f"重送 Telegram 訊息 {msg_id} 失敗: {e}", exc_info=True)
+            await safe_send_interaction_message(interaction, f"❌ 重送 Telegram 訊息時發生錯誤：{e}", ephemeral=True)
+            return
+
+        if not result.get("ok"):
+            reason = result.get("reason")
+            if reason == "not_found":
+                await safe_send_interaction_message(
+                    interaction, f"❌ 找不到 Telegram 訊息 `{msg_id}`（db id 或 msg id 都查不到）。", ephemeral=True
+                )
+            elif reason == "ambiguous":
+                lines = [
+                    f"• db#{c['id']} ← msg #{c['telegram_message_id']}（{c.get('chat_title') or c['telegram_chat_id']}）"
+                    for c in result.get("candidates", [])
+                ]
+                await safe_send_interaction_message(
+                    interaction,
+                    "⚠️ `{}` 跨頻道撞號，請改用 db id 重送：\n{}".format(msg_id, "\n".join(lines)),
+                    ephemeral=True,
+                )
+            else:
+                await safe_send_interaction_message(interaction, f"❌ 重送失敗：{reason}", ephemeral=True)
+            return
+
+        refetch_note = "已即時重抓" if result.get("refetch_ok") else "重抓逾時/未變動（用現有 DB 內容）"
+        summary = (
+            f"✅ 已重送 Telegram 訊息 db#{result['db_id']}（msg #{result['telegram_message_id']}）"
+            f"到 {result['sent']} 個頻道。\n"
+            f"自訂表情：找到 {result['emoji_found']} 個、成功轉出 {result['emoji_rendered']} 個；{refetch_note}。"
+        )
+        await safe_send_interaction_message(interaction, summary, ephemeral=True)
 
     # ── 巴哈文章指令 ──
 
