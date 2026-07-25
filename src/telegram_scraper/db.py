@@ -242,13 +242,60 @@ class TelegramDatabase:
         grouped_id: int | None = None,
         entities: list[dict] | None = None,
     ) -> tuple[int, bool]:
-        """Upsert 訊息（不含媒體），回傳 (message_pk, inserted_new_message)。"""
+        """Upsert 訊息（不含媒體），回傳 (message_pk, inserted_new_message)。
+
+        先 SELECT 查存在、存在才 UPDATE；不存在才 INSERT。這樣重掃歷史時「已存在」的
+        訊息不會去跑 INSERT ON CONFLICT——避免 BIGSERIAL 空燒號碼（id 出現大量 gap）。
+        重掃情境多數訊息已存在，SELECT+UPDATE 比原本 INSERT衝突+SELECT+UPDATE 還少一步；
+        僅真正的新訊息多一個 SELECT（走 UNIQUE 索引、極快）。並發安全靠保留的 ON CONFLICT。
+        """
         if self.pool is None:
             raise RuntimeError("資料庫尚未 connect")
 
         entities_json = json.dumps(entities) if entities else None
 
         async with self.pool.acquire() as conn:
+
+            async def _apply_update(message_pk: int) -> None:
+                await conn.execute(
+                    """
+                    UPDATE telegram_messages
+                    SET
+                        text = CASE
+                            WHEN COALESCE(text, '') = '' AND COALESCE($2, '') <> '' THEN $2
+                            ELSE text
+                        END,
+                        message_date = COALESCE(message_date, $3),
+                        has_media = has_media OR $4,
+                        chat_title = COALESCE(chat_title, $5),
+                        grouped_id = COALESCE(grouped_id, $6),
+                        entities = COALESCE(entities, $7::jsonb),
+                        updated_at = NOW()
+                    WHERE id = $1;
+                    """,
+                    int(message_pk),
+                    text,
+                    message_date,
+                    has_media,
+                    chat_title,
+                    grouped_id,
+                    entities_json,
+                )
+
+            # 1. 先查存在（走 UNIQUE 索引）——存在就只 UPDATE，不碰 INSERT（不燒號）
+            existing_id = await conn.fetchval(
+                """
+                SELECT id FROM telegram_messages
+                WHERE telegram_chat_id = $1 AND telegram_message_id = $2;
+                """,
+                telegram_chat_id,
+                telegram_message_id,
+            )
+            if existing_id is not None:
+                await _apply_update(existing_id)
+                return int(existing_id), False
+
+            # 2. 不存在才 INSERT；保留 ON CONFLICT 當並發保險（極少 race 才會燒到一個號）
             insert_row = await conn.fetchrow(
                 """
                 INSERT INTO telegram_messages (
@@ -274,48 +321,22 @@ class TelegramDatabase:
                 grouped_id,
                 entities_json,
             )
-
             if insert_row is not None:
                 return int(insert_row["id"]), True
 
-            existing_row = await conn.fetchrow(
+            # 3. race：剛被其他流程插入 → 再查一次並 UPDATE
+            existing_id = await conn.fetchval(
                 """
-                SELECT id
-                FROM telegram_messages
+                SELECT id FROM telegram_messages
                 WHERE telegram_chat_id = $1 AND telegram_message_id = $2;
                 """,
                 telegram_chat_id,
                 telegram_message_id,
             )
-            if existing_row is None:
+            if existing_id is None:
                 raise RuntimeError("訊息 upsert 後找不到既有資料")
-
-            message_pk = int(existing_row["id"])
-            await conn.execute(
-                """
-                UPDATE telegram_messages
-                SET
-                    text = CASE
-                        WHEN COALESCE(text, '') = '' AND COALESCE($2, '') <> '' THEN $2
-                        ELSE text
-                    END,
-                    message_date = COALESCE(message_date, $3),
-                    has_media = has_media OR $4,
-                    chat_title = COALESCE(chat_title, $5),
-                    grouped_id = COALESCE(grouped_id, $6),
-                    entities = COALESCE(entities, $7::jsonb),
-                    updated_at = NOW()
-                WHERE id = $1;
-                """,
-                message_pk,
-                text,
-                message_date,
-                has_media,
-                chat_title,
-                grouped_id,
-                entities_json,
-            )
-            return message_pk, False
+            await _apply_update(existing_id)
+            return int(existing_id), False
 
     async def has_media_records(self, message_pk: int) -> bool:
         """確認此訊息是否已有媒體記錄。"""
