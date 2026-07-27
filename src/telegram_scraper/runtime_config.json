@@ -1,5 +1,9 @@
 {
     "source_channel": "Seele_WW_leak",
+    "source_channels": [
+        "Seele_WW_leak",
+        "Gamedataleak"
+    ],
     "history_limit": 0,
     "history_hours": 168,
     "download_media": true,

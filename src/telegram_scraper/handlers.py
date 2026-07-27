@@ -3,7 +3,12 @@ from pathlib import Path
 from typing import Any
 
 from db import TelegramDatabase
-from filters import extract_forward_source_chat_id, is_forward_source_in_whitelist, should_skip_forward
+from filters import (
+    extract_forward_source_chat_id,
+    is_forward_source_a_primary,
+    is_forward_source_in_whitelist,
+    should_skip_forward,
+)
 from tg_config import TelegramConfig, TelegramRuntimeConfigWatcher, add_identifier_to_forward_whitelist
 
 
@@ -316,6 +321,21 @@ async def _process_message(
     runtime_snapshot = runtime_watcher.get_snapshot()
 
     is_forward_message = bool(message.fwd_from)
+
+    # 跨來源去重（優先於白名單）：若這是一則轉發、且原始來源本身也是我們直接監聽的
+    # 主頻，就丟掉——那則內容會從它自己的主頻直接進來，避免同性質頻道互轉造成重複。
+    # 不排除「當前抓取頻道」本身，保持雙向去重（A 轉 B、B 轉 A 都濾）；副作用是頻道
+    # 轉發自家舊文也會被視為重複略過，屬可接受。被此判濾掉者不進白名單、不 auto-add。
+    if is_forward_message:
+        primary_sources = {name.lower() for name in config.source_channels if name}
+        if primary_sources and await is_forward_source_a_primary(
+            client=client,
+            message=message,
+            primary_sources=primary_sources,
+        ):
+            print(f"[{log_prefix}] 略過主頻轉發（去重）message_id={message.id}")
+            return False
+
     allow_forward_here = await is_forward_source_in_whitelist(
         client=client,
         message=message,

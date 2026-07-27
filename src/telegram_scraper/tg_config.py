@@ -112,6 +112,7 @@ class TelegramConfig:
     session_dir: str = "session"
     session_name: str = "telegram_scraper"
     source_channel: str = "Seele_WW_leak"
+    source_channels: list[str] = field(default_factory=list)
     history_limit: int = 5
     history_hours: int | None = None
     download_media: bool = False
@@ -252,6 +253,23 @@ def load_config_from_env() -> TelegramConfig:
     source_channel_raw = str(
         runtime_json.get("source_channel", os.getenv("TELEGRAM_SOURCE_CHANNEL", "Seele_WW_leak"))
     ).strip()
+
+    # 多來源頻道：優先讀 runtime_config 的 source_channels（list），未設定時退回單一
+    # source_channel（相容舊配置）。source_channel 保留為清單第一個，供 refetch fallback
+    # 與 relay 端沿用（route name-fallback / embed 標題兜底）。
+    raw_channels = runtime_json.get("source_channels")
+    source_channels: list[str] = []
+    if isinstance(raw_channels, list):
+        for item in raw_channels:
+            name = normalize_channel_identifier(str(item))
+            if name and name not in source_channels:
+                source_channels.append(name)
+    if not source_channels:
+        fallback_name = normalize_channel_identifier(source_channel_raw)
+        if fallback_name:
+            source_channels = [fallback_name]
+    primary_channel = source_channels[0] if source_channels else normalize_channel_identifier(source_channel_raw)
+
     try:
         history_limit = max(0, int(runtime_json.get("history_limit", 0)))
     except (TypeError, ValueError):
@@ -293,7 +311,8 @@ def load_config_from_env() -> TelegramConfig:
         api_hash=api_hash,
         session_dir=session_dir,
         session_name=session_name,
-        source_channel=normalize_channel_identifier(source_channel_raw),
+        source_channel=primary_channel,
+        source_channels=source_channels,
         history_limit=history_limit,
         history_hours=history_hours,
         download_media=download_media,

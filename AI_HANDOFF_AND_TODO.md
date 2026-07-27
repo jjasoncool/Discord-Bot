@@ -256,6 +256,41 @@ last_confirmed: 2026-07-25
 
 ---
 
+## Telegram 多頻道來源 + 轉發去重（2026-07-27 已實作，待部署驗證）
+
+**需求**：新增 Gamedataleak（<https://t.me/Gamedataleak>）為主頻；避免兩個同性質頻道互轉造成重複（A 轉發 B、但 B 也是主頻時，A 的轉發無意義）。
+
+**已確認決策（2026-07-27）**：
+1. 加主頻方式＝**同容器多頻道**（`source_channel`→`source_channels` list，一個 session 同時監聽 Seele + Gamedataleak）。
+2. Discord 路由＝Gamedataleak **發到 Seele 同一個頻道**（`1276423699851116544`）。
+3. 去重＝**通用自動規則**：任何轉發若其原始來源本身也是我們的主頻，就在 scrape 階段丟掉；此排除**優先於** `forward_whitelist`（被排除者不進白名單、不 auto-add）。自我維護、雙向去重。
+
+**關鍵事實（已查證）**：
+- `telegram_messages` **不存轉發來源**（[db.py:87](src/telegram_scraper/db.py#L87)）→ 去重只能在 scrape 階段（[handlers._process_message](src/telegram_scraper/handlers.py#L318)，`fwd_from` 還在）。
+- Seele chat_id = **-1002405953050**（DB 另有 `2057132858` 為早期殘留）。
+- 帳號必須先加入 Gamedataleak 才收得到訊息、`get_entity` 才解析得到 username。
+
+**實作落點（已完成）**：
+- [tg_config.py](src/telegram_scraper/tg_config.py)：`TelegramConfig` 加 `source_channels: list[str]`；`load_config_from_env` 讀 runtime `source_channels`，缺則 fallback `[source_channel]`；`source_channel`＝清單 first（refetch + relay 端 `_get_source_channel_name` / route name-fallback BC）。
+- [runner.py](src/telegram_scraper/runner.py)：`listen_channels = source_channels or [source_channel]`；`NewMessage(chats=listen_channels)`；歷史掃描 **for each channel** 各自 collect→reverse→insert（維持每頻道 PK 時序）。
+- [filters.py](src/telegram_scraper/filters.py)：抽出 `_build_forward_source_candidates`（白名單與去重共用）；新增 `is_forward_source_a_primary(client, message, primary_sources)`。
+- [handlers.py](src/telegram_scraper/handlers.py)：`_process_message` 在 `should_skip_forward` 前先擋，若 `is_forward` 且來源 ∈ 主頻集合 → 略過（log「略過主頻轉發（去重）」）。**不排除當前頻道**，保雙向去重。
+- [runtime_config.json](src/telegram_scraper/runtime_config.json)：已加 `source_channels=["Seele_WW_leak","Gamedataleak"]`。
+- [config.json](src/config.json)：**未改**。同頻道靠現有 name-fallback（未匹配 chat_id → seele route）自動導到同一 Discord 頻道；待取得 Gamedataleak chat_id 後可補明確 chat_id route。
+
+**已驗證（本機純邏輯）**：config 解析出 `['Seele_WW_leak','Gamedataleak']`；去重函式對「Seele 轉 Gamedataleak / from_name 命中 / 非轉發 / 非主頻保留 / 白名單回歸」6 案全過。py_compile + JSON 均綠。
+
+**部署步驟**：
+1. 確認登入的 Telegram 帳號**已加入 Gamedataleak**（否則收不到、`get_entity` 解析不到 username → 去重失準）。使用者 2026-07-27 已確認加入。
+2. 重啟 `telegram-scraper`（載入多頻道監聽 + 去重）。首次會回填 Gamedataleak 近 `history_hours`(=168=7 天) 歷史 → relay 灌進同一頻道（可能爆量，維持 7 天不限縮）。
+3. 觀察 scraper log：`開始抓取來源頻道: Seele_WW_leak, Gamedataleak`、`Gamedataleak 歷史訊息抓取完成`；跨轉發出現時應有 `略過主頻轉發（去重）`。
+
+**待決 / 後續**：
+- 取得 Gamedataleak chat_id 後，在 `telegram_channel_routes` 補明確 chat_id route（去除對 name-fallback 的依賴）。
+- 去重目前以 username 比對為主；若某來源 `get_entity` 常失敗，可再把各主頻 chat_id 也納入 primary set 強化。
+
+---
+
 ## 專案 AI 架構總覽
 
 <!-- @meta

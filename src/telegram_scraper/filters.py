@@ -31,18 +31,15 @@ def extract_forward_source_chat_id(message: Any) -> str | None:
     return None
 
 
-async def is_forward_source_in_whitelist(
-    client: Any,
-    message: Any,
-    forward_whitelist: set[str],
-) -> bool:
-    """判斷「轉發來源」是否在 forward 白名單。"""
+async def _build_forward_source_candidates(client: Any, message: Any) -> set[str]:
+    """湊出「轉發來源」的所有可比對識別碼並小寫正規化。
+
+    候選值包含：來源 chat_id（peer_id 格式）、from_name、以及盡量補齊的
+    username / title / peer_id。供白名單與主頻去重共用同一套比對基準。
+    """
     fwd = getattr(message, "fwd_from", None)
     if not fwd:
-        return False
-
-    if not forward_whitelist:
-        return False
+        return set()
 
     candidates: set[str] = set()
 
@@ -75,7 +72,38 @@ async def is_forward_source_in_whitelist(
         # 取 entity 失敗時不影響主流程，沿用既有候選值
         pass
 
+    return candidates
+
+
+async def is_forward_source_in_whitelist(
+    client: Any,
+    message: Any,
+    forward_whitelist: set[str],
+) -> bool:
+    """判斷「轉發來源」是否在 forward 白名單。"""
+    if not getattr(message, "fwd_from", None) or not forward_whitelist:
+        return False
+
+    candidates = await _build_forward_source_candidates(client, message)
     return bool(candidates & forward_whitelist)
+
+
+async def is_forward_source_a_primary(
+    client: Any,
+    message: Any,
+    primary_sources: set[str],
+) -> bool:
+    """判斷「轉發來源」本身是否為我們直接監聽的主頻。
+
+    跨來源去重用：某主頻若轉發了「本身也是主頻」的內容，該內容會從它自己的主頻
+    直接進來 → 這則轉發丟掉，避免同性質頻道互轉造成重複。primary_sources 須為
+    小寫正規化後的頻道識別集合（與 _build_forward_source_candidates 同基準）。
+    """
+    if not getattr(message, "fwd_from", None) or not primary_sources:
+        return False
+
+    candidates = await _build_forward_source_candidates(client, message)
+    return bool(candidates & primary_sources)
 
 
 def should_skip_forward(is_forward_message: bool, skip_forwards: bool, allow_forward_here: bool) -> bool:
