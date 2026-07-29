@@ -381,7 +381,10 @@ class ArticleMonitor(BaseContentMonitor):
 
             # 偵測活動公告 → 自動建 Discord 伺服器活動（欄位對應/best-effort 收在 event_scheduler）
             from services.event_scheduler import schedule_from_article
-            await schedule_from_article(self.bot, article, channel_id)
+            await schedule_from_article(
+                self.bot, article, channel_id,
+                message_url=getattr(sent_message, "jump_url", None),
+            )
 
             logger.info(f"成功發送文章 {article['article_id']} 到頻道 {channel_id}")
             return True

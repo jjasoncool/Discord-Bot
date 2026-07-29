@@ -142,7 +142,14 @@ def parse_events(
     default_year = post_time.year if post_time else datetime.now(SERVER_TZ).year
     events: List[ParsedEvent] = []
 
-    for m in _ANCHOR.finditer(text):
+    matches = list(_ANCHOR.finditer(text))
+    # 單一活動帖：內文通常沒有章節標題行，抓不到就退用貼文標題（article_title / FB 首行），
+    # 而不是退到括號名——否則會抓到敘述句裡最後一個 4 星名（「燈燈」「悖論噴流」），
+    # 且 article 與 FB 兩邊退出來的名字不同 → 跨來源指紋對不上 → 重複建活動。
+    # 匯總帖（多錨點）才保留括號名 fallback，否則各活動同名 → 指紋互撞被吃掉。
+    multi = len(matches) > 1
+
+    for m in matches:
         start_str = (m.group('start') or '').strip()
         end_str = (m.group('end') or '').strip()
 
@@ -170,9 +177,8 @@ def parse_events(
         if start_dt and end_dt <= start_dt:
             end_dt = end_dt.replace(year=end_dt.year + 1)
 
-        # 錨點前文（取活動名用）：往前 ~90 字，優先抓最近的括號活動名
-        pre = text[max(0, m.start() - 90):m.start()]
-        title_hint = _clean_title_hint(pre) or fallback_title
+        # 錨點前文（取活動名用）：優先抓最近的「章節標題行」，退回括號活動名
+        title_hint = _clean_title_hint(text, m.start(), allow_bracket_fallback=multi) or fallback_title
 
         events.append(ParsedEvent(
             start=start_dt,
@@ -188,16 +194,70 @@ def parse_events(
 
 _BRACKET_NAME = re.compile(r'[【「『\[]([^】」』\]\n]{1,40})[】」』\]]')
 
+# 章節標題行辨識（喚取帖的「活動時間」上方那行才是活動名；
+# 緊鄰的敘述句「活動期間，5星角色「X」、4星角色「Y」…提升！」會誤取到最後一個 4 星名）
+_HEAD_WINDOW = 150            # 找標題行的回看範圍（含跨行）
+_HEAD_MAX_LINES = 5           # 最多回看幾個非空行，避免吃到上一段落
+_HEAD_DECO = ' 　​✦＊*※・‧•-－—:：|'
+_HEAD_SENTENCE = '。！？，、；'                       # 出現＝敘述句，非標題
+_HEAD_OPEN_BRACKET = '[【「『<＜〈《('                  # 標題多以括號活動名開頭
+_HEAD_SUFFIX = ('活動', '喚取', '說明', '公告', '挑戰')  # 或以這些詞結尾
+_HEAD_NOISE = re.compile(r'時間|日期|獎勵|獲得|領取|開放|\d\s*[:：]\s*\d|\*\s*\d|[~～]')
+# UP 池列舉句：「活動期間，5星角色「愛彌斯」、4星角色「白芷」…喚取機率限時提升！」
+# 這行的括號名是卡池內容而非活動名，取它會得到「燈燈」「悖論噴流」這種怪活動名。
+_GACHA_POOL_LINE = re.compile(r'喚取機率|\d\s*星角色|\d\s*星武器')
 
-def _clean_title_hint(pre: str) -> str:
-    """從錨點前文擷取活動名：優先取最近的括號名，否則取最後一段句子。"""
+
+def _looks_like_heading(line: str) -> bool:
+    """該行像「章節標題」而非敘述句／時間行／獎勵行。"""
+    s = line.strip(_HEAD_DECO)
+    if not (2 <= len(s) <= 40):
+        return False
+    if any(c in s for c in _HEAD_SENTENCE):
+        return False
+    if _HEAD_NOISE.search(s):
+        return False
+    return s[0] in _HEAD_OPEN_BRACKET or s.endswith(_HEAD_SUFFIX)
+
+
+def _clean_title_hint(text: str, anchor: int, *, allow_bracket_fallback: bool = True) -> str:
+    """從錨點前文擷取活動名。
+
+    優先：往回找最近的「章節標題行」（匯總帖/多期喚取帖唯一能區分各活動的位置）。
+    次選（僅匯總帖）：最近一個括號名，再次：最後一段句子。
+    單一活動帖找不到標題行時回 ""，由呼叫端退用貼文標題。
+    """
+    start = max(0, anchor - _HEAD_WINDOW)
+    lines = text[start:anchor].split('\n')
+    # 視窗把首行切成半句時丟掉它（殘句如「3:59（伺服器時間）」不算標題）
+    if start > 0 and text[start - 1] != '\n' and len(lines) > 1:
+        lines = lines[1:]
+
+    seen = 0
+    for line in reversed(lines):
+        if not line.strip(_HEAD_DECO):
+            continue
+        seen += 1
+        if seen > _HEAD_MAX_LINES:
+            break
+        if _looks_like_heading(line):
+            return line.strip(_HEAD_DECO)[:40]
+
+    if not allow_bracket_fallback:
+        return ""
+
+    pre = text[max(0, anchor - 90):anchor]
     if not pre:
         return ""
-    # 優先：最近一個括號活動名（跨來源/匯總帖↔獨立貼文最穩定的識別）
-    names = _BRACKET_NAME.findall(pre)
-    if names:
-        return names[-1].strip()[:40]
-    # 次選：切到最後一個句末/條列/裝飾之後的片段
+    # 次選：最近一個括號活動名（跨來源/匯總帖↔獨立貼文最穩定的識別）。
+    # 跳過 UP 池列舉句與說明條列——那裡的括號名是 4 星角色/武器與內建名詞，不是活動名。
+    for line in reversed(pre.split('\n')):
+        if _GACHA_POOL_LINE.search(line) or line.strip()[:1] in ('※', '-', '－'):
+            continue
+        names = _BRACKET_NAME.findall(line)
+        if names:
+            return names[-1].strip()[:40]
+    # 再次：切到最後一個句末/條列/裝飾之後的片段
     for boundary in ['✦', '※', '\n', '。', '！']:
         idx = pre.rfind(boundary)
         if idx != -1:

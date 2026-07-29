@@ -35,6 +35,18 @@ START_BUFFER = timedelta(minutes=5)
 # 單篇最多建幾個（防匯總帖異常爆量）
 MAX_EVENTS_PER_POST = 15
 
+# 「總表公告」：【3.5版本】[角色/武器活動喚取・第二期] 這類把當期多個卡池寫成一則的公告。
+# 用途＝**收斂成一則**（見 plan_events）：內文各卡池標題行不拆開，一律用貼文標題當活動名與指紋基準。
+# 這樣 article 總表與 FB 總表貼文指紋一致，靠既有 is_event_created 就擋得住跨來源重複。
+# 註：總表**不是**各卡池獨立公告的重複——查證 3.2~3.5 全部檔期，官方是「一部分卡池發獨立公告、
+# 其餘包進總表」，兩者互補；故不可因「同區間已有活動」就跳過總表，否則會漏掉只存在總表裡的卡池。
+_UMBRELLA_TITLE = re.compile(r'\d+\.\d+\s*版本.*角色.*武器.*喚取|角色\s*/\s*武器.*喚取')
+
+
+def is_umbrella_title(name: str) -> bool:
+    """是否為當期多卡池的總表公告標題。"""
+    return bool(_UMBRELLA_TITLE.search(name or ""))
+
 # articles.db 路徑（discord-bot 容器掛 ./src → /app；版本日回填用，RO）
 _ARTICLES_DB = Path(__file__).resolve().parent.parent / "scraper" / "articles.db"
 
@@ -204,6 +216,9 @@ def plan_events(
     """
     planned: List[PlannedEvent] = []
     local_seen = set()
+    # 總表公告（整期卡池包成一則）：不拆各卡池，一律用貼文標題。
+    # 各卡池另有獨立公告會各自建活動，拆了必重複；同期卡池區間相同，收斂後本地去重自然併成一則。
+    umbrella = is_umbrella_title(title or "")
 
     for ev in parsed:
         if ev.start is not None:
@@ -223,16 +238,17 @@ def plan_events(
         if discord_start >= end:
             continue  # 已結束 / 區間無效
 
-        # 顯示標題：單事件用「貼文自然標題」（article_title / FB 首行；一致、可讀）；
+        # 顯示標題：總表公告與單事件用「貼文自然標題」（article_title / FB 首行；一致、可讀）；
         # 多事件（版本內容說明匯總帖）才用逐活動括號名區分。
         headline = (title or "").strip()
-        if len(parsed) == 1 and headline:
+        if headline and (umbrella or len(parsed) == 1):
             display_name = headline
         else:
             display_name = ev.title_hint or headline or "鳴潮活動"
 
-        # 指紋核心維持原基準（優先括號核心名），不動已驗證的跨來源去重
-        fp = event_fingerprint(ev.title_hint or headline, logical_start, end)
+        # 指紋核心：總表用貼文標題（與 FB 總表貼文同基準才對得上），其餘維持原基準
+        fp_basis = headline if (umbrella and headline) else (ev.title_hint or headline)
+        fp = event_fingerprint(fp_basis, logical_start, end)
         if fp in local_seen:
             continue
         local_seen.add(fp)
@@ -254,6 +270,8 @@ def plan_events(
 
 
 def _build_description(logical_start: datetime, end: datetime, url: Optional[str], ev: ParsedEvent) -> str:
+    """url：優先為本站轉發訊息的 Discord jump link（點了直接跳到公告那則，好追來源）；
+    拿不到訊息時才退回官方原文連結。"""
     lines = [
         f"活動時間：{logical_start:%Y/%m/%d %H:%M} ~ {end:%Y/%m/%d %H:%M}（伺服器時間 UTC+8）",
     ]
@@ -261,7 +279,7 @@ def _build_description(logical_start: datetime, end: datetime, url: Optional[str
         lines.append(f"（起點由 {ev.start_relative_version} 版本更新時間回填）")
     if url:
         lines.append("")
-        lines.append(f"原公告：{url}")
+        lines.append(f"公告出處：{url}")
     return "\n".join(lines)[:1000]
 
 
@@ -279,11 +297,14 @@ async def maybe_schedule_events(
     channel_id: int,
     is_html: bool,
     image_url: Optional[str] = None,
+    message_url: Optional[str] = None,
 ) -> None:
     """偵測公告內活動時間並（依設定 dry-run / 實建）建立 Discord 伺服器活動。
 
     image_url：該篇 article/FB 貼文的封面圖，會下載後掛到活動當封面（best-effort，
     不落地、不寫 DB）；下載失敗或無圖則活動無封面。
+    message_url：本次轉發那則 Discord 訊息的 jump link，寫進活動描述當「公告出處」
+    （點了直接跳到伺服器內的公告訊息）；拿不到時退回官方原文連結 url。
     """
     try:
         import discord
@@ -312,7 +333,8 @@ async def maybe_schedule_events(
         now = datetime.now(timezone.utc)
         planned = plan_events(
             events, title=title or "", source=source, source_id=source_id,
-            url=url, version_resolver=_version_resolver, now=now, post_time=post_time,
+            url=(message_url or url), version_resolver=_version_resolver,
+            now=now, post_time=post_time,
         )
         if not planned:
             return
@@ -375,7 +397,8 @@ async def maybe_schedule_events(
 
 # ── 各來源薄 adapter（欄位對應住「活動功能自己家」；monitor 呼叫端變一行、best-effort 不拋） ──
 
-async def schedule_from_article(bot, article: dict, channel_id: int) -> None:
+async def schedule_from_article(bot, article: dict, channel_id: int,
+                                message_url: Optional[str] = None) -> None:
     """從官方文章 dict 觸發活動偵測。欄位對應集中於此，article_monitor 只需一行呼叫。"""
     try:
         text = (article.get("article_content_full") or article.get("article_content")
@@ -390,13 +413,14 @@ async def schedule_from_article(bot, article: dict, channel_id: int) -> None:
             post_time=parse_source_time(article.get("start_time") or article.get("create_time")),
             url=f"https://wutheringwaves.kurogames.com/zh-tw/main/news/detail/{article.get('article_id')}",
             channel_id=channel_id, is_html=True,
-            image_url=image_url,
+            image_url=image_url, message_url=message_url,
         )
     except Exception as e:
         logger.warning("[event] article 活動偵測失敗（已吞）: %s", e)
 
 
-async def schedule_from_fb(bot, fb_post: dict, channel_id: int) -> None:
+async def schedule_from_fb(bot, fb_post: dict, channel_id: int,
+                           message_url: Optional[str] = None) -> None:
     """從 FB 貼文 dict 觸發活動偵測。標題取內文首行（＝貼文標題，與 article_title 一致風格）。"""
     try:
         text = fb_post.get("text_md") or fb_post.get("text") or ""
@@ -409,6 +433,7 @@ async def schedule_from_fb(bot, fb_post: dict, channel_id: int) -> None:
             url=(fb_post.get("url") or fb_post.get("pfbid_url")),
             channel_id=channel_id, is_html=False,
             image_url=(fb_post.get("images") or [None])[0],
+            message_url=message_url,
         )
     except Exception as e:
         logger.warning("[event] fb 活動偵測失敗（已吞）: %s", e)

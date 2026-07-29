@@ -173,6 +173,65 @@ class HtmlStripTests(unittest.TestCase):
         self.assertNotIn("&hellip;", strip_html("劇情<br>探索&hellip;"))
 
 
+class TitleHintTests(unittest.TestCase):
+    """活動名擷取：章節標題行優先，別抓到 UP 池列舉句裡的 4 星名。
+
+    真實事故（2026-07-29，article #5221）：抓到「燈燈」「悖論噴流」兩個 4 星名當活動名。
+    """
+
+    # article #5221 實際內文（節錄；兩個卡池各一段，標題行在列舉句上方）
+    GACHA_POST = (
+        "[飛星自春天啟航]角色活動喚取\n"
+        "活動期間，5星角色「愛彌斯」、4星角色「白芷」、「莫特斐」、「燈燈」喚取機率限時提升！\n"
+        "✦活動時間✦\n2026年7月30日10:00 ~ 2026年8月19日11:59（伺服器時間）\n"
+        "※更多活動詳細說明，請前往遊戲內【喚取】介面查看。\n\n"
+        "「永遠的啟明星」武器活動喚取\n"
+        "活動期間，5星武器「永遠的啟明星」、4星武器「奇幻變奏」、「悖論噴流」喚取機率限時提升！\n"
+        "✦活動時間✦\n2026年7月30日10:00 ~ 2026年8月19日11:59（伺服器時間）\n"
+    )
+
+    def test_heading_line_beats_gacha_pool_names(self):
+        evs = parse_events(self.GACHA_POST, post_time=POST,
+                           fallback_title="【3.5版本】[角色/武器活動喚取・第二期]")
+        self.assertEqual(len(evs), 2)
+        self.assertEqual(evs[0].title_hint, "[飛星自春天啟航]角色活動喚取")
+        self.assertEqual(evs[1].title_hint, "「永遠的啟明星」武器活動喚取")
+
+    def test_pool_four_star_names_never_become_titles(self):
+        hints = [e.title_hint for e in parse_events(self.GACHA_POST, post_time=POST)]
+        for bad in ("燈燈", "悖論噴流", "白芷", "奇幻變奏"):
+            self.assertNotIn(bad, hints)
+
+    def test_single_event_post_falls_back_to_post_title(self):
+        # 單一活動帖內文沒有標題行 → 退用貼文標題，而非列舉句裡的 4 星名
+        text = ("活動期間，5星角色「斟雨祝荷風」、4星角色「白芷」、「燈燈」喚取機率限時提升！\n"
+                "✦活動時間✦2026年7月30日10:00 ~ 2026年8月19日11:59（伺服器時間）")
+        evs = parse_events(text, post_time=POST, fallback_title="[斟雨祝荷風]角色活動喚取")
+        self.assertEqual(len(evs), 1)
+        self.assertEqual(evs[0].title_hint, "[斟雨祝荷風]角色活動喚取")
+
+    def test_cross_source_fingerprint_matches_for_single_banner(self):
+        # Article（無標題行、退貼文標題） vs FB（首行即標題）→ 指紋須一致，否則重複建活動
+        s = datetime(2026, 7, 30, 10, 0, tzinfo=SERVER_TZ)
+        e = datetime(2026, 8, 19, 11, 59, tzinfo=SERVER_TZ)
+        art = ("活動期間，5星角色「斟雨祝荷風」、4星角色「燈燈」喚取機率限時提升！\n"
+               "✦活動時間✦2026年7月30日10:00 ~ 2026年8月19日11:59（伺服器時間）")
+        fb = ("[斟雨祝荷風]角色活動喚取\n"
+              "✦活動時間：2026年7月30日10:00 ~ 2026年8月19日11:59（伺服器時間）")
+        h_art = parse_events(art, post_time=POST,
+                             fallback_title="[斟雨祝荷風]角色活動喚取")[0].title_hint
+        h_fb = parse_events(fb, post_time=POST,
+                            fallback_title="[斟雨祝荷風]角色活動喚取")[0].title_hint
+        self.assertEqual(event_fingerprint(h_art, s, e), event_fingerprint(h_fb, s, e))
+
+    def test_time_line_never_used_as_heading(self):
+        text = ("[某某活動]限時挑戰活動\n"
+                "開放時間：2026年7月1日04:00 ~ 2026年7月8日03:59\n"
+                "✦活動時間✦2026年7月30日10:00 ~ 2026年8月19日11:59（伺服器時間）")
+        evs = parse_events(text, post_time=POST)
+        self.assertEqual(evs[0].title_hint, "[某某活動]限時挑戰活動")
+
+
 class FingerprintTests(unittest.TestCase):
     """跨來源活動指紋：同活動同指紋、同名不同期不同指紋。"""
 
