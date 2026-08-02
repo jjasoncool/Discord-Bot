@@ -115,6 +115,7 @@ class TelegramConfig:
     source_channels: list[str] = field(default_factory=list)
     history_limit: int = 5
     history_hours: int | None = None
+    catchup_interval_min: int = 15
     download_media: bool = False
     media_dir: str = "media"
     skip_forwards: bool = True
@@ -151,6 +152,7 @@ class TelegramRuntimeConfigSnapshot:
     """Telegram runtime_config.json 的快照。"""
 
     history_hours: int | None
+    catchup_interval_min: int
     skip_forwards: bool
     forward_whitelist: set[str]
     download_media: bool
@@ -174,6 +176,7 @@ class TelegramRuntimeConfigWatcher:
         self._last_checked_at: float = 0.0
         self._snapshot = TelegramRuntimeConfigSnapshot(
             history_hours=fallback_config.history_hours,
+            catchup_interval_min=fallback_config.catchup_interval_min,
             skip_forwards=fallback_config.skip_forwards,
             forward_whitelist=set(fallback_config.forward_whitelist),
             download_media=fallback_config.download_media,
@@ -197,6 +200,15 @@ class TelegramRuntimeConfigWatcher:
             except (TypeError, ValueError):
                 history_hours = self.fallback_config.history_hours
 
+        # 補掃間隔：<= 0 視為停用（仍保留背景迴圈，改設定後不必重啟即可恢復）
+        try:
+            catchup_interval_min = int(
+                runtime_json.get("catchup_interval_min", self.fallback_config.catchup_interval_min)
+            )
+        except (TypeError, ValueError):
+            catchup_interval_min = self.fallback_config.catchup_interval_min
+        catchup_interval_min = max(0, catchup_interval_min)
+
         skip_forwards = _to_bool(str(runtime_json.get("skip_forwards", self.fallback_config.skip_forwards)))
         forward_whitelist = _parse_whitelist(runtime_json.get("forward_whitelist", self.fallback_config.forward_whitelist))
         download_media = _to_bool(str(runtime_json.get("download_media", self.fallback_config.download_media)))
@@ -204,6 +216,7 @@ class TelegramRuntimeConfigWatcher:
 
         return TelegramRuntimeConfigSnapshot(
             history_hours=history_hours,
+            catchup_interval_min=catchup_interval_min,
             skip_forwards=skip_forwards,
             forward_whitelist=forward_whitelist,
             download_media=download_media,
@@ -283,6 +296,12 @@ def load_config_from_env() -> TelegramConfig:
         if history_hours <= 0:
             history_hours = None
 
+    # 週期性補掃間隔（分鐘）：修補 Telethon 漏掉的即時事件，<= 0 為停用
+    try:
+        catchup_interval_min = max(0, int(runtime_json.get("catchup_interval_min", 15)))
+    except (TypeError, ValueError):
+        catchup_interval_min = 15
+
     # 媒體下載設定優先讀 runtime_config.json，若未設定才回退到 env（相容舊配置）
     download_media_raw = runtime_json.get("download_media", os.getenv("TELEGRAM_DOWNLOAD_MEDIA", "false"))
     download_media = _to_bool(str(download_media_raw))
@@ -315,6 +334,7 @@ def load_config_from_env() -> TelegramConfig:
         source_channels=source_channels,
         history_limit=history_limit,
         history_hours=history_hours,
+        catchup_interval_min=catchup_interval_min,
         download_media=download_media,
         media_dir=media_dir,
         skip_forwards=skip_forwards,

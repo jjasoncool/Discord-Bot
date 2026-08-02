@@ -338,6 +338,25 @@ class TelegramDatabase:
             await _apply_update(existing_id)
             return int(existing_id), False
 
+    async def get_max_message_id(self, telegram_chat_id: int) -> int | None:
+        """取得某頻道目前 DB 內最大的 telegram_message_id，供週期性補掃當增量基準。
+
+        走 UNIQUE (telegram_chat_id, telegram_message_id) 索引，成本極低。
+        頻道尚無任何資料時回傳 None（呼叫端應跳過，避免整頻道重掃）。
+        """
+        if self.pool is None:
+            raise RuntimeError("資料庫尚未 connect")
+
+        async with self.pool.acquire() as conn:
+            value = await conn.fetchval(
+                """
+                SELECT MAX(telegram_message_id) FROM telegram_messages
+                WHERE telegram_chat_id = $1;
+                """,
+                int(telegram_chat_id),
+            )
+        return int(value) if value is not None else None
+
     async def has_media_records(self, message_pk: int) -> bool:
         """確認此訊息是否已有媒體記錄。"""
         if self.pool is None:

@@ -316,6 +316,7 @@ async def _process_message(
     runtime_watcher: TelegramRuntimeConfigWatcher,
     db: TelegramDatabase,
     log_prefix: str,
+    source_label: str | None = None,
 ) -> bool:
     """處理共用訊息流程（forward 過濾、白名單補齊、媒體處理）。"""
     runtime_snapshot = runtime_watcher.get_snapshot()
@@ -360,8 +361,10 @@ async def _process_message(
     # 解析頻道顯示名稱（title 或 username），供 relay 端作為 embed title
     resolved_chat_title = await _resolve_chat_title(client, chat_id)
 
-    if log_prefix == "History":
-        print(f"[History] source_channel={config.source_channel} message_id={message.id} has_media={has_media} text={text}")
+    if source_label:
+        # 逐頻道掃描（History / CatchUp）用實際來源頻道標示，不能用 config.source_channel——
+        # 那是多來源設定的第一個頻道，會把其他頻道的訊息全標成它，除錯時嚴重誤導。
+        print(f"[{log_prefix}] source_channel={source_label} message_id={message.id} has_media={has_media} text={text}")
     else:
         print(f"[{log_prefix}] chat_id={chat_id} message_id={message.id} has_media={has_media} text={text}")
 
@@ -454,6 +457,7 @@ async def handle_history_message(
     config: TelegramConfig,
     runtime_watcher: TelegramRuntimeConfigWatcher,
     db: TelegramDatabase,
+    source_label: str | None = None,
 ) -> bool:
     """處理歷史訊息。"""
     return await _process_message(
@@ -465,6 +469,34 @@ async def handle_history_message(
         runtime_watcher=runtime_watcher,
         db=db,
         log_prefix="History",
+        source_label=source_label,
+    )
+
+
+async def handle_catchup_message(
+    msg: Any,
+    client: Any,
+    config: TelegramConfig,
+    runtime_watcher: TelegramRuntimeConfigWatcher,
+    db: TelegramDatabase,
+    source_label: str | None = None,
+) -> bool:
+    """處理週期性補掃撈到的訊息。
+
+    與 History 的差別：補掃到的是「本該即時收到卻漏掉」的訊息，等同新訊息，
+    因此不跳過內嵌自訂表情下載（log_prefix 非 History 即會下載），確保 relay
+    轉出去時表情能正常對應到 Discord App Emoji。
+    """
+    return await _process_message(
+        message=msg,
+        chat_id=msg.chat_id,
+        raw_text=msg.message or "",
+        client=client,
+        config=config,
+        runtime_watcher=runtime_watcher,
+        db=db,
+        log_prefix="CatchUp",
+        source_label=source_label,
     )
 
 

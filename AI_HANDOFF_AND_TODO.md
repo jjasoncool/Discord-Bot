@@ -25,6 +25,7 @@
 > 4. 保留可追溯來源，避免之後重複討論同一件事
 
 最後盤點紀錄（只保留近期；過往詳見 `TODO-completed.md` 各歸檔 entry）：
+- 2026-08-02（Telegram 漏收事件自動補掃，**已實作，待部署驗證**）：症狀＝「最新的 telegram 沒有轉發」。**relay 端無辜**（delivery_state 3119 筆、`last_polled_pk`=`max(id)`=12494，DB 內全送完）；**斷點在 scraper**——Telegram 已有 `Seele_WW_leak/9824`，DB 最大卻停在 **9823**（08-01 22:29:48+08）。用 `telegram_emoji_refetch` NOTIFY 測活性，scraper **秒回且成功即時抓回 9823** → 連線正常、非卡死。**根因**＝Telethon 漏派 NewMessage 事件（handler 完全沒被呼叫），而 [runner.py](src/telegram_scraper/runner.py) **只在啟動時掃一次歷史**，之後純靠即時事件 → 漏掉就永久漏掉。**非偶發**：以 `created_at - message_date > 5min` 回推「靠重啟才補進來」的比例 7/25 **28/63**、7/26 **59/121**，過去都是剛好有重啟蓋掉問題。**實作**＝每 15 分鐘（`catchup_interval_min`，可熱調整、`<=0` 停用）以各頻道 DB 最大 message_id 為基準做 `iter_messages(reverse=True, offset_id=基準, limit=200)` 增量重掃（已讀 Telethon 1.43.2 原始碼確認 reverse 下 `offset_id` 內部 +1＝不含基準、回傳舊→新保 PK 時序）；即時/補掃/refetch 共用 `process_lock` 序列化；單輪上限由舊往新掃故不留永久空洞；單頻道拋錯不拖垮迴圈。**順修** History log 把 Gamedataleak 訊息全標成 `source_channel=Seele_WW_leak` 的誤導 bug。**驗證**：py_compile 全綠、容器內 stub 煙霧測試 15 項全過、`get_peer_id` 與 DB chat_id 一致、實 DB 基準 Seele=9823/Gamedataleak=2669。**未 commit**，`runtime_config.json` 刻意未動（受保護檔，程式端預設已生效）。**下一步**：`docker compose restart telegram-scraper` → 立刻補回 9824 → 觀察 `[CatchUp]` log。詳見 [Telegram 漏收事件自動補掃區塊](#telegram-漏收事件自動補掃2026-08-02-已實作待部署驗證)。
 - 2026-07-25（Telegram Premium 自訂表情 → Discord App Emoji，**已實作，待部署驗證**）：症狀＝TG premium custom emoji 內嵌文字，relay 只留 fallback 一般 emoji。**實證 msg #9676**「3.6主线登场角色↓」9 個角色貼圖在 Discord 只剩 `🐦‍🔥🐦🤔🐉💫🌫🥛😭🦊`。**根因（DB 查證）**：scraper [_serialize_entities](src/telegram_scraper/handlers.py#L182) 只存 `{type,offset,length}`，**`document_id` 被丟**（#9676 的 9 筆 CustomEmoji 皆無 document_id）→ relay 無從還原。**定案**：寄存用 **Discord App Emoji**（bot 私有池 2000、不佔伺服器 50 格、成員隱形、跨伺服器）；**Phase 1 只做靜態 webp→PNG，動態 tgs/GIF 不做**。完整規劃見 [Telegram 自訂表情 relay 區塊](#telegram-premium-自訂表情--discord-app-emoji規劃定案)。**已實作（py_compile + 98 測試全過）**：scraper 補 document_id + 下載（gate 掉 History）+ runner LISTEN 重抓；db 新表 `telegram_custom_emoji`；relay `apply_message_entities`（spoiler+emoji 合併）+ `CustomEmojiResolver`（上傳 App Emoji）+ footer 加 `db#id`；`/resend_article` 加 `type:telegram`（notify 重抓→poll→渲染→送）。**下一步**：使用者重啟 discord-bot + telegram-scraper，`/resend_article id:9676 type:telegram` 實測。
 - 2026-07-03（他人印象被審核擋下 → 一鍵重填**已實作**，存檔即生效免重啟）：**現象排查**＝使用者填「對他人印象」後「什麼都沒跑出來」。查 [discord_bot.log](logs/discord_bot.log)：14:39:46 開 modal → 14:44:30 `intro_impression_moderation_blocked decision=reject reason=請勿使用迷因/定型文灌水 score_meme_spam=1.0 score_fake_story=1.0`，即**送出成功但被審核 reject**（[impression_moderation_service.py:186](src/services/impression_moderation_service.py#L186) meme_spam>0.6 硬擋）；被擋只回一則通用 ephemeral 警告（易被忽略、且不顯示真原因），原文全丟需重打。**需求**＝被擋時可重新複製/帶入表單（使用者反映判斷標準偏高）。**改法（僅改 code，未動門檻）**：[management_commands.py](src/commands/management_commands.py) ①`IntroImpressionModal.__init__` 加 `prefill_target/alias/habit/impression` kwargs → `UserSelect(default_values=[...])`(2.4+) + `TextInput(default=...)` 帶入上次全部欄位（含對象）；②新增 `ImpressionRetryView`（非持久化，timeout=600，一顆「✏️ 重新填寫（帶入剛剛內容）」按鈕，callback `send_modal` 帶 prefill）；③被擋分支改回覆＝顯示**實際 `moderation.reason`** + 原文（```code block``` 可複製）+ 掛 retry_view。py_compile PASS、discord.py>=2.6.4 支援全部用到的 API。**未 commit**。**下一步**：docker 重啟後實測「填梗被擋 → 看到原因+原文+按鈕 → 點按鈕帶入內容改寫再送」。**選配（未拍板）**：若仍覺門檻高，可再放寬 [impression_moderation_service.py](src/services/impression_moderation_service.py) 的 `score_meme_spam>0.6` / `score_fake_story>0.6` / `score_real_interaction<0.4` 閾值，或對特定情境放行。
 - 2026-07-02（插話/askai 反附和 — prompt 微調**已實作**，存檔即生效免重啟）：使用者觀察「模型都在附和目前對話、不獨立思考」。**診斷（修正前一輪誤判）**：撈 `ai_interactions` 近兩則，其一觸發「英格蘭又讓人失望」+ 貼比分圖 → 回「這比分…徹底翻不了身」。原疑幻覺，**查 code 證實插話路徑會把圖 base64 送 vision 模型**（[ambient_reply.py:582/899-982](src/llm/ambient_reply.py#L899-L982) → [llm_service.py:62-83](src/services/llm_service.py#L62-L83) 轉 `image_url`），所以它**讀對了 0:1**、卻在「才 50 分鐘」時跟著把對方悲觀加碼 → **問題是反射性附和（模型 sycophancy 預設 + prompt 結構偏共鳴/留白強化），不是幻覺、也不是溫度**。**決策**：①**不動溫度**（`default_temperature=0.85`）——溫度管隨機/創意不管附和傾向，純聊天搞笑陪伴 bot 調低只會更平更像 yes-man；②**動 prompt 但窄**：把「有主見」當成人設本就有（機智/帶刺/見過世面不大驚小怪）卻被壓住的特質解放，條件觸發+點到為止。**改檔（僅 .txt，非資料檔）**：[persona_guardrails.txt](src/settings/prompts/persona_guardrails.txt) 於【不冒認】後新增【有自己的看法（不反射性附和）】4 點（對方 overshoot/與眼前事實對不上才淡淡唱反調、認真低潮不適用）；[persona_examples.txt](src/settings/prompts/persona_examples.txt) 新增範例 14（比分圖唱衰情境 ✗跟著加碼/✗說教/✓帶刺不說教）。兩檔 ambient([ambient_reply.py:105-109](src/llm/ambient_reply.py#L105-L109) identity→guardrails→ambient→examples) 與 /askai([llm_commands.py:105](src/commands/llm_commands.py#L105)) 皆載入；`./src` bind-mount + mtime 快取 → 免重啟。**未 commit**。**下一步**：觀察插話是否在情緒 overshoot 時淡淡點破而非附和、且不誤報/不說教/不變話癆。**選配**：baseline vs 新規則 A/B 實測（碰 Lemonade，挑閒時；使用者未拍板）。**能力備註**：此模型（ambient=Qwen3.6-35B-A3B Q4、askai=gemma-4-26B Q4、開 enable_thinking）感知 OK，「輕輕唱反調」在能力內；「跨多則偵測邏輯矛盾」的硬推理仍是天花板，別期待穩定。
@@ -343,6 +344,50 @@ last_confirmed: 2026-07-25
 **待決 / 後續**：
 - 取得 Gamedataleak chat_id 後，在 `telegram_channel_routes` 補明確 chat_id route（去除對 name-fallback 的依賴）。
 - 去重目前以 username 比對為主；若某來源 `get_entity` 常失敗，可再把各主頻 chat_id 也納入 primary set 強化。
+
+---
+
+## Telegram 漏收事件自動補掃（2026-08-02 已實作，待部署驗證）
+
+<!-- @meta
+id: telegram-catchup-sweep
+type: STATE
+status: confirmed
+depends_on: telegram-multi-source
+affects: telegram-relay
+last_confirmed: 2026-08-02
+-->
+
+**症狀**：使用者回報「最新的 telegram 沒有轉發」。
+
+**診斷（已查證，非推測）**：
+1. **relay 端無問題** — `telegram_relay_delivery_state` 3119 筆、`last_polled_pk`=12494＝`max(telegram_messages.id)`，DB 內該送的全送掉了。
+2. **斷點在 scraper** — Telegram 上已有 `Seele_WW_leak/9824`，但 DB 最大只到 **9823**（`2026-08-01 22:29:48+08`），之後 12 小時沒有任何新資料。
+3. **不是斷線/卡死** — 對 `telegram_emoji_refetch` 發 NOTIFY 測試，scraper 秒回並成功即時抓回 9823；TCP 對 `91.108.56.199:443` 為 ESTABLISHED，session `update_state` 時間戳持續推進。
+4. **根因＝Telethon 漏派 NewMessage 事件**（handler 完全沒被呼叫，連「略過轉發訊息」都沒印），而 [runner.py](src/telegram_scraper/runner.py) **只在啟動時掃一次歷史**，跑起來後 100% 只靠即時事件 → **漏掉就永久漏掉，除非重啟容器**。
+5. **不是偶發** — 以 `created_at - message_date > 5min` 回推「靠重啟歷史掃描才補進來」的比例：7/25 **28/63**、7/26 **59/121**、7/20 4/9、7/22 4/17、7/24 3/13。過去都是剛好有重啟才把洞補起來。
+
+**實作（本輪）**：
+- [db.py](src/telegram_scraper/db.py)：新增 `get_max_message_id(telegram_chat_id)`，走既有 UNIQUE(chat_id, message_id) 索引取增量基準。
+- [runner.py](src/telegram_scraper/runner.py)：新增 `_catch_up_channel` / `_catch_up_loop` / `_resolve_catchup_chat_id`（chat_id 快取）。以 `iter_messages(channel, reverse=True, offset_id=<DB 最大 message_id>, limit=200)` 增量重掃——已讀 Telethon 1.43.2 原始碼確認 reverse 模式下 `offset_id` 會 `+1`，即**從基準之後開始、不含基準本身**，且回傳為舊→新（PK 與時序一致）。
+- **序列化鎖**：即時事件 / 補掃 / refetch 三條路徑共用一把 `process_lock`，避免同一則訊息並行處理造成重複下載媒體。
+- **單輪上限 200 筆/頻道**：由舊往新掃，超出部分下一輪接著補，**不會留下永久空洞**；達上限會明確 log。
+- **容錯**：單頻道拋錯（FloodWait 等）只 log 並續跑其他頻道，不拖垮迴圈；`run_until_disconnected` 結束時 cancel 補掃 task。
+- [tg_config.py](src/telegram_scraper/tg_config.py)：`catchup_interval_min`（預設 **15** 分鐘）進 `TelegramConfig` 與 runtime snapshot，可從 `runtime_config.json` 熱調整；`<= 0` 為停用（迴圈保留，改回正值免重啟即恢復）。
+- [handlers.py](src/telegram_scraper/handlers.py)：新增 `handle_catchup_message`（`log_prefix="CatchUp"`，**不**跳過自訂表情下載——補掃到的等同新訊息，表情要能對到 Discord App Emoji）；`_process_message` 加 `source_label`，**順修** History log 把 Gamedataleak 的訊息全標成 `source_channel=Seele_WW_leak` 的誤導性 bug（原本印 `config.source_channel`＝多來源清單第一個）。
+
+**已驗證**：
+- 4 檔 `py_compile` PASS。
+- 容器內 stub 煙霧測試 **15 項全過**：offset_id/reverse/limit 參數正確、以 marked chat_id 查基準、每則都進 handler 且處理期間持有 lock、`source_label` 為實際頻道、無基準時**不**整頻道重掃、單頻道拋錯後迴圈續跑。
+- `get_peer_id(Channel(id=2405953050))` == `-1002405953050`，與 DB `telegram_chat_id` 一致。
+- 實 DB 驗證補掃基準：Seele=**9823**、Gamedataleak=**2669**（即重啟後首輪會補回 9824）。
+
+**未 commit。** `runtime_config.json` **刻意未改**（該檔執行中會被 `add_identifier_to_forward_whitelist` 自行寫入，屬受保護檔）；程式端預設 15 分鐘已生效，要調整再手動加 `"catchup_interval_min": <分鐘>`。
+
+**下一步**：
+1. `docker compose restart telegram-scraper`（bind-mount `./src/telegram_scraper` → `/app`，重啟即載入新 code；同時啟動歷史掃描會立刻補回 9824 → NOTIFY → relay 轉發）。
+2. 觀察 log：`週期性補掃已啟動（每 15 分鐘增量重掃）`；日後漏事件時應出現 `[CatchUp] <頻道> 補回漏收訊息：基準 message_id=... 之後撈到 N 筆`。
+3. 觀察一兩天，若 `[CatchUp]` 頻繁觸發，代表即時事件漏失率高，可考慮縮短間隔或深入追 Telethon 更新迴圈。
 
 ---
 
