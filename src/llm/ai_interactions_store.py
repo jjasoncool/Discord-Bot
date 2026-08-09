@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections import deque
 from typing import Any, Optional
 
@@ -68,6 +69,18 @@ CREATE TABLE IF NOT EXISTS {_TABLE} (
 ALTER TABLE {_TABLE} ADD COLUMN IF NOT EXISTS reaction_count     INT NOT NULL DEFAULT 0;
 ALTER TABLE {_TABLE} ADD COLUMN IF NOT EXISTS positive_reactions INT NOT NULL DEFAULT 0;
 ALTER TABLE {_TABLE} ADD COLUMN IF NOT EXISTS negative_reactions INT NOT NULL DEFAULT 0;
+-- got_reply：**它講的這句話有沒有換到別人接話**。刻意不叫 followed_up——那個字面像「這筆
+-- 已被跟進處理」，而且會跟 code 裡的 followup（**它**接續自己的話，主詞相反）撞名。
+-- **刻意 nullable**：NULL＝未觀測（功能上線前的舊資料），FALSE＝已觀測但沒人接，TRUE＝有人接。
+-- 鉤子的 k-NN 只吃非 NULL 的列 → 舊資料自動排除，不會被當成「全部都沒人接」而毒化統計。
+-- 標籤比 reaction 好：reaction 負向樣本只有個位數，而「話被接下去」才是真人插話成功的定義。
+ALTER TABLE {_TABLE} ADD COLUMN IF NOT EXISTS got_reply          BOOLEAN;
+-- explore_sample：這筆是不是 ε-greedy 探索放行的（無視鉤子分數硬放行）。訓練時要能分層，
+-- 否則探索樣本會被當成「鉤子看好的時機」而失去反例價值。
+ALTER TABLE {_TABLE} ADD COLUMN IF NOT EXISTS explore_sample     BOOLEAN NOT NULL DEFAULT FALSE;
+-- followup：這筆是不是「有人接它的話 → 它再回一句」。接續在 code 裡借用 directed 的回覆路徑，
+-- 若不獨立記一欄，DB 裡就分不出「被 @」和「接續」。舊資料 FALSE 天然正確（當時沒這功能）。
+ALTER TABLE {_TABLE} ADD COLUMN IF NOT EXISTS followup           BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS idx_ai_interactions_ts         ON {_TABLE} (ts DESC);
 CREATE INDEX IF NOT EXISTS idx_ai_interactions_channel_ts ON {_TABLE} (channel_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_ai_interactions_author     ON {_TABLE} (trigger_author_id);
@@ -180,11 +193,19 @@ def record_interaction(
     reply_message_id: Optional[str],
     trace_id: Optional[str],
     embedding: Optional[list] = None,
+    explore_sample: bool = False,
+    followup: bool = False,
+    observe_reply: bool = False,
 ) -> None:
     """寫入一筆插話紀錄（sync；async caller 用 asyncio.to_thread 包）。
 
     embedding：當下情境的向量。caller 沒帶就現算（情境＝觸發+脈絡）；embed 不出來就存 NULL，
     純表示「這列暫不可語意召回」，不影響寫入。
+    explore_sample：ε-greedy 探索放行的（鉤子分數沒過但硬放行）→ 訓練時分層用。
+    followup：這筆是「有人接它的話 → 它再回」。與 directed（被 @/reply）互斥，三種來源在 DB
+    裡分別是 directed=T / followup=T / 兩者皆 F（自發）。
+    observe_reply=True → `got_reply` 初始化成 FALSE（＝「已納入觀測、目前還沒人接」），
+    之後 `mark_got_reply` 偵測到有人接就翻成 TRUE。False 則留 NULL（不納入鉤子統計）。
     """
     _track_reply_id(reply_message_id)  # 記住這則訊息 id，之後它收到的反應才認得出是 bot 插話
     if embedding is None:
@@ -200,19 +221,108 @@ def record_interaction(
                         INSERT INTO {_TABLE}
                           (guild_id, channel_id, directed, trigger_kind, trigger_author_id,
                            trigger_message_id, trigger_text, context_snippet, reply_text,
-                           reply_message_id, trace_id, embedding)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector)
+                           reply_message_id, trace_id, embedding,
+                           explore_sample, followup, got_reply)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector,%s,%s,%s)
                         """,
                         (
                             guild_id, channel_id, directed, trigger_kind, trigger_author_id,
                             trigger_message_id, trigger_text, context_snippet, reply_text,
                             reply_message_id, trace_id, emb_literal,
+                            explore_sample, followup,
+                            (False if observe_reply else None),
                         ),
                     )
         finally:
             conn.close()
     except Exception as exc:
         logger.warning("ai_interactions 寫入失敗 trace=%s：%s", trace_id, exc)
+
+
+def mark_got_reply(
+    reply_message_id: str, *, attempts: int = 4, retry_delay: float = 2.5
+) -> bool:
+    """標記「它這句話換到了別人接話」＝鉤子學習的正標籤。sync；async caller 用 to_thread。
+
+    只翻已納入觀測的列（`got_reply IS NOT NULL`）；功能上線前的舊資料維持 NULL 不動，
+    免得混入沒有對照組的樣本。
+
+    **必須重試**：偵測到有人接話，可能發生在這筆插話紀錄 INSERT 完成**之前**——`record_interaction`
+    要先算 embedding，耗時可達數秒，而實測有「插話送出後 1 秒就被接話」的真實案例（trace
+    11:36:40 送出 / 11:36:41 接話 → 當時 UPDATE 影響 0 列，標籤靜默丟失）。rowcount=0 不是
+    例外，不重試就永遠標不到、而且無聲無息。本函式跑在 to_thread 裡，sleep 不阻塞 event loop。
+
+    回傳有沒有真的標到（caller 可忽略；失敗只影響一筆訓練樣本，不影響行為）。
+    """
+    for attempt in range(max(1, attempts)):
+        try:
+            conn = _get_conn()
+            try:
+                with conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            f"""UPDATE {_TABLE} SET got_reply = TRUE
+                                WHERE reply_message_id = %s AND got_reply IS NOT NULL""",
+                            (str(reply_message_id),),
+                        )
+                        if cur.rowcount > 0:
+                            return True
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.debug("ai_interactions got_reply 標記失敗 mid=%s：%s", reply_message_id, exc)
+        if attempt < attempts - 1:
+            time.sleep(retry_delay)  # 等 INSERT（含 embedding）落地
+    logger.info(
+        "ai_interactions got_reply 標記不到 mid=%s（重試 %d 次；該筆可能未納入觀測或寫入失敗）",
+        reply_message_id, attempts,
+    )
+    return False
+
+
+def fetch_reply_rate_stats(
+    situation_text: str, *, k: int = 20, max_distance: float = 0.50
+) -> tuple[int, float]:
+    """k-NN：過去「語意相近的情境」下自發插話，被接話的比例。回 (樣本數, 比率)。
+
+    這是鉤子的軟特徵——不是 LLM 推理，只是最近鄰查詢。只吃 `got_reply IS NOT NULL`（已觀測）
+    且 `directed = FALSE AND followup = FALSE`（**純自發**）的列：被 @ 本來就有人在跟它講話，
+    接續則是對話已在來回，兩者混進來都會把比率灌高。
+    撈不到 / 失敗回 (0, 0.0)，caller 據此決定不使用此特徵（而非當成 0 分）。
+    """
+    vec = _vec_literal(_embed_text(situation_text))
+    if not vec:
+        return (0, 0.0)
+    try:
+        conn = _get_conn()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        SELECT got_reply, (embedding <=> %s::vector) AS distance
+                        FROM {_TABLE}
+                        WHERE embedding IS NOT NULL
+                          AND got_reply IS NOT NULL
+                          AND directed = FALSE
+                          AND followup = FALSE
+                        ORDER BY embedding <=> %s::vector
+                        LIMIT %s
+                        """,
+                        (vec, vec, k),
+                    )
+                    rows = [
+                        r for r in cur.fetchall()
+                        if r[1] is not None and float(r[1]) <= max_distance
+                    ]
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.debug("ai_interactions followup 統計失敗：%s", exc)
+        return (0, 0.0)
+    if not rows:
+        return (0, 0.0)
+    return (len(rows), sum(1 for r in rows if r[0]) / len(rows))
 
 
 def note_reaction(message_id: str, emoji_name: str, emoji_id: Any, action: str) -> None:

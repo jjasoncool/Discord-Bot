@@ -43,7 +43,11 @@ from typing import Optional
 
 import discord
 
-from llm.ai_interactions_store import fetch_similar_positive, record_interaction
+from llm.ai_interactions_store import (
+    fetch_similar_positive,
+    mark_got_reply,
+    record_interaction,
+)
 from llm.ambient_hooks import evaluate as evaluate_hook
 from llm.ambient_memory import enqueue_for_memory, recall_lines, recall_signature_tags
 from llm.chat_line import (
@@ -196,10 +200,15 @@ def _write_ambient_debug(
         logger.warning("寫入 ambient debug prompt 失敗 trace=%s：%s", trace_id, exc)
 
 
-def _note_sent(tracker: dict) -> None:
-    """送出插話後更新冷卻時刻與每小時計數（滾動 1 小時窗口）。"""
+def _note_sent(tracker: dict, *, cooldown: bool = True) -> None:
+    """送出插話後更新每小時計數（滾動 1 小時窗口）；cooldown=True 才一併重設冷卻起點。
+
+    接續（followup）計入每小時額度但**不吃冷卻**——來回對話本該連貫，但總量仍要受控，
+    否則一問一答可以繞過所有節流。
+    """
     now = time.monotonic()
-    tracker["last_ts"] = now
+    if cooldown:
+        tracker["last_ts"] = now
     if now - tracker["hour_start"] >= 3600:
         tracker["hour_start"] = now
         tracker["hour_count"] = 0
@@ -652,9 +661,35 @@ def _get_proc_state(channel_id: int) -> dict:
             "running": False, "pending": False, "latest": None, "directed": None,
             "debouncing": False, "last_msg_mono": 0.0, "typing_at": {},
             "msg_times": deque(maxlen=12), "burst": deque(maxlen=40),
+            "followup_armed": False, "last_reply_mono": 0.0, "followup_chain": 0,
         }
         _PROC_STATE[channel_id] = st
     return st
+
+
+def _is_followup_to_bot(state: dict, message: discord.Message) -> bool:
+    """這則是不是在接它剛講的話 → 視為半 directed，允許馬上接下去。
+
+    沒有這個機制的話是「講完就跑」：除非被 @，否則不管別人怎麼回它都要等下一個冷卻週期。
+
+    三道判準（缺一不可）：
+      ① `followup_armed`——只認它發言後的**第一則**真人訊息，用完即熄。
+      ② window 內——`followup_window_seconds`。
+      ③ **發話者就是它剛才回的那個人**。這條最關鍵：少了它，「它插完話、群裡繼續聊自己的」
+         也會被當成「有人在接我」，實測 15 次插話裡 9 次是這樣來的。被它 reply 錨定的人接著
+         講，才真的是一來一回。
+    reply/@ 機器人走既有 directed 路徑，不經過這裡。防自循環：同一串上限 followup_max_chain。
+    """
+    if not _SETTINGS.followup_enabled or not state.get("followup_armed"):
+        return False
+    state["followup_armed"] = False  # 只給一次機會
+    last = state.get("last_reply_mono") or 0.0
+    if last <= 0 or (time.monotonic() - last) > _SETTINGS.followup_window_seconds:
+        return False
+    target = state.get("last_anchor_author_id")
+    if target is None or message.author.id != target:
+        return False  # 不是它剛才在對話的那個人 → 只是群裡在聊別的
+    return state.get("followup_chain", 0) < _SETTINGS.followup_max_chain
 
 
 def note_typing(channel_id: int, user_id: int) -> None:
@@ -759,6 +794,21 @@ async def maybe_ambient_reply(bot, message: discord.Message) -> None:
         state["typing_at"].pop(message.author.id, None)  # 送出了 → 清掉他的打字戳記
         if _is_directed(bot, message):
             state["directed"] = message
+            state["directed_kind"] = "directed"
+        elif _is_followup_to_bot(state, message):   # 它剛回的那個人接話了
+            state["directed"] = message
+            state["directed_kind"] = "followup"
+            state["followup_chain"] = state.get("followup_chain", 0) + 1
+            # 「話被接下去了」＝鉤子學習的正標籤（比 reaction 準：reaction 負向樣本只有個位數）。
+            # create_task 不 await → 不破壞這段的原子性。
+            last_mid = state.get("last_reply_message_id")
+            if last_mid:
+                asyncio.create_task(asyncio.to_thread(mark_got_reply, last_mid))
+            if _SETTINGS.debug_log:
+                logger.info(
+                    "ambient 接續 channel=%s：有人接了它的話（chain=%d）",
+                    message.channel.id, state["followup_chain"],
+                )
         if state["running"] or state["debouncing"]:
             state["pending"] = True   # 已有處理器在跑/在等 → 只記新動靜，由它回來重評估
             if _SETTINGS.debug_log:
@@ -792,9 +842,12 @@ async def maybe_ambient_reply(bot, message: discord.Message) -> None:
             directed_msg = state["directed"]
             if directed_msg is not None:
                 state["directed"] = None
+                # followup（有人接它的話）借用 directed 的「優先答 + reply 回去」路徑，
+                # 但**不是**被 @——它仍要過讓位/降溫/每小時上限，見 _run_one_ambient_pass。
+                current_followup = state.pop("directed_kind", "directed") == "followup"
                 current, current_directed = directed_msg, True   # @ 優先答
             else:
-                current, current_directed = state["latest"], False
+                current, current_directed, current_followup = state["latest"], False, False
             if current is None:
                 break
             burst = list(state["burst"])
@@ -803,17 +856,20 @@ async def maybe_ambient_reply(bot, message: discord.Message) -> None:
                 # 不外包 watchdog：生成逾時改由 generate_reply 的 timeout 控（只算「鎖內生成」、
                 # 不含「等鎖排隊」）→ 排在 /askai 後面時不會被誤砍。其餘 await（抓歷史 / 召回 /
                 # 送出）各自有 http/API 逾時，不會無限卡。
-                await _run_one_ambient_pass(bot, current, ambient_model, current_directed, burst)
+                await _run_one_ambient_pass(
+                    bot, current, ambient_model, current_directed, burst,
+                    followup=current_followup,
+                )
             except Exception as exc:
                 logger.warning("ambient pass 例外 channel=%s：%s", message.channel.id, exc, exc_info=True)
             # passes 只計「自發」輪次——max_passes_per_burst 是節制自發重評估用的額度，
-            # 被 @ 是必答的，不該被它吃掉。（`max_passes_per_burst` 降成 1 之後這件事會變
+            # 被 @／接續是必答的，不該被它吃掉。（`max_passes_per_burst` 降成 1 之後這件事會變
             # 致命：生成那 ~120 秒內進來的 @ 會在跑完當下直接被 break 掉，要等下一則訊息
             # 才處理；沒有下一則就永遠不回。）
             if not current_directed:
                 passes += 1
-            # 還有待答的 @ → 一定要處理完再走。directed 每取用一次就清空，只有新的 @ 才會
-            # 再設 → 不會空轉。
+            # 還有待答的 @／接續 → 一定要處理完再走。directed 每取用一次就清空，只有新的
+            # @ 才會再設 → 不會空轉；followup 另有 followup_max_chain 把關。
             if state["directed"] is not None:
                 continue
             # 沒有新動靜 → 收手；自發輪次達上限也收手（避免超活躍頻道空燒 12B）
@@ -913,8 +969,16 @@ async def _build_style_refs(situation: str) -> Optional[list]:
 async def _record_ambient_interaction(
     *, message: discord.Message, directed: bool, stripped: str, has_image: bool,
     chat_context: Optional[list], reply: str, sent_msg, trace_id: str,
+    followup: bool = False,
 ) -> None:
-    """把這次插話寫進 ai_interactions（best-effort；sync DB → to_thread 不阻塞 loop）。"""
+    """把這次插話寫進 ai_interactions（best-effort；sync DB → to_thread 不阻塞 loop）。
+
+    三種來源在 DB 裡分開記：`directed`（被 @/reply）／`followup`（接續）／兩者皆 F（自發）——
+    接續在 code 裡借用 directed 路徑，不獨立記一欄的話 DB 就分不出來。
+    自發與接續會把 `got_reply` 初始化成 FALSE＝納入「有沒有人接」的觀測；被 @ 的不納入
+    （對方本來就在跟它講話）。
+    """
+    db_directed = directed and not followup
     try:
         if stripped:
             trigger_kind = "text"
@@ -928,7 +992,7 @@ async def _record_ambient_interaction(
             record_interaction,
             guild_id=str(message.guild.id) if message.guild else "",
             channel_id=str(message.channel.id),
-            directed=directed,
+            directed=db_directed,
             trigger_kind=trigger_kind,
             trigger_author_id=str(message.author.id),
             trigger_message_id=str(message.id),
@@ -937,6 +1001,8 @@ async def _record_ambient_interaction(
             reply_text=reply,
             reply_message_id=str(sent_msg.id) if sent_msg is not None else None,
             trace_id=trace_id,
+            followup=followup,
+            observe_reply=not db_directed,
         )
     except Exception as exc:
         logger.debug("ambient 互動紀錄寫入略過 trace=%s：%s", trace_id, exc)
@@ -973,13 +1039,20 @@ def _passes_content_gate(msg: discord.Message) -> bool:
 
 async def _run_one_ambient_pass(
     bot, message: discord.Message, ambient_model: str, directed: bool,
-    burst: Optional[list] = None,
+    burst: Optional[list] = None, followup: bool = False,
 ) -> None:
-    """單一插話評估：閘門（內容/冷卻/讓位）→ 生成 → 送出。
+    """單一插話評估：閘門（內容/冷卻/讓位/鉤子）→ 生成 → 送出。
 
     message 已通過入口硬過濾（功能開、非 bot、白名單頻道、ambient_model 有設）；
     directed 由入口判好傳入。記憶沉澱也已在入口做過。
     burst＝靜默期累積的整段訊息（內容閘看它，不是只看最後一則）。
+
+    三種來源，閘門不同：
+      - 自發（directed=False）：全部閘門
+      - 被 @/reply（directed=True, followup=False）：使用者主動找它 → 只走 must-reply
+      - 接續（directed=True, followup=True）：借用「優先答 + reply 回去」路徑，但它畢竟是
+        自己起的頭，仍要過**讓位、降溫硬閘、每小時上限**——否則會繞過防 model swap
+        ping-pong 的保護，也會在群裡已經喊停時還一路接下去。不吃冷卻（來回對話本該連貫）。
     """
     stripped = (message.content or "").strip()
     has_image = _has_image(message)
@@ -1014,6 +1087,19 @@ async def _run_one_ambient_pass(
 
     else:
         tracker = _get_tracker(bot, cid)
+        if followup:
+            # 接續是它自己起的頭，不是使用者主動要的 → 不能拿 must-reply 的免死金牌繞過
+            # 讓位與每小時上限（降溫硬閘在下面 chat_context 取得後一起判）。不吃冷卻。
+            if stream_busy() or foreground_recently_active(_SETTINGS.askai_grace_seconds):
+                _log_skip(cid, "前景活躍/串流忙，讓位（接續）")
+                return
+            now = time.monotonic()
+            if now - tracker["hour_start"] >= 3600:
+                tracker["hour_start"] = now
+                tracker["hour_count"] = 0
+            if tracker["hour_count"] >= _SETTINGS.hourly_cap:
+                _log_skip(cid, f"已達每小時上限（{_SETTINGS.hourly_cap}），接續收手")
+                return
 
     # ── 生成（12B；走 generate_reply → chat_raw 持 stream_exclusive）──
     # 帶 #XXXX 錨點（與 chat_history 裡 bot 自己的行 name_with_anchor 一致）→ 讓模型能精準
@@ -1034,7 +1120,8 @@ async def _run_one_ambient_pass(
     # 降溫硬閘：自發插話時，若近期對話出現對「插話本身」的不滿（尬聊/閉嘴/話太多…），直接收手，
     # 不勞動模型。沿用 chat_history 滑動視窗——抱怨滾出視窗後自然恢復，不需額外狀態。
     # （被 @/reply 的 directed 不受影響：對方主動找它仍照常回。）
-    if not directed and _has_chime_backoff_signal(message, chat_context):
+    # （接續也要判：群裡已經喊停時，不該因為「有人接了它的話」就一路聊下去。）
+    if (not directed or followup) and _has_chime_backoff_signal(message, chat_context):
         _log_skip(message.channel.id, "偵測到降溫訊號（尬聊/叫停）→ 收手")
         return
 
@@ -1225,19 +1312,37 @@ async def _run_one_ambient_pass(
     # 一直 @ 它測試就會把自發插話餓死、整個小時靜默）。
     if not directed:
         _note_sent(tracker)
+    elif followup:
+        _note_sent(tracker, cooldown=False)  # 接續計入每小時額度，但不重設冷卻
+
+    # 武裝「接續」——它發言後的第一則真人訊息若在 window 內、且來自它剛回的那個人，就當成
+    # 在接它的話。只有 followup 會累加 chain；自發或被 @ 都代表新的一串 → 歸零。
+    state = _get_proc_state(cid)
+    state["followup_armed"] = True
+    state["last_reply_mono"] = time.monotonic()
+    state["last_reply_message_id"] = str(sent_msg.id) if sent_msg is not None else None
+    state["last_anchor_author_id"] = (
+        anchor.author.id if (not directed and anchor is not None) else message.author.id
+    )
+    if not followup:
+        state["followup_chain"] = 0
+
     if directed:
-        anchor_desc = "reply觸發訊息"          # 被 @：回叫它的人，不看 #N
+        anchor_desc = "reply觸發訊息"          # 被 @／接續：回叫它的人，不看 #N
     elif line_choice is not None:
         anchor_desc = f"#{line_choice}"        # 自發：模型自己選的線
     else:
         anchor_desc = "無（模型沒給編號→裸送）"
     logger.info(
-        "ambient 已插話 trace=%s 頻道=%s directed=%s 錨定=%s",
-        trace_id, message.channel.id, directed, anchor_desc,
+        "ambient 已插話 trace=%s 頻道=%s kind=%s 錨定=%s",
+        trace_id, message.channel.id,
+        ("followup" if followup else ("directed" if directed else "spontaneous")),
+        anchor_desc,
     )
 
     # 互動紀錄（best-effort、不阻塞）：記下「自己這次說了什麼、對誰、在聊什麼」→ 日記/好感度的素材
     await _record_ambient_interaction(
         message=message, directed=directed, stripped=stripped, has_image=has_image,
         chat_context=chat_context, reply=reply, sent_msg=sent_msg, trace_id=trace_id,
+        followup=followup,
     )

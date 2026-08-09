@@ -332,6 +332,19 @@ class AmbientChatSettings(BaseSettings):
     hot_min_messages: int = 5              # 最近幾則拿來判斷節奏
     hot_window_seconds: float = 120.0      # 這幾則落在此秒數內＝熱
     hot_quiet_seconds: float = 3.0         # 熱聊時只等這麼久就開跑
+
+    # ── 接續：它剛講完、有人接話 → 視為半 directed，允許馬上接下去 ──
+    # 沒有這個機制的話是「講完就跑」：除非被 @，否則不管別人怎麼回它都要等下一個冷卻週期。
+    followup_enabled: bool = True
+    # 180→45→90：45 秒實測太緊（51 分鐘內 5 次自發插話，接續一次都沒觸發）。真人看到回覆要
+    # 讀、要決定回不回、還要打字；何況它講的是兩分鐘前的話題，對方未必立刻接得上。
+    # 收斂靠的是下面那條「發話者必須是它剛才回的那個人」，不是靠把時間壓短。
+    followup_window_seconds: float = 90.0
+    # 2→1：一來一回就好，別纏著同一個人連講三輪。
+    followup_max_chain: int = 1
+    # 註：接續還有一道更關鍵的判準寫在 code 裡——**發話者必須是它剛才回的那個人**
+    # （見 ambient_reply._is_followup_to_bot）。少了它，「它插完話、群裡繼續聊自己的」也會被
+    # 當成有人在接它，實測 15 次插話裡 9 次是這樣來的。
     # 看門狗：單一 pass 超過此秒數視為卡住 → 取消，避免一次生成卡死整個頻道的序列處理。
     # 要夠長以容納冷載入(model load 30-60s)+生成。
     pass_timeout_seconds: float = 180.0
