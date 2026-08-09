@@ -969,14 +969,15 @@ async def _build_style_refs(situation: str) -> Optional[list]:
 async def _record_ambient_interaction(
     *, message: discord.Message, directed: bool, stripped: str, has_image: bool,
     chat_context: Optional[list], reply: str, sent_msg, trace_id: str,
-    followup: bool = False,
+    explore_sample: bool = False, followup: bool = False,
 ) -> None:
     """把這次插話寫進 ai_interactions（best-effort；sync DB → to_thread 不阻塞 loop）。
 
     三種來源在 DB 裡分開記：`directed`（被 @/reply）／`followup`（接續）／兩者皆 F（自發）——
     接續在 code 裡借用 directed 路徑，不獨立記一欄的話 DB 就分不出來。
+    explore_sample＝這筆是 ε-greedy 探索放行的（鉤子分數沒過但硬放行），訓練時要分層。
     自發與接續會把 `got_reply` 初始化成 FALSE＝納入「有沒有人接」的觀測；被 @ 的不納入
-    （對方本來就在跟它講話）。
+    （對方本來就在跟它講話）。純自發才會進鉤子的 k-NN 統計，見 fetch_reply_rate_stats。
     """
     db_directed = directed and not followup
     try:
@@ -1001,6 +1002,7 @@ async def _record_ambient_interaction(
             reply_text=reply,
             reply_message_id=str(sent_msg.id) if sent_msg is not None else None,
             trace_id=trace_id,
+            explore_sample=explore_sample,
             followup=followup,
             observe_reply=not db_directed,
         )
@@ -1220,10 +1222,12 @@ async def _run_one_ambient_pass(
 
     # debug 摘要（discord_bot.log）：一眼看出各層 context 各抓到幾筆 + 有沒有圖 + 有沒有接到被回覆訊息
     logger.info(
-        "ambient 生成 trace=%s directed=%s model=%s | chat=%d persona=%d memory=%d callback=%d style=%d img=%d reply_to=%d",
+        "ambient 生成 trace=%s directed=%s model=%s | chat=%d persona=%d memory=%d "
+        "callback=%d style=%d signals=%d img=%d reply_to=%d",
         trace_id, directed, ambient_model,
         len(chat_context or []), len(persona_cards or []), len(memory_lines or []),
         len(callback_lines or []), len(style_ref_lines or []),
+        len(hook.signals) if hook is not None else 0,
         len(image_payload or []), 1 if replied_to_text else 0,
     )
 
@@ -1234,6 +1238,9 @@ async def _run_one_ambient_pass(
         persona_context=persona_context,
         recalled_context=callback_lines,
         style_refs=style_ref_lines,
+        # 鉤子量到的事實（誰問了沒人回、誰連講沒人接、誰跟誰在來回）→ 卸掉模型自己推導
+        # 時間關係的負擔，判斷仍歸它。directed 時 hook 為 None，不帶（對方在直接跟它說話）。
+        situation_signals=(hook.signals if hook is not None else None) or None,
         images=image_payload,
         model=ambient_model,
         bot_display_name=bot_display_name,
@@ -1344,5 +1351,6 @@ async def _run_one_ambient_pass(
     await _record_ambient_interaction(
         message=message, directed=directed, stripped=stripped, has_image=has_image,
         chat_context=chat_context, reply=reply, sent_msg=sent_msg, trace_id=trace_id,
+        explore_sample=bool(hook is not None and hook.explore),
         followup=followup,
     )

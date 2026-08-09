@@ -63,16 +63,19 @@ def _sigmoid(x: float) -> float:
 class HookDecision:
     """鉤子判定結果（帶可讀細項，供 log 與之後的離線訓練）。"""
 
-    __slots__ = ("passed", "score", "prob", "features", "veto", "explore")
+    __slots__ = ("passed", "score", "prob", "features", "veto", "explore", "signals")
 
     def __init__(self, *, passed: bool, score: float, prob: float,
-                 features: dict, veto: Optional[str], explore: bool):
+                 features: dict, veto: Optional[str], explore: bool,
+                 signals: Optional[list] = None):
         self.passed = passed
         self.score = score
         self.prob = prob
         self.features = features
         self.veto = veto
         self.explore = explore
+        # 量到的事實，寫成中性描述後注入 prompt 的 <situation_signals>（見 describe_signals）
+        self.signals = signals or []
 
     def __repr__(self) -> str:  # debug log 用
         hit = ",".join(k for k, v in self.features.items() if v) or "-"
@@ -98,11 +101,17 @@ _W = {
 # 「該不該插進這段對話」是語意問題，留給模型的第一關。
 
 
-def _structural_features(recent: list, now_ts: float) -> tuple[dict, Optional[str]]:
+def _structural_features(
+    recent: list, now_ts: float, obs: Optional[dict] = None
+) -> tuple[dict, Optional[str]]:
     """只看 metadata 的結構特徵。回 (特徵字典, 否決原因或 None)。
 
     recent：時序（舊→新）的 discord.Message，已排除 bot。now_ts＝現在的 epoch 秒。
+    obs：傳一個 dict 進來，會被填入「量到了什麼」的細節（誰、多久前、幾則），
+        供 `describe_signals()` 寫成給模型看的中性事實。out-param 而非改回傳簽章＝
+        既有 caller（含測試）不受影響。
     """
+    obs = obs if obs is not None else {}
     feats: dict = {
         "dangling_question": 0.0,
         "monologue": 0.0,
@@ -129,6 +138,16 @@ def _structural_features(recent: list, now_ts: float) -> tuple[dict, Optional[st
     # 根本問題是：prompt 第一關 gate #3 的判準是「**話題封不封閉**，不是有沒有兩個人」——那是
     # 語意問題，結構規則模仿不來，硬擋只會把「兩人在聊一件全場都看得到的事」一起殺掉。
     # 人數的事交給模型判斷；鉤子只管「時機」，不管「對象」。
+    # ——但「誰跟誰在來回」這個**事實**仍然量測下來（存進 obs、不計分），寫成中性描述給模型，
+    #   省下它自己數作者、算間隔的力氣（那正是它最容易算錯的地方）。判斷仍然是它的。
+    tail = recent[-6:]
+    if len(tail) >= 4:
+        authors = {m.author.id for m in tail}
+        gaps = [_ts(tail[i + 1]) - _ts(tail[i]) for i in range(len(tail) - 1)]
+        if len(authors) == 2 and (sum(gaps) / len(gaps)) < 45.0:
+            obs["two_person"] = [tail[-1].author, next(
+                m.author for m in reversed(tail) if m.author.id != tail[-1].author.id
+            )]
 
     # ── 懸空問句：最近 10 則裡有人問了問題，之後沒有別人回，且已過靜默期 ──
     for m in reversed(recent[-10:]):
@@ -139,11 +158,18 @@ def _structural_features(recent: list, now_ts: float) -> tuple[dict, Optional[st
         )
         if not answered and (now_ts - _ts(m)) > quiet:
             feats["dangling_question"] = 1.0
+            obs["question"] = (m.author, now_ts - _ts(m))
         break  # 只看最近那一個問句
 
     # ── 獨白：最近 3 則同一個人 ──
     if len(recent) >= 3 and len({m.author.id for m in recent[-3:]}) == 1:
         feats["monologue"] = 1.0
+        streak = 0
+        for m in reversed(recent):
+            if m.author.id != recent[-1].author.id:
+                break
+            streak += 1
+        obs["monologue"] = (recent[-1].author, streak, now_ts - _ts(recent[-1]))
 
     # ── 對話正熱：近 8 則擠在 3 分鐘內 → 場子熱絡，這時插一句最自然（真人也是這樣插話的）──
     # 其他鉤子全是「找空檔」導向（懸空問句/獨白/冷場/停頓），快節奏熱聊時一個都不命中；
@@ -165,6 +191,47 @@ def _structural_features(recent: list, now_ts: float) -> tuple[dict, Optional[st
             feats["lull_after_burst"] = 1.0
 
     return feats, None
+
+
+def _ago(seconds: float) -> str:
+    """秒數 → 口語的「多久前」（給模型看的，不需要精確到秒）。"""
+    if seconds < 90:
+        return "剛剛"
+    mins = int(seconds // 60)
+    return f"{mins} 分鐘前" if mins < 60 else f"{mins // 60} 小時前"
+
+
+def describe_signals(obs: dict) -> list[str]:
+    """把鉤子量到的事實寫成中性的自然語言，給模型當判斷材料。
+
+    **只陳述事實、不下結論、不給分數。** 例如寫「A 問了一句、到現在沒人回應」，
+    不寫「A 想要有人回答，建議你接話」——後者會把模型變成橡皮圖章，它的判斷力就廢了。
+    分數/權重更是絕對不給：那是內部實作細節，模型看到只會誤以為「分數高就該講」。
+
+    這樣分工才乾淨：**容易算錯的事實推導（誰回了誰、隔多久、連講幾則）交給 code，
+    需要理解的判斷（他是想要回應還是不想被打擾、這時候插話得不得體）留給模型。**
+    """
+    from llm.chat_line import name_with_anchor  # leaf 模組，避免頂層循環 import
+
+    lines: list[str] = []
+    if "question" in obs:
+        author, ago = obs["question"]
+        lines.append(
+            f"・{name_with_anchor(author)} 問了一句（{_ago(ago)}），到現在沒有人回應。"
+        )
+    if "monologue" in obs:
+        author, streak, ago = obs["monologue"]
+        lines.append(
+            f"・{name_with_anchor(author)} 連續講了 {streak} 則都沒有人接話"
+            f"（最後一則：{_ago(ago)}）。"
+        )
+    if "two_person" in obs:
+        a, b = obs["two_person"]
+        lines.append(
+            f"・最近幾則是 {name_with_anchor(a)} 和 {name_with_anchor(b)} 兩個人在來回，"
+            "節奏很快。"
+        )
+    return lines
 
 
 def _channel_has_life(recent: list, now_ts: float) -> bool:
@@ -230,7 +297,8 @@ async def evaluate(recent: list, *, situation: str = "") -> HookDecision:
                             veto=None, explore=False)
     try:
         now_ts = time.time()
-        feats, veto = _structural_features(recent, now_ts)
+        obs: dict = {}
+        feats, veto = _structural_features(recent, now_ts, obs)
         feats.update(_text_features(recent))
         knn_val, knn_n = await _knn_feature(situation)
         feats["knn_reply_rate"] = knn_val
@@ -249,7 +317,8 @@ async def evaluate(recent: list, *, situation: str = "") -> HookDecision:
                 passed, explore = True, True
 
         decision = HookDecision(passed=passed, score=score, prob=prob,
-                                features=feats, veto=veto, explore=explore)
+                                features=feats, veto=veto, explore=explore,
+                                signals=describe_signals(obs))
         if _SETTINGS.hook_debug:
             logger.info(
                 "ambient 鉤子 %s | thr=%.2f knn(n=%d,v=%+.2f) feats=%s",

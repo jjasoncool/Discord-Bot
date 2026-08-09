@@ -231,6 +231,7 @@ class LLMService:
         persona_context: Optional[List[str]] = None,
         recalled_context: Optional[List[str]] = None,
         style_refs: Optional[List[str]] = None,
+        situation_signals: Optional[List[str]] = None,
         target_profiles: Optional[List[str]] = None,
         web_context: Optional[List[str]] = None,
         images: Optional[List[str]] = None,
@@ -247,6 +248,9 @@ class LLMService:
         persona_context: 自然語言人物描述（每人一個字串，例如 "「老哥」— 群裡的非酋代表"）
         recalled_context: 從頻道過去語意檢索回來的「模糊印象/舊發言」（callback），放獨立的
             <recalled_context> 區塊，與人物卡分開——它是「回憶起的過去脈絡」，不是某人的人物設定
+        situation_signals: 鉤子量到的**客觀事實**（誰問了沒人回、誰連講沒人接、誰跟誰在來回），
+            見 llm/ambient_hooks.describe_signals。只陳述事實、不下結論、不含分數；用途是把
+            「容易算錯的事實推導」從模型身上卸下來，判斷仍完全歸模型。插話專用，/askai 不傳
         target_profiles: 發問者明確 mention（<@id>）的人物 persona card，獨立於 persona_context
             放在 <latest_user_message> 旁邊的 <target_profile> 區塊，提高 attention 優先序
         web_context: 網路搜尋結果（每筆一個字串，例如 "[1] 標題 — snippet (url)"）
@@ -262,7 +266,8 @@ class LLMService:
 
         has_context = bool(
             chat_context or bot_history or persona_context or recalled_context
-            or style_refs or target_profiles or web_context or replied_to_text
+            or style_refs or situation_signals or target_profiles or web_context
+            or replied_to_text
         )
         if has_context:
             composed_user_prompt += (
@@ -309,6 +314,20 @@ class LLMService:
             for line in recalled_context:
                 composed_user_prompt += f"{self._sanitize_text(line)}\n"
             composed_user_prompt += "</recalled_context>\n\n"
+
+        if situation_signals:
+            # 鉤子（ambient_hooks）零成本量到的**事實**：誰問了沒人回、誰連講沒人接、誰跟誰在來回。
+            # 目的是把「容易算錯的事實推導」從模型身上卸下來——它從一堆 [HH:MM] 時間戳裡自己
+            # 比對誰回了誰、隔多久，正是最常出錯的地方。**判斷仍然完全是模型的**：這裡只陳述
+            # 事實、不下結論、不給分數（給了會變橡皮圖章）。怎麼用寫在 ambient_reply_prompt.txt。
+            composed_user_prompt += "<situation_signals>\n"
+            composed_user_prompt += (
+                "（以下是系統對當下場面量到的客觀事實，只是幫你省下自己數時間、比對誰回誰的力氣。"
+                "**它不代表你就該開口**——要不要講、講什麼，仍然照你自己的判斷。）\n"
+            )
+            for line in situation_signals:
+                composed_user_prompt += f"{self._sanitize_text(line)}\n"
+            composed_user_prompt += "</situation_signals>\n\n"
 
         if style_refs:
             # 你過去在類似情境講過、且群裡反應不錯的話。只給「調子/招式」當範本，嚴禁照抄字句——
@@ -696,6 +715,7 @@ class LLMService:
         persona_context: Optional[List[str]] = None,
         recalled_context: Optional[List[str]] = None,
         style_refs: Optional[List[str]] = None,
+        situation_signals: Optional[List[str]] = None,
         target_profiles: Optional[List[str]] = None,
         web_context: Optional[List[str]] = None,
         images: Optional[List[str]] = None,
@@ -730,6 +750,7 @@ class LLMService:
             persona_context=persona_context,
             recalled_context=recalled_context,
             style_refs=style_refs,
+            situation_signals=situation_signals,
             target_profiles=target_profiles,
             web_context=web_context,
             images=images,
