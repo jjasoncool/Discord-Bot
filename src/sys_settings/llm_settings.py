@@ -310,9 +310,25 @@ class AmbientChatSettings(BaseSettings):
     max_chars: int = 300             # 太長（長篇貼文）不插
     cooldown_seconds: float = 300.0  # 同頻道兩次自發插話的最短間隔（5 分鐘→真的「偶爾」）；冷卻期內連判斷都不跑
     hourly_cap: int = 20             # 同頻道每小時自發插話上限（太低會整個小時靜默）
-    # per-channel 序列處理：一輪 burst 內最多重評估幾次（生成期間有新訊息才重評估）；
-    # 防超活躍頻道無限重評估空燒 12B。冷卻 + 減壓閥才是主要節流。
-    max_passes_per_burst: int = 3
+    # per-channel 序列處理：一輪 burst 內最多重評估幾次。3→1：第二輪要再等一次生成（~120s），
+    # 講出來已跟現場脫節；靜默期上線後 burst 內的新訊息本來就會被合併進同一次評估。
+    max_passes_per_burst: int = 1
+
+    # ── 靜默期（不搶話）：訊息進來不馬上開跑，等對話停一下再擷取完整脈絡 ──
+    # 慢節奏的判準是「距最後一則夠久」**且**「沒人正在打字」；typing 是加分訊號，收不到
+    # （手機/貼圖/第三方 client）就退化成純時間 debounce。`Intents.default()` 已含 typing。
+    quiet_seconds: float = 15.0            # 最後一則訊息後要靜默多久（總延遲已 ~120s，多等不痛）
+    typing_grace_seconds: float = 12.0     # 多久沒收到 typing 事件才算「沒人在打」（client 約每 9s 重送）
+    quiet_max_wait_seconds: float = 60.0   # 總等待上限：一直有人打字也不能無限等
+    quiet_directed_seconds: float = 0.0    # 被 @/reply → 不等，立刻處理
+
+    # ── 熱聊快速通道：慢節奏要「等人講完」，熱絡時「看前面的就可以講」──
+    # 熱聊時永遠等不到靜默（一直有人在講、在打字），用同一套規則只會被 max_wait 硬拖，
+    # 而那時對話又前進了一段。而且熱聊插話本來就不需要空檔——真人也是直接接話。
+    # 判定為熱時：只等一個很短的間隔（避免切在某人連發的中間），並且**忽略 typing**。
+    hot_min_messages: int = 5              # 最近幾則拿來判斷節奏
+    hot_window_seconds: float = 120.0      # 這幾則落在此秒數內＝熱
+    hot_quiet_seconds: float = 3.0         # 熱聊時只等這麼久就開跑
     # 看門狗：單一 pass 超過此秒數視為卡住 → 取消，避免一次生成卡死整個頻道的序列處理。
     # 要夠長以容納冷載入(model load 30-60s)+生成。
     pass_timeout_seconds: float = 180.0

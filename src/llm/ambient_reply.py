@@ -3,7 +3,11 @@
 掛在 `discord_bot.on_message`，以背景 task 執行，不阻塞訊息處理。
 
 觸發哲學（由便宜到貴，任一關卡不過就 return，多數訊息連模型都不勞動）：
-    硬性過濾（零成本） → 冷卻 / 每小時上限 → foreground 讓位 → 12B 判斷（回 / [PASS] 沉默）
+    硬性過濾（零成本）→ **靜默期**（等對話停一下再擷取脈絡）→ 內容閘（看整段 burst）
+    → 冷卻 / 每小時上限 → foreground 讓位 → 12B 判斷（回 / [PASS] 沉默）
+
+靜默期依對話節奏切換：慢節奏等到「夠久沒新訊息且沒人在打字」，熱聊只等一小段就開跑
+（熱聊等不到靜默，而且插話本來就不需要空檔）。一段 burst 合併成一次評估。
 
 「偶爾」感由冷卻 + 每小時上限保證；插不插由 12B 自己判斷，不擲骰。冷卻期內連判斷都不跑（省 12B）。
 `judge_sampling_rate`（預設 1.0）是純減壓閥：頻道太吵時才抽樣降載，預設不作用。
@@ -624,15 +628,96 @@ async def _resolve_replied_to(
 
 # per-channel 序列處理狀態：同頻道同時只有一個 ambient 在跑。生成期間進來的訊息不平行觸發，
 # 只更新 latest / 標 pending；等這次跑完，再用「最新」對話狀態重新評估要不要插（@ 走 directed 優先答）。
-_PROC_STATE: dict = {}  # channel_id -> {running, pending, latest, directed}
+#   debouncing   靜默期等待中（等的人只有一個，其餘訊息只更新狀態）
+#   last_msg_mono 最後一則訊息的時刻（靜默期判準）
+#   typing_at    {user_id: 最後一次 typing 事件時刻}
+#   msg_times    近期訊息時刻（判斷對話節奏快/慢）
+#   burst        靜默期累積的訊息（內容閘改看整段，不是只看最後一則）
+_PROC_STATE: dict = {}
 
 
 def _get_proc_state(channel_id: int) -> dict:
     st = _PROC_STATE.get(channel_id)
     if st is None:
-        st = {"running": False, "pending": False, "latest": None, "directed": None}
+        st = {
+            "running": False, "pending": False, "latest": None, "directed": None,
+            "debouncing": False, "last_msg_mono": 0.0, "typing_at": {},
+            "msg_times": deque(maxlen=12), "burst": deque(maxlen=40),
+        }
         _PROC_STATE[channel_id] = st
     return st
+
+
+def note_typing(channel_id: int, user_id: int) -> None:
+    """記下「某人正在這個頻道打字」（discord_bot.on_typing 呼叫）。零 I/O，只寫 dict。
+
+    只追白名單頻道，避免全伺服器每個頻道都佔記憶體。Discord 沒有「停止打字」事件，
+    靠 typing_grace_seconds 自然過期。
+    """
+    if not _SETTINGS.enabled:
+        return
+    target = _resolve_target_channel_id()
+    if target is None or channel_id != target:
+        return
+    state = _get_proc_state(channel_id)
+    now = time.monotonic()
+    typing_at = state["typing_at"]
+    typing_at[user_id] = now
+    if len(typing_at) > 8:  # 順手清過期（人數少，成本可忽略）
+        cutoff = now - _SETTINGS.typing_grace_seconds
+        for uid in [u for u, t in typing_at.items() if t < cutoff]:
+            typing_at.pop(uid, None)
+
+
+def _someone_typing(state: dict, now: float) -> bool:
+    """頻道裡還有人在打字嗎（最後一次 typing 事件在 grace 秒內）。"""
+    return any(
+        now - t < _SETTINGS.typing_grace_seconds
+        for t in (state.get("typing_at") or {}).values()
+    )
+
+
+def _is_hot_conversation(state: dict) -> bool:
+    """對話是不是正熱：最近幾則擠在 `hot_window_seconds` 內。"""
+    times = state.get("msg_times") or ()
+    n = _SETTINGS.hot_min_messages
+    if len(times) < n:
+        return False
+    recent = list(times)[-n:]
+    return (recent[-1] - recent[0]) < _SETTINGS.hot_window_seconds
+
+
+async def _wait_for_quiet(state: dict) -> None:
+    """靜默期：依對話節奏切換等法（不搶話）。
+
+    **慢節奏**：等到「距最後一則夠久（`quiet_seconds`）」**且**「沒人在打字」才返回——
+    打字不是講話，有人正在打一段長的可能要 20~30 秒，純時間 debounce 會切在半途。
+    typing 是加分訊號，收不到（手機/貼圖/第三方 client）就退化成純時間靜默期。
+
+    **熱聊**：只等 `hot_quiet_seconds`，而且**忽略 typing**。熱聊時永遠等不到靜默（一直有人
+    在講、在打字），用慢節奏那套只會被 `max_wait` 硬拖、而那時對話又前進了一段；何況熱聊
+    插話本來就不需要空檔，真人也是直接接話。留一個很短的間隔只是避免切在某人連發的中間。
+
+    directed（被 @/reply）不等；等待期間被 @ 也立刻打斷。
+    """
+    if state.get("directed") is not None:
+        if _SETTINGS.quiet_directed_seconds > 0:
+            await asyncio.sleep(_SETTINGS.quiet_directed_seconds)
+        return
+    started = time.monotonic()
+    while True:
+        now = time.monotonic()
+        if state.get("directed") is not None:
+            return  # 等待中被 @ → 立刻處理
+        if now - started >= _SETTINGS.quiet_max_wait_seconds:
+            return  # 總上限：一直有人打字也不能無限等
+        idle = now - state.get("last_msg_mono", 0.0)
+        if _is_hot_conversation(state):
+            if idle >= _SETTINGS.hot_quiet_seconds:
+                return
+        elif idle >= _SETTINGS.quiet_seconds and not _someone_typing(state, now):
+            return
+        await asyncio.sleep(0.5)
 
 
 async def maybe_ambient_reply(bot, message: discord.Message) -> None:
@@ -658,20 +743,40 @@ async def maybe_ambient_reply(bot, message: discord.Message) -> None:
         # ── per-channel 序列協調（以下到設旗標之間無 await → 原子）──
         state = _get_proc_state(message.channel.id)
         state["latest"] = message
+        _now_mono = time.monotonic()
+        state["last_msg_mono"] = _now_mono
+        state["msg_times"].append(_now_mono)    # 對話節奏（快/慢）→ 決定靜默期怎麼等
+        state["burst"].append(message)          # 內容閘改看整段 burst
+        state["typing_at"].pop(message.author.id, None)  # 送出了 → 清掉他的打字戳記
         if _is_directed(bot, message):
             state["directed"] = message
-        if state["running"]:
-            state["pending"] = True   # 已有處理器在跑 → 只記新動靜，等它回來重評估
+        if state["running"] or state["debouncing"]:
+            state["pending"] = True   # 已有處理器在跑/在等 → 只記新動靜，由它回來重評估
             if _SETTINGS.debug_log:
                 logger.info("ambient 吸收 channel=%s：處理器忙，待這輪跑完用最新狀態重評估", message.channel.id)
             return
-        state["running"] = True
+        state["debouncing"] = True
     except Exception as exc:
         logger.warning("ambient 入口例外：%s", exc, exc_info=True)
         return
 
-    # ── 序列處理迴圈（同頻道唯一）：跑完一輪後若有新動靜/待答的 @ 就用最新狀態再跑一輪 ──
+    # 靜默期 + 處理迴圈包在同一個 try/finally：兩個旗標**一定**要被清乾淨。
+    # 分成兩段 try 會埋地雷——靜默期若收到 CancelledError（BaseException，不被
+    # `except Exception` 攔），內層 finally 會把 running 設成 True，然後例外繼續往外拋、
+    # 迴圈那段的 finally 永遠不執行 → running 永久卡住，該頻道插話從此靜音且無聲無息。
     try:
+        # ── 靜默期：等對話停一下再開跑（不搶話 + 讓擷取到的脈絡完整）──
+        # 例外也要往下走：寧可用當下狀態評估一次，也不要白白放掉這一輪。
+        try:
+            await _wait_for_quiet(state)
+        except Exception as exc:
+            logger.warning("ambient 靜默期例外 channel=%s：%s", message.channel.id, exc)
+        finally:
+            # 兩個旗標之間無 await → 不留空隙給其他 task 插進來搶
+            state["debouncing"] = False
+            state["running"] = True
+
+        # ── 序列處理迴圈（同頻道唯一）：跑完一輪後若有新動靜/待答的 @ 就用最新狀態再跑一輪 ──
         passes = 0
         while True:
             state["pending"] = False
@@ -683,19 +788,31 @@ async def maybe_ambient_reply(bot, message: discord.Message) -> None:
                 current, current_directed = state["latest"], False
             if current is None:
                 break
+            burst = list(state["burst"])
+            state["burst"].clear()
             try:
                 # 不外包 watchdog：生成逾時改由 generate_reply 的 timeout 控（只算「鎖內生成」、
                 # 不含「等鎖排隊」）→ 排在 /askai 後面時不會被誤砍。其餘 await（抓歷史 / 召回 /
                 # 送出）各自有 http/API 逾時，不會無限卡。
-                await _run_one_ambient_pass(bot, current, ambient_model, current_directed)
+                await _run_one_ambient_pass(bot, current, ambient_model, current_directed, burst)
             except Exception as exc:
                 logger.warning("ambient pass 例外 channel=%s：%s", message.channel.id, exc, exc_info=True)
-            passes += 1
-            # 沒有新動靜也沒有待答 @ → 收手；達上限也收手（避免超活躍頻道空燒 12B）
-            if (not state["pending"] and state["directed"] is None) or passes >= _SETTINGS.max_passes_per_burst:
+            # passes 只計「自發」輪次——max_passes_per_burst 是節制自發重評估用的額度，
+            # 被 @ 是必答的，不該被它吃掉。（`max_passes_per_burst` 降成 1 之後這件事會變
+            # 致命：生成那 ~120 秒內進來的 @ 會在跑完當下直接被 break 掉，要等下一則訊息
+            # 才處理；沒有下一則就永遠不回。）
+            if not current_directed:
+                passes += 1
+            # 還有待答的 @ → 一定要處理完再走。directed 每取用一次就清空，只有新的 @ 才會
+            # 再設 → 不會空轉。
+            if state["directed"] is not None:
+                continue
+            # 沒有新動靜 → 收手；自發輪次達上限也收手（避免超活躍頻道空燒 12B）
+            if not state["pending"] or passes >= _SETTINGS.max_passes_per_burst:
                 break
     finally:
         state["running"] = False
+        state["debouncing"] = False
 
 
 def _log_skip(channel_id: int, reason: str) -> None:
@@ -816,35 +933,42 @@ async def _record_ambient_interaction(
         logger.debug("ambient 互動紀錄寫入略過 trace=%s：%s", trace_id, exc)
 
 
+def _passes_content_gate(msg: discord.Message) -> bool:
+    """單則有沒有「可聊的內容」：非指令、非空、非純連結、非純表情、長度在區間內。有圖直接放行。"""
+    stripped = (msg.content or "").strip()
+    if _is_command_like(stripped):
+        return False
+    if _has_image(msg):
+        return True  # 有圖，圖就是內容
+    if not stripped or _is_link_only(stripped):
+        return False
+    if is_emoji_or_symbol_only(stripped):
+        return False
+    return _SETTINGS.min_chars <= len(stripped) <= _SETTINGS.max_chars
+
+
 async def _run_one_ambient_pass(
-    bot, message: discord.Message, ambient_model: str, directed: bool
+    bot, message: discord.Message, ambient_model: str, directed: bool,
+    burst: Optional[list] = None,
 ) -> None:
-    """單一插話評估：閘門（內容/冷卻/讓位/機率）→ 生成 → 送出。
+    """單一插話評估：閘門（內容/冷卻/讓位）→ 生成 → 送出。
 
     message 已通過入口硬過濾（功能開、非 bot、白名單頻道、ambient_model 有設）；
     directed 由入口判好傳入。記憶沉澱也已在入口做過。
+    burst＝靜默期累積的整段訊息（內容閘看它，不是只看最後一則）。
     """
     stripped = (message.content or "").strip()
     has_image = _has_image(message)
 
     cid = message.channel.id
-    # ── 非被點名：再過內容/冷卻/讓位/機率（跳過原因都記 log，方便 debug）────
+    # ── 非被點名：再過內容/冷卻/讓位（跳過原因都記 log，方便 debug）────
     if not directed:
-        if _is_command_like(stripped):
-            _log_skip(cid, "指令訊息")
+        # 內容閘看「整段 burst」：靜默期會把一串訊息合併成一次評估，若只看最後一則，
+        # 剛好收尾是貼圖或「笑死」就會把整段有料的對話一起刷掉。任一則有料就放行。
+        candidates = burst or [message]
+        if not any(_passes_content_gate(m) for m in candidates):
+            _log_skip(cid, f"整段 burst（{len(candidates)} 則）都沒有可聊的內容")
             return
-        if not has_image:
-            # 純文字才要求：非空、非純連結、長度在區間內（有圖則圖就是內容，放行）
-            if not stripped or _is_link_only(stripped):
-                _log_skip(cid, "空訊息或純連結")
-                return
-            if is_emoji_or_symbol_only(stripped):
-                _log_skip(cid, "只有表情/貼圖 → 不觸發自發插話")
-                return
-            n = len(stripped)
-            if n < _SETTINGS.min_chars or n > _SETTINGS.max_chars:
-                _log_skip(cid, f"長度 {n} 不在 {_SETTINGS.min_chars}~{_SETTINGS.max_chars}")
-                return
 
         tracker = _get_tracker(bot, cid)
         now = time.monotonic()

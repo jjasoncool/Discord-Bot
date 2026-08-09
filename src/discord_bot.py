@@ -444,6 +444,21 @@ async def on_message(message):
     await bot.process_commands(message)
 
 @bot.event
+async def on_typing(channel, user, when):
+    """有人正在打字 → 記給插話的靜默期用（等人打完再開口，不搶話）。
+
+    `Intents.default()` 已含 typing（非 privileged），不必額外授權。Discord 沒有「停止打字」
+    事件，client 持續打字時每約 9 秒重送一次 → 由 ambient 端以 grace 秒數判定過期。
+    """
+    if getattr(user, "bot", False):
+        return
+    try:
+        from llm.ambient_reply import note_typing
+        note_typing(channel.id, user.id)
+    except Exception:
+        pass  # 純訊號，壞掉不該影響任何事（收不到就退化成純時間靜默期）
+
+@bot.event
 async def on_message_edit(before, after):
     if after.author.bot:
         return
