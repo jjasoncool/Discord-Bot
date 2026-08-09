@@ -942,6 +942,21 @@ async def _record_ambient_interaction(
         logger.debug("ambient 互動紀錄寫入略過 trace=%s：%s", trace_id, exc)
 
 
+_LINE_CHOICE_RE = re.compile(r"^#(\d{1,3})[ \t]*\r?\n?")
+
+
+def _parse_line_choice(text: str) -> tuple[Optional[int], str]:
+    """從模型輸出剝出開頭的 `#N`（它宣告要接的那一則），回 (編號或 None, 其餘內容)。
+
+    容錯 `#12`、`#12\\n內容`、`#12 內容` 三種寫法；沒給編號就回 (None, 原文)——模型偶爾
+    會忘記格式，不該因此丟棄整則回覆，退回舊的裸送行為即可。
+    """
+    m = _LINE_CHOICE_RE.match(text)
+    if not m:
+        return (None, text)
+    return (int(m.group(1)), text[m.end():].strip())
+
+
 def _passes_content_gate(msg: discord.Message) -> bool:
     """單則有沒有「可聊的內容」：非指令、非空、非純連結、非純表情、長度在區間內。有圖直接放行。"""
     stripped = (msg.content or "").strip()
@@ -1080,13 +1095,23 @@ async def _run_one_ambient_pass(
     else:
         asker_for_bundle = None
         _ts = message.created_at.astimezone(_TAIPEI_TZ).strftime("%H:%M")
+        # 觸發訊息附在脈絡末尾時也要給編號並登記進 thread_map——否則模型想接「最新這一則」
+        # 卻指不到它（reply 錨定就落空）。編號接續 _fetch_recent 已用掉的最大號。
+        _next_no = (max(thread_map) if thread_map else 0) + 1
         if stripped:
             # 觸發訊息本體不截斷（time_only 不帶日期，與近期視窗一致）；compact=False 保留原貌
             chat_context = (chat_context or []) + [
-                format_chat_line(message, _TAIPEI_TZ, time_only=True, compact=False)
+                format_chat_line(
+                    message, _TAIPEI_TZ, time_only=True, compact=False,
+                    prefix=f"#{_next_no} ",
+                )
             ]
+            thread_map[_next_no] = message
         elif image_payload:
-            chat_context = (chat_context or []) + [f"[{_ts}] {asker_display_name}: (貼了一張圖)"]
+            chat_context = (chat_context or []) + [
+                f"#{_next_no} [{_ts}] {asker_display_name}: (貼了一張圖)"
+            ]
+            thread_map[_next_no] = message
         prompt_text = (
             "（以上是你在群裡旁觀到的最新對話。最新一則是群友彼此在講話、不一定是對你說的——"
             "先判斷適不適合插話；要插就接整段對話裡的具體一點，否則只輸出 [PASS]。）"
@@ -1134,7 +1159,9 @@ async def _run_one_ambient_pass(
         trace_id=trace_id,
     )
 
-    reply = (result.reply or "").strip()
+    # 模型第一行宣告「我在接第幾則」→ 剝出來當 reply 錨點，其餘才是要講的話
+    raw_reply = (result.reply or "").strip()
+    line_choice, reply = _parse_line_choice(raw_reply)
     sentinel = _SETTINGS.silence_sentinel
     if result.error_kind:
         outcome = f"error:{result.error_kind}"
@@ -1144,9 +1171,10 @@ async def _run_one_ambient_pass(
         outcome = "reply"
 
     # 把完整 prompt（含三層 context）寫進 ambient_prompt.txt，reply/pass/error 都記，方便 debug
+    # （reply 記模型原樣輸出＝含 `#N`，才看得出它到底選了哪一條線、選得對不對）
     _write_ambient_debug(
         trace_id=trace_id, prompt_record_log=result.prompt_record_log,
-        outcome=outcome, reply=reply,
+        outcome=outcome, reply=raw_reply,
     )
 
     if result.error_kind:
@@ -1157,6 +1185,7 @@ async def _run_one_ambient_pass(
         return
 
     sent_msg = None
+    anchor = None   # 自發時模型選的那則（reply 錨點）；directed 時維持 None
     try:
         if directed:
             try:
@@ -1172,9 +1201,22 @@ async def _run_one_ambient_pass(
                     reply, allowed_mentions=discord.AllowedMentions.none()
                 )
         else:
-            sent_msg = await message.channel.send(
-                reply, allowed_mentions=discord.AllowedMentions.none()
-            )
+            # 自發插話錨定到它宣告要接的那一則（`#N`）。生成要 ~120 秒，活躍頻道早已翻頁，
+            # 裸送必然像亂入；用 reply 指出「我在回這句」，遲到兩分鐘也讀得懂——這正是
+            # 真人在忙碌群裡的做法。錨點失效（訊息被刪/沒給編號）就退回原本的裸送。
+            anchor = thread_map.get(line_choice) if line_choice is not None else None
+            if anchor is not None:
+                try:
+                    sent_msg = await anchor.reply(reply, mention_author=False)
+                except discord.HTTPException as anchor_exc:
+                    logger.info(
+                        "ambient 錨定 #%s 失敗（原訊息可能已刪？）trace=%s：%s → 改直接發頻道",
+                        line_choice, trace_id, anchor_exc,
+                    )
+            if sent_msg is None:
+                sent_msg = await message.channel.send(
+                    reply, allowed_mentions=discord.AllowedMentions.none()
+                )
     except discord.HTTPException as exc:
         logger.warning("ambient 送出回覆失敗 trace=%s：%s", trace_id, exc)
         return
@@ -1183,9 +1225,15 @@ async def _run_one_ambient_pass(
     # 一直 @ 它測試就會把自發插話餓死、整個小時靜默）。
     if not directed:
         _note_sent(tracker)
+    if directed:
+        anchor_desc = "reply觸發訊息"          # 被 @：回叫它的人，不看 #N
+    elif line_choice is not None:
+        anchor_desc = f"#{line_choice}"        # 自發：模型自己選的線
+    else:
+        anchor_desc = "無（模型沒給編號→裸送）"
     logger.info(
-        "ambient 已插話 trace=%s 頻道=%s directed=%s",
-        trace_id, message.channel.id, directed,
+        "ambient 已插話 trace=%s 頻道=%s directed=%s 錨定=%s",
+        trace_id, message.channel.id, directed, anchor_desc,
     )
 
     # 互動紀錄（best-effort、不阻塞）：記下「自己這次說了什麼、對誰、在聊什麼」→ 日記/好感度的素材
