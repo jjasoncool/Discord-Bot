@@ -12,6 +12,8 @@ raw `<:name:id>`），ambient / diary 又各有 `_name_with_anchor` / `_semantic
 
 from __future__ import annotations
 
+import logging
+import re
 from datetime import tzinfo
 from typing import TYPE_CHECKING, Callable, Optional
 
@@ -20,6 +22,11 @@ from llm.sticker_cache import get_sticker_text
 
 if TYPE_CHECKING:  # 僅型別註解用；runtime 不依賴 discord（保持 leaf 輕量）
     import discord
+
+logger = logging.getLogger("discord_bot")
+
+# Discord 原始 mention：<@123>、<@!123>（舊版帶暱稱的寫法）
+_MENTION_RE = re.compile(r"<@!?(\d+)>")
 
 
 def name_with_anchor(author) -> str:
@@ -33,13 +40,47 @@ def name_with_anchor(author) -> str:
     return f"{name}#{short}" if short else name
 
 
+def resolve_user_mentions(text: str, msg) -> str:
+    """把原始 `<@123456789>` 換成 `顯示名#XXXX`（與 chat_history 其他行同格式）。
+
+    **對照靠的是 `#XXXX`（user_id 後四碼），不是名字**——群友會改暱稱、persona card 又用
+    自填別名，唯一穩定的串接點就是這個錨點。所以名字查不到也無妨：輸出 `某人#6490`，
+    模型看到 chat_history 別行的 `克羅#6490` 一樣對得上是同一個人。
+
+    解析順序：`msg.mentions`（discord.py 已解析好，連已離開伺服器的 User 都在）→
+    guild member cache → 純錨點。全部零 API、零 DB。
+
+    修的是實測 **53% 的 chat_history 含有裸 `<@id>`** ——模型只看到一長串數字，
+    完全不知道那是誰，也對不上任何人（emoji_text_utils 的註解早就寫明它不動 mention）。
+    """
+    if "<@" not in text:
+        return text  # fast path：絕大多數訊息沒有 mention
+    by_id = {str(getattr(u, "id", "")): u for u in (getattr(msg, "mentions", None) or [])}
+    guild = getattr(msg, "guild", None)
+
+    def _sub(m: re.Match) -> str:
+        uid = m.group(1)
+        user = by_id.get(uid)
+        if user is None and guild is not None:
+            try:
+                user = guild.get_member(int(uid))
+            except (ValueError, TypeError, AttributeError):
+                user = None
+        if user is not None:
+            return name_with_anchor(user)
+        return f"某人#{uid[-4:]}" if len(uid) >= 4 else "某人"
+
+    return _MENTION_RE.sub(_sub, text)
+
+
 def semantic_message_text(msg: discord.Message) -> str:
-    """訊息文字 + 語意化自訂表情（<:name:id>→:描述:）+ 貼圖描述。
+    """訊息文字 + 語意化自訂表情（<:name:id>→:描述:）+ 人名 mention + 貼圖描述。
 
     純貼圖（無文字）訊息會回傳貼圖描述而非空字串，避免被當空訊息整則跳過。
     回傳前不壓空白（保留原樣讓 caller 決定）；單行壓縮由 format_chat_line 負責。
     """
     text = replace_custom_emoji_with_description((msg.content or "").strip())
+    text = resolve_user_mentions(text, msg)
     if msg.stickers:
         parts = [s for s in (get_sticker_text(st) for st in msg.stickers) if s]
         if parts:
@@ -90,6 +131,40 @@ def format_chat_line(
     return f"{prefix}[{ts}] {name}: {text}{suffix}"
 
 
+# 已警告過的撞號組合（避免同一組每次組 prompt 都洗一次 log）
+_WARNED_ANCHOR_COLLISIONS: set = set()
+
+
+def _check_anchor_collision(msgs: list) -> None:
+    """偵測「兩個人的 user_id 後四碼相同」→ prompt 裡的 `#XXXX` 會同時指向兩個人。
+
+    錨點是模型辨認「這幾行是同一個人」的唯一依據（顯示名會改、persona card 用自填別名），
+    撞號等於讓它把兩個人當成一個，而且完全無聲無息。實測 78 位發言者目前 0 撞號，但機率
+    隨群成長上升（約：100 人 39%、150 人 67% 會出現至少一組），所以留個警報。
+
+    真的撞到再處理——加長到 5 碼會讓既有 persona card 文字裡存的 4 碼對不上，要一併重建。
+    """
+    seen: dict = {}
+    for m in msgs:
+        uid = str(getattr(getattr(m, "author", None), "id", "") or "")
+        if len(uid) < 4:
+            continue
+        anchor = uid[-4:]
+        prev = seen.setdefault(anchor, uid)
+        if prev == uid:
+            continue
+        key = (anchor, *sorted((prev, uid)))
+        if key in _WARNED_ANCHOR_COLLISIONS:
+            continue
+        _WARNED_ANCHOR_COLLISIONS.add(key)
+        logger.warning(
+            "chat_line 錨點撞號：user_id %s 與 %s 的後四碼都是 #%s → prompt 裡的 #%s 會指向"
+            "兩個人，模型可能把他們當同一人。要修得把 name_with_anchor 加長到 5 碼，"
+            "並一併重建 persona card（那裡的文字存了 4 碼）。",
+            prev, uid, anchor, anchor,
+        )
+
+
 def _reply_target_placeholder(msg) -> str:
     """被回覆、但本身無文字（純圖/附件）的訊息，給個佔位內容讓它能成行被 ↩#N 指到。"""
     atts = getattr(msg, "attachments", None) or []
@@ -100,13 +175,16 @@ def _reply_target_placeholder(msg) -> str:
     return "(附件)" if atts else "(訊息)"
 
 
-def _thread_render(msgs: list, tz: tzinfo, max_len: int | None, self_id: int | None) -> list[str]:
-    """把時序訊息渲染成帶 reply 編號 threading 的行。
+def _thread_render(
+    msgs: list, tz: tzinfo, max_len: int | None, self_id: int | None
+) -> tuple[list[str], dict]:
+    """把時序訊息渲染成帶編號的行；回 (行, {編號: 訊息})。
 
-    clutter 隨「回覆邊數」而非行數成長：
-    - 只有「視窗內被回覆過」的訊息給短編號，前綴 `#N `；其餘行不加編號。
+    - **每一行都給編號**（前綴 `#N `，N 從 1 依序遞增、只算實際成行的訊息）。
+      舊版只編「被回覆過」的訊息，但多數人聊天不按 reply → 大部分行沒編號；模型要表態
+      「我這句在接哪一條線」時無錨可指。多組人各聊各的時，這個編號就是唯一的指線方式。
     - 是回覆的行加後綴 ` ↩#M`（M＝被回那則的編號）；被回的在視窗外 → ` ↩(較早)`。
-    - 非目標的空訊息照舊整則跳過；但「被回覆的純圖訊息」改顯示 `(圖)` 一行（才指得到）。
+    - 空訊息（純圖等）照舊跳過、不佔編號；但「被回覆過的空訊息」要成行顯示 `(圖)` 才指得到。
     回覆只會指向更早的訊息 → 目標必在其回覆者之前出現，編號無前向引用問題。
     """
     in_window = {m.id for m in msgs}
@@ -116,17 +194,15 @@ def _thread_render(msgs: list, tz: tzinfo, max_len: int | None, self_id: int | N
         return getattr(ref, "message_id", None) if ref is not None else None
 
     referenced = {rid for m in msgs if (rid := _ref_id(m)) is not None and rid in in_window}
-    thread_no: dict = {}
-    for m in msgs:
-        if m.id in referenced:
-            thread_no[m.id] = len(thread_no) + 1
+
+    # 文字只算一次（semantic_message_text 有 regex 替換成本），過濾與渲染共用
+    texts = {m.id: semantic_message_text(m) for m in msgs}
+    # 先決定哪些會成行，再依序編號 → 編號連續、不因跳過的空訊息而跳號
+    rendered = [m for m in msgs if texts[m.id] or m.id in referenced]
+    thread_no = {m.id: i + 1 for i, m in enumerate(rendered)}
 
     lines: list[str] = []
-    for m in msgs:
-        is_target = m.id in thread_no
-        has_text = bool(semantic_message_text(m))
-        if not has_text and not is_target:
-            continue  # 非目標的空訊息照舊跳過（不增 token）
+    for m in rendered:
         rid = _ref_id(m)
         suffix = ""
         if rid is not None:
@@ -134,12 +210,12 @@ def _thread_render(msgs: list, tz: tzinfo, max_len: int | None, self_id: int | N
         lines.append(
             format_chat_line(
                 m, tz, time_only=True, max_len=max_len, compact=False, self_id=self_id,
-                prefix=(f"#{thread_no[m.id]} " if is_target else ""),
+                prefix=f"#{thread_no[m.id]} ",
                 suffix=suffix,
-                empty_placeholder=(None if has_text else _reply_target_placeholder(m)),
+                empty_placeholder=(None if texts[m.id] else _reply_target_placeholder(m)),
             )
         )
-    return lines
+    return lines, {thread_no[m.id]: m for m in rendered}
 
 
 async def fetch_recent_lines(
@@ -153,6 +229,7 @@ async def fetch_recent_lines(
     collect_participant_ids: bool = False,
     self_id: int | None = None,
     thread_replies: bool = False,
+    thread_map: Optional[dict] = None,
     on_error: Optional[Callable[[Exception], None]] = None,
 ) -> tuple[list[str], Optional[list[int]]]:
     """抓近期頻道訊息 → 時序（舊→新）的 `[HH:MM] 名#XXXX: 內容` 行（time_only）。
@@ -165,7 +242,10 @@ async def fetch_recent_lines(
       oldest_first=False 抓最新、最後統一反轉，與既有行為一致）。
     - collect_participant_ids=True 時，回傳 (lines, 非 bot 發話者 id[出現序])；否則第二項為 None。
       lines 含 bot 自己的話以維持對話連續性；participant_ids 只收非 bot。
-    - thread_replies=True → 行加 reply 編號 threading（見 _thread_render）；預設 False＝既有扁平輸出。
+    - thread_replies=True → 每行加編號（見 _thread_render）；預設 False＝既有扁平輸出。
+    - thread_map：傳一個 dict 進來，thread_replies 模式下會被填成 `{編號: discord.Message}`。
+      out-param 而非改回傳簽章＝不動既有 caller 的 unpack。caller 拿它把模型回的 `#N`
+      還原成真正的訊息物件（reply 錨定用）。
     - on_error：抓取失敗時呼叫（讓 caller 決定 log 等級/訊息）；失敗仍回已收集到的部分。
     """
     pids: Optional[list[int]] = [] if collect_participant_ids else None
@@ -185,9 +265,12 @@ async def fetch_recent_lines(
         if on_error is not None:
             on_error(exc)
     msgs.reverse()  # newest-first → 時序（舊→新）
+    _check_anchor_collision(msgs)  # #XXXX 指向兩個人時出警報（見函式說明）
 
     if thread_replies:
-        lines = _thread_render(msgs, tz, max_len, self_id)
+        lines, no_to_msg = _thread_render(msgs, tz, max_len, self_id)
+        if thread_map is not None:
+            thread_map.update(no_to_msg)
     else:
         # compact=False：ambient / 日記歷史上不壓縮空白，保留原貌（嚴格等價）；空訊息整則跳過
         lines = [
