@@ -25,6 +25,7 @@
 > 4. 保留可追溯來源，避免之後重複討論同一件事
 
 最後盤點紀錄（只保留近期；過往詳見 `TODO-completed.md` 各歸檔 entry）：
+- 2026-08-09（插話「談話自然」重構，**已實作・待部署驗證**；py_compile 全綠、146 測試全過、未 commit）：使用者提出兩個痛點——①一偵測到發言就馬上運算，沒等人講完；②聊天室常有多組人聊不同主題，機器人不知該加入哪個。**本輪量到基準**：自發插話「trace→送出」中位 **120.8s**（p90 165s、max 901s，n=3540）、PASS 率僅 15%、`ai_interactions` 5602 筆但負向反應只有 **13** 筆。**核心診斷**：問題不是它選錯主題，是**選的時候那條線還在、120 秒後講出來已經沒了**，而自發插話是裸 `channel.send` 無指向 → 必然像亂入；且節奏由冷卻計時器決定（每 5 分鐘準時報到）而非對話內容。**目標函數經使用者拍板＝自然/人性，GPU 節省降為副作用**。**四層方案**：L3 選線+reply 錨定（第一優先，讓「慢」變合理）、L4-b 接續自己的話、L2 debounce+typing 不搶話、L1 鉤子閘（**不用 LLM**＝結構演算法+少量 regex+k-NN，權重用 logistic regression 從 5602 筆學、標籤改用「插話後有沒有人接」而非 reaction）。順帶 `max_passes_per_burst` 3→1、`cooldown` 300→180。**使用者否決**：等鎖上限（GPU 本來就慢，放棄等於 /askai 忙時永遠不插話）、新鮮度丟棄（被接完也可以插，且丟棄＝白燒 120s 零產出）。**實作中修掉的缺陷**：L4-b 借用 directed 路徑會連 foreground 讓位/降溫硬閘/每小時上限一起繞過 → 加 `followup` 旗標分流閘門。**下一步**：`docker compose restart discord-bot` → 看 log 的「ambient 鉤子」分數分布調 `hook_threshold`、看「錨定=#N」確認模型有遵守選線契約。詳見 [自然插話重構區塊](#自然插話重構2026-08-09已實作待部署驗證)。
 - 2026-08-02（Telegram 漏收事件自動補掃，**已實作，待部署驗證**）：症狀＝「最新的 telegram 沒有轉發」。**relay 端無辜**（delivery_state 3119 筆、`last_polled_pk`=`max(id)`=12494，DB 內全送完）；**斷點在 scraper**——Telegram 已有 `Seele_WW_leak/9824`，DB 最大卻停在 **9823**（08-01 22:29:48+08）。用 `telegram_emoji_refetch` NOTIFY 測活性，scraper **秒回且成功即時抓回 9823** → 連線正常、非卡死。**根因**＝Telethon 漏派 NewMessage 事件（handler 完全沒被呼叫），而 [runner.py](src/telegram_scraper/runner.py) **只在啟動時掃一次歷史**，之後純靠即時事件 → 漏掉就永久漏掉。**非偶發**：以 `created_at - message_date > 5min` 回推「靠重啟才補進來」的比例 7/25 **28/63**、7/26 **59/121**，過去都是剛好有重啟蓋掉問題。**實作**＝每 15 分鐘（`catchup_interval_min`，可熱調整、`<=0` 停用）以各頻道 DB 最大 message_id 為基準做 `iter_messages(reverse=True, offset_id=基準, limit=200)` 增量重掃（已讀 Telethon 1.43.2 原始碼確認 reverse 下 `offset_id` 內部 +1＝不含基準、回傳舊→新保 PK 時序）；即時/補掃/refetch 共用 `process_lock` 序列化；單輪上限由舊往新掃故不留永久空洞；單頻道拋錯不拖垮迴圈。**順修** History log 把 Gamedataleak 訊息全標成 `source_channel=Seele_WW_leak` 的誤導 bug。**驗證**：py_compile 全綠、容器內 stub 煙霧測試 15 項全過、`get_peer_id` 與 DB chat_id 一致、實 DB 基準 Seele=9823/Gamedataleak=2669。**未 commit**，`runtime_config.json` 刻意未動（受保護檔，程式端預設已生效）。**下一步**：`docker compose restart telegram-scraper` → 立刻補回 9824 → 觀察 `[CatchUp]` log。詳見 [Telegram 漏收事件自動補掃區塊](#telegram-漏收事件自動補掃2026-08-02-已實作待部署驗證)。
 - 2026-07-25（Telegram Premium 自訂表情 → Discord App Emoji，**已實作，待部署驗證**）：症狀＝TG premium custom emoji 內嵌文字，relay 只留 fallback 一般 emoji。**實證 msg #9676**「3.6主线登场角色↓」9 個角色貼圖在 Discord 只剩 `🐦‍🔥🐦🤔🐉💫🌫🥛😭🦊`。**根因（DB 查證）**：scraper [_serialize_entities](src/telegram_scraper/handlers.py#L182) 只存 `{type,offset,length}`，**`document_id` 被丟**（#9676 的 9 筆 CustomEmoji 皆無 document_id）→ relay 無從還原。**定案**：寄存用 **Discord App Emoji**（bot 私有池 2000、不佔伺服器 50 格、成員隱形、跨伺服器）；**Phase 1 只做靜態 webp→PNG，動態 tgs/GIF 不做**。完整規劃見 [Telegram 自訂表情 relay 區塊](#telegram-premium-自訂表情--discord-app-emoji規劃定案)。**已實作（py_compile + 98 測試全過）**：scraper 補 document_id + 下載（gate 掉 History）+ runner LISTEN 重抓；db 新表 `telegram_custom_emoji`；relay `apply_message_entities`（spoiler+emoji 合併）+ `CustomEmojiResolver`（上傳 App Emoji）+ footer 加 `db#id`；`/resend_article` 加 `type:telegram`（notify 重抓→poll→渲染→送）。**下一步**：使用者重啟 discord-bot + telegram-scraper，`/resend_article id:9676 type:telegram` 實測。
 - 2026-07-03（他人印象被審核擋下 → 一鍵重填**已實作**，存檔即生效免重啟）：**現象排查**＝使用者填「對他人印象」後「什麼都沒跑出來」。查 [discord_bot.log](logs/discord_bot.log)：14:39:46 開 modal → 14:44:30 `intro_impression_moderation_blocked decision=reject reason=請勿使用迷因/定型文灌水 score_meme_spam=1.0 score_fake_story=1.0`，即**送出成功但被審核 reject**（[impression_moderation_service.py:186](src/services/impression_moderation_service.py#L186) meme_spam>0.6 硬擋）；被擋只回一則通用 ephemeral 警告（易被忽略、且不顯示真原因），原文全丟需重打。**需求**＝被擋時可重新複製/帶入表單（使用者反映判斷標準偏高）。**改法（僅改 code，未動門檻）**：[management_commands.py](src/commands/management_commands.py) ①`IntroImpressionModal.__init__` 加 `prefill_target/alias/habit/impression` kwargs → `UserSelect(default_values=[...])`(2.4+) + `TextInput(default=...)` 帶入上次全部欄位（含對象）；②新增 `ImpressionRetryView`（非持久化，timeout=600，一顆「✏️ 重新填寫（帶入剛剛內容）」按鈕，callback `send_modal` 帶 prefill）；③被擋分支改回覆＝顯示**實際 `moderation.reason`** + 原文（```code block``` 可複製）+ 掛 retry_view。py_compile PASS、discord.py>=2.6.4 支援全部用到的 API。**未 commit**。**下一步**：docker 重啟後實測「填梗被擋 → 看到原因+原文+按鈕 → 點按鈕帶入內容改寫再送」。**選配（未拍板）**：若仍覺門檻高，可再放寬 [impression_moderation_service.py](src/services/impression_moderation_service.py) 的 `score_meme_spam>0.6` / `score_fake_story>0.6` / `score_real_interaction<0.4` 閾值，或對特定情境放行。
@@ -986,8 +987,8 @@ id: ambient-chat
 type: TODO
 status: draft
 depends_on: [project-architecture, context-prompt-optimization]
-affects: [ai-chat-channel-memory]
-last_confirmed: 2026-06-20
+affects: [ai-chat-channel-memory, ambient-natural-rework]
+last_confirmed: 2026-08-09
 -->
 
 > **目標：** 在白名單的一般聊天頻道裡，AI（柔喵）**沒人叫也會偶爾冒一句**，讓群聊更活；被 **@ 或 reply 時一定回**。定位是「彩蛋式偶爾插話」，**不是**功能一那種「專屬頻道全程參與」。寧可少講講得巧，也不要每句都插變噪音。
@@ -1124,6 +1125,435 @@ last_confirmed: 2026-06-20
 | `src/settings/prompts/ambient_reply_prompt.txt`（新） | 輕量插話人設 | A |
 | `src/llm/context_retriever.py` | `retrieve_discord_context` 泛化吃 channel | B |
 | `src/llm/preference_extractor.py`（與功能一共用） | 12B 傾聽 → 偏好事實抽取（共享層） | C |
+
+---
+
+### 自然插話重構（2026-08-09，**已實作・待部署驗證**）
+
+<!-- @meta
+id: ambient-natural-rework
+type: DECISION
+status: confirmed
+depends_on: [ambient-chat]
+last_confirmed: 2026-08-09
+-->
+
+**起點**：使用者觀察「一偵測到發言就馬上運算」+「聊天室常有多組人聊不同主題，機器人不知該加入哪個」。
+**目標函數（使用者拍板）**：**談話自然、適當插話、有人性**；GPU 節省只是副作用，不是目標。
+
+#### 實測基準（本輪從 log / DB 量到，後續調整以此為準）
+
+| 指標 | 值 | 來源 |
+|---|---|---|
+| 自發插話「trace 建立 → 送出」中位 | **120.8s**（p10 95.2 / p90 164.7 / max 901.3） | `discord_bot.log` n=3540 |
+| 被 @ 同上中位 | 111.3s | n=367 |
+| PASS 率 | **15%**（146 reply / 26 pass） | `ambient_prompt.txt.1` |
+| `ai_interactions` 總筆數 | 5602（directed 894） | pgvector |
+| 有正向反應 / 負向反應 | 343（6.1%） / **13（0.2%）** | 同上 |
+
+#### 診斷（六個「不自然」的來源）
+
+1. **節奏由計時器決定，不由對話內容決定**：冷卻 300s 一到期，下一則就喚起生成，而 PASS 率僅 15% → 等於「每 5 分鐘準時報到講一句」。
+2. **120s 後裸送、無指向**（[ambient_reply.py:1032](src/llm/ambient_reply.py#L1032) `channel.send`）→ 多人多主題頻道必然像亂入。**這才是「不知道加入哪個主題」的真正成因**：它選的時候那條線還在，講出來時已經沒了。
+3. 第一則就開跑 → 上下文半截；`max_passes_per_burst=3` → 一段 burst 最壞燒 6 分鐘。
+4. **A↔B 對線**這種零成本可判的，現在花 120s 讓模型判（prompt 第一關 gate #3）。
+5. **講完就跑**：除非被 @，否則不理會別人對它的回應 → 沒有來回感。
+6. 等鎖排隊不計入 `pass_timeout_seconds`（[ambient_reply.py:988](src/llm/ambient_reply.py#L988) 註解已載明）→ 實測 max 901s。
+
+#### 四層方案（優先序＝對「自然」的貢獻，非改動大小）
+
+| 層 | 內容 | 關鍵決策 |
+|---|---|---|
+| **L3 選線 + reply 錨定**（第一優先） | chat_context 每行給 `#N`；prompt 輸出契約第一行 `#N`＝我在接第幾則；自發送出改 `message.reply(#N)` | **不走 code 端聚類**（embedding 分群易錯）；讓模型自己選線。120s 延遲下這是唯一能讓「慢」變合理的東西——引用著回話的人，晚兩分鐘正常 |
+| **L4-b 接續自己的話** | 它剛講完、下一則在接它的話 → 視為半 directed，允許馬上接續 | 現在完全沒有；最能製造「有在對話」的感覺 |
+| **L2 不搶話** | debounce 靜默 10~15s **且** 無人 typing（`on_typing`）；directed 不等 | `Intents.default()` 已含 typing，**不必改 intents**。typing 是加分訊號，收不到就退化成純時間 debounce。**不做** typing indicator 顯示（2 分鐘太假） |
+| **L1 鉤子閘** | 決定「值不值得花那 120s」 | 見下節。鉤子只管喚不喚醒模型，**開不開口仍由模型 `[PASS]` 決定** |
+
+順帶必做（理由是自然，不是省 GPU）：`max_passes_per_burst` **3 → 1**（第二輪要再等 2 分鐘，講出來跟現場脫節）。
+
+**使用者否決、不做（2026-08-09）**：
+- ~~等鎖上限 120s 超過放棄~~ → **不做**。GPU 本來就慢，放棄等於 `/askai` 忙的時段插話永遠不會發生；寧可晚講也不要不講。
+- ~~L4-a 新鮮度檢查（那條線被別人接完就丟棄）~~ → **不做**。使用者判斷「被接完也可以插話，沒差」；真人也常在別人答完後補一句自己的看法，且有 reply 錨定後遲到的傷害已經很小，丟棄反而是白燒 120s 卻零產出。L4 只保留 **b（接續自己的話）**。
+
+**完整保留、本次不動的既有機制**（曾在 to-be 流程圖被省略，非刪除）：foreground 讓位（`stream_busy` / `foreground_recently_active`，防 model swap ping-pong）、每小時上限、`judge_sampling_rate` 減壓閥、降溫硬閘 `_has_chime_backoff_signal`（尬聊/閉嘴 → 收手）、三層 context 組裝（persona / memory / signature tags / callback / style_refs / 圖片 / replied_to）、`[PASS]` 判斷、`_write_ambient_debug`、`record_interaction`、directed 優先答與 pending 吸收、reply 失敗 fallback `channel.send`。
+
+#### L1 鉤子的判斷方法（**不用 LLM**）
+
+寫死結構演算法（主）+ 極少量 regex + k-NN 檢索（軟），權重由歷史資料迴歸學出來。
+
+- **結構鉤子（零 I/O，只看 `author_id`/`created_at`/`reference_id`）**：正＝懸空問句（有人問、30s+ 沒人回）、獨白（最近 3 則同一人）、冷場後新起頭（隔 >10 分鐘）、熱聊後停頓（近 10 則跨度 <5min 且最後一則已過 60s）；**負＝A↔B 對線（近 6 則只有 2 人且平均間隔 <45s）→ 直接否決**。
+- **regex**：只放最高把握兩三條（沒 @ 但叫名字、明確徵詢）。刻意克制，避免膨脹成關鍵詞地獄。
+- **k-NN（非 LLM 推理）**：`get_text_embedding(近 3 則)` → `ai_interactions` 最近鄰 20 筆 → 「過去語意相近情境下插話被接的比率」當一個特徵。基礎設施（embedding 欄位 + hnsw + [fetch_similar_positive](src/llm/ai_interactions_store.py#L289)）已存在。
+- **組合**：負鉤子否決 → `sigmoid(w·features) >= threshold`。**threshold 是唯一旋鈕**（調高＝話少）。
+- **權重來源**：logistic regression，樣本＝5602 筆，特徵 <10 個。**係數可讀**＝看得出它為什麼開口，可定期重訓。
+
+**學習標籤換掉**：不用 reaction（負向僅 13 筆，「什麼時候該閉嘴」學不出來），改用「**插話後 5 分鐘內有沒有人接話/回它**」——真人插話成功的定義本來就是話被接下去。此標籤可從 `ai_interactions`(`reply_message_id`+`channel_id`+`ts`) 配合 chat 歷史庫**回溯計算 5602 筆全量**，不必等新資料。
+
+**已知統計限制**：5602 筆全是「已插話」樣本、無反例 → 學到的是「已想插話的情況下什麼形狀會被接」（ranking），不是「該不該插話」（causal）。可接受，但**門檻值必須上線後觀察調整，不能直接從迴歸結果讀出**。
+
+#### 自循環 feedback 盤點（2026-08-09）
+
+| 迴路 | 狀態 | 防護 |
+|---|---|---|
+| **回音迴圈**（回 bot／自己） | 既有，**不動** | 入口 `message.author.bot` 一律排除（[ambient_reply.py:644](src/llm/ambient_reply.py#L644)）；chat_history 裡自己的行標「(你自己)」 |
+| **style_refs 風格自我模仿**（插話→reaction→embedding→召回當靈感） | 既有，**不動** | 已有距離地板 + 抽樣 + `_RECENT_STYLE_REFS` 近期壓制；決策是「召回真句子不重寫」以免蒸笨 |
+| **AI 日記** | 既有，不構成迴路 | v1 定位「純表達、不改行為」 |
+| **★鉤子權重學習迴路**（本輪新引入，**最需注意**） | 新增 | 見下 |
+| **★L4-b 接續迴路**（本輪新引入） | 新增 | 見下 |
+
+**鉤子權重學習迴路的風險**：鉤子用「插話後有沒有人接」訓練 → 鉤子決定何時插話 → **只有鉤子放行的時機才會產生新樣本** → 新樣本再訓練鉤子。等於 exposure bias 自我強化：一旦鉤子偏好「懸空問句」，其他時機永遠沒機會被驗證，策略窄化成單調的一種開口方式。這也是前述 selection bias 的升級版——上線後 bias 會自己滾大。
+
+**防護＝ε-greedy 探索**：保留一小比例（`hook_explore_rate`，起步 ~10%）**無視鉤子分數強制放行**，專門收集「鉤子不看好的時機」樣本。這批探索樣本正是迴歸訓練缺的反例，讓模型有機會發現新的好時機。探索樣本在 `ai_interactions` 標記（加欄位或記在 `trace_id`），訓練時可分層。
+
+**L4-b 接續迴路的風險**：它講 → 有人回 → 它接 → 對方再回 → 它再接……理論上無限。**防護**：同一串接續次數上限（`followup_max_chain`，建議 2）、接續一樣吃每小時上限、且接續對象必須是**非 bot 的真人訊息**。
+
+#### 新增設定（`AmbientChatSettings`）
+
+`quiet_seconds`(10~15) / `typing_grace_seconds`(12) / `quiet_max_wait_seconds`(60) / `quiet_directed_seconds`(0) / `hook_threshold`(上線調) / `hook_knn_*` / `hook_explore_rate`(~0.1) / `followup_window_seconds`(L4-b) / `followup_max_chain`(2) / `max_passes_per_burst`(3→**1**) / `cooldown_seconds`(300→**180**)
+
+**冷卻 300 → 180s（使用者拍板 2026-08-09）**：撤掉等鎖上限與新鮮度丟棄後，節奏完全由冷卻決定，而 300s 會把鉤子閘架空（冷卻期內連鉤子都不看）。**物理下限約 120s**——生成一次 120s、一小時最多 30 次，冷卻低於生成時間會讓隊列越排越長。取 180s＝鉤子有發揮空間、又留安全邊際。**話多話少的主旋鈕改為 `hook_threshold`**，冷卻退為防洗版的安全網。
+
+#### 涉及檔案（本重構）
+
+| 檔案 | 改動 |
+|---|---|
+| `src/llm/ambient_reply.py` | debounce 迴圈、鉤子閘接入、`#N` 解析、reply 錨定送出、新鮮度檢查、L4-b |
+| `src/llm/ambient_hooks.py`（新） | 結構鉤子 + regex + k-NN + 迴歸打分 |
+| `src/llm/chat_line.py` | `#N` 從「僅被回覆過的行」改為每行都給（[chat_line.py:107](src/llm/chat_line.py#L107)） |
+| `src/settings/prompts/ambient_reply_prompt.txt` | 輸出契約加 `#N` 選線；「分不清接誰 → PASS」 |
+| `src/discord_bot.py` | 新增 `on_typing` handler |
+| `src/sys_settings/llm_settings.py` | 上表設定項 |
+| 離線分析腳本（新） | 回溯標記 5602 筆 + 交叉比對形狀 + 訓迴歸 |
+
+#### 實作紀錄（2026-08-09，使用者「全部實做」）
+
+**六項改動全部落地**（未 commit）：debounce＋typing、鉤子閘、每行 `#N`、選線＋reply 錨定、
+L4-b 接續、`max_passes` 3→1（另 `cooldown` 300→180）。
+
+前幾輪的未定案一併用建議值定案（都是可熱調的設定，上線後照實際狀況調）：
+`#N` **每行都給**（編號只算實際成行的訊息、跳過的空訊息不佔號，所以不會跳號）、
+`quiet_seconds=15`、`hook_threshold=0.5`、`hook_explore_rate=0.1`。
+
+**實作中發現並修掉的缺陷**：L4-b 借用 directed 路徑會**連 foreground 讓位、降溫硬閘、每小時
+上限一起繞過**——被 @ 有 must-reply 的免死金牌是因為使用者主動找它，但接續是它自己起的頭，
+不該享有同等待遇（會破壞防 model swap ping-pong 的保護，也會在群裡已喊停時還一路接下去）。
+修法：`_run_one_ambient_pass` 多收 `followup` 旗標，三種來源走不同閘門組合；`_note_sent`
+加 `cooldown=False` 讓接續計入每小時額度但不吃冷卻。
+
+**改動檔案**：
+| 檔案 | 內容 |
+|---|---|
+| `src/llm/ambient_hooks.py`（新） | 結構鉤子 + regex + k-NN + sigmoid 計分 + ε-greedy；失敗一律 fall-open（交給模型 `[PASS]` 把關，不讓鉤子壞掉就整個功能啞掉） |
+| `src/llm/ambient_reply.py` | `note_typing` / `_wait_for_quiet` / `_is_followup_to_bot` / `_parse_line_choice` / `_passes_content_gate`；入口加靜默期與 followup 分派；pass 接鉤子閘、reply 錨定送出 |
+| `src/llm/chat_line.py` | `_thread_render` 每行給編號 + 回 `{編號: 訊息}`；`fetch_recent_lines` 加 `thread_map` out-param（不改回傳簽章＝不動既有 caller） |
+| `src/llm/ai_interactions_store.py` | 加三欄（見下）；`mark_got_reply()`；`fetch_reply_rate_stats()` k-NN |
+| `src/settings/prompts/ambient_reply_prompt.txt` | 編號說明改「每行都有」；輸出契約加「第一行寫 `#N`」＋範例 |
+| `src/discord_bot.py` | `on_typing` handler |
+| `src/sys_settings/llm_settings.py` | 上節設定項 |
+| `src/test/test_ambient_natural.py`（新） | 35 個 hermetic 測試 |
+
+**驗證**：py_compile 全綠；容器內 `unittest discover` **146 測試全過**（既有 111 + 新 35）。
+新測試涵蓋每行編號/thread_map/↩指向/空訊息不佔號、`#N` 解析四種寫法、內容閘 burst 語意、
+五種結構鉤子 + A↔B 否決、ε-greedy、鉤子 fall-open。
+注意：`AmbientChatSettings` 是 pydantic **frozen**，測試要覆寫設定得用 `model_copy(update=...)`
+換掉 module 的 `_SETTINGS`，不能直接賦值。
+
+#### 資料庫異動（`ai_interactions` 一張表，只加欄不改既有資料）
+
+| 欄位 | 型別 | 語意 |
+|---|---|---|
+| `got_reply` | `BOOLEAN` **nullable** | 它這句話有沒有換到別人接話。NULL＝未觀測（上線前的 5602 筆、以及被 @ 的）／FALSE＝已觀測沒人接／TRUE＝有人接 |
+| `explore_sample` | `BOOLEAN NOT NULL DEFAULT FALSE` | ε-greedy 探索放行的樣本（鉤子分數沒過但硬放行）→ 訓練分層用 |
+| `followup` | `BOOLEAN NOT NULL DEFAULT FALSE` | 這筆是「有人接它 → 它再回」 |
+
+**命名的坑（2026-08-09 改名）**：原本叫 `followed_up`／`explore`。
+`followed_up` 字面像「這筆已被跟進處理」，而且跟 code 裡的 `followup`（**它**接續自己的話）
+主詞相反、必踩；`explore` 太抽象。改成 `got_reply`／`explore_sample`。
+另補 `followup` 欄——接續在 code 裡借用 directed 路徑，不獨立記一欄的話 **DB 分不出「被 @」
+和「接續」**。三種來源現在是：`directed=T`（被 @）／`followup=T`（接續）／兩者皆 F（自發）。
+
+`got_reply` 刻意 nullable：若給 `DEFAULT FALSE`，舊資料會被當成「全部都沒人接」毒化 k-NN 統計；
+順帶讓 `mark_got_reply` 的 `WHERE ... AND got_reply IS NOT NULL` 天然碰不到舊資料。
+k-NN 只吃**純自發**（`directed = FALSE AND followup = FALSE`）——被 @ 與接續的情境「被接」機率
+天生偏高，混進去會灌高分數。
+
+**沒有**新索引 / 改型別 / UPDATE 既有列；其他表未動。
+
+**改名的實際執行（2026-08-09）**：討論期間 bot 曾重啟過，已用舊名 `followed_up`／`explore`
+建好欄位並寫入少量真實資料 → 改名改用 **`ALTER TABLE ... RENAME COLUMN`** 就地改（metadata
+操作、不搬列、資料完整保留），而非「建新欄 + UPDATE 搬 + DROP 舊欄」。已執行完成，驗證
+`total=5631 / got_reply 已觀測 4 筆（TRUE 2）/ explore_sample 1 筆` 全數帶過來。
+`followup` 欄同時以 `ADD COLUMN IF NOT EXISTS` 補上。重啟時 `ensure_table` 的三行 ALTER
+會因為欄位已存在而全部跳過（idempotent）。
+
+**注意（一次性）**：rename 之後、重啟之前，記憶體裡跑的舊 code 其 INSERT 仍用舊欄名 →
+`record_interaction` 會寫入失敗（best-effort，只記 warning，插話本身照常送出）。空窗期損失
+僅為「幾筆插話紀錄」，重啟即恢復。
+
+**部署**：`docker compose restart discord-bot`。`ensure_table()` 在 on_ready 跑 idempotent ALTER
+自動補這三欄，不必手動改 DB。prompt 檔走 mtime 快取，但 code 改動要重啟。
+
+#### 提高發話頻率（2026-08-09，使用者要求「發話頻率高一點」）
+
+**真正的根因不是門檻設太高，是鉤子的時間門檻跟 debounce 打架**：`dangling_question` 要求
+「問句後 > 30s」、`lull_after_burst` 要求「最後一則後 > 60s」，但靜默期只等 `quiet_seconds`
+(15s) 就評估 → **熱聊後停頓永遠不可能命中**。實測 log 全是 `feats={}` `p=0.23` 就是這個。
+把鉤子接到 debounce 後面時漏掉了疊加效應；「等一下、對方可能還在打字」本來就已經由 typing
+偵測負責，鉤子不需要再等一次。
+
+**改法**：兩個門檻改成跟 `quiet_seconds` 連動（`quiet = max(5.0, _SETTINGS.quiet_seconds)`），
+另把 `hook_threshold` 0.5→**0.4**、`hook_explore_rate` 0.1→**0.15**。
+0.4 的意義：讓「冷場後新起頭」「熱聊後停頓」（分數 0.45）單獨命中就能開口，完全沒鉤子的
+平淡對話仍然閉嘴（0.23）。已加迴歸測試 `test_time_gates_track_quiet_seconds` 防止門檻再被寫死。
+
+**還想更多話的階梯**（依序試，每次只動一項才看得出效果）：
+`hook_threshold` 0.4→0.35 ／ `cooldown_seconds` 180→150（**下限約 120**＝一次生成的時間，
+低於它隊列只會越排越長）／ `hourly_cap` 20→30 ／ `hook_explore_rate` →0.2。
+
+#### 上線後實測發現（2026-08-09 重啟，台北 11:28）
+
+**功能全數驗證通過**：`thr=0.40` 生效；`PASS p=0.45 [lull_after_burst]` ← 修好的鉤子第一次
+命中（改門檻前永遠不可能）；`VETO:two_person_volley` 實際擋掉對線；`EXPLORE` 放行；
+`kind=spontaneous 錨定=#21` ← 模型遵守 `#N` 契約、reply 錨定生效；`kind=followup` +
+`接續 chain=1/2` ← L4-b 整條鏈通；DB 三欄寫入正確（`directed=f, followup=t` 分得開）。
+
+**實測抓到的 bug（已修）—— `mark_got_reply` 的 race**：`id 5666` 在 11:36:40 插話、11:36:41
+就被接話，但 `got_reply` 仍是 `f`；對照 `id 5667`（間隔 13 秒）就正確標成 `t`。原因是送出後
+`await _record_ambient_interaction()` 要先算 embedding 才 INSERT，而 `mark_got_reply` 1 秒後
+就跑 → UPDATE 影響 0 列。**rowcount=0 不是例外，靜默丟失、連 log 都沒有**。修法：加重試
+（4 次 × 2.5s，跑在 to_thread 裡不阻塞 loop）+ 檢查 rowcount + 全數失敗時 log.info。
+
+**實測抓到的設計失誤（已修）—— 人數不該當判準**：重建容器後 12 分鐘內 7 次判定，
+**6 次是 `VETO:two_person_volley`**（兩人 + 間隔 <45s → 直接否決）。小頻道常態就是兩三人在聊，
+等於全時間閉嘴。根因：把 prompt 第一關 gate #3 降級成純結構規則時，**把它的放行例外一起丟掉了**
+——原文是「判準是**話題封不封閉**，不是有沒有兩個人」，那是語意問題，結構規則模仿不來，
+硬擋只會把「兩人在聊一件全場都看得到的事」一起殺掉；而且它是硬否決、繞過模型判斷。
+
+**使用者拍板：「不需要限定幾個人聊」→ 整條負鉤子拿掉**（連降級成扣分的折衷版也不留）。
+現在 `_W` **全部是正權重、沒有任何負鉤子**，唯一的 veto 只剩 `no_messages`。
+分工變成：**鉤子只管「時機」（值不值得花那 ~120s 去想），「該不該插進這段對話」是語意問題，
+完整留給模型的第一關。** 加迴歸測試 `test_participant_count_is_never_a_gate`（兩人密集／兩人慢聊／
+三人 三種都必須不否決）。
+
+順帶把 `lull_after_burst` 的「有在聊」跨度 **300s → 600s**——原本的 5 分鐘是連珠炮節奏，
+小頻道每分鐘一兩則、10 則就超過 5 分鐘，等於這鉤子只服務最吵的頻道。
+
+**再一個盲點（已修）—— 鉤子全是「找空檔」導向，快節奏熱聊反而靜音**：使用者指出「快節奏對話
+也希望機器人能參與」。原本五個正鉤子（懸空問句／獨白／冷場／停頓）**全在找對話空隙**，熱聊
+進行中一個都不命中；而且 debounce 在熱聊時等不到「靜默 15s 且沒人打字」，只能靠
+`quiet_max_wait_seconds`(60s) 兜底放行，那時「已停下來」也不成立 → **熱聊必然 SKIP**。
+真人剛好相反，熱聊時插話才最自然。**新增 `active_chat`**（近 8 則擠在 3 分鐘內）權重 **1.2**。
+與 `lull_after_burst` 不衝突：那條看「已停下來」、這條看「節奏快」，同時成立＝剛熱聊完的空檔，
+疊加加分（0.73）是對的。測試 `test_active_chat_while_conversation_is_hot` / `test_sparse_chat_is_not_active`。
+
+**現行鉤子分數對照**（threshold 0.4，任一鉤子命中即可開口）：
+
+| 鉤子 | 權重 | 單獨命中分數 |
+|---|---|---|
+| 叫名字（沒 @） | 2.5 | 0.79 |
+| 懸空問句 | 2.2 | 0.73 |
+| 明確徵詢 | 1.3 | 0.52 |
+| 獨白 / **對話正熱** | 1.2 | 0.50 |
+| 冷場後起頭 / 聊完停頓 | 1.0 | 0.45 |
+| （什麼都沒命中） | — | 0.23 ✗ |
+
+**靜默期依對話節奏切換（使用者定調：「慢的時候等人講完才說話，熱絡的時候只看前面的就可以講」）**：
+原本 debounce 對兩種節奏用同一套規則，熱聊時「靜默 15s 且沒人打字」根本等不到，只能被
+`max_wait` 硬拖 60 秒，而那時對話又前進了一段。何況熱聊插話本來就不需要空檔——真人也是直接接話。
+
+| 節奏 | 判定 | 等法 |
+|---|---|---|
+| 慢 | 最近 5 則跨度 ≥ `hot_window_seconds`(120s) | 等 `quiet_seconds`(15s) **且**沒人在打字 |
+| 熱 | 最近 5 則落在 120s 內 | 只等 `hot_quiet_seconds`(3s)，**忽略 typing** |
+
+熱聊忽略 typing 是刻意的：熱聊時本來就一直有人在打字，等它等於不等。留 3 秒只是避免切在
+某人連發的中間。實作＝`_is_hot_conversation()` 讀 `state["msg_times"]`（deque(12)，每則訊息
+記一個 monotonic 時刻）。熱聊總延遲從「60s + 生成」降到「3s + 生成」≈ 2 分鐘。
+測試 `test_hot_conversation_uses_short_wait_and_ignores_typing` /
+`test_slow_conversation_still_waits_for_typing`。
+
+**`docker compose restart` 不套用 compose 變更（既有問題，非本次造成）**：啟動 gate 的 log 印的是
+`--- running startup tests ---`，但 docker-compose.yaml 寫的是 `--- running startup tests (auto-discover) ---`
+→ 容器跑的是**建立當時的舊 command**（手動測試列表，23 個）。從 2026-07-09 至今每次啟動都是
+`Ran 23 tests`，期間新增過測試檔（7/25、8/9）數字卻沒動。**程式碼本身是 bind mount 所以一直
+是最新的**，只有 gate 沒生效。要修：`docker compose up -d discord-bot`（重建容器）而非 restart。
+
+#### 清理與資料庫維護（2026-08-09，全實作後掃描）
+
+**移除 `judge_sampling_rate`（純機率減壓閥）**：`random.random() > rate` 就跳過評估——**隨機丟棄
+會丟掉好時機、留下爛時機**，它對「這一刻值不值得插話」一無所知。鉤子閘做同一件事但有判斷依據，
+完全取代之；兩者並存還會讓調校時分不清是哪個閥在作用（而且 `hook_explore_rate` 也是隨機、
+方向相反）。預設 1.0 本來就不作用 → 移除零風險。**要降載請調 `hook_threshold`，別再加機率閥。**
+
+**資料庫維護（已執行）**：
+1. `UPDATE ai_interactions SET got_reply=TRUE WHERE id=5666` —— 補回被上述 race 吃掉的標籤。
+2. 新增 **partial index**：
+   ```sql
+   CREATE INDEX idx_ai_interactions_embedding_observed
+     ON ai_interactions USING hnsw (embedding vector_cosine_ops)
+     WHERE got_reply IS NOT NULL AND directed = FALSE AND followup = FALSE;
+   ```
+   原因：`fetch_reply_rate_stats` 的 WHERE 只符合個位數列，但既有 hnsw 索引涵蓋全部 5600+ 列。
+   hnsw 是**近似**搜尋，掃描時把不符條件的 post-filter 掉 → 很可能掃到 `ef_search` 上限仍湊不滿
+   LIMIT，症狀是「明明有語意相近的樣本卻撈不到」。partial index 只索引真正會被查的列。
+   現在建成本最低（資料少），且隨 `got_reply` 累積越來越有價值。
+
+**掃描結論**：無孤兒 code（所有函式都有呼叫點）；DB 完整性正常（embedding 100% 覆蓋、
+`reply_message_id` 無空值、無 directed/got_reply 矛盾）。`HookDecision.score` 原本只寫不讀 →
+改印進 debug log（`s=+0.00 p=0.50`，調權重時 raw score 比 sigmoid 後直觀）。
+
+**Log rotate 不需另做**：`hook_debug` / `callback_debug` / `style_refs_debug` 都走
+`logging.getLogger("discord_bot")` → `discord_bot.log`，已吃到 [logger_config.py](src/utils/logger_config.py#L45)
+的 `RotatingFileHandler`（**20MB × 20 份**）；`_write_ambient_debug` 走
+[logger_factory.py](src/llm/logger_factory.py#L38)（5MB × 3）。**沒有重複造輪子的必要。**
+
+#### 「幾乎每個人的話都在回」（2026-08-09 實測回報）→ 修 L4-b 判準
+
+**先量再改**：一小時內 15 次插話，來源分布 **followup 9 / spontaneous 5 / directed 1**。
+鉤子閘那側其實正常（PASS 5、EXPLORE 3、SKIP 2、VETO 1）——**主因是接續，不是鉤子**。
+接續不經鉤子閘、不吃冷卻，chain 上限 2 → 每次自發插話後還能再連兩次。
+
+**根因是判準太寬**：原本只要「它發言後的第一則真人訊息 + window 內」就算接續，但**那則訊息
+未必是在回它**——它插完話、群裡繼續聊自己的，第一則就被當成「有人接我」，於是又講一句。
+
+**修法（三道判準，缺一不可）**：
+1. `followup_armed`——只認發言後第一則，用完即熄（原有）。
+2. window：`followup_window_seconds` **180 → 45 → 90**（45 實測太緊：修正後 51 分鐘內 5 次
+   自發插話、接續一次都沒觸發。真人看到回覆要讀、要決定回不回、還要打字，何況它講的是兩分鐘前
+   的話題。**收斂該靠下面第 3 條的對象判準，不是靠把時間壓短**）。
+3. **★發話者必須是它剛才回的那個人**（新增，最關鍵）。送出時記
+   `state["last_anchor_author_id"]`：自發＝它 reply 錨定那則的作者、被 @/接續＝跟它說話的人。
+   `followup_max_chain` 順帶 **2 → 1**（一來一回就好，別纏著同一個人連講三輪）。
+
+迴歸測試 `test_someone_else_talking_is_not_a_followup`。
+
+**如果還是嫌多，下一格**（一次只動一項才看得出效果）：`hook_explore_rate` 0.15→0.1 →
+`hook_threshold` 0.4→0.45 → `cooldown_seconds` 180→240。
+
+#### 「沒人聊天時不用硬回」（2026-08-09 使用者回報）
+
+**先量再改**（132 次真實評估，用「同一秒多筆＝測試」濾掉 63 筆測試污染的 log）：
+
+| 判定 | 次數 | | 鉤子命中 | 次數 |
+|---|---|---|---|---|
+| SKIP | 48 | | 無任何特徵 | 96 |
+| VETO | 43（舊版 two_person，已移除） | | `lull_after_burst` | 16 |
+| PASS | 35 | | `active_chat` | 11 |
+| EXPLORE | 6 | | `monologue` | 9 |
+| | | | `dangling_question` | 6 |
+| | | | **`cold_start`** | **1** |
+
+**順帶澄清一個假警報**：先前兩次看到 explore 比例 38%/60%（設定 15%）疑似有 bug，
+濾掉測試 log 後真實比例是 **11.1%**（6/54）——正常。**統計 log 時必須排除測試產生的行**
+（`test_strong_hook_passes` 會同時命中 dangling/monologue/named/solicit 四個，
+`test_explore_forces_pass` 會產生一筆無特徵 EXPLORE）。
+
+**兩個修正**：
+1. **移除 `cold_start`**（「冷場 >10 分鐘後有人開口就接」）——語意上正是「沒人聊天時硬回」，
+   而且 132 次評估只命中 1 次，移除無痛。測試改成
+   `test_long_silence_then_one_message_is_not_a_hook`（死寂後冒一句，**不該有任何鉤子命中**）。
+2. **ε-greedy 探索加活躍度前提**（`_channel_has_life`）：近 `explore_min_messages`(5) 則要落在
+   `explore_activity_window_seconds`(900s) 內才探索。原本探索完全不管有沒有人在，
+   「無特徵卻被探索放行」正是使用者感受到的來源；何況沒人在時探索也**學不到東西**
+   （標籤必然是「沒人接」）。測試 `test_explore_requires_the_channel_to_have_people`。
+
+修正後，安靜頻道基本上只在 **有人問了沒人回 / 有人叫它 / 明確徵詢** 時才開口。
+
+#### C：把鉤子量到的事實注入 prompt（2026-08-09 實作）
+
+**問題**：使用者問「這（判斷有沒有人想要回應）應該用 prompt 做嗎？模型有時候會誤判」。
+
+**釐清出的分工原則（重要，之後所有取捨都照這條）**：
+
+| | 鉤子（code） | 模型（prompt） |
+|---|---|---|
+| 做什麼 | **可觀察的行為痕跡**（量測） | **意圖與分寸**（判斷） |
+| 例 | 有問句、30s 沒人回；某人連講 3 則沒人接 | 他是想要回應還是不想被打擾？這時插話得體嗎？ |
+| 會不會錯 | 不會——它不判斷，只量測 | 會 |
+| 成本 | 零 | ~120s |
+
+判斷一件事該放哪層，就問「**這件事有沒有『判斷錯』的可能**」——有，是意圖，歸模型；
+沒有，只是數數字，歸 code。`two_person_volley` 的教訓正是 code 越界去猜意圖。
+反過來全給 prompt 也不行：每則訊息都要 120s 生成才知道要不要講，物理上做不到。
+
+**真正的誤判解方**：鉤子已經算好的事實**完全沒告訴模型**，模型得自己從一堆 `[HH:MM]`
+裡推導誰回了誰、隔多久——**那正是它最容易算錯的地方**。所以把事實卸給它。
+
+**模組化切法（使用者要求維持模組化，三選一後拍板）**：
+- **資料**（動態、每次不同）→ 只能在 bundle 層：`llm_service._build_prompt_bundle` 新增
+  `situation_signals` 參數與 `<situation_signals>` 區塊 + 一句中性 header。/askai 不傳就不出現
+  （與 `style_refs` 同模式）。
+- **使用規則**（靜態、要能熱改）→ 放 `ambient_reply_prompt.txt`。**理由是「誰在用」**：
+  `recalled_context`/`style_refs` 是 askai+ambient 共用 → 說明放共用的 llm_service 合理；
+  `situation_signals` **只有插話用** → 放插話專屬的行為檔才符合模組邊界。不另開新檔（粒度太細）。
+
+**訊號契約**：自然語言、**只陳述事實、不下結論、絕不含分數**。給分數或「建議你接話」
+會把模型變成橡皮圖章，判斷力就廢了。實際輸出長這樣：
+```
+・米拉#1111 連續講了 3 則都沒有人接話（最後一則：剛剛）。
+・阿華#3333 問了一句（3 分鐘前），到現在沒有人回應。
+・最近幾則是 阿明#1001 和 阿華#1000 兩個人在來回，節奏很快。
+```
+第三條是**負面事實**——當初 `two_person_volley` 的翻案：錯的是 code 拿它硬擋，
+陳述事實交給模型判斷「封不封閉」則完全正確，還省下它自己數作者/算間隔。
+
+**實作**：`_structural_features` 加 `obs` out-param（收集誰/多久/幾則，不改回傳簽章）；
+`describe_signals(obs)` 產生描述；`HookDecision.signals` 帶出；`ambient_reply` 傳給
+`generate_reply`；prompt 檔新增 `★ <situation_signals> 怎麼用` 四條（明示「不是叫你開口的指示」、
+獨白可能是想找人聊也可能是自言自語不想被打擾、要看內容再決定）。
+測試 5 個，含 **`test_signals_never_leak_scores_or_advice`** 釘住「不得出現建議/分數」的契約。
+
+#### prompt 內人名對照：裸 mention 修補 + 錨點撞號警報（2026-08-09）
+
+**使用者的問題**：「prompt 內可不可以對照？因為人物也都有可能改名。」
+
+**釐清出的核心**：**對照依據是 `#XXXX`（user_id 後四碼），不是名字。** 改名不會動到它，
+所以各區塊的名字**允許不同**——實測 persona card 用自填別名 `「柔喵, 阿喵#4635」`、
+chat_history 用 Discord 顯示名 `❤️柔柔喵❤️-時渺#4635`，靠同一個 `#4635` 就串得起來。
+`name_with_anchor` 當初的設計是對的。
+
+**討論掉的替代方案**：使用者提議「prompt 直接用 ID + 每天維護一張對照表」。不採用，因為
+①12B 比對 19 位數字容易看錯，4 碼好認得多 ②token 成本高（每行都帶）③要「看到 ID→查表→
+得名字」兩跳，小模型易掉 ④`guild.get_member()` 已經是**即時**的對照表（`intents.members=True`，
+member cache 常駐），改名當下就更新，比每天同步的表更即時、且零維護。
+
+**唯一被證實的破口＝裸 mention**：`<@436506192047636490>` 沒有任何錨點，模型只看到一串數字。
+實測 **chat_history 53%（10/19）、recalled_context 29%（5/17）** 的區塊含有它
+（[emoji_text_utils.py:8](src/llm/emoji_text_utils.py#L8) 的註解早就寫明「不動 mention」，一直沒人補）。
+
+**修法**（`chat_line.resolve_user_mentions`，接在 `semantic_message_text` 管線裡 →
+chat_history / recalled_context / 日記 / askai **一次全部受益**）：
+`msg.mentions`（discord.py 已解析，含已離開伺服器的 User）→ guild member cache → 純錨點。
+全程零 API、零 DB，`"<@" not in text` 有 fast path。
+**名字查不到也保留錨點**（`某人#6490`）——因為錨點才是對照依據，模型看到別行的 `克羅#6490`
+一樣對得上。實例：`那是 <@436506192047636490>` → `那是 克羅#6490`。
+
+**錨點撞號警報**（`_check_anchor_collision`）：兩人 user_id 後四碼相同時 `#XXXX` 會指向兩個人，
+而且無聲無息。實測 **78 位發言者目前 0 撞號**，但機率隨群成長上升（約 100 人 39%、150 人 67%
+會出現至少一組）→ 加 log warning，同一組只警告一次。
+**真撞到才處理**：加長到 5 碼會讓 persona card 文字裡已存的 4 碼對不上，要一併重建。
+
+測試 10 個（mention 解析 7、撞號 3），總數 178。
+
+#### 待觀察（上線後才調得準）
+
+1. `hook_threshold`：看 `discord_bot.log` 的「ambient 鉤子」行（`hook_debug=True`）分數分布，
+   話太少就調低、太吵調高。這是話多話少的**主旋鈕**。
+2. 模型遵不遵守 `#N` 輸出契約：看 `ambient_prompt.txt` 的 reply 段（記的是模型原樣輸出）與
+   `已插話 … 錨定=#N` log。不遵守就退回裸送，不會壞，但錨定效果會失效。
+3. `got_reply` 樣本累積：滿約 50 筆後 k-NN 特徵才會真的生效（`_knn_feature` 樣本 <5 回中性）。
+4. 之後才做：用 (特徵, got_reply) 跑 logistic regression 取代手設權重 `ambient_hooks._W`。
+5. **`got_reply` 有已知的保守偏差**：只認「它發言後的第一則」訊息（`followup_armed` 用完即熄），
+   所以「有人先聊別的、第二則才回它」不會被標記 → 系統性低估被接率。當初這樣設是為了 L4-b
+   不要亂接話；要放寬的話得把兩個用途拆開（L4-b 維持保守、標籤改成 window 內有人 reply/提到它），
+   但該多寬要等真實資料才知道，現在拆是憑空猜。
+
+#### 已作廢的中間結論（避免重複討論）
+
+- 「debounce 純 5 秒」→ 打字不是講話，改為**靜默 + typing 雙條件**。
+- 「以省 GPU 排優先序」→ 使用者拍板目標是自然，該排序作廢。
+- 「(A) trigger 往回找 vs (B) 內容閘看整段 burst」→ 有了選線機制後 trigger 是哪則不再關鍵，**(B) 定案**。
+- 「用 reaction 當學習標籤」→ 負向樣本僅 13 筆，改用「有沒有被接話」。
 
 ---
 
