@@ -4,13 +4,17 @@
 
 觸發哲學（由便宜到貴，任一關卡不過就 return，多數訊息連模型都不勞動）：
     硬性過濾（零成本）→ **靜默期**（等對話停一下再擷取脈絡）→ 內容閘（看整段 burst）
-    → 冷卻 / 每小時上限 → foreground 讓位 → 12B 判斷（回 / [PASS] 沉默）
+    → 冷卻 / 每小時上限 → foreground 讓位 → **鉤子閘**（零成本，決定值不值得花那 ~120s）
+    → 12B 判斷（回 / [PASS] 沉默）
 
 靜默期依對話節奏切換：慢節奏等到「夠久沒新訊息且沒人在打字」，熱聊只等一小段就開跑
 （熱聊等不到靜默，而且插話本來就不需要空檔）。一段 burst 合併成一次評估。
 
-「偶爾」感由冷卻 + 每小時上限保證；插不插由 12B 自己判斷，不擲骰。冷卻期內連判斷都不跑（省 12B）。
-`judge_sampling_rate`（預設 1.0）是純減壓閥：頻道太吵時才抽樣降載，預設不作用。
+節奏由「對話內容」決定，不由計時器決定：鉤子閘（`ambient_hooks`）算這一刻有沒有值得開口的
+訊號，`hook_threshold` 是話多話少的主旋鈕；冷卻退居防洗版的安全網。插不插最終仍由 12B 的
+`[PASS]` 說了算，鉤子只管「要不要喚醒它」。
+（歷史：曾有 `judge_sampling_rate` 純機率減壓閥，隨機丟棄評估——會丟掉好時機、留下爛時機，
+被有判斷依據的鉤子閘完全取代，已移除。）
 
 特例：被 @ 或 reply 機器人 → must-reply，覆蓋冷卻（但仍走同一條 Lemonade 單流）。
 
@@ -40,6 +44,7 @@ from typing import Optional
 import discord
 
 from llm.ai_interactions_store import fetch_similar_positive, record_interaction
+from llm.ambient_hooks import evaluate as evaluate_hook
 from llm.ambient_memory import enqueue_for_memory, recall_lines, recall_signature_tags
 from llm.chat_line import (
     fetch_recent_lines,
@@ -202,9 +207,12 @@ def _note_sent(tracker: dict) -> None:
 
 
 async def _fetch_recent(
-    message: discord.Message,
+    message: discord.Message, thread_map: Optional[dict] = None
 ) -> tuple[Optional[list[str]], list[int]]:
     """抓近期頻道訊息：回 (對話脈絡行[舊→新], 近期發言者 user_id)。
+
+    thread_map：傳 dict 進來會被填成 `{行編號: discord.Message}`——鉤子閘靠它拿到 Message
+    物件算結構特徵。
 
     對話脈絡含機器人自己的話以維持連續性；participant_ids 只收非 bot，給 persona 召回用。
     bot 自己的行會被標「(你自己)」（self_id），讓模型在混合脈絡裡認得哪幾行是自己講的，
@@ -219,7 +227,8 @@ async def _fetch_recent(
         max_len=200,
         collect_participant_ids=True,
         self_id=self_id,
-        thread_replies=True,  # 行加 reply 編號 threading（#N / ↩#M），讓「這/你/這貓」指代有錨
+        thread_replies=True,  # 每行加編號（#N / ↩#M）：指代有錨，也讓鉤子拿得到訊息物件
+        thread_map=thread_map,
         on_error=lambda exc: logger.debug("ambient 抓取頻道歷史失敗：%s", exc),
     )
     if message.author.id not in participant_ids:
@@ -988,10 +997,6 @@ async def _run_one_ambient_pass(
             _log_skip(cid, "前景活躍/串流忙，讓位")
             return
 
-        # 減壓閥（預設 1.0 不作用）：太吵時抽樣降載，避免每則都勞動 12B；插不插仍由 12B 決定
-        if _SETTINGS.judge_sampling_rate < 1.0 and random.random() > _SETTINGS.judge_sampling_rate:
-            _log_skip(cid, "減壓閥抽樣跳過")
-            return
     else:
         tracker = _get_tracker(bot, cid)
 
@@ -1008,7 +1013,8 @@ async def _run_one_ambient_pass(
     # persona card 對齊，多人也分得清）。guardrails 已說明 #XXXX 是內部碼、不可對外講出。
     asker_display_name = name_with_anchor(message.author)
 
-    chat_context, participant_ids = await _fetch_recent(message)
+    thread_map: dict = {}
+    chat_context, participant_ids = await _fetch_recent(message, thread_map)
 
     # 降溫硬閘：自發插話時，若近期對話出現對「插話本身」的不滿（尬聊/閉嘴/話太多…），直接收手，
     # 不勞動模型。沿用 chat_history 滑動視窗——抱怨滾出視窗後自然恢復，不需額外狀態。
@@ -1016,6 +1022,19 @@ async def _run_one_ambient_pass(
     if not directed and _has_chime_backoff_signal(message, chat_context):
         _log_skip(message.channel.id, "偵測到降溫訊號（尬聊/叫停）→ 收手")
         return
+
+    # ── 鉤子閘：值不值得花那 ~120s 去想。零成本結構演算法 + 少量 regex + k-NN，不動 LLM。
+    # 位置在這裡＝已有完整脈絡可算特徵，但還沒付出生成代價。開不開口最終仍由模型 [PASS] 決定，
+    # 所以門檻可以寬鬆；ε-greedy 探索比例會無視分數放行，避免鉤子偏好自我強化。
+    hook = None
+    if not directed:
+        recent_msgs = [m for _no, m in sorted(thread_map.items()) if not m.author.bot]
+        recent_msgs.append(message)  # thread_map 是 before=message，觸發訊息本身要補上
+        hook = await evaluate_hook(recent_msgs, situation=stripped)
+        if not hook.passed:
+            reason = hook.veto or f"p={hook.prob:.2f}<{_SETTINGS.hook_threshold}"
+            _log_skip(cid, f"鉤子閘未過（{reason}）")
+            return
 
     system_prompt = _load_ambient_prompt()
     trace_id = f"amb-{message.channel.id}-{int(time.time() * 1000)}"

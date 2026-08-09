@@ -308,7 +308,10 @@ class AmbientChatSettings(BaseSettings):
     # 觸發門檻：插不插由 12B 判斷，「偶爾」感由冷卻 + 每小時上限保證（不用機率）
     min_chars: int = 4               # 太短（貼圖式單字）不插
     max_chars: int = 300             # 太長（長篇貼文）不插
-    cooldown_seconds: float = 300.0  # 同頻道兩次自發插話的最短間隔（5 分鐘→真的「偶爾」）；冷卻期內連判斷都不跑
+    # 冷卻＝防洗版的安全網，不再是節拍器（話多話少的主旋鈕改為 hook_threshold）。
+    # 300→180：撤掉等鎖上限後節奏全由冷卻決定，300s 會把鉤子閘架空（冷卻期內連鉤子都不看）。
+    # 物理下限約 120s——一次生成實測中位 120s、一小時最多 30 次，冷卻低於生成時間會讓隊列越排越長。
+    cooldown_seconds: float = 180.0
     hourly_cap: int = 20             # 同頻道每小時自發插話上限（太低會整個小時靜默）
     # per-channel 序列處理：一輪 burst 內最多重評估幾次。3→1：第二輪要再等一次生成（~120s），
     # 講出來已跟現場脫節；靜默期上線後 burst 內的新訊息本來就會被合併進同一次評估。
@@ -332,8 +335,26 @@ class AmbientChatSettings(BaseSettings):
     # 看門狗：單一 pass 超過此秒數視為卡住 → 取消，避免一次生成卡死整個頻道的序列處理。
     # 要夠長以容納冷載入(model load 30-60s)+生成。
     pass_timeout_seconds: float = 180.0
-    # 減壓閥（預設關閉）：1.0 = 每則都讓 12B 判斷；頻道太吵、12B 負載過高時才調 < 1.0 抽樣降載
-    judge_sampling_rate: float = 1.0
+    # （已移除 judge_sampling_rate 純機率減壓閥：隨機丟棄評估會丟掉好時機、留下爛時機，
+    #   完全被下面有判斷依據的鉤子閘取代。要降載請調 hook_threshold，不要再加機率閥。）
+
+    # ── 鉤子閘：決定「值不值得花那 ~120s 去想」。不用 LLM，見 llm/ambient_hooks.py ──
+    hook_enabled: bool = True
+    # sigmoid 分數門檻；調高＝話少、調低＝話多（話多話少的**主旋鈕**）。
+    # 對照現行權重的實際分數（單一鉤子命中）：
+    #   什麼都沒命中 0.23｜聊完停頓 0.45｜獨白・對話正熱 0.50｜徵詢 0.52
+    #   ｜懸空問句 0.73｜叫名字 0.79　　（可疊加，例如熱聊+停頓＝0.73）
+    # 取 0.4 的意義：**任一個鉤子命中就能開口**，只有「完全沒訊號的零星對話」才閉嘴（0.23）。
+    hook_threshold: float = 0.4
+    hook_explore_rate: float = 0.15  # ε-greedy：無視分數強制放行的比例，專收「鉤子不看好」的樣本。
+    # 探索的前提：頻道最近真的有人在。沒人聊天時探索既學不到東西（沒人在，標籤必然是
+    # 「沒人接」），又會在死寂的頻道突然冒一句——實測那正是「沒人聊天也硬回」的來源。
+    explore_min_messages: int = 5           # 近期至少要有這麼多則
+    explore_activity_window_seconds: float = 900.0   # 且第 N 則新於此秒數（15 分鐘）
+    hook_knn_enabled: bool = True    # k-NN 特徵：過去語意相近情境下插話被接的比率（一次 embedding）
+    hook_knn_top_k: int = 20
+    hook_knn_max_distance: float = 0.50
+    hook_debug: bool = True          # 把每次鉤子計分的細項寫進 discord_bot.log（調門檻用）
 
     # 與 /askai 的讓位：foreground 活躍此秒數內，背景插話暫停（防換模型 ping-pong）
     askai_grace_seconds: float = 90.0
