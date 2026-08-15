@@ -122,6 +122,12 @@ services:
         target: /etc/searxng
     environment:
       - TZ=Asia/Taipei
+      # 官方 entrypoint 預設會 `chown -R searxng:searxng /etc/searxng`，把 bind mount 出來的
+      # ./searxng 搶成 uid 977 → 主機端要 sudo 才改得動設定。關掉它，設定檔就能用一般身分編輯。
+      # 安全：SearXNG 只「讀」settings.yml（entrypoint 的 setup() 只在檔案不存在時才從樣板產生），
+      # 而且主程序是以 root 跑，讀 644 的檔案沒有問題。關掉只會在啟動 log 印一行 warning。
+      # 注意：改這行要 `docker compose up -d searxng` 重建容器，`docker restart` 不會套用新 env。
+      - FORCE_OWNERSHIP=false
       - SEARXNG_BASE_URL=http://searxng:8080/
       - SEARXNG_SECRET=${SEARXNG_SECRET:-change_me_please_use_long_random_string}
       - UWSGI_WORKERS=${SEARXNG_WORKERS:-2}
