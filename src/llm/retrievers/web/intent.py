@@ -1,9 +1,10 @@
 """意圖偵測 + 查詢整理 + 類別路由：純 regex、零外部依賴。
 
-三個獨立責任：
+四個獨立責任：
 1. `should_search`：判斷要不要搜（yes/no + 觸發原因）
 2. `clean_query`：剝除指令性贅字，得到真正要送 SearXNG 的字串
 3. `classify_route`：依關鍵字決定 categories / time_range / language
+4. `focus_news_query`：新聞類問句剝成關鍵字（無主題的換成廣義錨字）
 
 合併為 `IntentResult`，方便 caller 一次拿到所有所需資訊。
 """
@@ -139,7 +140,40 @@ _STRIP_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\s+"),
 )
 
+# 新聞問句 → 關鍵字：news 引擎比對的是標題字面，餵整句問句不是回 0 筆，就是回一堆
+# 不相關的填充頭條（「比特幣現在多少」→ 慈濟／日本豪雨），後者最難察覺。剝完沒剩主題的
+# 純問句（「今天有什麼新聞」）改用廣義錨字，否則連 general 引擎都只回得出新聞網站首頁。
+# 取捨：單字雜訊（有／到／說／講）會誤傷專名（「有線電視」→「線電視」），但不收會讓
+# 「有講到長榮」這種殘渣毒化查詢；結果偏少時另有 general fallback 兜底。
+_NEWS_QUERY_NOISE = re.compile(
+    r"今天|今日|本日|昨天|昨日|最近|最新|近期|現在|目前|"
+    r"新聞|頭條|時事|消息|報導|大事|情況|狀況|資訊|相關|重點|整理|"
+    r"有沒有|有什麼|有哪些|什麼|哪些|怎麼樣|怎樣|如何|多少|發生|事情|重要|值得|"
+    r"請問|請|幫我|想|知道|看看|一下|告訴我|我|你|"
+    r"的|嗎|呢|了|是|在|可以|能|幫|找|查|說|講|到|過|有|吧|啊|呀|"
+    r"[\s，,、。？?！!~～]"
+)
+_NEWS_ANCHOR_QUERY = "台灣 新聞"
+
+
+def focus_news_query(cleaned: str, categories: str | None) -> str:
+    """新聞類問句 → 關鍵字：剝掉問句雜訊；剝完沒主題就換成廣義錨字。
+
+    只對 `categories == "news"` 生效——通用路由（天氣、遊戲改版）走的是能吃長句的
+    general 引擎，照原字搜即可。
+    """
+    if categories != "news" or not cleaned:
+        return cleaned
+    topic = _NEWS_QUERY_NOISE.sub("", cleaned).strip()
+    return topic if len(topic) >= 2 else _NEWS_ANCHOR_QUERY
+
+
 # 路由規則（順序敏感：愈特定愈前）
+#
+# ⚠ news 路由不可用 time_range="day"（實測直接回 0 筆，勿改回去）：bing news 會送
+# `qft=interval="4"`，Bing 對此回空 body → 引擎拋 ParserError；duckduckgo news 沒宣告
+# time_range_support → SearXNG 帶任何 time_range 就整個跳過它。兩根柱子同時倒。
+# general 引擎不受影響（支援 day），所以天氣 / 體育即時那幾條 general+day 照留。
 #
 # 為什麼遊戲改版類走通用 engines 而不是 news：
 # 實測 Google News / Bing News 在 zh-TW 對遊戲垂直站（巴哈、4Gamers、遊戲角落）
@@ -155,10 +189,10 @@ _STRIP_PATTERNS: tuple[re.Pattern[str], ...] = (
 # 「網友說」歷史上只在 Reddit route 出現、未在 HARD 裡，因此維持 inline
 # 不收進 _TOPIC_REDDIT，避免擴張 HARD 觸發行為。
 _ROUTE_RULES: tuple[tuple[re.Pattern[str], str | None, str | None, str | None], ...] = (
-    # 國際金融題材：news + 當日 + 英文 locale（最特定，需排在股價類之前）
-    (re.compile(_alt(_TOPIC_FINANCE_INTL), re.IGNORECASE), "news", "day", "en"),
-    # 股價類：news + 當日（中文圈題材：台股、港股、日股、陸股、匯率等）
-    (re.compile(_alt(_TOPIC_FINANCE_ZH)), "news", "day", None),
+    # 國際金融題材：news + 一週 + 英文 locale（最特定，需排在股價類之前）
+    (re.compile(_alt(_TOPIC_FINANCE_INTL), re.IGNORECASE), "news", "week", "en"),
+    # 股價類：news + 一週（中文圈題材：台股、港股、日股、陸股、匯率等）
+    (re.compile(_alt(_TOPIC_FINANCE_ZH)), "news", "week", None),
     # 天氣類：通用 + 當日
     (re.compile(_alt(_TOPIC_WEATHER)), None, "day", None),
     # 遊戲改版 / 軟體版本：通用 + 一週（news engines 對這類覆蓋太差）
@@ -172,11 +206,13 @@ _ROUTE_RULES: tuple[tuple[re.Pattern[str], str | None, str | None, str | None], 
     # 體育報導 / 花絮：news + 一週（news engines 對足球 / NBA 等「報導類」覆蓋良好；
     # 但對賽程 / 比分這種即時數據覆蓋差，那類已由上一條 general 規則接走）
     (re.compile(_alt(_TOPIC_SPORTS), re.IGNORECASE), "news", "week", None),
-    # 今日新聞：news + 當日（「今天 / 今日 / 本日」明確指當天，time_range 收到 day；
-    # 排在下面 week 規則之前，「今天新聞」這種同時帶兩組的 query 才會落在 day）
-    (re.compile(_alt(_TRIGGER_NEWS_TODAY)), "news", "day", None),
-    # 純新聞 / 政治時事 / 最新 / 昨日：news + 一週
-    (re.compile(_alt(_TRIGGER_NEWS_TIME, _TOPIC_NEWS_PURE)), "news", "week", None),
+    # 新聞 / 政治時事 / 今日 / 最新 / 昨日：news + 一週。
+    # 「今天」原本另走 day，因上方 ⚠ 改 week 後與本條相同，故合併；新鮮度改由引擎排序負責
+    # （bing news 不回傳 publishedDate，我們本來也無法自行過濾日期）。
+    (
+        re.compile(_alt(_TRIGGER_NEWS_TODAY, _TRIGGER_NEWS_TIME, _TOPIC_NEWS_PURE)),
+        "news", "week", None,
+    ),
     # Reddit / 鄉民 / 網友討論（網友說 inline，原因見上方說明）
     (re.compile(_alt(_TOPIC_REDDIT) + r"|網友說", re.IGNORECASE), "social media", None, None),
 )
@@ -244,6 +280,8 @@ def should_search(question: str) -> IntentResult:
     text = question.strip()
     cleaned = clean_query(text)
     cat, tr, lang = classify_route(text)
+    # 新聞類問句剝成關鍵字（無主題的換成廣義錨字），否則 news 引擎搜不到或回填充垃圾
+    cleaned = focus_news_query(cleaned, cat)
 
     if len(text) < 6:
         hard = _SEARCH_HARD.search(text)

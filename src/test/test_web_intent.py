@@ -21,7 +21,12 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from llm.retrievers.web.intent import classify_route, should_search
+from llm.retrievers.web.intent import (
+    _ROUTE_RULES,
+    classify_route,
+    focus_news_query,
+    should_search,
+)
 
 
 class SportsTriggerTests(unittest.TestCase):
@@ -137,17 +142,21 @@ class SessionWordTriggerTests(unittest.TestCase):
 
 
 class NewsTimeRangeTests(unittest.TestCase):
-    """新聞時序錨字拆分：今日 → news/day，新聞/最新/昨日 → news/week。"""
+    """新聞時序錨字一律 news/week——**news 路由不得使用 day**（2026-08-15 修）。
 
-    def test_today_news_routes_day(self):
-        # 使用者講明「今天 / 今日 / 本日」就該收到當日視窗，而非整週。
+    原本「今天 / 今日 / 本日」另走 day，看起來合理但實測直接回 0 筆：
+    bing news 在 day 濾鏡下拿到空 body（lxml ParserError），duckduckgo news 的
+    duckduckgo_extra engine 沒宣告 time_range_support、被 SearXNG 整個跳過。
+    """
+
+    def test_today_news_routes_week_not_day(self):
+        # 回歸釘樁：「今天」不能再落到 day，否則 news 引擎全滅。
         for q in ["今天新聞", "今日頭條", "本日重點新聞"]:
             with self.subTest(q=q):
-                self.assertEqual(classify_route(q), ("news", "day", None))
+                self.assertEqual(classify_route(q), ("news", "week", None))
 
-    def test_today_plus_news_word_still_day(self):
-        # 「今天新聞」同時帶今日 + 新聞兩組，today 規則須排在前 → day。
-        self.assertEqual(classify_route("今天有什麼新聞"), ("news", "day", None))
+    def test_today_plus_news_word_routes_week(self):
+        self.assertEqual(classify_route("今天有什麼新聞"), ("news", "week", None))
 
     def test_recent_words_stay_week(self):
         # 新聞 / 最新 / 昨天 / 昨日 維持 news + 一週。
@@ -181,9 +190,10 @@ class WeekVariantTests(unittest.TestCase):
 class RegressionTests(unittest.TestCase):
     """既有行為不受本輪改動影響。"""
 
-    def test_finance_still_routes_news_day(self):
+    def test_finance_routes_news_week(self):
+        # 原本斷言 day，實測 台股 day=0 / week=10、美股 day=1 / week=10 → 改 week。
         cat, tr, _lang = classify_route("台積電今天股價")
-        self.assertEqual((cat, tr), ("news", "day"))
+        self.assertEqual((cat, tr), ("news", "week"))
 
     def test_never_chitchat_not_triggered(self):
         result = should_search("早安你今天好嗎")
@@ -193,6 +203,78 @@ class RegressionTests(unittest.TestCase):
     def test_time_word_without_action_verb_not_triggered(self):
         # 「剛才」在 SOFT 但需配動作詞；翻譯請求不應觸發搜尋。
         self.assertFalse(should_search("幫我把剛才那段話翻成英文").triggered)
+
+
+class NewsRouteNeverUsesDayTests(unittest.TestCase):
+    """結構性釘樁：**任何** news 路由都不得帶 time_range="day"。
+
+    逐條測「今天新聞」「台股」只擋得住已知的三條；這條掃整張路由表，
+    以後新增 news 規則時手滑寫 day 也會被擋下來。day 為什麼會死見 intent.py 的 ⚠ 註解。
+    """
+
+    def test_no_news_rule_uses_day(self):
+        offenders = [
+            (pattern.pattern[:40], tr)
+            for pattern, cat, tr, _lang in _ROUTE_RULES
+            if cat == "news" and tr == "day"
+        ]
+        self.assertEqual(
+            offenders, [],
+            "news 路由不能用 time_range=day（會讓 bing news / duckduckgo news 全滅）",
+        )
+
+    def test_general_routes_may_still_use_day(self):
+        # general 引擎支援 day（實測 10 筆），天氣 / 體育即時那幾條照留，不該被一起改掉。
+        self.assertEqual(classify_route("今天天氣如何"), (None, "day", None))
+        self.assertEqual(classify_route("今天世足賽場次"), (None, "day", None))
+
+
+class NewsQueryFocusTests(unittest.TestCase):
+    """新聞問句 → 關鍵字。
+
+    news 引擎比對的是標題字面，餵整句問句不是回 0 筆就是回一堆不相關的填充頭條。
+    實測（前 5 筆有幾筆真的提到主題）：剝後 7 勝 3 平 0 敗。
+    """
+
+    def test_topicless_question_falls_back_to_anchor(self):
+        # 剝完沒剩主題 → 廣義錨字，否則連 general 引擎都只回得出新聞網站首頁。
+        for q in [
+            "今天有什麼新聞",
+            "最近有什麼新聞",
+            "今天的新聞",
+            "有什麼新聞嗎",
+            "請幫我找一下今天有什麼新聞",  # 回歸實例：實際只撈到 1 筆的那句
+        ]:
+            with self.subTest(q=q):
+                self.assertEqual(should_search(q).cleaned_query, "台灣 新聞")
+
+    def test_question_is_stripped_down_to_topic(self):
+        # 有主題就剝成主題字本身（實測 台積電 0→5 筆相關、長榮 0→4）。
+        for q, expected in [
+            ("台積電最新新聞", "台積電"),
+            ("美股現在如何", "美股"),
+            ("鴻海最新消息", "鴻海"),
+            ("台股", "台股"),
+        ]:
+            with self.subTest(q=q):
+                self.assertEqual(should_search(q).cleaned_query, expected)
+
+    def test_topic_survives_even_with_leftover_particles(self):
+        # 殘渣可以留，主題不能掉——這是「有講到長榮」那類句子的回歸。
+        cleaned = should_search("昨天的新聞有講到長榮嗎").cleaned_query
+        self.assertIn("長榮", cleaned)
+        self.assertNotEqual(cleaned, "台灣 新聞")
+
+    def test_non_news_route_is_untouched(self):
+        # 只對 news 路由生效；通用路由（遊戲改版）走 general 引擎，吃得下長句。
+        self.assertEqual(
+            should_search("鳴潮什麼時候改版").cleaned_query, "鳴潮什麼時候改版"
+        )
+
+    def test_helper_is_news_only(self):
+        self.assertEqual(focus_news_query("今天有什麼新聞", None), "今天有什麼新聞")
+        self.assertEqual(focus_news_query("今天有什麼新聞", "news"), "台灣 新聞")
+        self.assertEqual(focus_news_query("台積電最新新聞", "news"), "台積電")
 
 
 if __name__ == "__main__":
