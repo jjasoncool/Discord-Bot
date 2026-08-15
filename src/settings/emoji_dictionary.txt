@@ -237,3 +237,15 @@ yang_confuse = think
 # === 自動偵測 2026-07-28（待填寫） ===
 wfrog_stock_decline = agree
 wfrog_stock_rise = negative
+
+# === 自動偵測 2026-08-10（待填寫） ===
+Dorothy_love = agree
+Dorothy_question = neutral
+Dorothy_wink = laugh
+
+# === 自動偵測 2026-08-15（待填寫） ===
+Dorothy_chaos = negative
+Dorothy_cry = negative
+Dorothy_fear = negative
+Dorothy_grab = agree
+Dorothy_laugh = laugh
