@@ -1535,6 +1535,114 @@ chat_history / recalled_context / 日記 / askai **一次全部受益**）：
 
 測試 10 個（mention 解析 7、撞號 3），總數 178。
 
+#### 動作描述氾濫 + 色色尺度放寬（2026-08-15）
+
+**動作氾濫**：`ambient_model` 換 `Qwen3.8-27B` 後幾乎每則都用 `*尾尖輕輕一掃*` 起手
+（實測 08-09~14 舊模型 2/319，08-15 新模型 4/11 且連四則，連「介紹一下鳴潮」也加）。
+**根因不是模型壞掉**：prompt 有四處寫「可以用動作」、零處寫「什麼時候不該用」。舊模型指令
+跟得鬆等於沒看見，新模型跟得緊就把「允許」讀成「預設」。
+→ **通則：換模型時，prompt 裡所有「沒寫界線的允許」都會被重新詮釋一次。**
+
+**改法**：規則進 `persona_guardrails.txt`【動作描述】（預設不寫 → 只有「對方先做指向你的肢體
+互動／挑逗」或「對方低潮需要無聲陪伴」可用 → 一則一個、上則用過這則不用）；examples 補範例 15。
+
+**單一來源原則（使用者當場糾正，已定案）**：初版在其餘三處都加「——見 guardrails【動作描述】」，
+太冗長。**規則只寫 guardrails 一份，其他檔案只把原本的「鼓勵」拿掉，不重述也不指路**——
+guardrails 本來就跟它們組在同一個 system prompt 裡，指路等於對著同一份文件說「請見同一份文件」。
+
+**色色尺度**：原本「露骨的器官、體液、性行為過程」整包在【紅線】。使用者拍板放寬器官 → 移出
+紅線、另立【色色尺度（分寸，不是紅線）】：器官可直接講／指名，但不寫成色情敘事（性行為過程
+逐步描寫、體液細節仍不寫）。**紅線原封不動**（未成年、非合意、真實公眾人物、不主動把在場成員
+當性對象、降級觸發）。ambient / askai 兩份 prompt 同步改口徑，避免互相打架。
+
+#### 新聞檢索修復（2026-08-15，已實作）
+
+**現象**：問「今天有什麼新聞」只回 1 則。模型沒問題，是檢索層。
+
+**真因①：我們自己送的 `time_range=day` 讓 news 引擎回 0 筆**（q=台積電）：
+
+| 引擎 | 不設 | week | day |
+| --- | --- | --- | --- |
+| bing news | 10 | 10 | **0** |
+| duckduckgo news | 30 | **0** | **0** |
+
+機制（已讀 SearXNG 2026.8.14 原始碼）：bing news 宣告支援 day，但 Bing 對 `qft=interval="4"`
+回**空 body** → `bing_news.py:85` 拋 lxml ParserError；duckduckgo news 用的 `duckduckgo_extra`
+**整份沒宣告 `time_range_support`**（預設 False）→ `processors/abstract.py:264` 把它**整個跳過**。
+受害的是三條 news+day 路由（今日新聞 / 台股 / 美股+加密幣）。general+day 不受影響，照留。
+
+**真因②：news 引擎比對標題字面，餵問句會回 0 筆或「填充垃圾」**（「比特幣現在多少」回 4 筆
+慈濟／日本豪雨／韓國女孩）。剝成關鍵字再搜，10 題以「前 5 筆有幾筆真的提到主題」計分：
+**剝後 7 勝 3 平 0 敗**（台積電 0→5、美股 0→5、長榮 0→4）。剝完沒主題就換錨字「台灣 新聞」。
+（使用者判讀「n=1 也沒比較差」正確 → 評分標準從**筆數**改成**相關筆數**。）
+
+**真因③：既有 general fallback 門檻是 `not results`**，救不到「只吐 1 筆」——這是看到 1 則的直接原因。
+
+**已實作**：① 三條 news 路由 day→week（`_ROUTE_RULES` 上方留 ⚠ 註解）② `focus_news_query()`
+③ `fallback_min_results=3`，fallback 改成**合併**不取代 ④ news 路由只送 engines 不送 categories
+（同送取聯集會把壞引擎叫來陪跑；實測 0.68s→0.16s、結果一樣）。
+
+**驗收**：四句端到端各 5 筆相關（改前 1／0／0／4 筆全錯）。測試 185 全綠，含結構釘樁
+`test_no_news_rule_uses_day` 掃整張路由表。
+
+**已知殘留**：
+- **引擎總體檢**（2026-08-15，每個引擎中文查 3 次，全 0 再補測英文 3 次；結果完全一致無 flaky）：
+
+  | 引擎 | 中文×3 | 英文×3 | 判定 |
+  | --- | --- | --- | --- |
+  | duckduckgo / duckduckgo news | 10 / 30 | — | ✅（news 版帶 time_range 會被跳過） |
+  | bing / bing news | 7 / 10 | — | ✅ 主力 |
+  | reuters | 0 | 20 | ✅ 英文站，**不是壞掉**（先前誤判） |
+  | wikinews | 5 | — | ⚠️ 有回但只有簡中舊文 |
+  | google / google news / startpage / startpage news | 0 | 0 | ❌ CAPTCHA（google 通用版是靜默 0 筆） |
+  | brave / brave.news | 0 | 0 | ❌ 429 限流 |
+  | yahoo news | 0 | 0 | ❌ ALPN（見下），無解 |
+  | qwant news | 0 | 0 | ❌ SearXNG parser bug `qwant.py:222` |
+
+  處置：① `searxng/settings.yml` 那 8 個加 `disabled: true`（該檔 uid 977 所有，須使用者自行套用 +
+  重啟 searxng）② **`default_engines` / `news_engines` 也要同步砍**——因為明確指定 `engines=` 會
+  **繞過** disabled（`webadapter.parse_generic` 只有 category 路徑才過濾），只改 settings.yml 沒用。
+  現值：`default_engines="bing,duckduckgo"`、`news_engines="bing news,duckduckgo news,reuters"`。
+
+- **google / google news 的真正死因（都不是被封 IP，也不是 CAPTCHA）**：我們的出口是 HiNet 高雄
+  浮動住宅 IP，用 curl／httpx 直接打 `google.com/search` 與 `news.google.com` **都是 HTTP 200**。
+  - **google（通用）**：Google 回 200 但內容是 **JS 重導向殼**（頁面只有 3 個 `<a>`、0 個 `data-ved`，
+    正文是「如果系統沒有在數秒鐘後將您重新導向…」）。SearXNG 的 xpath 命中 0，而它的 CAPTCHA 判定
+    要求「<2000 bytes 且含 /sorry/」，這頁 92KB 又不含 → 不算錯誤 → **安靜回 0 筆**。
+  - **google news**：`engine_traits.json` **根本沒有 zh-TW 的 ceid 條目**（只有 zh-HK / zh-CN），
+    fallback 後算出 `hl=zh-Hant-HK` 這種無效值 → Google News 回 **302 導去 CONSENT 對話框**
+    （SearXNG 官方文件自己就警告 hl 沒設對會被導到 CONSENT）→ 而 `detect_google_sorry` 有一條
+    `if resp.status_code == 302: raise CaptchaException` → **誤判成 CAPTCHA**、停權 3600 秒。
+    實測 `hl=zh-Hant-TW / zh-Hant-HK / zh-Hans-CN` 全 302，`hl=zh-TW / en-US` 都 200 →
+    **所有中文語系都中招，只有 en 能用**。（parser 那個 issue #5852 已於 2026-03 由 PR #5984 修掉，
+    我們這版有修好的 xpath，不是同一件事。）
+  - 結論：不改 SearXNG 原始碼就救不回中文的 Google 系。業界通例也是放棄 Google 改用還能用的引擎。
+
+  因為 news 路由用 `time_range=week`，duckduckgo news 每次都被跳過 → **實際只有 bing news 在跑**。
+  想要兩引擎備援就得拿掉 time_range（35 筆 vs 10 筆，代價是可能混進較舊的新聞）。
+
+- **yahoo news 為什麼救不回來**（容器內同一支 Python 交錯測 6 輪，穩定重現）：
+  不送 ALPN → 6/6 成功 200；ALPN=`[h2, http/1.1]` → 6/6 BadStatusLine（＝SearXNG log 的
+  「server has disconnected」）；ALPN=`[http/1.1]` → 6/6 HTTP 500。
+  而 httpx **一定會送 ALPN**（`http2=True` 送 h2+1.1、`False` 送 1.1），所以
+  **`enable_http2: false` 也救不了**。排除項：不是 IP（容器與 host 出口 IP 同為一個）、
+  不是 UA（六種 SearXNG UA 用 curl 都 200）、不是 header、不是 parser（xpath 對得上現行 HTML）。
+  唯一解是改 SearXNG 原始碼建立不帶 ALPN 的 SSLContext → 要自建 image
+  （`/usr/local/searxng/searx` 不是掛載的，只有 `/etc/searxng` 是）→ 不划算，建議停用。
+- `focus_news_query` 的單字雜訊（有／到／說／講）會誤傷專名（「有線電視」→「線電視」）；不收
+  則殘渣毒化查詢（相關數 4→0）。權衡後收下，踩到再拆例外。
+- **停權（Suspended）是 SearXNG 本地計時器，重啟只把它歸零、對方的封鎖沒變 → 重啟不是修復**。
+  要分辨「本地停權」還是「真的壞掉」，讀 `unresponsive_engines` 前綴就夠：`Suspended: X` ＝
+  這次沒發請求；`X` ＝ 發了、對方回錯。**不需要重啟**。
+- RSS 方案已否決：查詢改寫就拿得到當日頭條，不必新增依賴。
+- **「本地新聞也改走英文來源 + 模型翻譯」已否決（2026-08-15，使用者拍板）**：起點是想救 google news，
+  但實測 ① google news 就算語系正確也是 0 筆——Google 又改版把 `<a target="_blank">` 往下包一層，
+  SearXNG 用的是直接子節點 `./a[...]`（改成 `.//a` 應可修，可回報上游）② 更關鍵的是，英文來源回的是
+  「外媒視角的台灣」（預算案／印尼海軍演習／AI 經濟預測），不是群友問「今天有什麼新聞」想聽的
+  （雨彈／貓咪博覽會／總統開嗆）。**這是覆蓋角度差異，翻譯補不了。**
+  結論：國際題材（`_TOPIC_FINANCE_INTL`）維持 lang=en + 模型翻譯（本來就在跑，靠 bing news + reuters）；
+  本地題材維持中文來源。google 系維持停用。
+
 #### 待觀察（上線後才調得準）
 
 1. `hook_threshold`：看 `discord_bot.log` 的「ambient 鉤子」行（`hook_debug=True`）分數分布，
