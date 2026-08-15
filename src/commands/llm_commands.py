@@ -410,18 +410,21 @@ class LLMCommands(commands.Cog):
 
         web_task: asyncio.Task | None = None
         if run_web:
-            # 送給 SearXNG 的 query 用 cleaned_query（剝除指令贅字），engines/categories
-            # 由 intent 路由決定：股價走 news+day、新聞走 news+week、reddit 走 social media
+            # 送給 SearXNG 的 query 用 cleaned_query（已剝除贅字／改寫成關鍵字），
+            # engines/categories 由 intent 路由決定：新聞/股價走 news+week、reddit 走 social media
             search_query = intent.cleaned_query or resolved_question
             search_engines: str | None = None
+            search_categories = intent.categories
             if intent.categories == "news":
+                # engines 與 categories 二選一：同送時 SearXNG 取聯集，會把停用的引擎一起叫來陪跑
                 search_engines = WEB_SETTINGS.news_engines
+                search_categories = None
             web_task = asyncio.create_task(
                 llm.fetch_web_results(
                     search_query,
                     settings=WEB_SETTINGS,
                     engines=search_engines,
-                    categories=intent.categories,
+                    categories=search_categories,
                     time_range=intent.time_range,
                     language=intent.language,
                     logger_override=logger,
@@ -479,21 +482,23 @@ class LLMCommands(commands.Cog):
         if web_task is not None:
             try:
                 outcome = await web_task
-                # 窄路由（news / 限定 categories / 限時）查 0 筆時，改用 general 引擎、
-                # 去掉 categories/time_range 再撈一次。news engines 對空泛 query
-                # （如「最近重點新聞」）常 0 筆，general 引擎覆蓋廣得多。
-                # 僅在「真的 0 筆且非錯誤」時 fallback：timeout / http error 代表
-                # SearXNG 本身異常，重試無益；本來就是 general 無限時的就不重撈。
+                # 窄路由（news / 限定 categories / 限時）結果太少時，改用 general 引擎、
+                # 去掉 categories/time_range 再撈一次。門檻不是 0：news engines 常「只吐 1 筆」，
+                # 那種半死不活的結果會擋掉救援 → 安靜降級。
+                # 僅在「非錯誤」時 fallback：timeout / http error 代表 SearXNG 本身異常，
+                # 重試無益；本來就是 general 無限時的就不重撈。
                 primary_narrow = (
                     intent.categories is not None or intent.time_range is not None
                 )
                 if (
-                    not outcome.results
+                    len(outcome.results) < WEB_SETTINGS.fallback_min_results
                     and outcome.meta.get("error") is None
                     and primary_narrow
                 ):
                     logger.info(
-                        "/askai web fallback: 主搜 0 筆，改 general 引擎重試 (query=%s)",
+                        "/askai web fallback: 主搜只有 %d 筆（< %d），改 general 引擎重試 (query=%s)",
+                        len(outcome.results),
+                        WEB_SETTINGS.fallback_min_results,
                         search_query[:80],
                     )
                     fallback_outcome = await llm.fetch_web_results(
@@ -511,7 +516,20 @@ class LLMCommands(commands.Cog):
                         "error": fallback_outcome.meta.get("error"),
                     }
                     if fallback_outcome.results:
-                        outcome = fallback_outcome  # 採用 fallback（含其 meta）
+                        # 合併而非取代：主搜是窄路由結果，通常比 general 補充更貼題 → 去重後排前面
+                        seen_urls = {r.url for r in outcome.results}
+                        merged = list(outcome.results) + [
+                            r for r in fallback_outcome.results if r.url not in seen_urls
+                        ]
+                        merged = merged[: WEB_SETTINGS.top_k]
+                        outcome = llm.WebRetrievalOutcome(
+                            results=merged,
+                            meta={
+                                **fallback_outcome.meta,
+                                "result_count": len(merged),
+                                "merged_from_primary": len(seen_urls),
+                            },
+                        )
                 web_meta.update(outcome.meta)
                 if outcome.results:
                     web_context = llm.format_web_context_lines(outcome.results)

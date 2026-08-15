@@ -215,10 +215,15 @@ class AskAIWebSettings(BaseSettings):
         default="http://searxng:8080/search",
         validation_alias="SEARXNG_URL",
     )
-    default_engines: str = "google,bing,duckduckgo,brave"
-    news_engines: str = "google news,bing news,duckduckgo news"
+    # 明確指定 engines 會繞過 SearXNG 的 disabled 設定，死掉的引擎要在這裡拿掉才有效。
+    # 名單依實測收斂（詳見 handoff）：只有 bing / duckduckgo 系穩定，reuters 供 lang=en 路由。
+    default_engines: str = "bing,duckduckgo"
+    news_engines: str = "bing news,duckduckgo news,reuters"
     timeout_seconds: float = 4.0
     top_k: int = 5
+    # 主搜結果太少就走 general fallback。門檻不設 0：news 引擎常「只吐 1 筆」，
+    # 那種結果答不了問題卻又擋掉救援，會安靜降級。
+    fallback_min_results: int = 3
     language: str = "zh-TW"
 
     model_config = SettingsConfigDict(
