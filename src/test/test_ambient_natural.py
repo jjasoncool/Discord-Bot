@@ -31,7 +31,7 @@ if SRC_DIR not in sys.path:
 
 from llm import ambient_hooks, ambient_reply
 from llm.ambient_hooks import _structural_features, _text_features
-from llm.ambient_reply import _parse_line_choice, _passes_content_gate
+from llm.ambient_reply import _is_silence, _parse_line_choice, _passes_content_gate
 from llm import chat_line
 from llm.chat_line import (
     fetch_recent_lines,
@@ -247,6 +247,25 @@ class ParseLineChoiceTests(unittest.TestCase):
 
     def test_hash_inside_text_not_treated_as_choice(self):
         self.assertEqual((None, "這款遊戲 #1 好玩"), _parse_line_choice("這款遊戲 #1 好玩"))
+
+
+class SilenceSentinelTests(unittest.TestCase):
+    """沉默哨符比對。漏判一次就是把控制符當成回覆送進頻道（實際發生過 [Pass]）。"""
+
+    SENTINEL = "[PASS]"
+
+    def test_sentinel_variants_are_silence(self):
+        for reply in ["[PASS]", "[Pass]", "[pass]", "［PASS］", "(pass)", "  [PASS]  ", "PASS", "pass。"]:
+            with self.subTest(reply=reply):
+                self.assertTrue(_is_silence(reply, self.SENTINEL))
+
+    def test_empty_reply_is_silence(self):
+        self.assertTrue(_is_silence("", self.SENTINEL))
+
+    def test_normal_reply_is_not_silence(self):
+        for reply in ["這王判定根本看心情吧", "這局我先 pass，你們玩", "Pass 掉那張卡比較穩"]:
+            with self.subTest(reply=reply):
+                self.assertFalse(_is_silence(reply, self.SENTINEL))
 
 
 class ContentGateTests(unittest.TestCase):

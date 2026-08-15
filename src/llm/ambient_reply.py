@@ -1025,6 +1025,21 @@ def _parse_line_choice(text: str) -> tuple[Optional[int], str]:
     return (int(m.group(1)), text[m.end():].strip())
 
 
+# 沉默哨符的寬鬆比對：大小寫、全形括號、圓括號都吃。漏判一次的代價是把 [Pass] 當成
+# 正常回覆送進頻道（2026-08-15 實際發生過：74 次 [PASS] 裡混進一次 [Pass]）。
+_PASS_SENTINEL_RE = re.compile(r"[\[\［(]\s*pass\s*[\]\］)]", re.IGNORECASE)
+
+
+def _is_silence(reply: str, sentinel: str) -> bool:
+    """模型是否表示「這則不開口」。"""
+    if not reply:
+        return True
+    if sentinel.lower() in reply.lower() or _PASS_SENTINEL_RE.search(reply):
+        return True
+    # 連括號都忘了打的裸寫法（整則就只有這個字才算，避免誤殺「我這局先 pass」）
+    return reply.strip().strip("。．.!！?？ ").lower() == "pass"
+
+
 def _passes_content_gate(msg: discord.Message) -> bool:
     """單則有沒有「可聊的內容」：非指令、非空、非純連結、非純表情、長度在區間內。有圖直接放行。"""
     stripped = (msg.content or "").strip()
@@ -1259,7 +1274,7 @@ async def _run_one_ambient_pass(
     sentinel = _SETTINGS.silence_sentinel
     if result.error_kind:
         outcome = f"error:{result.error_kind}"
-    elif not reply or sentinel in reply:
+    elif _is_silence(reply, sentinel):
         outcome = "pass"
     else:
         outcome = "reply"
