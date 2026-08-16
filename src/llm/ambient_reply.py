@@ -58,6 +58,7 @@ from llm.chat_line import (
 )
 from llm.emoji_text_utils import is_emoji_or_symbol_only
 from llm.lemonade_gate import foreground_recently_active, stream_busy
+from llm.vision_image import DEFAULT_MAX_FRAMES, extract_key_frames, is_vision_image
 from llm.logger_factory import get_or_create_file_logger
 from services.llm_service import LLMService
 from sys_settings.llm_settings import AmbientChatSettings
@@ -590,24 +591,23 @@ def _resolve_target_channel_id() -> Optional[int]:
     return cid
 
 
-_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
-
-
 def _has_image(message: discord.Message) -> bool:
     """訊息是否含支援的圖片附件（用副檔名快判，不下載）。"""
-    return any(
-        (att.filename or "").lower().endswith(_IMAGE_EXTS)
-        for att in message.attachments
-    )
+    return any(is_vision_image(att.filename or "") for att in message.attachments)
 
 
 async def _prepare_images(message: discord.Message) -> Optional[list[str]]:
-    """下載圖片附件 → base64（給 vision 模型）；silent best-effort，超限/失敗就跳過。"""
+    """下載圖片附件 → base64（給 vision 模型）；silent best-effort，超限/失敗就跳過。
+
+    動圖會就地拆成幾張關鍵幀（見 `extract_key_frames`）——後端直接吃 gif 只讀得到第一幀。
+    拆出來的幀跟一般圖片共用 `image_max_count` 這個總額度（上限 9 張）。
+    """
     out: list[str] = []
     for att in message.attachments:
-        if len(out) >= _SETTINGS.image_max_count:
+        budget = _SETTINGS.image_max_count - len(out)
+        if budget <= 0:
             break
-        if not (att.filename or "").lower().endswith(_IMAGE_EXTS):
+        if not is_vision_image(att.filename or ""):
             continue
         if att.size and att.size > _SETTINGS.image_max_bytes:
             continue
@@ -616,8 +616,10 @@ async def _prepare_images(message: discord.Message) -> Optional[list[str]]:
         except Exception as exc:
             logger.debug("ambient 讀取圖片失敗：%s", exc)
             continue
-        if data:
-            out.append(base64.b64encode(data).decode("utf-8"))
+        if not data:
+            continue
+        frames = extract_key_frames(data, max_frames=min(DEFAULT_MAX_FRAMES, budget))
+        out.extend(base64.b64encode(f).decode("utf-8") for f in frames[:budget])
     return out or None
 
 

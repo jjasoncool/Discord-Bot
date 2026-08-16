@@ -7,6 +7,7 @@ LLM 服務模組
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from typing import Any, List, Optional
 
@@ -14,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from llm.lemonade_gate import stream_exclusive
+from llm.vision_image import is_universal_image, to_png_first_frame
 from llm.llm_http_client import (
     LlmAPIError,
     LlmConnectionError,
@@ -66,6 +68,12 @@ def _convert_messages_for_openai(
 
     無 images 的訊息原封不動回傳；保留原 dict 其他鍵。
     Discord 上傳格式以 jpeg/png 為主，data URL prefix 用 jpeg 即可（model 端不嚴格驗證）。
+
+    **多張圖一定要拆成多則訊息**，不能塞在同一則的 content 裡。實測後端解析
+    「單一 message 內多個 image_url」時**每隔一張丟一張**（prompt_tokens 只認 ⌈n/2⌉ 張：
+    送 2 張跟 1 張一樣、3 張等於 2 張、6 張等於 3 張），拆成一圖一則就完全線性、全部吃進去。
+    這是中間層的解析 bug，不是模型能力限制——同一個模型在多則訊息下讀得出連續幀的變化。
+    圖片排在文字之前，維持「先看圖、再讀問題」的順序。
     """
     converted: list[dict[str, object]] = []
     for msg in messages:
@@ -73,19 +81,56 @@ def _convert_messages_for_openai(
         if not images:
             converted.append(msg)
             continue
-        text = msg.get("content", "") or ""
-        content_parts: list[dict[str, object]] = []
-        if text:
-            content_parts.append({"type": "text", "text": text})
+        role = msg.get("role", "user")
+        base = {k: v for k, v in msg.items() if k not in ("images", "content")}
         for image_b64 in images:
-            content_parts.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
+            converted.append({
+                **base, "role": role,
+                "content": [{
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
+                }],
             })
-        new_msg = {k: v for k, v in msg.items() if k != "images"}
-        new_msg["content"] = content_parts
-        converted.append(new_msg)
+        text = msg.get("content", "") or ""
+        if text:
+            converted.append({**base, "role": role,
+                              "content": [{"type": "text", "text": text}]})
     return converted
+
+
+def _downgrade_images(messages: list[dict[str, object]]) -> Optional[list[dict[str, object]]]:
+    """把 messages 裡「非 jpeg/png」的圖退成 PNG 第一幀。
+
+    回 None ＝ 沒有可退的圖（沒帶圖，或本來就全是 jpeg/png）→ 呼叫端不必重試，
+    因為那代表失敗跟圖片格式無關。
+    """
+    changed = False
+    out: list[dict[str, object]] = []
+    for msg in messages:
+        images = msg.get("images")
+        if not isinstance(images, list) or not images:
+            out.append(msg)
+            continue
+        converted: list[str] = []
+        for b64 in images:
+            try:
+                raw = base64.b64decode(b64)
+            except Exception:
+                converted.append(b64)
+                continue
+            if is_universal_image(raw):
+                converted.append(b64)
+                continue
+            png = to_png_first_frame(raw)
+            if png == raw:          # 轉不動（沒 Pillow / 格式不認得）→ 維持原樣
+                converted.append(b64)
+            else:
+                converted.append(base64.b64encode(png).decode("utf-8"))
+                changed = True
+        new_msg = dict(msg)
+        new_msg["images"] = converted
+        out.append(new_msg)
+    return out if changed else None
 
 
 @dataclass(frozen=True)
@@ -764,11 +809,12 @@ class LLMService:
         target_model = self._resolve_runtime_model(model)
         target_think = self.resolve_request_think(think)
         trace_label = trace_id or "-"
+        sent_messages = bundle.messages
 
         try:
             reply = await self.chat_raw(
                 model=target_model,
-                messages=bundle.messages,
+                messages=sent_messages,
                 think=target_think,
                 temperature=temperature,
                 top_p=top_p,
@@ -781,10 +827,39 @@ class LLMService:
             return GenerateReplyResult(
                 reply=reply,
                 prompt_record_log=bundle.prompt_record_log,
-                messages_sent=list(bundle.messages),
+                messages_sent=list(sent_messages),
                 error_kind=None,
             )
         except LLMAPIError as exc:
+            # 帶了非 jpeg/png 的圖而請求失敗 → 可能是後端解不了那個格式（gif/webp 支援度看模型）。
+            # 退成 PNG 第一幀重試一次。刻意不預先轉檔：那會把「讀得懂 gif 的模型」一起打死。
+            downgraded = _downgrade_images(sent_messages)
+            if downgraded is not None:
+                logger.warning(
+                    "LLM 帶圖請求失敗 trace=%s status=%s → 把圖退成 PNG 重試一次",
+                    trace_label, exc.status,
+                )
+                try:
+                    reply = await self.chat_raw(
+                        model=target_model,
+                        messages=downgraded,
+                        think=target_think,
+                        temperature=temperature,
+                        top_p=top_p,
+                        repeat_penalty=repeat_penalty,
+                        num_ctx=num_ctx,
+                        timeout=timeout,
+                        keep_alive=keep_alive,
+                        trace_id=trace_id,
+                    )
+                    return GenerateReplyResult(
+                        reply=reply,
+                        prompt_record_log=bundle.prompt_record_log,
+                        messages_sent=list(downgraded),
+                        error_kind=None,
+                    )
+                except Exception as retry_exc:
+                    logger.warning("退成 PNG 後仍失敗 trace=%s：%s", trace_label, retry_exc)
             if exc.status is not None:
                 logger.error("LLM 回應失敗 trace=%s status=%s detail=%s", trace_label, exc.status, exc.detail)
                 return GenerateReplyResult(

@@ -16,6 +16,12 @@ import llm
 from llm.logger_factory import get_or_create_file_logger
 from llm.lemonade_gate import note_foreground_activity
 from llm.chat_line import name_with_anchor
+from llm.vision_image import (
+    DEFAULT_MAX_FRAMES,
+    VISION_IMAGE_EXTS,
+    extract_key_frames,
+    is_vision_image,
+)
 from services.llm_service import LLMService
 from sys_settings.llm_settings import AskAICommandSettings, AskAIWebSettings
 from utils.utils import safe_send_interaction_message, check_guild
@@ -281,7 +287,10 @@ class LLMCommands(commands.Cog):
             self._askai_worker_task = asyncio.create_task(self._askai_worker())
 
     @app_commands.command(name="askai", description="向 AI 詢問問題")
-    @app_commands.describe(question="想問 AI 的問題", image="可選的圖片（支援 jpg/png/webp）")
+    @app_commands.describe(
+        question="想問 AI 的問題",
+        image="可選的圖片（jpg/png/webp/gif；動畫 gif 只看得到第一幀）",
+    )
     @app_commands.checks.dynamic_cooldown(askai_cooldown)
     async def askai_cmd(
         self,
@@ -831,10 +840,9 @@ class LLMCommands(commands.Cog):
     ) -> list[str] | None:
         """下載並轉換圖片為 Ollama 可接受的 base64 清單。"""
         filename = (image.filename or "").lower()
-        allowed_ext = (".jpg", ".jpeg", ".png", ".webp")
-        if not filename.endswith(allowed_ext):
+        if not is_vision_image(filename):
             await interaction.followup.send(
-                "⚠️ 目前僅支援 jpg/png/webp 圖片，gif 不支援。",
+                "⚠️ 目前僅支援 " + " / ".join(e.lstrip(".") for e in VISION_IMAGE_EXTS) + " 圖片。",
                 ephemeral=True,
             )
             return None
@@ -863,8 +871,9 @@ class LLMCommands(commands.Cog):
             )
             return None
 
-        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-        return [image_b64]
+        # 動圖拆成關鍵幀再送（後端直接吃 gif 只讀得到第一幀）；靜圖回原圖一張
+        frames = extract_key_frames(image_bytes, max_frames=DEFAULT_MAX_FRAMES)
+        return [base64.b64encode(f).decode("utf-8") for f in frames]
 
 
 class _PersonalityResultPagerView(discord.ui.View):

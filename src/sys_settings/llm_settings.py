@@ -381,7 +381,7 @@ class AmbientChatSettings(BaseSettings):
     silence_sentinel: str = "[PASS]"
 
     # ── 看圖（ambient 模型需具 vision；QAT 12B 自帶 mmproj）──
-    image_max_count: int = 5             # 一次最多帶幾張圖（上限；每張吃 context/成本，非每則都會滿）
+    image_max_count: int = 9             # 一次請求最多帶幾張圖（含動圖拆出來的幀），硬上限
     image_max_bytes: int = 5 * 1024 * 1024
 
     # ── Phase C 記憶寫入（preference_fact）──
