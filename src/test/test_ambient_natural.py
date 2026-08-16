@@ -35,6 +35,8 @@ from llm.ambient_reply import _is_silence, _parse_line_choice, _passes_content_g
 from llm import chat_line
 from llm.chat_line import (
     fetch_recent_lines,
+    format_chat_line,
+    image_marker,
     resolve_user_mentions,
     semantic_message_text,
 )
@@ -247,6 +249,39 @@ class ParseLineChoiceTests(unittest.TestCase):
 
     def test_hash_inside_text_not_treated_as_choice(self):
         self.assertEqual((None, "這款遊戲 #1 好玩"), _parse_line_choice("這款遊戲 #1 好玩"))
+
+
+class ImageMarkerTests(unittest.TestCase):
+    """帶圖的行要看得出來有圖。
+
+    回歸實例：克羅貼了 3 張截圖 + 一句「我這樣484有一點太兇了」，chat_history 只印得出
+    那句話，圖走 vision payload 另外送 → 模型看得到圖卻不知道掛在哪一行。
+    """
+
+    def test_text_message_with_image_keeps_both(self):
+        line = format_chat_line(_msg("我這樣484有一點太兇了", attachments=("a.png",)), TZ8, time_only=True)
+        self.assertIn("我這樣484有一點太兇了", line)
+        self.assertIn("(圖)", line)
+
+    def test_multiple_images_are_counted(self):
+        line = format_chat_line(_msg("看這個", attachments=("a.png", "b.jpg", "c.webp")), TZ8, time_only=True)
+        self.assertIn("(圖×3)", line)
+
+    def test_image_only_message_becomes_the_marker(self):
+        self.assertTrue(format_chat_line(_msg("", attachments=("a.png",)), TZ8, time_only=True).endswith("(圖)"))
+
+    def test_marker_survives_truncation(self):
+        # 標記接在截斷之後：內容再長也不能把「這則有圖」截掉
+        line = format_chat_line(_msg("很長" * 60, attachments=("a.png",)), TZ8, time_only=True, max_len=10)
+        self.assertIn("…", line)
+        self.assertTrue(line.endswith("(圖)"))
+
+    def test_non_image_attachment_is_not_marked_as_image(self):
+        self.assertEqual(image_marker(_msg("報告", attachments=("report.pdf",))), "")
+
+    def test_plain_message_unchanged(self):
+        line = format_chat_line(_msg("純文字"), TZ8, time_only=True)
+        self.assertTrue(line.endswith("純文字"))
 
 
 class SilenceSentinelTests(unittest.TestCase):

@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 
 from llm.emoji_text_utils import replace_custom_emoji_with_description
 from llm.sticker_cache import get_sticker_text
+from llm.vision_image import is_vision_image
 
 if TYPE_CHECKING:  # 僅型別註解用；runtime 不依賴 discord（保持 leaf 輕量）
     import discord
@@ -89,6 +90,19 @@ def semantic_message_text(msg: discord.Message) -> str:
     return text
 
 
+def image_marker(msg) -> str:
+    """訊息帶了幾張圖 → `(圖)` / `(圖×N)`；沒帶就空字串。
+
+    有文字又有圖的訊息本來不會在 chat_history 留下任何痕跡（只印得出文字），模型從
+    vision payload 收到圖、卻不知道那張圖掛在哪一行——多人同時貼圖時就會安錯人。
+    """
+    atts = getattr(msg, "attachments", None) or []
+    n = sum(1 for a in atts if is_vision_image(getattr(a, "filename", "") or ""))
+    if not n:
+        return ""
+    return "(圖)" if n == 1 else f"(圖×{n})"
+
+
 def format_chat_line(
     msg: discord.Message,
     tz: tzinfo,
@@ -113,19 +127,26 @@ def format_chat_line(
       混合的 chat_history 裡認得哪幾行是自己講的，不致把自己的話當成別人的。
     - prefix / suffix：在 `[時間]…內容` 前後接字串（給 reply threading 用：prefix 放被回覆
       訊息的編號錨 `#N `、suffix 放回覆指標 ` ↩#M`）；預設空＝不影響既有 caller。
-    - empty_placeholder：內容為空（純圖等）時改用此字串當內容，讓「被回覆的純圖訊息」也能
+    - 帶圖的訊息會在內容尾端補 `(圖)` / `(圖×N)`（見 `image_marker`），純圖訊息則整行內容
+      就是那個標記。圖是走 vision payload 另外送的，文字裡沒有痕跡的話模型對不出「哪張圖
+      是哪一行的」。
+    - empty_placeholder：內容為空（純附件等）時改用此字串當內容，讓「被回覆的空訊息」也能
       成行被 ↩#N 指到（caller 仍可選擇對非目標的空訊息直接跳過、不傳此參數）。
     """
     name = name_with_anchor(msg.author)
     if self_id is not None and getattr(msg.author, "id", None) == self_id:
         name += "(你自己)"
     text = semantic_message_text(msg)
-    if not text and empty_placeholder is not None:
-        text = empty_placeholder
     if compact:
         text = " ".join(text.split())
     if max_len is not None and len(text) > max_len:
         text = text[:max_len] + "…"
+    # 圖片標記接在截斷之後：內容再長也不能把「這則有圖」這件事截掉
+    marker = image_marker(msg)
+    if marker:
+        text = f"{text} {marker}" if text else marker
+    if not text and empty_placeholder is not None:
+        text = empty_placeholder
     fmt = "%H:%M" if time_only else "%Y-%m-%d %H:%M"
     ts = msg.created_at.astimezone(tz).strftime(fmt)
     return f"{prefix}[{ts}] {name}: {text}{suffix}"
@@ -166,13 +187,11 @@ def _check_anchor_collision(msgs: list) -> None:
 
 
 def _reply_target_placeholder(msg) -> str:
-    """被回覆、但本身無文字（純圖/附件）的訊息，給個佔位內容讓它能成行被 ↩#N 指到。"""
-    atts = getattr(msg, "attachments", None) or []
-    for a in atts:
-        fn = (getattr(a, "filename", "") or "").lower()
-        if fn.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif")):
-            return "(圖)"
-    return "(附件)" if atts else "(訊息)"
+    """被回覆、但本身無文字的訊息，給個佔位內容讓它能成行被 ↩#N 指到。
+
+    圖片已由 `image_marker` 標掉（純圖訊息的整行內容就是那個標記），這裡只剩其餘附件與空訊息。
+    """
+    return "(附件)" if (getattr(msg, "attachments", None) or []) else "(訊息)"
 
 
 def _thread_render(
