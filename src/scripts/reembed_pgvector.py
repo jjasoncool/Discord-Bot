@@ -44,7 +44,6 @@ from pathlib import Path
 # container 裡 /app 沒在 sys.path，手動加入以便 import sys_settings / llm 等模組
 sys.path.insert(0, "/app")
 
-import psycopg2
 import requests
 
 from llm.safe_llm_embedding import embed_with_perturbation_retry
@@ -139,13 +138,7 @@ def main() -> int:
         settings.pgvector_port, settings.pgvector_db,
     )
 
-    conn = psycopg2.connect(
-        host=settings.pgvector_host,
-        port=settings.pgvector_port,
-        dbname=settings.pgvector_db,
-        user=settings.pgvector_user,
-        password=settings.pgvector_password,
-    )
+    conn = LLMServiceSettings().pgvector_connect()
     conn.autocommit = False
 
     # 全程共用一個 Session，讓所有 embed 請求走同一條 HTTP keep-alive 連線

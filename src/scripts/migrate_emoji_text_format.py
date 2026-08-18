@@ -49,13 +49,7 @@ logging.basicConfig(
 
 def get_conn():
     s = LLMServiceSettings()
-    return psycopg2.connect(
-        host=s.pgvector_host,
-        port=s.pgvector_port,
-        dbname=s.pgvector_db,
-        user=s.pgvector_user,
-        password=s.pgvector_password,
-    )
+    return LLMServiceSettings().pgvector_connect()
 
 
 def main():

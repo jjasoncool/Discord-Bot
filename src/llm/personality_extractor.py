@@ -10,7 +10,6 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, Awaitable, Callable, Protocol
 
-import psycopg2
 
 from llm.emoji_text_utils import (
     reload_descriptions as _reload_emoji_descriptions,
@@ -67,14 +66,7 @@ def _load_extract_prompts() -> dict[str, str]:
 
 def _get_db_conn():
     """建立 pgvector 連線。"""
-    settings = LLMServiceSettings()
-    return psycopg2.connect(
-        host=settings.pgvector_host,
-        port=settings.pgvector_port,
-        dbname=settings.pgvector_db,
-        user=settings.pgvector_user,
-        password=settings.pgvector_password,
-    )
+    return LLMServiceSettings().pgvector_connect()
 
 
 def get_last_extraction_time(guild_id: int | None = None) -> datetime | None:
@@ -83,7 +75,7 @@ def get_last_extraction_time(guild_id: int | None = None) -> datetime | None:
     回傳 UTC datetime；若資料庫沒有任何 auto_personality 記錄或未帶時間戳，回傳 None。
     給排程啟動時判斷「上次排程是否錯過」用。
     """
-    profile_table = f"data_{HYBRID_RETRIEVAL_SETTINGS.get_source('member_profile').table_name}"
+    profile_table = HYBRID_RETRIEVAL_SETTINGS.source_table("member_profile")
     sql = f"""
         SELECT MAX((metadata_->>'last_extracted_at')::TIMESTAMPTZ)
         FROM {profile_table}
@@ -108,7 +100,7 @@ def get_last_extraction_time(guild_id: int | None = None) -> datetime | None:
 
 def _fetch_aliases_from_db() -> dict[str, str]:
     """從 member_profile 表撈取 author_id → alias 對照。"""
-    profile_table = f"data_{HYBRID_RETRIEVAL_SETTINGS.get_source('member_profile').table_name}"
+    profile_table = HYBRID_RETRIEVAL_SETTINGS.source_table("member_profile")
     try:
         with _get_db_conn() as conn:
             with conn.cursor() as cur:
@@ -131,7 +123,7 @@ def fetch_recent_messages(
     channel_ids: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """從 pgvector 撈最近 N 天的聊天記錄。"""
-    chat_table = f"data_{HYBRID_RETRIEVAL_SETTINGS.get_chat_table_name()}"
+    chat_table = HYBRID_RETRIEVAL_SETTINGS.chat_table()
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
     query = f"""

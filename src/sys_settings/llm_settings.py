@@ -85,6 +85,26 @@ class LLMServiceSettings(BaseSettings):
         """允許 init > env > dotenv > file secrets 的覆寫順序。"""
         return (init_settings, env_settings, dotenv_settings, file_secret_settings)
 
+    def pgvector_connect(self):
+        """開一條 pgvector 連線（psycopg2）。
+
+        **憑證的擁有者負責提供連線方式**——原本專案有六處各自
+        `psycopg2.connect(host=..., port=..., dbname=..., user=..., password=...)`，
+        五個參數一字不差地抄了六遍。改連線池、加 timeout、換驅動時要記得改六個地方，
+        而漏掉的那個不會報錯、只會行為不一致。
+
+        延後 import psycopg2：讓沒裝驅動的環境（單元測試）也能匯入本設定模組。
+        """
+        import psycopg2
+
+        return psycopg2.connect(
+            host=self.pgvector_host,
+            port=self.pgvector_port,
+            dbname=self.pgvector_db,
+            user=self.pgvector_user,
+            password=self.pgvector_password,
+        )
+
     def build_pgvector_database_url(self) -> str:
         """由 PGVECTOR_* 參數在程式內組裝 asyncpg 連線字串。"""
         encoded_user = quote_plus(self.pgvector_user)

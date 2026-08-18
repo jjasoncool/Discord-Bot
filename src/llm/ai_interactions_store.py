@@ -14,7 +14,6 @@ import time
 from collections import deque
 from typing import Any, Optional
 
-import psycopg2
 
 from sys_settings.llm_settings import LLMServiceSettings
 
@@ -104,14 +103,7 @@ def _get_settings() -> LLMServiceSettings:
 
 
 def _get_conn():
-    s = _get_settings()
-    return psycopg2.connect(
-        host=s.pgvector_host,
-        port=s.pgvector_port,
-        dbname=s.pgvector_db,
-        user=s.pgvector_user,
-        password=s.pgvector_password,
-    )
+    return _get_settings().pgvector_connect()
 
 
 def _get_embed_model():

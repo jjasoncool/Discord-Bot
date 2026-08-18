@@ -18,7 +18,6 @@ from typing import Protocol, runtime_checkable
 from sys_settings.llm_settings import LLMServiceSettings, load_llm_runtime_config
 from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
 
-import psycopg2
 
 try:
     from llama_index.core import Document, VectorStoreIndex
@@ -146,19 +145,15 @@ class PgVectorMemberProfileStore:
         self._index_lock = threading.RLock()
 
     def _get_physical_table_name(self) -> str:
-        """LlamaIndex PGVectorStore 的實體表名稱通常為 data_<table_name>。"""
-        # 僅允許英數與底線，避免 identifier 注入
-        safe = re.sub(r"[^a-zA-Z0-9_]", "", self.table_name)
-        return f"data_{safe}"
+        """LlamaIndex PGVectorStore 的實體表名稱通常為 data_<table_name>。
+
+        消毒（僅允許英數與底線，避免 identifier 注入）已收斂到
+        `HybridRetrievalSettings.physical_table()`，四處呼叫端共用同一份。
+        """
+        return HYBRID_RETRIEVAL_SETTINGS.physical_table(self.table_name)
 
     def _get_db_conn(self):
-        return psycopg2.connect(
-            host=self.settings.pgvector_host,
-            port=self.settings.pgvector_port,
-            dbname=self.settings.pgvector_db,
-            user=self.settings.pgvector_user,
-            password=self.settings.pgvector_password,
-        )
+        return self.settings.pgvector_connect()
 
     def _ensure_schema_constraints(self) -> None:
         """建立跨環境可重現的約束（idempotent）。"""

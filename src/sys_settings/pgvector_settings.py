@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -147,6 +148,30 @@ class HybridRetrievalSettings(BaseModel):
         if source and source.enabled:
             return source
         return None
+
+    @staticmethod
+    def physical_table(table_name: str) -> str:
+        """邏輯表名 → LlamaIndex PGVectorStore 的實體表名（`data_<table_name>`）。
+
+        **只允許英數與底線**：表名沒辦法用 `%s` 參數化帶進 SQL，只能字串拼接，
+        所以消毒必須發生在這裡。原本專案有四處各自拼 `f"data_{...}"`，其中
+        `context_retriever` 與 `member_profile_store` 有消毒、`personality_extractor`
+        與 persona agent 沒有——那不只是重複，是**安全性不一致**。收斂成單一來源後
+        所有呼叫端自動一致。
+        """
+        return "data_" + re.sub(r"[^a-zA-Z0-9_]", "", table_name)
+
+    def chat_table(self) -> str:
+        """聊天記錄的實體表名（已消毒）。"""
+        return self.physical_table(self.get_chat_table_name())
+
+    def source_table(self, source_key: str, *, default: str | None = None) -> str:
+        """指定來源的實體表名（已消毒）。來源不存在時用 `default`，沒給就 KeyError。"""
+        source = self.get_source(source_key)
+        name = source.table_name if source is not None else default
+        if not name:
+            raise KeyError(f"找不到檢索來源設定: {source_key}")
+        return self.physical_table(name)
 
     def get_chat_table_name(self) -> str:
         """取得 Discord 聊天來源資料表（僅使用多來源結構）。"""

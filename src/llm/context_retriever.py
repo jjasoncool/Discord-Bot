@@ -6,7 +6,6 @@ import asyncio
 import functools
 import logging
 import json
-import re
 import threading
 from collections import defaultdict
 from datetime import timezone
@@ -72,13 +71,7 @@ def _pgvector_connect():
     各 stage 都用同一份 creds，避免散落多處 drift。回傳 connection 物件，呼叫端照舊
     `with _pgvector_connect() as conn:` 使用（語意與原本 inline psycopg2.connect 相同）。
     """
-    return psycopg2.connect(
-        host=LLM_SETTINGS.pgvector_host,
-        port=LLM_SETTINGS.pgvector_port,
-        dbname=LLM_SETTINGS.pgvector_db,
-        user=LLM_SETTINGS.pgvector_user,
-        password=LLM_SETTINGS.pgvector_password,
-    )
+    return LLM_SETTINGS.pgvector_connect()
 
 
 def _load_embed_model_name() -> str:
@@ -325,7 +318,7 @@ def search_chat(
         logger.warning("取得 chat table name 失敗: %s", exc)
         return []
 
-    physical_table = f"data_{re.sub(r'[^a-zA-Z0-9_]', '', table_name)}"
+    physical_table = HYBRID_RETRIEVAL_SETTINGS.physical_table(table_name)
     # pgvector 的向量 literal 需以 '[v1,v2,...]' 字串形式帶入再 cast 成 vector。
     vector_literal = "[" + ",".join(f"{float(v):.6f}" for v in query_embedding) + "]"
 
@@ -746,7 +739,7 @@ def _retrieve_rag_context_impl(
     meta["intent"] = intent
 
     table_name = source.table_name
-    physical_table = f"data_{re.sub(r'[^a-zA-Z0-9_]', '', table_name)}"
+    physical_table = HYBRID_RETRIEVAL_SETTINGS.physical_table(table_name)
     alias_hints = expand_alias_candidates(question)
     # mentioned_user_ids 優先採 caller 傳入（從原始 <@id> 抽出）；否則從 question 重抽
     # caller 若已將 question 替換成 display_name，重抽會失敗，必須顯式傳入
