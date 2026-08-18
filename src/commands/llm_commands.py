@@ -1300,6 +1300,135 @@ class PersonalityCommands(commands.Cog):
         self._track_task(task)
 
     @app_commands.command(
+        name="persona_agent_test",
+        description="測試人格 Agent（管理員限定，只跑一人、不寫入資料庫）",
+    )
+    @app_commands.describe(
+        target="要分析的成員",
+        model="指定模型（不填則用 config 的主 model）",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def persona_agent_test_cmd(
+        self,
+        interaction: discord.Interaction,
+        target: discord.Member,
+        model: str | None = None,
+    ):
+        """對單一成員跑一次 persona agent（影子模式的除錯入口）。
+
+        **為什麼一定要有這個指令**：agent 走 `stream_exclusive()` 那把 process 內的
+        全域鎖來跟 /askai、插話 協調「一次只做一件事」。用 `docker exec` 在旁邊的
+        process 跑，鎖是各自一份 → 禮讓機制完全失效、與插話正面對撞（實測：共用 KV
+        池被瓜分導致 context 超限、吞吐 33→7 tok/s）。**必須跑在 bot 自己的 process 內**
+        才測得到真實行為，這個指令就是那個入口。M4 排程上線後也是手動抽查的工具。
+
+        只讀不寫：結果只回報與寫 log，不碰任何資料表（寫入屬於 M3 的驗證層）。
+        """
+        if not interaction.guild:
+            await safe_send_interaction_message(
+                interaction, "⚠️ 僅限伺服器內使用。", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        from llm.persona_agent import agent as persona_agent
+        from llm.persona_agent import tools as persona_tools
+
+        from sys_settings.llm_settings import (
+            LLMServiceSettings,
+            load_llm_runtime_config,
+        )
+        runtime_config = load_llm_runtime_config(
+            LLMServiceSettings().llm_runtime_model_path
+        )
+        target_model = model or runtime_config.model
+        user_id = str(target.id)
+        guild_id = interaction.guild.id
+
+        await interaction.followup.send(
+            f"🔬 persona agent 開始跑 **{target.display_name}**（model=`{target_model}`）\n"
+            f"會禮讓 /askai 與插話，白天可能要等上一段時間；結果出來會再回報一次。",
+            ephemeral=True,
+        )
+
+        async def _run_and_report() -> None:
+            ctx = persona_tools.ToolContext.build(
+                guild_id=guild_id,
+                allowed_ids=[user_id],   # 白名單只放這一人，工具層會擋掉其他查詢
+            )
+            try:
+                run = await persona_agent.run_for_user(
+                    user_id=user_id, ctx=ctx, model=target_model
+                )
+            except Exception as exc:
+                logger.error("persona_agent_test 失敗: %s", exc, exc_info=True)
+                await self._report_agent_result(interaction, target, None, str(exc))
+                return
+
+            # 完整結果一律進 log：Discord 有長度限制、followup token 也只有 15 分鐘，
+            # 跑久了送不出去也不能讓結果消失
+            logger.info(
+                "persona_agent_test 結果 target=%s status=%s steps=%d tools=%d "
+                "tokens≈%d %.0fs diff=%s",
+                user_id, run.status, run.steps, len(run.trace),
+                run.estimated_tokens, run.duration_ms / 1000,
+                json.dumps(run.diff, ensure_ascii=False) if run.diff else None,
+            )
+            await self._report_agent_result(interaction, target, run, None)
+
+        task = asyncio.create_task(_run_and_report())
+        self._track_task(task)
+
+    async def _report_agent_result(
+        self,
+        interaction: discord.Interaction,
+        target: discord.Member,
+        run,
+        error: str | None,
+    ) -> None:
+        """把 agent 結果回報到 Discord；送不出去只記 log，不讓例外往外炸。"""
+        if error is not None:
+            summary = f"❌ persona agent 執行失敗：`{error[:300]}`"
+            attachment = None
+        else:
+            icon = {"ok": "✅", "context_exceeded": "🈵", "max_steps": "⏱️"}.get(
+                run.status, "⚠️"
+            )
+            tool_lines = "\n".join(
+                f"  step{t.step} {t.tool} {t.arguments[:60]} ({t.elapsed_ms}ms)"
+                for t in run.trace
+            ) or "  （沒有任何工具呼叫）"
+            summary = (
+                f"{icon} **{target.display_name}** status=`{run.status}` "
+                f"steps={run.steps} 工具={len(run.trace)} "
+                f"tokens≈{run.estimated_tokens} 耗時={run.duration_ms / 1000:.0f}s\n"
+                f"```\n{tool_lines[:1200]}\n```"
+            )
+            if run.error:
+                summary += f"\nerror: `{run.error[:200]}`"
+            attachment = None
+            if run.diff is not None:
+                payload = json.dumps(run.diff, ensure_ascii=False, indent=2)
+                attachment = discord.File(
+                    io.BytesIO(payload.encode("utf-8")),
+                    filename=f"persona_diff_{target.id}.json",
+                )
+
+        # discord.py 的 file 預設是 MISSING 哨兵而非 None；傳 None 會炸，
+        # 而沒有 diff 正好是失敗路徑（error / context_exceeded）→ 必須條件帶入
+        kwargs: dict = {"ephemeral": True}
+        if attachment is not None:
+            kwargs["file"] = attachment
+        try:
+            await interaction.followup.send(summary[:1900], **kwargs)
+        except Exception as exc:
+            # followup token 15 分鐘就過期；agent 跑久了必然送不出去 → 結果已在 log
+            logger.warning(
+                "persona_agent_test 結果無法回傳 Discord（結果已寫入 log）: %s", exc
+            )
+
+    @app_commands.command(
         name="ai_diary", description="立即產生並發布 AI 今日日記（管理員限定）"
     )
     @app_commands.checks.has_permissions(administrator=True)
