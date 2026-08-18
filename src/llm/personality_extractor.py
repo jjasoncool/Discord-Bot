@@ -545,33 +545,6 @@ async def _run_personality_extraction_impl(
             total_batches=0,
         )
 
-    # 0. 招牌梗衰減 sweep（hoist 在早返之上：即使本次無聊天記錄，也照常 GC 死梗 / demote）。
-    #    跟人格萃取共用 _extraction_running 鎖（本 impl 已在鎖內），不另開排程。
-    if guild is not None:
-        try:
-            import asyncio as _aio0
-            from llm.member_profile_store import get_member_profile_store
-            from sys_settings.llm_settings import AmbientChatSettings
-            _ac = AmbientChatSettings()
-            _port = get_member_profile_store()
-            if progress_callback:
-                progress_callback(
-                    stage="sweeping", model=model, total_users=0,
-                    completed_users=0, current_batch=0, total_batches=0,
-                )
-            sweep_stats = await _aio0.get_running_loop().run_in_executor(
-                None,
-                lambda: _port.sweep_signature_tags(
-                    guild_id=guild.id,
-                    halflife_low_days=_ac.tag_halflife_low_days,
-                    halflife_spicy_days=_ac.tag_halflife_spicy_days,
-                    demote_floor=_ac.tag_demote_floor,
-                    archive_floor=_ac.tag_archive_floor,
-                ),
-            )
-            logger.info("招牌梗 sweep（guild=%s）：%s", guild.id, sweep_stats)
-        except Exception as exc:
-            logger.warning("招牌梗 sweep 失敗（不影響人格萃取）：%s", exc, exc_info=True)
 
     # 1. 撈聊天記錄
     messages = fetch_recent_messages(days=days, channel_ids=channel_ids)

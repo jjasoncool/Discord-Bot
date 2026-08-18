@@ -170,23 +170,40 @@ async def on_ready():
         from datetime import datetime, timezone, timedelta
         TAIPEI_TZ = timezone(timedelta(hours=8))
 
-        async def _run_personality_extraction_once():
-            """跑一次完整的人格萃取（refresh emoji 字典 → 萃取 → register 結果）。
+        async def _run_daily_maintenance_once():
+            """每日維護：三個**彼此獨立**的步驟，各自 try / except，互不拖累。
 
-            排程與啟動補跑共用此函式。若遇到鎖（`PersonalityExtractionInProgressError`）
+              ① emoji 字典自動更新（讀 guild.emojis → 補空值項目）
+              ② 招牌梗衰減 sweep（純 SQL GC／降級）
+              ③ 人格萃取（唯一會用到 LLM 的步驟）
+
+            2026-08-18 拆分：原本 ② 藏在 ③ 內部（共用 `_extraction_running` 鎖、不另開排程），
+            但三者無資料相依。拆開後 ③ 日後換成 persona agent 實作時，只需替換這一步，
+            ①② 不受影響。
+
+            排程與啟動補跑共用此函式。③ 若遇到鎖（`PersonalityExtractionInProgressError`）
             只 log INFO 後返回，不視為錯誤。
             """
             guild = bot.guilds[0] if bot.guilds else None
             if not guild:
-                logger.warning("人格萃取：無可用 guild")
+                logger.warning("每日維護：無可用 guild")
                 return
 
+            # ① emoji 字典
             try:
                 from llm.personality_extractor import refresh_emoji_dictionary
                 refresh_emoji_dictionary(guild)
             except Exception as exc:
                 logger.warning("emoji 字典自動更新失敗: %s", exc)
 
+            # ② 招牌梗衰減 sweep（不佔 GPU，失敗不影響 ③）
+            try:
+                from llm.signature_tag_extractor import run_signature_tag_sweep
+                await run_signature_tag_sweep(guild)
+            except Exception as exc:
+                logger.warning("招牌梗 sweep 失敗: %s", exc)
+
+            # ③ 人格萃取
             from llm.personality_extractor import (
                 PersonalityExtractionInProgressError,
                 run_personality_extraction,
@@ -236,7 +253,7 @@ async def on_ready():
                             "啟動補跑檢查：last_extract=%s, 上個排程=%s → 立即補跑",
                             last_extract_local, last_scheduled_run.isoformat(),
                         )
-                        await _run_personality_extraction_once()
+                        await _run_daily_maintenance_once()
                     else:
                         logger.info(
                             "啟動補跑檢查：last_extract=%s ≥ 上個排程=%s，跳過",
@@ -255,7 +272,7 @@ async def on_ready():
                     wait_seconds = (target - now).total_seconds()
                     logger.info("人格萃取排程：下次執行 %s（等待 %.0f 秒）", target.isoformat(), wait_seconds)
                     await asyncio.sleep(wait_seconds)
-                    await _run_personality_extraction_once()
+                    await _run_daily_maintenance_once()
                 except Exception as exc:
                     logger.error("人格萃取排程失敗: %s", exc, exc_info=True)
                     # 失敗後等 1 小時再試

@@ -288,6 +288,43 @@ async def ingest_signature_tags(
     return stats
 
 
+async def run_signature_tag_sweep(guild) -> dict[str, int]:
+    """招牌梗衰減 sweep（每日維護步驟；純 metadata UPDATE/DELETE，不碰 LLM、不重嵌入）。
+
+    2026-08-18 從 `personality_extractor._run_personality_extraction_impl` 的步驟 0 移出。
+    兩者無資料相依（sweep 只動 profile_kind='signature_tag'，萃取只動 'auto_personality'），
+    當初共用 `_extraction_running` 鎖只是為了不另開排程。拆開的好處：
+      - 人格萃取日後換成 agent 實作時，招牌梗 GC 不受影響（換工具＝只換萃取那一步）
+      - 手動預覽指令（`write_rag=False`）不再誤觸真實的刪梗／降級
+
+    純 SQL、不佔 GPU，所以不需要 `stream_exclusive()` 或萃取鎖。
+    失敗只 log 不 raise —— 維護工作不該拖垮排程的其他步驟。
+
+    回傳 `{scanned, demoted, archived}`；guild 為 None 或失敗時回傳全 0。
+    """
+    zero = {"scanned": 0, "demoted": 0, "archived": 0}
+    if guild is None:
+        logger.warning("招牌梗 sweep：無可用 guild，略過")
+        return zero
+    try:
+        port = get_member_profile_store()
+        stats = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: port.sweep_signature_tags(
+                guild_id=guild.id,
+                halflife_low_days=_SETTINGS.tag_halflife_low_days,
+                halflife_spicy_days=_SETTINGS.tag_halflife_spicy_days,
+                demote_floor=_SETTINGS.tag_demote_floor,
+                archive_floor=_SETTINGS.tag_archive_floor,
+            ),
+        )
+        logger.info("招牌梗 sweep（guild=%s）：%s", guild.id, stats)
+        return stats
+    except Exception as exc:
+        logger.warning("招牌梗 sweep 失敗（不影響其他維護步驟）：%s", exc, exc_info=True)
+        return zero
+
+
 async def process_tag_batch(*, guild_id: int, messages: list[dict], model: str) -> dict:
     """便利接口：一批訊息 → 抽取 → 守門 ingest。供 MemoryService.observe 並排呼叫。
 
