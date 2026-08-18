@@ -181,7 +181,10 @@ def _build_media_item(message: Any, file_rel_path: str) -> dict:
         "width": width,
         "height": height,
         "duration_sec": duration_sec,
-        "is_spoiler": bool(getattr(message, "media_unread", False)),
+        # spoiler 旗標在 media 物件上（MessageMediaPhoto/MessageMediaDocument.spoiler），
+        # 不在 message 上。原本讀的 message.media_unread 是「媒體尚未被檢視」（語音/圓形
+        # 影片用），與防雷完全無關，導致所有媒體都被記成非 spoiler。
+        "is_spoiler": bool(getattr(media, "spoiler", False)),
     }
 
 
@@ -402,6 +405,10 @@ async def _process_message(
             await db.upsert_media_items(message_pk, media_items)
         else:
             print(f"[{log_prefix}] 媒體已存在，略過下載 message_pk={message_pk}")
+            # 檔案在就不重抓，但 spoiler 旗標仍要校正——早期版本讀錯欄位（media_unread），
+            # 舊資料全被記成非 spoiler，不在這裡回填就永遠錯下去。
+            if await db.update_media_spoiler(message_pk, bool(getattr(message.media, "spoiler", False))):
+                print(f"[{log_prefix}] 已校正 spoiler 旗標 message_pk={message_pk}")
 
     # 2.5 下載內嵌自訂表情（premium custom emoji），供 relay 轉成 Discord App Emoji。
     # 只在「即時新訊息」與「on-demand 重抓」時做；啟動歷史掃描（History）刻意跳過，

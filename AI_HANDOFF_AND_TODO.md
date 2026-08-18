@@ -27,7 +27,8 @@
 最後盤點紀錄（只保留近期；過往詳見 `TODO-completed.md` 各歸檔 entry）：
 - 2026-08-18（人格萃取 Agent 影子模式，**規劃定案・未開工**；本輪只做查證與線上實測，未動任何 code／設定檔）：把每日 04:00 的固定人格萃取升級成 tool-calling agent，產出**可稽核的 diff** 而非整份覆蓋；影子模式並行、寫獨立表、**不動 production**。**線上實測（Lemonade 11.5.0 + Qwen3.8-27B-UD-Q4_K_XL / llamacpp b9747）**：tool calling ✅（`finish_reason=tool_calls`，4.4s / 33 tok/s）、`role:"tool"` 回合往返 ✅、`response_format: json_schema` strict ✅ → **不需自架 llama-server、不需 `--jinja`，M0 直接跳過**。**併發**：1 發 33 tok/s、2 發各 11~12、3 發各 7 → llama-server 多 slot 真並行但**總吞吐固定被平分**（故獨立進程方案會讓 askai 慢 3 倍）。**prompt cache**：冷 3417 tok/10.1s → 熱 18 tok/0.3s，且插入不同前綴後仍命中（多組 cache 並存）；插話 prompt 78%（10,823 字元）是靜態前綴，現有組裝順序已是最優。**資料面**：chat 表 273,780 筆 / 81 人 / `message_id` **100% 覆蓋**（evidence 機制成立）；訊息平均僅 11~38 字；14 天符合門檻 46 人、337,211 字。**五項定案**：①`personality_model` 統一改 27B（`max_models.llm=1` 會互踢）②04:00 觸發、production→agent **序列接力**（約 05:10 收工）③agent 跑在 bot process 內共用 `stream_exclusive`、**不可做成獨立腳本**、每 step 主動禮讓 ④**補第四支工具 `get_conversation`**（人格訊號在互動不在句子，不補會輸給現有 pipeline）+ context 改 token 預算 ⑤thinking 分兩段（收集關、產 diff 開，12 分/人 → 3 分/人）。**M1 第一項＝補 code 缺口**：`think` 覆寫管線完整存在，唯一斷點在 [_build_chat_extra_body](src/services/llm_service.py#L573-L588) 的 lemonade 分支把它丟掉。詳見 [Persona Agent 區塊](#persona-extraction-agent影子模式規劃定案)。
 - 2026-08-09（插話「談話自然」重構，**已實作・待部署驗證**；py_compile 全綠、146 測試全過、未 commit）：使用者提出兩個痛點——①一偵測到發言就馬上運算，沒等人講完；②聊天室常有多組人聊不同主題，機器人不知該加入哪個。**本輪量到基準**：自發插話「trace→送出」中位 **120.8s**（p90 165s、max 901s，n=3540）、PASS 率僅 15%、`ai_interactions` 5602 筆但負向反應只有 **13** 筆。**核心診斷**：問題不是它選錯主題，是**選的時候那條線還在、120 秒後講出來已經沒了**，而自發插話是裸 `channel.send` 無指向 → 必然像亂入；且節奏由冷卻計時器決定（每 5 分鐘準時報到）而非對話內容。**目標函數經使用者拍板＝自然/人性，GPU 節省降為副作用**。**四層方案**：L3 選線+reply 錨定（第一優先，讓「慢」變合理）、L4-b 接續自己的話、L2 debounce+typing 不搶話、L1 鉤子閘（**不用 LLM**＝結構演算法+少量 regex+k-NN，權重用 logistic regression 從 5602 筆學、標籤改用「插話後有沒有人接」而非 reaction）。順帶 `max_passes_per_burst` 3→1、`cooldown` 300→180。**使用者否決**：等鎖上限（GPU 本來就慢，放棄等於 /askai 忙時永遠不插話）、新鮮度丟棄（被接完也可以插，且丟棄＝白燒 120s 零產出）。**實作中修掉的缺陷**：L4-b 借用 directed 路徑會連 foreground 讓位/降溫硬閘/每小時上限一起繞過 → 加 `followup` 旗標分流閘門。**下一步**：`docker compose restart discord-bot` → 看 log 的「ambient 鉤子」分數分布調 `hook_threshold`、看「錨定=#N」確認模型有遵守選線契約。詳見 [自然插話重構區塊](#自然插話重構2026-08-09已實作待部署驗證)。
-- 2026-08-02（Telegram 漏收事件自動補掃，**已實作，待部署驗證**）：症狀＝「最新的 telegram 沒有轉發」。**relay 端無辜**（delivery_state 3119 筆、`last_polled_pk`=`max(id)`=12494，DB 內全送完）；**斷點在 scraper**——Telegram 已有 `Seele_WW_leak/9824`，DB 最大卻停在 **9823**（08-01 22:29:48+08）。用 `telegram_emoji_refetch` NOTIFY 測活性，scraper **秒回且成功即時抓回 9823** → 連線正常、非卡死。**根因**＝Telethon 漏派 NewMessage 事件（handler 完全沒被呼叫），而 [runner.py](src/telegram_scraper/runner.py) **只在啟動時掃一次歷史**，之後純靠即時事件 → 漏掉就永久漏掉。**非偶發**：以 `created_at - message_date > 5min` 回推「靠重啟才補進來」的比例 7/25 **28/63**、7/26 **59/121**，過去都是剛好有重啟蓋掉問題。**實作**＝每 15 分鐘（`catchup_interval_min`，可熱調整、`<=0` 停用）以各頻道 DB 最大 message_id 為基準做 `iter_messages(reverse=True, offset_id=基準, limit=200)` 增量重掃（已讀 Telethon 1.43.2 原始碼確認 reverse 下 `offset_id` 內部 +1＝不含基準、回傳舊→新保 PK 時序）；即時/補掃/refetch 共用 `process_lock` 序列化；單輪上限由舊往新掃故不留永久空洞；單頻道拋錯不拖垮迴圈。**順修** History log 把 Gamedataleak 訊息全標成 `source_channel=Seele_WW_leak` 的誤導 bug。**驗證**：py_compile 全綠、容器內 stub 煙霧測試 15 項全過、`get_peer_id` 與 DB chat_id 一致、實 DB 基準 Seele=9823/Gamedataleak=2669。**未 commit**，`runtime_config.json` 刻意未動（受保護檔，程式端預設已生效）。**下一步**：`docker compose restart telegram-scraper` → 立刻補回 9824 → 觀察 `[CatchUp]` log。詳見 [Telegram 漏收事件自動補掃區塊](#telegram-漏收事件自動補掃2026-08-02-已實作待部署驗證)。
+- 2026-08-02（Telegram 媒體 spoiler 未帶到 Discord，**已實作，待部署驗證**）：症狀＝TG 影片有防雷、Discord 沒打碼。**relay 端無辜**（`AttachmentSpec.is_spoiler` → `discord.File(spoiler=)` → discord.py 自動加 `SPOILER_` 前綴，圖片也已有「spoiler 首圖不進 embed」分支）；**DB `telegram_message_media` 2696 筆 `is_spoiler` 全 false**。**根因**＝[`_build_media_item`](src/telegram_scraper/handlers.py#L140) 讀 `message.media_unread`（語意是「媒體未檢視」，語音/圓形影片用），真正旗標在 media 物件上的 `MessageMediaPhoto/Document.spoiler`。**修法**：①改讀 `getattr(media, "spoiler", False)`；②`db.update_media_spoiler()`（`IS DISTINCT FROM` 過濾空寫）；③「媒體已存在略過下載」分支補呼叫回填——**沒這段舊資料永遠錯**，`/resend_article` 舊影片仍不打碼。**驗證**：scraper 5 案全過、`discord.File(spoiler=True)` 實測輸出 `SPOILER_clip.mp4`、回填 SQL 以 BEGIN/ROLLBACK 實測（值變 UPDATE 1、值同 UPDATE 0、回滾後 2696 筆未動）。**未 commit**。**下一步**：重啟 telegram-scraper，歷史掃描會校正近 7 天旗標。詳見 [Telegram 媒體 spoiler 區塊](#telegram-媒體-spoiler防雷未帶到-discord2026-08-02-已實作待部署驗證)。
+- 2026-08-02（Telegram 漏收事件自動補掃，**已實作，待部署驗證**）：症狀＝「最新的 telegram 沒有轉發」。**relay 端無辜**（delivery_state 3119 筆、`last_polled_pk`=`max(id)`=12494，DB 內全送完）；**斷點在 scraper**——Telegram 已有 `Seele_WW_leak/9824`，DB 最大卻停在 **9823**（08-01 22:29:48+08）。用 `telegram_emoji_refetch` NOTIFY 測活性，scraper **秒回且成功即時抓回 9823** → 連線正常、非卡死。**根因**＝Telethon 漏派 NewMessage 事件（handler 完全沒被呼叫），而 [runner.py](src/telegram_scraper/runner.py) **只在啟動時掃一次歷史**，之後純靠即時事件 → 漏掉就永久漏掉。**非偶發**：以 `created_at - message_date > 5min` 回推「靠重啟才補進來」的比例 7/25 **28/63**、7/26 **59/121**，過去都是剛好有重啟蓋掉問題。**實作**＝每 15 分鐘（`catchup_interval_min`，可熱調整、`<=0` 停用）以各頻道 DB 最大 message_id 為基準做 `iter_messages(reverse=True, offset_id=基準, limit=200)` 增量重掃（已讀 Telethon 1.43.2 原始碼確認 reverse 下 `offset_id` 內部 +1＝不含基準、回傳舊→新保 PK 時序）；即時/補掃/refetch 共用 `process_lock` 序列化；單輪上限由舊往新掃故不留永久空洞；單頻道拋錯不拖垮迴圈。**順修** History log 把 Gamedataleak 訊息全標成 `source_channel=Seele_WW_leak` 的誤導 bug。**驗證**：py_compile 全綠、容器內 stub 煙霧測試 15 項全過、`get_peer_id` 與 DB chat_id 一致、實 DB 基準 Seele=9823/Gamedataleak=2669。**已 commit（`fbd2d3c`）**，`runtime_config.json` 刻意未動（受保護檔，程式端預設已生效）。**下一步**：`docker compose restart telegram-scraper` → 立刻補回 9824 → 觀察 `[CatchUp]` log。詳見 [Telegram 漏收事件自動補掃區塊](#telegram-漏收事件自動補掃2026-08-02-已實作待部署驗證)。
 - 2026-07-25（Telegram Premium 自訂表情 → Discord App Emoji，**已實作，待部署驗證**）：症狀＝TG premium custom emoji 內嵌文字，relay 只留 fallback 一般 emoji。**實證 msg #9676**「3.6主线登场角色↓」9 個角色貼圖在 Discord 只剩 `🐦‍🔥🐦🤔🐉💫🌫🥛😭🦊`。**根因（DB 查證）**：scraper [_serialize_entities](src/telegram_scraper/handlers.py#L182) 只存 `{type,offset,length}`，**`document_id` 被丟**（#9676 的 9 筆 CustomEmoji 皆無 document_id）→ relay 無從還原。**定案**：寄存用 **Discord App Emoji**（bot 私有池 2000、不佔伺服器 50 格、成員隱形、跨伺服器）；**Phase 1 只做靜態 webp→PNG，動態 tgs/GIF 不做**。完整規劃見 [Telegram 自訂表情 relay 區塊](#telegram-premium-自訂表情--discord-app-emoji規劃定案)。**已實作（py_compile + 98 測試全過）**：scraper 補 document_id + 下載（gate 掉 History）+ runner LISTEN 重抓；db 新表 `telegram_custom_emoji`；relay `apply_message_entities`（spoiler+emoji 合併）+ `CustomEmojiResolver`（上傳 App Emoji）+ footer 加 `db#id`；`/resend_article` 加 `type:telegram`（notify 重抓→poll→渲染→送）。**下一步**：使用者重啟 discord-bot + telegram-scraper，`/resend_article id:9676 type:telegram` 實測。
 - 2026-07-03（他人印象被審核擋下 → 一鍵重填**已實作**，存檔即生效免重啟）：**現象排查**＝使用者填「對他人印象」後「什麼都沒跑出來」。查 [discord_bot.log](logs/discord_bot.log)：14:39:46 開 modal → 14:44:30 `intro_impression_moderation_blocked decision=reject reason=請勿使用迷因/定型文灌水 score_meme_spam=1.0 score_fake_story=1.0`，即**送出成功但被審核 reject**（[impression_moderation_service.py:186](src/services/impression_moderation_service.py#L186) meme_spam>0.6 硬擋）；被擋只回一則通用 ephemeral 警告（易被忽略、且不顯示真原因），原文全丟需重打。**需求**＝被擋時可重新複製/帶入表單（使用者反映判斷標準偏高）。**改法（僅改 code，未動門檻）**：[management_commands.py](src/commands/management_commands.py) ①`IntroImpressionModal.__init__` 加 `prefill_target/alias/habit/impression` kwargs → `UserSelect(default_values=[...])`(2.4+) + `TextInput(default=...)` 帶入上次全部欄位（含對象）；②新增 `ImpressionRetryView`（非持久化，timeout=600，一顆「✏️ 重新填寫（帶入剛剛內容）」按鈕，callback `send_modal` 帶 prefill）；③被擋分支改回覆＝顯示**實際 `moderation.reason`** + 原文（```code block``` 可複製）+ 掛 retry_view。py_compile PASS、discord.py>=2.6.4 支援全部用到的 API。**未 commit**。**下一步**：docker 重啟後實測「填梗被擋 → 看到原因+原文+按鈕 → 點按鈕帶入內容改寫再送」。**選配（未拍板）**：若仍覺門檻高，可再放寬 [impression_moderation_service.py](src/services/impression_moderation_service.py) 的 `score_meme_spam>0.6` / `score_fake_story>0.6` / `score_real_interaction<0.4` 閾值，或對特定情境放行。
 - 2026-07-02（插話/askai 反附和 — prompt 微調**已實作**，存檔即生效免重啟）：使用者觀察「模型都在附和目前對話、不獨立思考」。**診斷（修正前一輪誤判）**：撈 `ai_interactions` 近兩則，其一觸發「英格蘭又讓人失望」+ 貼比分圖 → 回「這比分…徹底翻不了身」。原疑幻覺，**查 code 證實插話路徑會把圖 base64 送 vision 模型**（[ambient_reply.py:582/899-982](src/llm/ambient_reply.py#L899-L982) → [llm_service.py:62-83](src/services/llm_service.py#L62-L83) 轉 `image_url`），所以它**讀對了 0:1**、卻在「才 50 分鐘」時跟著把對方悲觀加碼 → **問題是反射性附和（模型 sycophancy 預設 + prompt 結構偏共鳴/留白強化），不是幻覺、也不是溫度**。**決策**：①**不動溫度**（`default_temperature=0.85`）——溫度管隨機/創意不管附和傾向，純聊天搞笑陪伴 bot 調低只會更平更像 yes-man；②**動 prompt 但窄**：把「有主見」當成人設本就有（機智/帶刺/見過世面不大驚小怪）卻被壓住的特質解放，條件觸發+點到為止。**改檔（僅 .txt，非資料檔）**：[persona_guardrails.txt](src/settings/prompts/persona_guardrails.txt) 於【不冒認】後新增【有自己的看法（不反射性附和）】4 點（對方 overshoot/與眼前事實對不上才淡淡唱反調、認真低潮不適用）；[persona_examples.txt](src/settings/prompts/persona_examples.txt) 新增範例 14（比分圖唱衰情境 ✗跟著加碼/✗說教/✓帶刺不說教）。兩檔 ambient([ambient_reply.py:105-109](src/llm/ambient_reply.py#L105-L109) identity→guardrails→ambient→examples) 與 /askai([llm_commands.py:105](src/commands/llm_commands.py#L105)) 皆載入；`./src` bind-mount + mtime 快取 → 免重啟。**未 commit**。**下一步**：觀察插話是否在情緒 overshoot 時淡淡點破而非附和、且不誤報/不說教/不變話癆。**選配**：baseline vs 新規則 A/B 實測（碰 Lemonade，挑閒時；使用者未拍板）。**能力備註**：此模型（ambient=Qwen3.6-35B-A3B Q4、askai=gemma-4-26B Q4、開 enable_thinking）感知 OK，「輕輕唱反調」在能力內；「跨多則偵測邏輯矛盾」的硬推理仍是天花板，別期待穩定。
@@ -160,6 +161,65 @@ context 改用 **token 預算**（[tokenization.py](src/llm/tokenization.py) 估
 **⑤ thinking 分兩段**
 「呼叫哪個工具」是機械決策（schema 已限死選項，實測 thinking 關閉時 4.4s / 42 tok 就正確產出）；「新增還是修正、證據夠不夠、跟舊描述矛盾嗎」才需要推理。8 步全開 ≈ 8 × 90s ≈ **12 分/人**（10 人 2 小時）；收集關閉、只有最後產 diff 開 ≈ **3 分/人**（10 人 30 分）。
 
+### 整體流程（定案）
+
+每日 04:00 由 `_run_daily_maintenance_once()` 序列觸發，**一次只做一件事**：
+
+```
+04:00  ① emoji 字典更新（已拆分 ✅）
+       ② 招牌梗 sweep（已拆分 ✅）
+       ③ production 人格萃取   約 40 分 → auto_personality（線上功能在吃）
+       ④ persona agent 影子     約 30 分 → persona_agent_versions（只有維運在看）
+05:10  收工
+```
+
+③④ 寫不同的表；persona card / /askai / 插話 完全不知道 ④ 存在（＝影子模式的定義）。
+
+agent 單人流程：
+
+```
+for 每位樣本使用者：
+  ├─ 組 messages（system=任務+工具契約 / user=這次分析誰）
+  ├─ loop（max_steps=8）：
+  │    ├─ 禮讓：stream_busy() / foreground_recently_active(90) → 等
+  │    ├─ 呼叫 LLM（thinking=OFF）帶 tools
+  │    ├─ 有 tool_calls → 執行工具 → append role:"tool" → 下一步
+  │    └─ 無 tool_calls 或 token 預算（24k）用盡 → 跳出
+  ├─ 最終步：thinking=ON + response_format=json_schema → 產 diff
+  ├─ 驗證層（程式碼判斷，非 LLM）：
+  │    ① JSON 合規？        否 → rejected_schema
+  │    ② evidence 存在且屬於本人？ 否 → rejected_evidence
+  │    ③ confidence=low / changes 空？ 是 → 標記資料不足、不寫版本
+  │    └─ 通過 → 套用 diff 產生完整 persona_text
+  └─ 寫 persona_agent_versions（新版本，永不覆蓋）+ persona_agent_runs（trace）
+```
+
+逐使用者獨立 try/except：**任一人失敗不影響其他人**。
+
+### 四支唯讀工具
+
+| 工具 | 用途 | 備註 |
+|---|---|---|
+| `get_current_persona(user_id)` | 讀現有描述當 diff 基準 | 第一次讀 production 的 `auto_personality`（**必帶 `guild_id`**），之後讀自己最新版 |
+| `get_messages(user_id, days, channel, limit)` | 主要資料來源 | days ≤ 90、limit ≤ 200，程式端夾住並在回傳註明 |
+| `search_messages(user_id, keyword, days, limit)` | 矛盾時找佐證 | limit ≤ 50 |
+| `get_conversation(channel_id, around_msg_id, before, after)` | **還原現場** | 勝負手；window ≤ 30。會回傳他人發言（與現有 pipeline 餵交錯 chat_log 同等級，非新增暴露面） |
+
+共同規則：唯讀、白名單強制檢查（`allowed_ids`）、回傳一律 JSON 字串、例外 catch 成 `{"error": ...}` 交給模型自行修正。
+
+### 兩張新表（普通 SQL 表，不進向量表）
+
+`persona_agent_versions`（成品，永久保存）
+- 欄位：`guild_id / author_id / version / persona_text / changes(JSONB) / confidence / notes / model / based_on / created_at`，`UNIQUE(guild_id, author_id, version)`
+- 功能：①M6 評比的對照組 ②稽核（reason + evidence 可翻回現場）③救援（現行 `auto_personality` 原地覆蓋、零歷史）④切換後成為正本 ⑤v2 漂移視覺化
+
+`persona_agent_runs`（過程 log，可定期清）
+- 欄位：`run_id / guild_id / author_id / status / steps / trace(JSONB) / duration_ms / error / created_at`
+- `status`：`ok / rejected_schema / rejected_evidence / max_steps / error`
+- 功能：①看 agent 決策路徑（黑箱除錯）②幻覺率＝`rejected_evidence` 比例（eval 直接取數）③失敗率（M4 驗收要求）④成本觀測決定樣本規模
+
+**為什麼不放進 `data_discord_member_profiles_index`**：①版本歷史會被語意召回撈出來當現況、污染 RAG ②不需要 embedding ③需要 `UNIQUE` 關聯約束，jsonb metadata 撐不起來。先例＝`ai_interactions`（同 DB 的普通 SQL 表）。
+
 ### M1 第一項：`think` 參數的 code 缺口
 
 覆寫管線**完整存在**——[`resolve_request_think()`](src/services/llm_service.py#L243) 有明確優先序（override > `backends.ollama.extra_body.think` > 舊欄位 > True），一路傳到 `generate_reply(think=)` → `chat_raw(think=)` → `_build_chat_extra_body(think=)`，且已有 caller 在用（[llm_commands.py:680](src/commands/llm_commands.py#L680)、[diary_reflection.py:201](src/llm/diary_reflection.py#L201)）。
@@ -178,15 +238,52 @@ context 改用 **token 預算**（[tokenization.py](src/llm/tokenization.py) 估
 
 ⚠️ `chat_raw` 的 timeout **在取得鎖之後才起算**（[ambient_reply.py:1267](src/llm/ambient_reply.py#L1267) 註解），等鎖無上限 → agent 必須維持「一步一放鎖」，絕不可跨 step 持鎖。
 
+### 工程節點（M1→M6）
+
+| 節點 | 內容 | 驗收標準 | 碰 production？ |
+|---|---|---|---|
+| **M1** | `think` 缺口 + 四支唯讀工具 + diff schema + 單元測試 | 容器內 `unittest discover` 全綠；夾取／白名單拒絕／`guild_id` 必帶／`think` 不傳時 extra_body 不變 四類皆有測 | ❌ 完全不碰（新模組無人呼叫，行為零改變） |
+| **M2** | agent loop（手寫、`max_steps=8`、禮讓、token 預算、逐步 log） | 單人跑通：log 顯示至少一次多輪工具呼叫、產出可解析 JSON、耗時落在 2~3 分/人 | ❌ dry-run，不寫 DB |
+| **M3** | 驗證層 + `store.py`（ensure_table／版本遞增／寫入） | **蓄意注入不存在的 msg_id → 該筆被攔，`status=rejected_evidence`** | ❌ 只寫新表 |
+| **M4** | 樣本批次 + 接進 04:00 第 ④ 步 + `personality_model` 改 27B | 單人失敗不影響其他人；失敗率記錄在 `runs` 表 | ⚠️ 第一次動排程，需重啟 bot |
+| **M5** | 與 production 平行跑一週 | 同一人的兩份輸出可並排比較 | 並行不互相影響 |
+| **M6** | 人工評比（具體性／幻覺率／矛盾處理／空洞比例）+ 決策文件 | 結論可以是「pipeline 更好」——那也是有效產出 | — |
+
+**節奏**：每個 M 完成後停下來給 Jason 檢視，不連續推進。M1~M3 完全不碰 production。
+
+**時序注意**：`personality_model` 改 27B **延到 M4 才做**。統一 27B 的目的是避免 agent 與 production 互踢模型，但 agent 到 M4 才真的跑批次；提早改只會讓 production 先變慢（20→40 分）並多一個變數。
+
+### 退場時程（若 M6 決定採用）
+
+```
+agent 產出後多呼叫一次現有的 index_auto_personality  → 下游（persona card / askai / 插話）零改動
+        ↓ 觀察一週
+停掉 production 萃取（emoji 字典與招牌梗 sweep 已於 2026-08-18 拆出，不受影響 ✅）
+```
+
+若不採用：agent 留著當實驗或直接移除，production 不受任何影響。
+
+### 主要風險
+
+| 風險 | 對應 |
+|---|---|
+| agent 版**輸給**現有 pipeline | 可接受的結論（M6 明文允許）。`get_conversation` 就是為了避免這個 |
+| 模型把互損文化讀成攻擊性 | 冒煙測試已重現（「你也太廢」→「尖酸刻薄、帶有攻擊性」）。diff prompt 須寫入該文化，eval 獨立列一欄 |
+| context 撐爆 32k | token 預算：累計 24k 上限、留 8k 給 thinking + 輸出；用 token 不用則數 |
+| agent 拖慢白天對話 | 04:00 執行 + 每 step 禮讓 + 一次只做一件 |
+| 8 步不夠用 | `runs.status='max_steps'` 比例會顯示；M2 即可觀察 |
+
 ### 未定案（待 Jason 拍板）
 
-- **樣本使用者清單**（5~10 人）與代號對應表；建議組成：A 層×2、D/E 層×2（現行 `MIN_MESSAGES_PER_USER=10` 門檻下 E 層 9 人**從未被分析過**，是 agent 最可能贏的戰場）、C 層×2、曾抽壞案例×1
-- **獨立資料表命名**；建議 `persona_agent_runs`（每次執行 log）+ `persona_agent_versions`（版本歷史），以 `author_id` 軟連結、無硬 FK（比照 [ai_interactions_store.py:158](src/llm/ai_interactions_store.py#L158) `ensure_table()` 先例）
-- **diff prompt 必須寫入「互損型社交」文化**——否則會系統性把每個人寫成有攻擊性；此項須在 eval 表獨立列一欄
+- **樣本使用者清單**（5~10 人）與代號對應表；建議組成：A 層×2、D/E 層×2（現行 `MIN_MESSAGES_PER_USER=10` 門檻下 E 層 9 人**從未被分析過**，是 agent 最可能贏的戰場）、C 層×2、曾抽壞案例×1。**M4 才需要**
+- **diff prompt 的互損文化寫法**（M2 撰寫 prompt 時一併定）
 
-### 里程碑
+### 已完成的前置工作
 
-M0 ✅ 本輪實測跳過｜**M1** 四支唯讀工具 + schema + `think` 缺口 + 單元測試（走 [docker-compose.yaml:15](docker-compose.yaml#L15) 的 `unittest discover` gate，新增 `src/test/test_persona_agent_tools.py` 即自動納入）｜M2 agent loop 單人跑通｜M3 diff + 驗證層 + 獨立表｜M4 樣本整批｜M5 與 production 平行一週｜M6 人工評比 + 決策文件（結論可以是「pipeline 更好」）
+- **2026-08-18｜M1 完成（未 commit）**：`llm/persona_agent/` 新套件（`tools.py` 四支唯讀工具、`schema.py` diff strict schema、`__init__.py` re-export）+ `llm_service` 的 `think` 缺口修補（`resolve_request_think` 改 backend-aware、`_build_chat_extra_body` 的 lemonade 分支把 `think` 轉成 `chat_template_kwargs.enable_thinking`，**僅在明確傳入時覆寫**故既有 caller 行為不變）+ 兩支測試（`test_persona_agent_tools.py` 16 項、`test_llm_think_override.py` 15 項）。容器內 gate **242 測試全綠**（原 211）。另對真實 DB 做過煙霧測試，四支工具皆通。**M1 完全不碰 production 執行路徑**。
+
+- **2026-08-18｜04:00 排程三步驟拆分（commit `5b69042`）**：招牌梗 sweep 從 `_run_personality_extraction_impl` 移到 `signature_tag_extractor.run_signature_tag_sweep()`，`_run_personality_extraction_once` 更名 `_run_daily_maintenance_once` 並拆成 emoji／sweep／萃取三個各自 try/except 的步驟。**未來換掉萃取只需動一行**；順帶修掉「手動預覽（`write_rag=False`）會誤觸真實刪梗／降級」。容器內 211 測試全綠。
+- **2026-08-18｜清除 `auto_personality` 殭屍列**：12 筆 `guild_id='0'` 的舊格式殘留（`last_extracted_at` 為空、author_id 與正式版完全重複）已刪除，現為 65 筆／65 人完全對齊。原本無害（[context_retriever.py:771](src/llm/context_retriever.py#L771) 有 guild_id 過濾），刪除理由是避免新寫的 `get_current_persona` 漏帶 `guild_id` 時撈到舊基準產出錯誤 diff。**工具層仍強制帶 `guild_id`——正確性不靠資料剛好乾淨。**
 
 ---
 
@@ -459,12 +556,43 @@ last_confirmed: 2026-08-02
 - `get_peer_id(Channel(id=2405953050))` == `-1002405953050`，與 DB `telegram_chat_id` 一致。
 - 實 DB 驗證補掃基準：Seele=**9823**、Gamedataleak=**2669**（即重啟後首輪會補回 9824）。
 
-**未 commit。** `runtime_config.json` **刻意未改**（該檔執行中會被 `add_identifier_to_forward_whitelist` 自行寫入，屬受保護檔）；程式端預設 15 分鐘已生效，要調整再手動加 `"catchup_interval_min": <分鐘>`。
+**已 commit（`fbd2d3c`）。** `runtime_config.json` **刻意未改**（該檔執行中會被 `add_identifier_to_forward_whitelist` 自行寫入，屬受保護檔）；程式端預設 15 分鐘已生效，要調整再手動加 `"catchup_interval_min": <分鐘>`。
 
 **下一步**：
 1. `docker compose restart telegram-scraper`（bind-mount `./src/telegram_scraper` → `/app`，重啟即載入新 code；同時啟動歷史掃描會立刻補回 9824 → NOTIFY → relay 轉發）。
 2. 觀察 log：`週期性補掃已啟動（每 15 分鐘增量重掃）`；日後漏事件時應出現 `[CatchUp] <頻道> 補回漏收訊息：基準 message_id=... 之後撈到 N 筆`。
 3. 觀察一兩天，若 `[CatchUp]` 頻繁觸發，代表即時事件漏失率高，可考慮縮短間隔或深入追 Telethon 更新迴圈。
+
+---
+
+## Telegram 媒體 spoiler（防雷）未帶到 Discord（2026-08-02 已實作，待部署驗證）
+
+<!-- @meta
+id: telegram-media-spoiler
+type: STATE
+status: confirmed
+depends_on: telegram-catchup-sweep
+affects: telegram-relay
+last_confirmed: 2026-08-02
+-->
+
+**症狀**：Telegram 影片有加 spoiler，轉到 Discord 沒有打碼。
+
+**診斷**：DB `telegram_message_media` **2696 筆 `is_spoiler` 全為 false**，零筆 true。relay 端其實**早就接好了**（`TelegramMediaRecord` → `AttachmentSpec` → `discord.File(spoiler=...)`，discord.py 2.7.1 會自動加 `SPOILER_` 檔名前綴；圖片路徑也已有「首圖若為 spoiler 就不塞進 embed、改走附件」的分支）。唯一斷點在 scraper 寫入端。
+
+**根因**：[handlers.py `_build_media_item`](src/telegram_scraper/handlers.py#L140) 讀 `message.media_unread`——那是「媒體尚未被檢視」（語音/圓形影片用），與防雷無關。真正的旗標在 **media 物件**上：`MessageMediaPhoto.spoiler` / `MessageMediaDocument.spoiler`（已用 Telethon 1.43.2 的 `inspect.signature` 確認欄位存在）。
+
+**實作**：
+- [handlers.py](src/telegram_scraper/handlers.py)：`is_spoiler` 改讀 `getattr(media, "spoiler", False)`。
+- [db.py](src/telegram_scraper/db.py)：新增 `update_media_spoiler(message_pk, is_spoiler)`，`WHERE ... AND is_spoiler IS DISTINCT FROM $2` → 值沒變就不寫。
+- [handlers.py](src/telegram_scraper/handlers.py)：「媒體已存在，略過下載」分支補呼叫回填。**沒有這段的話舊資料永遠錯**（該分支整段跳過 `upsert_media_items`），`/resend_article` 舊 spoiler 影片仍不會打碼。
+
+**已驗證**：
+- scraper 端 5 案全過（影片/圖片 × spoiler 真假 + 無媒體），並對照出舊寫法對 spoiler 影片確實回傳 False。
+- `discord.File(..., spoiler=True)` 實測輸出檔名 `SPOILER_clip.mp4`。
+- 回填 SQL 以 `BEGIN/ROLLBACK` 實測：值有變 → `UPDATE 1`、值相同 → `UPDATE 0`；回滾後全表 2696 筆未動。
+
+**未 commit。下一步**：重啟 `telegram-scraper`，啟動歷史掃描（168h）會順手把近 7 天媒體的 spoiler 旗標校正（log 出現 `已校正 spoiler 旗標 message_pk=...`）；之後新的 spoiler 影片轉到 Discord 應顯示為需點擊的模糊附件。**注意**：Discord 已發出的舊訊息無法回頭補打碼，回填只影響 DB 正確性與日後 `/resend_article`。
 
 ---
 

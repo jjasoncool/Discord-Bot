@@ -415,6 +415,29 @@ class TelegramDatabase:
                         bool(media.get("is_spoiler", False)),
                     )
 
+    async def update_media_spoiler(self, message_pk: int, is_spoiler: bool) -> bool:
+        """回填某訊息所有媒體的 spoiler 旗標，回傳是否真的有更新。
+
+        媒體檔已存在時不會重跑 upsert_media_items，若只靠那條路徑，早期用錯欄位
+        寫進去的 is_spoiler 會永遠留錯（/resend_article 舊影片不會打碼）。這裡在
+        重掃時順手校正；用 IS DISTINCT FROM 過濾，值沒變就不寫。
+        """
+        if self.pool is None:
+            raise RuntimeError("資料庫尚未 connect")
+
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE telegram_message_media
+                SET is_spoiler = $2, updated_at = NOW()
+                WHERE message_id = $1 AND is_spoiler IS DISTINCT FROM $2;
+                """,
+                int(message_pk),
+                bool(is_spoiler),
+            )
+        # asyncpg 回傳 "UPDATE <n>"
+        return not result.endswith(" 0")
+
     async def notify_new_message(self, message_pk: int) -> None:
         """發送 pg_notify 通知新訊息。"""
         if self.pool is None:
