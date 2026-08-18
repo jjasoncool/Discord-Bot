@@ -6,6 +6,10 @@
 
 | 日期 | 區塊 | 關鍵字 |
 |---|---|---|
+| 2026-07-27 | [Telegram 多頻道來源 + 轉發去重](#telegram-多頻道來源--轉發去重歸檔-2026-08-18原-2026-07-27) | 從 handoff 歸檔, source_channels, 跨來源轉發去重 |
+| 2026-07-25 | [Telegram Premium 自訂表情 → Discord App Emoji](#telegram-premium-自訂表情--discord-app-emoji歸檔-2026-08-18原-2026-07-25) | 從 handoff 歸檔, telegram_custom_emoji, App Emoji |
+| 2026-07-01 | [活動公告 → 自動建立 Discord 伺服器活動](#活動公告--自動建立-discord-伺服器活動歸檔-2026-08-18原-2026-07-01) | 從 handoff 歸檔, event_time_parser, created_events |
+| 2026-07-25 | [handoff 盤點紀錄歸檔（2026-08-18）](#handoff-盤點紀錄歸檔歸檔-2026-08-18) | handoff 盤點歸檔, 印象重填, 反附和, reply_to |
 | 2026-06-29 | [變更紀錄：日記「開頭都一樣 + 只記得晚上」修正](#變更紀錄日記開頭都一樣--只記得晚上修正歸檔-2026-07-02原-2026-06-29) | 從 handoff 歸檔 |
 | 2026-06-29 | [變更紀錄：插話人格「有時像屁孩噴人」修正](#變更紀錄插話人格有時像屁孩噴人修正歸檔-2026-07-02原-2026-06-29) | 從 handoff 歸檔 |
 | 2026-06-30 | [變更紀錄：V2 風格召回（style_refs）+ 從反應數據學個性](#變更紀錄v2-風格召回style_refs-從反應數據學個性歸檔-2026-07-02原-2026-06-30) | 從 handoff 歸檔 |
@@ -1546,3 +1550,256 @@ last_confirmed: 2026-04-07
 -->
 
 **起因：** post id=399 DB 有 8 張圖但 bot 收到 API images 為空、Discord 貼文無圖。根因：輪詢模式時間差 + FB CDN URL token 過期 + 無刷新機制。**變更**：① `src/scraper/main.py` FB 抓完呼叫 `_notify_discord_bot("fb")` ② `src/services/notify_server.py` 新增 `"fb"` handler → `_process_fb` → `FBMonitor.check_and_send_fb_posts()` ③ `src/discord_bot.py` 移除 `_auto_start_fb_monitor` 輪詢（原每 600 秒）④ `fb_scraper_service.py` `_merge_fields_for_duplicate` 圖片合併改 `>=` 時更新（刷新 CDN token 不縮水）⑤ `database.py` `_update_fb_post` 圖片從「只新增」改「全量替換」。**流程**：scraper 抓 FB → 寫 DB（URL 最新鮮）→ POST /notify/fb → bot 拉資料 → 下載圖 → 發送。**注意**：舊貼文（不在 FB 首頁）不會被重抓、CDN URL 過期無法自動更新；`start_fb_monitoring()` 保留供手動指令。
+
+---
+
+## 活動公告 → 自動建立 Discord 伺服器活動（歸檔 2026-08-18，原 2026-07-01）
+
+**歸檔佐證**：已上線運作 — `a9b5101` 起共 5 次 commit（含 `7c3ec8c` 關掉 dry-run、`2c58d51` 刪除活動時清 created_events、`ae47f49` 封面圖、`198d68a` 標題取章節名），`sent_articles.db` 的 `created_events` 已累積 **17 筆**自動建立的活動。
+
+<!-- @meta
+id: event-announce-auto-schedule
+type: DECISION
+status: confirmed
+last_confirmed: 2026-07-01
+depends_on: post_to_channel, notify_server, state_db, article_monitor, fb_monitor
+affects: scraper/main.py, notify_server, article_monitor, fb_monitor, discord_bot
+-->
+
+**目標**：把官方公告（FB／Article）裡同時含「活動時間」+「伺服器時間」的限時活動，解析出時間區間後**全自動**建成 Discord 伺服器活動（Guild Scheduled Event）。
+
+### 來源與觸發（定案）
+- 來源＝我們自己轉發的 **FB + Article**，兩者都發進 `article_monitor_channel_id`（FB 走 `notify_server._process_fb`、Article 改推送後同址；[notify_server.py:154](src/services/notify_server.py#L154) 已寫死此 key）。
+- **不走 on_message**：bot 自己的訊息被 [on_message:356](src/discord_bot.py#L356) 擋掉；且攔在轉發點拿得到原始 dict（全文＋真發布時間），比反推 embed 乾淨。
+- 偵測**寄生在轉發動作尾巴**（`send_*_to_channel` 成功後呼叫），不自建排程、不輪詢、不監聽 gateway。
+
+### 同時做的基礎改造：Article 改推送 + 共用模組（完整版，使用者選定）
+1. **Article 改準即時推送**（對稱 FB）：
+   - [scraper/main.py](src/scraper/main.py#L40) `main_scrape_task()` 成功後加 `_notify_discord_bot("article", {...})`（仿 fb [:73](src/scraper/main.py#L73)）。
+   - [notify_server](src/services/notify_server.py#L32) 派發表加 `"article"` 來源。
+   - [discord_bot.py](src/discord_bot.py#L549) 退役 `_auto_start_official_article_monitor` 輪詢 → **降為 30 分 fallback safety net**；FB 也補同一條 fallback（目前 FB 無保險絲，webhook 漏了就不發）。
+2. **共用模組（完整版）**：
+   - **觸發層**：notify_server 用宣告式 `_RELAY_SOURCES` 註冊表（source → {config_key, monitor_factory, method}）把 `fb / article / it_article` 收斂成單一 `_process_relay`；**巴哈維持自有 handler**（單篇/批次＋forum slot 是真特例）。配 `src/test/test_notify_relay.py` 守現役 FB/IT 推送。
+   - **偵測層**：`event_scheduler` 為唯一活動偵測模組，FB/Article 發送尾巴各呼叫一次，匯流同一 parser+scheduler。
+
+### 解析（純 regex，不上 LLM）—— 已對 articles.db 全 490 篇對抗審查（2026-07-01）
+- 理由：官方公告格式高度固定、幻覺日期在「自動建行事曆」不可逆；LLM 僅留逃生門。
+- **雙詞交集硬閘門**：stripped text 同時含「活動時間」AND（含「伺服器時間」OR「（UTC+8）」）。實測交集=219/490，能分辨真活動 vs 宣傳/售票/維護預告（使用者觀察「交集伺服器時間 通常是活動」獲驗證）。
+- **錨點認「詞」不認「符號」**：`活動時間[✦*：:\s　]*`——✦ 等裝飾不穩定，刻意忽略，只認「活動時間」四字。實證不會誤抓「✦開放條件✦／※…期間／活動時間結束後」散文。**加 negative lookahead** 排除「結束/及時/期間/內」散文字，讓 n 計的是「活動時間標籤」而非「活動時間詞」。
+- **DATE**：`(\d{4})[/年](\d{1,2})[/月](\d{1,2})日?\s*(\d{1,2})[:：](\d{2})`（日與時之間**可選空白**，相容 `YYYY/M/D HH:MM`）+ **缺年分支** `(\d{1,2})月(\d{1,2})日…`（年份用貼文 start_time 補；跨年 end<start 則 +1 年）。範圍符 `[~～\-－—至到]`。
+- **逐錨點抽出所有 range**（不再「恰好一個才建」）：一篇可含多個「活動時間」活動（含版本內容說明匯總帖），全部抽出，靠**指紋去重**決定建不建（見下）。
+- **缺時間成分預設（皆 UTC+8）**：有日期無時刻 → start 00:00、end 23:59；缺結束（永久開放）→ 跳過。
+- **相對起點（「X版本更新後」）**：**不可壓貼文日**（預告型貼文發文遠早於上線，方向性錯，實測偏差約 4 天）。改用**版本日回填**：解析同版本「內容說明」帖的「更新維護時間：YYYY年M月D日HH:00」；解析不到 → SKIP（寧可漏不可錯）。
+- **全自動「寧可漏不可錯」**：抓不到/不確定一律不建。
+
+### 去重（跨來源活動指紋，v1 強制）—— 對抗審查確認的最關鍵修正
+- **問題**：FB+Article 都進 `article_monitor_channel_id`，**同活動雙來源雙報**（實證：坎特蕾拉喚取同時在 Article #3736 與 FB #93，range 一致）；FB 內部亦重複（#7==#9 同 post_id、content_hash 不同）。純 article_id/fb_id 去重**無法擋跨來源雙建**。
+- **指紋** = `(normalize(title), start_utc8, end_utc8)`。normalize 剝 `[括號]`/✦裝飾/全形空白；**必含 start/end**（「聲弦滌蕩」13 篇、「回音盈域」10 篇為**同名不同期**循環活動，純標題會錯誤合併）。時間正規化到整分避免 1 分鐘差漏命中。
+- **建立前查指紋**：命中既有 `created_events` 即跳過。FB 去重改用 `post_id`（非自增 id）。
+- **匯總帖補建**：版本內容說明帖**逐活動 parse + 指紋去重**——有獨立貼文的被指紋擋掉（不重複）、只在匯總帖的補建（不漏，實證「唯你的長夏永不凋落」5/22~8/1 等只活在匯總帖）。降噪可只補非贈禮/簽到的玩法活動。
+- **冪等對照表** `created_events(event_fingerprint, discord_event_id, source_id)`：可冪等、可在偵測刪文/改期時撤銷/更新。
+- **首次上線 dry-run**：先輸出待建清單給人工核一輪，再開全自動（使用者已同意「錯了沒差再改」，dry-run 為首批保險）。
+
+### 時區 / Discord 限制（定案）
+- 伺服器時區 **UTC+8 固定**（壓 00:00、轉 UTC 都用它；台港服無 DST，等同 fixed +8）。
+- Discord 規定 scheduled event **start 必須在未來** → `start = max(now+5min, 解析start)`；即日起原始 00:00 寫進 description；clamp 後若 start≥end 則整則跳過。
+- `entity_type=external`，`location=`**「鳴潮」**（使用者選 b；多遊戲對應後續再抽），`description=` 原文摘要＋跳轉連結（FB `url`／文章連結）。
+- bot 為 **admin** → Manage Events 無虞。guild 活動上限 100。
+
+### 程式落點
+- `src/services/event_time_parser.py`：純函式 `text + post_time → list[ParsedEvent]`（一篇可多事件），無 discord/db/io 依賴、可單測。含 strip HTML、GATE、ANCHOR、DATE（缺年/空白）、相對起點標記。
+- `src/services/event_scheduler.py`：副作用層。閘門（`channel == config.article_monitor_channel_id`，即時讀）→ parse → 版本日回填（查 articles.db 版本說明帖，建 `{version→update_dt}` 快取）→ **指紋去重**（查 `created_events`）→ clamp → `guild.create_scheduled_event` → 寫指紋對照。全程 best-effort 不拋。dry-run 模式只輸出清單。
+- 去重儲存：沿用 [StateDB](src/services/state_db.py) 加 `created_events(event_fingerprint TEXT PK, discord_event_id, source, source_id, ts)`。
+- `src/test/test_event_time_parser.py`：用 [articles.db](src/scraper/articles.db) 真實樣本 + [fb_posts.json](src/scraper/data/fb_posts.json) 當測資（順補記憶「CI 要記起來」，接 docker 啟動測試 gate）。
+- hook：[article_monitor.send_article_to_channel](src/services/article_monitor.py#L275)／[fb_monitor.send_fb_post_to_channel](src/services/fb_monitor.py#L163) 尾巴各加 ~3 行（包 try/except，絕不拖垮轉發；仿 [ai_interactions_store](src/llm/ai_interactions_store.py) best-effort）。
+- **不碰 [post_to_channel](src/utils/discord_content.py#L64)**：守 additive 邊界。
+
+### 欄位對照（已查證）
+- article：`article_title` / `article_content_full`→`article_content`→`article_desc` / `start_time`→`create_time` / `article_id`。
+- fb：（無標題，從內文首行取）/ `text_md`→`text` / `timestamp`→`created_at` / `id` / `url`→`pfbid_url`。
+
+### 實作範圍（使用者 2026-07-01 定：v1+v2 全覆蓋一起上、容錯後修）
+- 全覆蓋 = 絕對起點 CREATE + 相對起點版本日回填 + 匯總帖逐活動補建 + **跨來源指紋去重（強制）** + 格式修補（空白/缺年）+ 首批 dry-run。
+- **基礎改造同步做**：article 改推送（scraper notify + notify_server article 來源 + 輪詢退役/30 分 fallback）+ 共用模組 `_process_relay`（收斂 fb/article/it，**巴哈維持自有 handler，零風險已驗證**）+ `test_notify_relay`。
+
+### 事故修正：活動名抓到卡池 4 星名（2026-07-29，已修）
+- **現象**：Discord 冒出兩個怪活動「燈燈」「悖論噴流」（來源 article #5221 =【3.5版本】[角色/武器活動喚取・第二期]）。
+- **根因**：`_clean_title_hint` 取「錨點前 90 字內**最後一個**括號名」。喚取帖緊貼「活動時間」上方那句正是 UP 池列舉句
+  「活動期間，5星角色「愛彌斯」、4星角色「白芷」、「莫特斐」、「燈燈」喚取機率限時提升！」→ 取到最後一個 **4 星名**，
+  而真正的活動名在再上一行的標題行（`[飛星自春天啟航]角色活動喚取`）。
+- **連帶災情（比錯名更嚴重）**：`title_hint` 同時是**指紋核心**，故
+  ① 同期多卡池共用同一批 4 星 → 指紋互撞，`plan_events` 本地去重把**真活動吃掉**（#4160/#4492/#4594/#4699 實測 4~6 個事件只剩 2 個）；
+  ② Article 與 FB 抓到不同名 → 跨來源去重失效 → **重複建活動**（#5221 該檔期建出 3 個，其中 2 個名字是廢的）。
+- **修法**（[event_time_parser.py](src/services/event_time_parser.py)）：
+  1. **標題行優先**：錨點往回 150 字、最多 5 個非空行，取第一個「像章節標題」的行——長度 2~40、無 `。！？，、；`、
+     不含時間/日期/獎勵/`數字:數字`/`*數量`/`~`，且**以括號開頭**或**以 活動|喚取|說明|公告|挑戰 結尾**。視窗切半的殘句丟棄。
+  2. **括號 fallback 只留給匯總帖**（多錨點）；單一活動帖抓不到標題行 → 回 `""` → 退用**貼文標題**（article_title／FB 首行），
+     這正是 Article↔FB 兩邊都拿得到的同一個字串 → 跨來源指紋才對得上。
+  3. 括號 fallback 另**跳過 UP 池列舉句**（`喚取機率|N星角色|N星武器`）與 `※`/`-` 說明條列。
+- **驗證**：articles.db 全 510 篇 + fb_posts.json 全 709 篇重跑；匯總帖活動名由「4 星名」變回真名
+  （`[非定義光譜]角色活動喚取`／`「溢彩熒輝」武器活動喚取`…），FB 側幾乎全部收斂成貼文首行；
+  規則 3 全庫只動到 #4920 一篇（無標題行的純列舉帖 → 收斂成單一總表活動，且指紋與 FB 總表貼文對上）。
+
+### 總表貼文處理（2026-07-29 使用者定案：「收斂成一則 + 總表在後 → 跳過」）
+- **問題**：修好命名後，同一檔期各卡池各建一個（4 個），FB 另有一則整期總表貼文
+  「【3.5版本】[角色/武器活動喚取・第二期]」→ 再多建第 5 個重複活動。
+- **判定**：`is_umbrella_title()`（`N.N版本…角色…武器…喚取` 或 `角色/武器…喚取`）。
+  全庫命中 6 篇 article + 7 篇 FB，單卡池公告（`[飛星自春天啟航]角色活動喚取`、`[週年角色活動喚取・第二期]`…）零誤判。
+- **規則 A｜總表不拆各卡池**（`plan_events`）：總表帖一律用**貼文標題**當活動名與指紋基準，不用逐卡池標題行。
+  #5221 內文有兩個卡池標題行，仍收斂成 1 則；同期卡池區間相同，本地指紋去重自然併掉。
+  **不會漏不同檔期**——指紋含 start/end，區間不同就是不同活動（全庫 6 篇總表檢核：相異檔期數 ≤1，收斂後皆為 1 則）。
+  這也讓 article 總表與 FB 總表**指紋一致**（`3.5版本角色武器活動喚取第二期|…`），跨來源去重擋得住。
+- **規則 B（曾實作，2026-07-30 撤除）**：原本加了「同區間已有活動 → 跳過總表」（`StateDB.has_event_in_window`）。
+  **前提是錯的，已連同該 DB method 一併移除。**
+  - 錯在哪：當初以為「總表＝各卡池獨立公告的重複」。查證 3.2~3.5 全部檔期後推翻——官方實際做法是
+    **一部分卡池發獨立公告、其餘包進總表**，兩者**互補而非重複**：
+    3.5 第二期 → 總表 #5221 只寫「飛星自春天啟航／永遠的啟明星」，另外 #5226「斟雨祝荷風」、#5235「棲霞飲露」各自發文；
+    3.3 第二期 → 總表 #4699 + 獨立 #4711/#4719；3.2、3.4 則整期只有總表。
+  - 後果：規則 B 會因為 #5226/#5235 佔住同一區間，把 #5221 整篇跳掉 → **只存在總表裡的兩個卡池完全沒有活動**。
+    使用者實測：刪掉舊活動後重送 #5221，log 出現「跳過總表公告（同區間已有活動）」，活動建不出來。
+  - 為何不需要它：規則 A 已讓 article 總表與 FB 總表**指紋相同**，既有 `is_event_created` 就擋得住那唯一的真重複。
+- **實測（#5221 重送，撤除規則 B 後）**：parse 2 個區間 → 收斂 1 則「【3.5版本】[角色/武器活動喚取・第二期]」→
+  指紋不存在 → **建立**；#5226/#5235 重送 → 指紋已存在 → SKIP。該檔期共 3 個活動，無重複、無遺漏。
+- **教訓**：活動去重只走**指紋**（含 start/end）。「同區間」不等於「同活動」——同一版本檔期本來就會有多個不同活動。
+
+### 活動描述連結改指 Discord 訊息（2026-07-29）
+- 描述末行由「原公告：官方原文 URL」改為「**公告出處：該則轉發訊息的 Discord jump link**」，點了直接跳到伺服器內的公告訊息，好追活動來自哪篇。
+- 串接：`article_monitor` / `fb_monitor` 早已有 `sent_message`（`post_to_channel` 回傳值，論壇頻道則為 thread 首則）→
+  以 `getattr(sent_message, "jump_url", None)` 傳給 `schedule_from_article/fb(message_url=...)` →
+  `maybe_schedule_events(message_url=...)` → `url=(message_url or url)`。
+- **退路**：拿不到訊息（發送失敗/舊呼叫端）時自動退回官方原文連結，描述不會變空。
+
+### 來源標題取法差異（使用者提醒，2026-07-29 查證）
+- article 用 DB 欄位 `article_title`；**FB 無標題欄位，取內文首行**——兩者機制本就不同。
+- 查證：有連結可配對的 75 組，normalize 後 68 組相同、7 組不同；不同的都是**首行為情境文/問候語**的貼文
+  （典藏車型、特別訂製、XBOX、短影片徵集…），這些**都過不了「活動時間＋伺服器時間」雙詞閘門**，不進活動路徑。
+- 對「會建出活動」的 66 篇 FB 貼文逐篇檢查首行：**0 篇是情境文**（活動公告一律首行即標題）。
+- 結論：現行取法對活動路徑安全；若日後 FB 改版把情境文放首行，需另做 FB 專屬標題擷取。
+
+### 待辦 / 未決
+- 多遊戲 `location` 對應（目前固定「鳴潮」）後續再抽。
+- 既有 `created_events` 14 筆是**舊指紋**；同一篇公告若被重掃會以新指紋再建一次（article_monitor 只處理新文，實務風險低）。
+- 公告事後改時間/刪文 → 用 `created_events` 對照表撤銷/更新（進階，可後補）。
+- 版本日回填依賴版本說明帖有「更新維護時間」欄；v1.1 #995 缺此欄 → 該版相對起點活動 fallback SKIP。
+- FB `content_hash` 對同 post_id 產生兩值（#7/#9）成因未明 → 指紋總閘可兜底，來源層待查。
+
+---
+
+## Telegram Premium 自訂表情 → Discord App Emoji（歸檔 2026-08-18，原 2026-07-25）
+
+**歸檔佐證**：已上線運作 — `cfc99bc` 已 commit，`telegram_custom_emoji` 有 **10 筆**取得 `discord_emoji_id`（即實際上傳成 Discord App Emoji）。Phase 2（動態 tgs/webm → GIF）未做，如日後要續作再開新區塊。
+
+<!-- @meta
+id: telegram-custom-emoji-relay
+type: DECISION
+status: confirmed
+depends_on: [telegram-relay]
+affects: telegram_scraper/handlers.py, telegram_scraper/db.py, services/telegram_relay_service.py
+last_confirmed: 2026-07-25
+-->
+
+**目標**：把 Telegram Premium 自訂表情（內嵌在文字裡的角色貼圖）relay 到 Discord 時還原成實際圖案，而非只剩 fallback 一般 emoji。
+
+### 問題與根因（已對 msg #9676 實證，2026-07-25）
+- 症狀：TG `MessageEntityCustomEmoji` 內嵌文字，每個佔一個 fallback unicode emoji 位置；relay 只保留 fallback → 使用者看到「看不懂的一般 emoji」。
+- 實證：msg #9676「3.6主线登场角色↓」9 個角色自訂表情 → Discord 顯示成 `🐦‍🔥🐦🤔🐉💫🌫🥛😭🦊`（鳴潮 3.6 角色貼圖）。
+- 根因：scraper [_serialize_entities](src/telegram_scraper/handlers.py#L182) 只存 `{type, offset, length}`，**`document_id` 被丟棄**（DB 查證：#9676 的 9 筆 CustomEmoji 皆無 document_id）；relay [apply_spoiler_entities](src/services/telegram_relay_service.py#L32) 只處理 spoiler，CustomEmoji 被無視。
+
+### 定案（2026-07-25，使用者確認）
+- 寄存模式 = **Discord App Emoji**（application 私有 emoji）：bot 專屬池上限 2000、**不佔伺服器 50 格**、**成員 emoji 選單隱形**、跨伺服器共用、程式自動建立/刪除、語法同 `<:name:id>`。
+- **Phase 1 只做靜態**（webp → PNG）。動態 tgs / video webm → **不做**，維持 fallback emoji（不變差）。
+
+### 三段改造
+1. **Scraper**（[handlers.py](src/telegram_scraper/handlers.py) / [db.py](src/telegram_scraper/db.py)）：
+   - `_serialize_entities` 對 `MessageEntityCustomEmoji` 多存 `document_id`。
+   - 用 `GetCustomEmojiDocumentsRequest(document_id=[...])` 取 document → 下載表情檔到共用 media 目錄（重用現有跨容器穩定檔名機制）；靜態 mime = `image/webp`。
+2. **對照表**（telegram_data DB，新表）：
+   `telegram_custom_emoji_map(document_id BIGINT PK, discord_emoji_id BIGINT, discord_emoji_name TEXT, animated BOOL, status TEXT, file_rel_path TEXT, created_at, last_used_at)`；status = ok / failed / unsupported（動態）。
+3. **Relay**（[telegram_relay_service.py](src/services/telegram_relay_service.py)）：
+   - 新 `apply_custom_emoji_entities(text, entities)`：查表命中 → UTF-16 range 換 `<:name:id>`；未命中 → lazy 轉檔（webp→PNG，Pillow）+ `bot.create_application_emoji(name=f"tg_{document_id}", image=...)` → 寫對照表 → 換。動態/轉檔失敗 → 保留 fallback（best-effort，絕不拖垮發文）。
+   - **與 spoiler 合併成同一次「由後往前」UTF-16 rewrite**，避免兩種 entity 並存時 offset 位移。
+   - 命名 `tg_{document_id}`（deterministic、可反查）；custom emoji 在 embed description 內可正常 render（relay 用 embed 發文）。
+
+### 測試入口 / 重抓 / 多頻道定位（2026-07-25 定案）
+- **測試入口**：用既有 admin 指令 [`/resend_article`](src/commands/article_commands.py#L520) 加 `type: telegram` 分支（不新開指令）。
+- **on-demand 重抓**：resend 讀 DB 不會自己抓 Telegram；改由 resend → `pg_notify('telegram_emoji_refetch', {chat_id,msg_id})` → scraper 用「既有常駐 client」抓該則、下載表情、回填 entities → resend poll DB 至就緒（~15s）→ 渲染+送。scraper 新增一個 pg LISTEN 任務（runner.py）。**不可雙開 session**（discord-bot 雖掛 ./src 看得到 session，但另開 client 會 SQLite 鎖衝突）。
+- **多頻道定位**：premium emoji 是**全域 document_id**、不屬於頻道 → emoji 表維持全域 key（跨頻道自動共用去重）。真正要處理的是**訊息定位**：`telegram_message_id`（footer 的 #9676）每頻道各自編號、非全域唯一。
+  - **對外**：footer 加 **DB id**（全域唯一，resend 用它）；footer = **A 方案**「`msg #9676 · db#12345`」（頻道名維持在 embed 標題、不進 footer）。
+  - **對內**：resend 用 db id 查出 `(chat_id, telegram_message_id)`，重抓帶 chat_id，scraper `get_messages(chat_id, ids=...)` 抓對頻道。
+- **replay 不動**：[`telegram_replay_from_message_id`](src/config.json#L14) 維持 telegram_message_id per-來源（已無歧義、且比 db id 耐清庫重掃）。
+- **現況**：scraper 單頻道（source_channel=Seele_WW_leak）、relay 已 route 架構；今天不撞號，此設計讓未來加頻道零改動。
+
+### 環境利多（已查證）
+- discord.py **2.6.4**（[requirements.txt:1](docker/discord_bot/requirements.txt#L1)）支援 App Emoji API。
+- relay 容器已有 **ffmpeg**（[dockerfile:6](docker/discord_bot/dockerfile#L6)）+ **Pillow**（[telegram_relay_service.py:887](src/services/telegram_relay_service.py#L887)）→ Phase 1 靜態零新依賴。
+
+### 實作狀態（2026-07-25 已完成，待部署驗證）
+**改動檔案：**
+- [handlers.py](src/telegram_scraper/handlers.py)：`_serialize_entities` 補 `document_id`；新增 `_download_custom_emojis`（GetCustomEmojiDocumentsRequest→下載→寫表→回填 entities，History 掃描跳過）；`_process_message` 掛呼叫；新增 `handle_refetch_message`。
+- [db.py](src/telegram_scraper/db.py)：`init_db` 建 `telegram_custom_emoji` 表；`get_known_emoji_ids` / `upsert_custom_emoji` / `update_message_entities`。
+- [runner.py](src/telegram_scraper/runner.py)：新增 `EMOJI_REFETCH_CHANNEL="telegram_emoji_refetch"` pg LISTEN + `_handle_refetch_request`（用常駐 client `get_messages(chat_id, ids=)`）。**LISTEN 設在歷史掃描之前**（掃描可能很久，期間也要能收重抓通知）；重抓 task 用 set 持參照防 GC。**不需要歷史掃描做表情**（History 已 gate 掉）：新訊息即時抓、舊訊息靠 resend on-demand。
+- [telegram_relay_service.py](src/services/telegram_relay_service.py)：`apply_message_entities`（spoiler+emoji 合併 UTF-16 改寫；舊 `apply_spoiler_entities` 已移除、無 production 呼叫者，測試改用之）；`CustomEmojiResolver`（webp→PNG Pillow→`create_application_emoji`→回填，名 `tg_{doc_id}`）；repo 加 `get/mark_custom_emoji_*`/`find_messages_by_id`/`send_pg_notify` + `ensure_relay_tables` 建表；worker `_resolve_custom_emojis`/`_wait_emoji_ready`/`resend_telegram_by_id`；`_process_one` 渲染前解析 emoji；footer 加 `db#{message_pk}`。
+- [article_commands.py](src/commands/article_commands.py)：`/resend_article` 加 `type:telegram` + `_handle_resend_telegram`。
+- [test_telegram_custom_emoji.py](src/test/test_telegram_custom_emoji.py)：9 個新測試（+ 既有 spoiler 14 測試仍過，全套 98 綠）。
+
+**部署測試步驟：**
+1. 使用者重啟 `telegram-scraper`（載入 LISTEN + 下載邏輯）+ `discord-bot`（載入 resolver/resend）。
+2. Discord admin 打 `/resend_article id:9676 type:telegram` → 應在 relay 頻道重送 #9676，9 個角色表情顯示為實際圖案。
+3. 觀察：scraper log `[Refetch] 完成`、`自訂表情已下載`；relay 回報「找到 9、轉出 N」。
+
+### 待辦 / 未決
+- **歷史訊息回填**：document_id 從未存 → #9676 等舊訊息無法從 DB 回填，需重掃（Telethon 重抓 entities）才有；新訊息修好 scraper 後自動帶。**決策：不做批次回填，改 on-demand（`/resend_article type:telegram` 觸發單則重抓）**。
+- 2000 池策略：v1 不淘汰、逼近上限只 log；之後加 LRU（`last_used_at` + `delete_application_emoji`）。
+- Discord emoji 建立有 rate limit：新表情包首次大量 lazy 上傳要退避重試。
+- 名稱限制：Discord emoji name 2–32 字 `[A-Za-z0-9_]`，`tg_{document_id}` 需確認位數不超（document_id < 29 位）。
+- Phase 2（未來）：動態 tgs→GIF（裝 rlottie/python-lottie）+ webm→GIF，順帶修「獨立動態貼圖變 .tgs 附件」。
+
+---
+
+## Telegram 多頻道來源 + 轉發去重（歸檔 2026-08-18，原 2026-07-27）
+
+**歸檔佐證**：已上線運作 — `d0e0880` 已 commit，DB 內 Gamedataleak（`-1002974889459`）已累積 **205 筆**訊息。原「待決」的 `telegram_channel_routes` 補明確 chat_id route 仍未做，屬可選優化。
+
+**需求**：新增 Gamedataleak（<https://t.me/Gamedataleak>）為主頻；避免兩個同性質頻道互轉造成重複（A 轉發 B、但 B 也是主頻時，A 的轉發無意義）。
+
+**已確認決策（2026-07-27）**：
+1. 加主頻方式＝**同容器多頻道**（`source_channel`→`source_channels` list，一個 session 同時監聽 Seele + Gamedataleak）。
+2. Discord 路由＝Gamedataleak **發到 Seele 同一個頻道**（`1276423699851116544`）。
+3. 去重＝**通用自動規則**：任何轉發若其原始來源本身也是我們的主頻，就在 scrape 階段丟掉；此排除**優先於** `forward_whitelist`（被排除者不進白名單、不 auto-add）。自我維護、雙向去重。
+
+**關鍵事實（已查證）**：
+- `telegram_messages` **不存轉發來源**（[db.py:87](src/telegram_scraper/db.py#L87)）→ 去重只能在 scrape 階段（[handlers._process_message](src/telegram_scraper/handlers.py#L318)，`fwd_from` 還在）。
+- Seele chat_id = **-1002405953050**（DB 另有 `2057132858` 為早期殘留）。
+- 帳號必須先加入 Gamedataleak 才收得到訊息、`get_entity` 才解析得到 username。
+
+**實作落點（已完成）**：
+- [tg_config.py](src/telegram_scraper/tg_config.py)：`TelegramConfig` 加 `source_channels: list[str]`；`load_config_from_env` 讀 runtime `source_channels`，缺則 fallback `[source_channel]`；`source_channel`＝清單 first（refetch + relay 端 `_get_source_channel_name` / route name-fallback BC）。
+- [runner.py](src/telegram_scraper/runner.py)：`listen_channels = source_channels or [source_channel]`；`NewMessage(chats=listen_channels)`；歷史掃描 **for each channel** 各自 collect→reverse→insert（維持每頻道 PK 時序）。
+- [filters.py](src/telegram_scraper/filters.py)：抽出 `_build_forward_source_candidates`（白名單與去重共用）；新增 `is_forward_source_a_primary(client, message, primary_sources)`。
+- [handlers.py](src/telegram_scraper/handlers.py)：`_process_message` 在 `should_skip_forward` 前先擋，若 `is_forward` 且來源 ∈ 主頻集合 → 略過（log「略過主頻轉發（去重）」）。**不排除當前頻道**，保雙向去重。
+- [runtime_config.json](src/telegram_scraper/runtime_config.json)：已加 `source_channels=["Seele_WW_leak","Gamedataleak"]`。
+- [config.json](src/config.json)：**未改**。同頻道靠現有 name-fallback（未匹配 chat_id → seele route）自動導到同一 Discord 頻道；待取得 Gamedataleak chat_id 後可補明確 chat_id route。
+
+**已驗證（本機純邏輯）**：config 解析出 `['Seele_WW_leak','Gamedataleak']`；去重函式對「Seele 轉 Gamedataleak / from_name 命中 / 非轉發 / 非主頻保留 / 白名單回歸」6 案全過。py_compile + JSON 均綠。
+
+**部署步驟**：
+1. 確認登入的 Telegram 帳號**已加入 Gamedataleak**（否則收不到、`get_entity` 解析不到 username → 去重失準）。使用者 2026-07-27 已確認加入。
+2. 重啟 `telegram-scraper`（載入多頻道監聽 + 去重）。首次會回填 Gamedataleak 近 `history_hours`(=168=7 天) 歷史 → relay 灌進同一頻道（可能爆量，維持 7 天不限縮）。
+3. 觀察 scraper log：`開始抓取來源頻道: Seele_WW_leak, Gamedataleak`、`Gamedataleak 歷史訊息抓取完成`；跨轉發出現時應有 `略過主頻轉發（去重）`。
+
+**待決 / 後續**：
+- 取得 Gamedataleak chat_id 後，在 `telegram_channel_routes` 補明確 chat_id route（去除對 name-fallback 的依賴）。
+- 去重目前以 username 比對為主；若某來源 `get_entity` 常失敗，可再把各主頻 chat_id 也納入 primary set 強化。
+
+---
+
+## handoff 盤點紀錄歸檔（歸檔 2026-08-18）
+
+> 從 AI_HANDOFF_AND_TODO.md 搬來的已完成盤點條目（2026-06-25 ~ 2026-07-25），皆已 commit 並上線。
+
+- 2026-07-25（Telegram Premium 自訂表情 → Discord App Emoji，**已實作，待部署驗證**）：症狀＝TG premium custom emoji 內嵌文字，relay 只留 fallback 一般 emoji。**實證 msg #9676**「3.6主线登场角色↓」9 個角色貼圖在 Discord 只剩 `🐦‍🔥🐦🤔🐉💫🌫🥛😭🦊`。**根因（DB 查證）**：scraper [_serialize_entities](src/telegram_scraper/handlers.py#L182) 只存 `{type,offset,length}`，**`document_id` 被丟**（#9676 的 9 筆 CustomEmoji 皆無 document_id）→ relay 無從還原。**定案**：寄存用 **Discord App Emoji**（bot 私有池 2000、不佔伺服器 50 格、成員隱形、跨伺服器）；**Phase 1 只做靜態 webp→PNG，動態 tgs/GIF 不做**。完整規劃見 [Telegram 自訂表情 relay 區塊](#telegram-premium-自訂表情--discord-app-emoji規劃定案)。**已實作（py_compile + 98 測試全過）**：scraper 補 document_id + 下載（gate 掉 History）+ runner LISTEN 重抓；db 新表 `telegram_custom_emoji`；relay `apply_message_entities`（spoiler+emoji 合併）+ `CustomEmojiResolver`（上傳 App Emoji）+ footer 加 `db#id`；`/resend_article` 加 `type:telegram`（notify 重抓→poll→渲染→送）。**下一步**：使用者重啟 discord-bot + telegram-scraper，`/resend_article id:9676 type:telegram` 實測。
+- 2026-07-03（他人印象被審核擋下 → 一鍵重填**已實作**，存檔即生效免重啟）：**現象排查**＝使用者填「對他人印象」後「什麼都沒跑出來」。查 [discord_bot.log](logs/discord_bot.log)：14:39:46 開 modal → 14:44:30 `intro_impression_moderation_blocked decision=reject reason=請勿使用迷因/定型文灌水 score_meme_spam=1.0 score_fake_story=1.0`，即**送出成功但被審核 reject**（[impression_moderation_service.py:186](src/services/impression_moderation_service.py#L186) meme_spam>0.6 硬擋）；被擋只回一則通用 ephemeral 警告（易被忽略、且不顯示真原因），原文全丟需重打。**需求**＝被擋時可重新複製/帶入表單（使用者反映判斷標準偏高）。**改法（僅改 code，未動門檻）**：[management_commands.py](src/commands/management_commands.py) ①`IntroImpressionModal.__init__` 加 `prefill_target/alias/habit/impression` kwargs → `UserSelect(default_values=[...])`(2.4+) + `TextInput(default=...)` 帶入上次全部欄位（含對象）；②新增 `ImpressionRetryView`（非持久化，timeout=600，一顆「✏️ 重新填寫（帶入剛剛內容）」按鈕，callback `send_modal` 帶 prefill）；③被擋分支改回覆＝顯示**實際 `moderation.reason`** + 原文（```code block``` 可複製）+ 掛 retry_view。py_compile PASS、discord.py>=2.6.4 支援全部用到的 API。**未 commit**。**下一步**：docker 重啟後實測「填梗被擋 → 看到原因+原文+按鈕 → 點按鈕帶入內容改寫再送」。**選配（未拍板）**：若仍覺門檻高，可再放寬 [impression_moderation_service.py](src/services/impression_moderation_service.py) 的 `score_meme_spam>0.6` / `score_fake_story>0.6` / `score_real_interaction<0.4` 閾值，或對特定情境放行。
+- 2026-07-02（插話/askai 反附和 — prompt 微調**已實作**，存檔即生效免重啟）：使用者觀察「模型都在附和目前對話、不獨立思考」。**診斷（修正前一輪誤判）**：撈 `ai_interactions` 近兩則，其一觸發「英格蘭又讓人失望」+ 貼比分圖 → 回「這比分…徹底翻不了身」。原疑幻覺，**查 code 證實插話路徑會把圖 base64 送 vision 模型**（[ambient_reply.py:582/899-982](src/llm/ambient_reply.py#L899-L982) → [llm_service.py:62-83](src/services/llm_service.py#L62-L83) 轉 `image_url`），所以它**讀對了 0:1**、卻在「才 50 分鐘」時跟著把對方悲觀加碼 → **問題是反射性附和（模型 sycophancy 預設 + prompt 結構偏共鳴/留白強化），不是幻覺、也不是溫度**。**決策**：①**不動溫度**（`default_temperature=0.85`）——溫度管隨機/創意不管附和傾向，純聊天搞笑陪伴 bot 調低只會更平更像 yes-man；②**動 prompt 但窄**：把「有主見」當成人設本就有（機智/帶刺/見過世面不大驚小怪）卻被壓住的特質解放，條件觸發+點到為止。**改檔（僅 .txt，非資料檔）**：[persona_guardrails.txt](src/settings/prompts/persona_guardrails.txt) 於【不冒認】後新增【有自己的看法（不反射性附和）】4 點（對方 overshoot/與眼前事實對不上才淡淡唱反調、認真低潮不適用）；[persona_examples.txt](src/settings/prompts/persona_examples.txt) 新增範例 14（比分圖唱衰情境 ✗跟著加碼/✗說教/✓帶刺不說教）。兩檔 ambient([ambient_reply.py:105-109](src/llm/ambient_reply.py#L105-L109) identity→guardrails→ambient→examples) 與 /askai([llm_commands.py:105](src/commands/llm_commands.py#L105)) 皆載入；`./src` bind-mount + mtime 快取 → 免重啟。**未 commit**。**下一步**：觀察插話是否在情緒 overshoot 時淡淡點破而非附和、且不誤報/不說教/不變話癆。**選配**：baseline vs 新規則 A/B 實測（碰 Lemonade，挑閒時；使用者未拍板）。**能力備註**：此模型（ambient=Qwen3.6-35B-A3B Q4、askai=gemma-4-26B Q4、開 enable_thinking）感知 OK，「輕輕唱反調」在能力內；「跨多則偵測邏輯矛盾」的硬推理仍是天花板，別期待穩定。
+- 2026-07-01（活動公告自動建活動 — 全覆蓋版**已實作**，待 docker 驗證）：需求＝官方公告（FB+Article，皆進 `article_monitor_channel_id`）含「活動時間」+「伺服器時間」交集 → regex 解析時間 → **全自動**建 Discord 伺服器活動。**先用 articles.db 全 490 篇跑 4 視角對抗審查**（workflow），抓到並修掉 4 個真缺陷：①跨來源（Article↔FB 同活動雙報，如坎特蕾拉 #3736+FB #93）→ **指紋去重(normalize(title)+start+end)** 為 v1 強制；②相對起點「X版本更新後」不可壓貼文日（方向錯）→ **版本日回填**（查版本內容說明帖「更新維護時間」，解不到 SKIP）；③版本內容說明匯總帖整篇丟棄會漏建「只在匯總帖」的活動 → **逐活動 parse + 指紋去重補建**；④缺年/空白格式 → DATE 補容錯。**新檔**：[event_time_parser.py](src/services/event_time_parser.py)(純函式、strip HTML、雙詞閘門、錨點認詞不認✦、缺年/即日起/版本相對起點)、[event_scheduler.py](src/services/event_scheduler.py)(閘門=channel==config、版本日回填、指紋去重、clamp start 未來、create_scheduled_event external/location=「鳴潮」、**首批預設 dry-run**)、[test_event_time_parser.py](src/test/test_event_time_parser.py)(20 測試)、[test_notify_relay.py](src/test/test_notify_relay.py)。**改檔**：[state_db.py](src/services/state_db.py) 加 `created_events` 指紋表；[article_monitor.py](src/services/article_monitor.py)/[fb_monitor.py](src/services/fb_monitor.py) send 尾巴各掛 hook(best-effort)；[notify_server.py](src/services/notify_server.py) 共用 `_process_relay`+`_RELAY_SOURCES`(收斂 fb/article/it，**巴哈維持自有 handler**)+新增 article 來源；[scraper/main.py](src/scraper/main.py) 加 `_notify_discord_bot("article")`(改推送)；[discord_bot.py](src/discord_bot.py) article 輪詢 180s→1800s fallback；docker-compose 啟動 gate 加兩測試。**驗證**：20 parser 測試 PASS、全檔 py_compile PASS、dry-run（article 239 + FB 41 = 280 唯一活動、跨來源指紋擋掉 105 重複、6+ 相對起點版本日解不到 SKIP）。**未 commit**。**下一步**：①docker 重啟（套 notify_server/monitor/scraper 改動 + 跑啟動 gate）②看 `[event][dry-run]` log 確認待建清單合理 ③滿意後在 config.json 設 `"event_schedule_dry_run": false` 開全自動。**殘留風險（已記文件）**：跨來源指紋對「同名不同期循環活動」靠 start/end 精確；版本日回填依賴版本說明帖有「更新維護時間」欄。
+- 2026-06-25（插話除錯）：**修「B 回覆 A 再 @ 機器人問意見 → 看不到 A 寫什麼就亂答」**。根因：Discord 原生 reply 的 `message.reference` 全程只被 [_is_directed](src/llm/ambient_reply.py) 拿來判「是不是回覆機器人」，**被回覆訊息的內容從未進 prompt**；模型只拿到 `<latest_user_message>`(B 的字) + `<chat_history>`(B 之前 20 則, `history_limit=20`)。A 那句要嘛已滾出視窗、要嘛在視窗內但**沒有連結標記**告訴模型「B 的問句是衝著這行來的」→「他/這個/這樣」無指涉 → 腦補亂答。**修法**（本輪定案：範圍 b 含自發、帶圖、不去重、不碰 /askai）：①[ambient_reply.py](src/llm/ambient_reply.py) 新增 `_resolve_replied_to()`（reference.resolved 三態 Message/Deleted/None；None 時 `fetch_message` 補抓一次，best-effort）；directed 與自發插話都在 `generate_reply` 前算 `replied_to_from/_text`，並把被回覆訊息的圖也併進 vision payload（trigger 自己的圖優先、整體受 `image_max_count=1`）。②[llm_service.py](src/services/llm_service.py) `_build_prompt_bundle`/`generate_reply` 加 `replied_to_from/replied_to_text` 兩參數，在 `<latest_user_message>` **正上方**輸出 `<reply_to from="A#XXXX">…</reply_to>` + 一行指引（把「他/這個/這樣」對準 reply_to，別跟 chat_history 其他話題搞混）。③debug 摘要加 `reply_to=` 計數。py_compile PASS、callers 全 kwargs 不受影響、**未 commit**。**下一步**：docker 重啟 → 實測「B reply A → @機器人問意見」「reply 帶圖」兩情境，看 `ambient_prompt.txt` 有 `<reply_to>` 區塊且回答對準 A。**未做（可選）**：/askai 同缺口（本輪不碰）。
+
