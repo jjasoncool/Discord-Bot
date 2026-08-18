@@ -142,6 +142,27 @@ class PromptBundle:
 
 
 @dataclass(frozen=True)
+class ChatMessageResult:
+    """`chat_with_tools` 的回傳：完整 assistant message 的重點欄位。
+
+    `chat_raw` 只取 content 字串，tool-calling 需要看到 `tool_calls` 與
+    `finish_reason` 才能驅動 agent loop，故另開一支並回傳結構化結果。
+
+    tool-calling 時 `content` 正常就是空字串（模型把輸出放進 tool_calls），
+    因此本型別**不把空 content 視為錯誤**——這正是與 `chat_raw` 的關鍵差異。
+    """
+
+    content: str
+    tool_calls: list[dict[str, Any]]
+    finish_reason: str
+    usage: dict[str, Any]
+
+    @property
+    def wants_tool_call(self) -> bool:
+        return bool(self.tool_calls)
+
+
+@dataclass(frozen=True)
 class GenerateReplyResult:
     """generate_reply 結果。失敗時 reply 是友善字串、error_kind 標記類型。
 
@@ -241,10 +262,15 @@ class LLMService:
         return candidate or None
 
     def resolve_request_think(self, override_think: Optional[bool] = None) -> bool:
-        """對外提供本次請求最終 think 設定（觀測用）。
+        """對外提供本次請求最終 think 設定。
 
-        新版優先序：override > backends.ollama.extra_body.think > 舊欄位 think > True。
-        非 ollama backend 此欄位無實際作用，仍保留以向後相容呼叫端。
+        優先序：override > 當前 backend profile 的思考開關 > 舊欄位 think > True。
+        各後端表達「思考模式」的欄位不同，這裡做語意統一：
+          - ollama   → `backends.ollama.extra_body.think`
+          - lemonade → `backends.lemonade.extra_body.chat_template_kwargs.enable_thinking`
+          - 其他（vLLM）→ 無對應欄位，落到舊欄位 `think` / 預設 True
+
+        回傳的 bool 由 `_build_chat_extra_body` 轉成該後端真正的 request 欄位。
         """
         if override_think is not None:
             return bool(override_think)
@@ -253,11 +279,19 @@ class LLMService:
         if runtime_config is None:
             return True
 
-        ollama_profile = runtime_config.backends.get("ollama")
-        if ollama_profile is not None:
-            think_in_profile = ollama_profile.extra_body.get("think")
-            if isinstance(think_in_profile, bool):
-                return think_in_profile
+        backend = runtime_config.backend
+        profile = runtime_config.backends.get(backend)
+        if profile is not None:
+            if backend == "ollama":
+                think_in_profile = profile.extra_body.get("think")
+                if isinstance(think_in_profile, bool):
+                    return think_in_profile
+            elif backend == "lemonade":
+                template_kwargs = profile.extra_body.get("chat_template_kwargs")
+                if isinstance(template_kwargs, dict):
+                    enable_thinking = template_kwargs.get("enable_thinking")
+                    if isinstance(enable_thinking, bool):
+                        return enable_thinking
 
         return runtime_config.think
 
@@ -570,11 +604,25 @@ class LLMService:
                     options["num_ctx"] = num_ctx
                 extra_body["options"] = options
         else:
-            # 非 ollama 後端忽略 Ollama-only knobs；過去用 graceful-ignore，
-            # 現在改成根本不送，避免 vLLM 嚴格模式直接 4xx
+            if backend == "lemonade" and think is not None:
+                # Lemonade（llama.cpp）用 `chat_template_kwargs.enable_thinking` 表達思考模式，
+                # 與 Ollama 的 top-level `think` 同義 → 在此做語意轉接。
+                #
+                # 為什麼需要這段：`think` 的覆寫管線本來就完整（resolve_request_think →
+                # generate_reply → chat_raw → 這裡），但從 Ollama 遷到 Lemonade 後，
+                # 這個參數在下面被丟進 `ignored` → 形成「傳得到、卻不生效」的斷點。
+                #
+                # 只有明確傳入才覆寫：think=None 時完全沿用 profile.extra_body 的設定，
+                # 因此既有 caller（/askai、插話、人格萃取）行為不變。
+                template_kwargs = dict(extra_body.get("chat_template_kwargs", {}))
+                template_kwargs["enable_thinking"] = bool(think)
+                extra_body["chat_template_kwargs"] = template_kwargs
+
+            # 其餘 Ollama-only knobs 在非 ollama 後端一律不送，避免 vLLM 嚴格模式直接 4xx。
+            # think 已被 lemonade 分支消化，故不列入 ignored。
             ignored = [
                 name for name, val in (
-                    ("think", think),
+                    ("think", None if backend == "lemonade" else think),
                     ("keep_alive", keep_alive),
                     ("repeat_penalty", repeat_penalty),
                     ("num_ctx", num_ctx),
@@ -640,13 +688,66 @@ class LLMService:
             keep_alive=keep_alive,
         )
 
+        trace_label = trace_id or "-"
+        choice, completion = await self._chat_completion_checked(
+            model=model,
+            messages=messages,
+            temperature=effective_temperature,
+            top_p=effective_top_p,
+            timeout=effective_timeout,
+            extra_body=extra_body,
+            trace_label=trace_label,
+        )
+
+        message = choice.get("message") or {}
+        content = message.get("content")
+        if content:
+            return content
+
+        # 空 content：完整 raw response 寫進 anomaly log（不污染主 log）
+        anomaly_logger.error(
+            "empty_content trace=%s model=%s finish_reason=%s usage=%s raw=%s",
+            trace_label,
+            model,
+            choice.get("finish_reason"),
+            completion.get("usage"),
+            completion,
+        )
+        await self._snapshot_backend_state(trace_label, model, "empty_content")
+        raise LLMAPIError(
+            "回應格式異常: 空 content",
+            kind="empty_content",
+            detail=str({
+                "trace": trace_label,
+                "finish_reason": choice.get("finish_reason"),
+                "usage": completion.get("usage"),
+                "see": "logs/llm_anomaly.log",
+            }),
+        )
+
+    async def _chat_completion_checked(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, object]],
+        temperature: float,
+        top_p: float,
+        timeout: int,
+        extra_body: dict[str, Any],
+        trace_label: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """送出 chat completion 並做共用的失敗判讀，回傳 `(choice, completion)`。
+
+        `chat_raw`（取 content 字串）與 `chat_with_tools`（取完整 message）共用這段：
+        模型載入、vision 訊息轉換、串流互斥閘、連線層例外的 anomaly log 與後端狀態
+        快照、以及 `no_choices` 判讀。**空 content 的判讀不在這裡**——那對 chat_raw
+        是錯誤，對 tool-calling 卻是正常結果，交由各自的呼叫端決定。
+        """
         # 確認 Lemonade 已用對的 ctx_size 載入此 model（其他後端 short-circuit）
         await self._ensure_model_loaded(model)
 
         # 把 Ollama 風格 images=[base64...] 轉成 OpenAI vision content array
         openai_messages = _convert_messages_for_openai(messages)
-
-        trace_label = trace_id or "-"
 
         try:
             # 對稱 gate：stream 期間擋背景 embedding flush，避免 lemonade
@@ -655,13 +756,13 @@ class LLMService:
                 completion = await self._client.chat_completion(
                     model=model,
                     messages=openai_messages,
-                    temperature=effective_temperature,
-                    top_p=effective_top_p,
-                    timeout=float(effective_timeout),
+                    temperature=temperature,
+                    top_p=top_p,
+                    timeout=float(timeout),
                     extra_body=extra_body,
                 )
         except (LlmTimeoutError, LlmConnectionError) as exc:
-            # 連線層失敗：原本 chat_raw 不寫 anomaly，補上一行並抓 Lemonade 狀態快照後 re-raise
+            # 連線層失敗：補一行 anomaly 並抓 Lemonade 狀態快照後 re-raise
             kind = "timeout" if isinstance(exc, LlmTimeoutError) else "connection"
             anomaly_logger.error(
                 "%s trace=%s model=%s err=%s", kind, trace_label, model, exc,
@@ -690,31 +791,103 @@ class LLMService:
                 }),
             )
 
-        choice = choices[0]
-        message = choice.get("message") or {}
-        content = message.get("content")
-        if content:
-            return content
+        return choices[0], completion
 
-        # 空 content：完整 raw response 寫進 anomaly log（不污染主 log）
-        anomaly_logger.error(
-            "empty_content trace=%s model=%s finish_reason=%s usage=%s raw=%s",
-            trace_label,
-            model,
-            choice.get("finish_reason"),
-            completion.get("usage"),
-            completion,
+    async def chat_with_tools(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, object]],
+        tools: Optional[list[dict[str, Any]]] = None,
+        response_format: Optional[dict[str, Any]] = None,
+        think: Optional[bool] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        num_ctx: Optional[int] = None,
+        timeout: Optional[int] = None,
+        keep_alive: Optional[str] = None,
+        trace_id: Optional[str] = None,
+    ) -> ChatMessageResult:
+        """tool-calling 版的底層呼叫：回傳完整 assistant message 而非 content 字串。
+
+        與 `chat_raw` 的分工：
+        - `chat_raw`：一問一答、只要文字。空 content 視為錯誤。
+        - `chat_with_tools`：agent loop 用。要看得到 `tool_calls` 與 `finish_reason`，
+          且**空 content 是正常的**（模型把輸出放進 tool_calls 時 content 就是空字串）。
+
+        `tools` / `response_format` 依 OpenAI dialect 直接併進 request body top-level。
+        本後端（Lemonade + llama.cpp）已實測支援 `tool_calls` 往返與
+        `response_format.json_schema` strict 模式。
+
+        `think` 走與 `chat_raw` 相同的轉接（Lemonade → `chat_template_kwargs.
+        enable_thinking`），讓 agent 能在收集步驟關閉思考、產出最終結果時再打開。
+
+        兩者共用模型載入、串流互斥閘與重試——**agent 因此自動遵守「一次只做一件事」**，
+        不會與 /askai、插話 搶 GPU。
+
+        Raises: 與 `chat_raw` 相同（LLMAPIError / LlmTimeoutError / LlmConnectionError），
+        另外在 content 與 tool_calls 同時為空時拋 `empty_content`。
+        """
+        effective_temperature = (
+            temperature if temperature is not None
+            else self.settings.default_temperature
         )
-        await self._snapshot_backend_state(trace_label, model, "empty_content")
-        raise LLMAPIError(
-            "回應格式異常: 空 content",
-            kind="empty_content",
-            detail=str({
-                "trace": trace_label,
-                "finish_reason": choice.get("finish_reason"),
-                "usage": completion.get("usage"),
-                "see": "logs/llm_anomaly.log",
-            }),
+        effective_top_p = top_p if top_p is not None else self.settings.default_top_p
+        effective_timeout = timeout if timeout is not None else self.timeout
+
+        extra_body = self._build_chat_extra_body(
+            think=think,
+            repeat_penalty=None,
+            num_ctx=num_ctx,
+            keep_alive=keep_alive,
+        )
+        if tools:
+            extra_body["tools"] = tools
+        if response_format:
+            extra_body["response_format"] = response_format
+
+        trace_label = trace_id or "-"
+        choice, completion = await self._chat_completion_checked(
+            model=model,
+            messages=messages,
+            temperature=effective_temperature,
+            top_p=effective_top_p,
+            timeout=effective_timeout,
+            extra_body=extra_body,
+            trace_label=trace_label,
+        )
+
+        message = choice.get("message") or {}
+        tool_calls = message.get("tool_calls") or []
+        content = message.get("content") or ""
+
+        if not content and not tool_calls:
+            # 兩者皆空才算異常（單獨空 content 在 tool-calling 是正常的）
+            anomaly_logger.error(
+                "empty_content trace=%s model=%s finish_reason=%s usage=%s raw=%s",
+                trace_label,
+                model,
+                choice.get("finish_reason"),
+                completion.get("usage"),
+                completion,
+            )
+            await self._snapshot_backend_state(trace_label, model, "empty_content")
+            raise LLMAPIError(
+                "回應格式異常: 空 content 且無 tool_calls",
+                kind="empty_content",
+                detail=str({
+                    "trace": trace_label,
+                    "finish_reason": choice.get("finish_reason"),
+                    "usage": completion.get("usage"),
+                    "see": "logs/llm_anomaly.log",
+                }),
+            )
+
+        return ChatMessageResult(
+            content=content,
+            tool_calls=list(tool_calls),
+            finish_reason=str(choice.get("finish_reason") or ""),
+            usage=completion.get("usage") or {},
         )
 
     async def _snapshot_backend_state(
