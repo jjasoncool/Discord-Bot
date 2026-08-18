@@ -16,9 +16,9 @@ import functools
 import json
 import logging
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
+from llm import prompt_files
 from llm.member_profile_store import get_member_profile_store
 from services.llm_service import LLMService
 from sys_settings.llm_settings import AmbientChatSettings
@@ -27,7 +27,6 @@ logger = logging.getLogger("discord_bot")
 
 _SETTINGS = AmbientChatSettings()
 _LLM_SERVICE: Optional[LLMService] = None
-_PROMPT_CACHE: dict = {"text": None, "mtime_ns": None}
 
 
 def _get_llm() -> LLMService:
@@ -39,20 +38,9 @@ def _get_llm() -> LLMService:
 
 def _load_extractor_prompt() -> str:
     """讀抽取守門 prompt（mtime 快取）；缺檔回空字串（呼叫端會略過抽取）。"""
-    path = Path(_SETTINGS.extractor_prompt_path)
-    try:
-        if path.exists():
-            mtime_ns = path.stat().st_mtime_ns
-            if _PROMPT_CACHE["mtime_ns"] == mtime_ns and _PROMPT_CACHE["text"]:
-                return _PROMPT_CACHE["text"]
-            text = path.read_text(encoding="utf-8").strip()
-            if text:
-                _PROMPT_CACHE["text"] = text
-                _PROMPT_CACHE["mtime_ns"] = mtime_ns
-                return text
-    except Exception as exc:
-        logger.warning("載入 preference extractor prompt 失敗（%s）：%s", path, exc)
-    return ""
+    return prompt_files.read_text(
+        _SETTINGS.extractor_prompt_path, label="preference extractor prompt"
+    )
 
 
 def _parse_facts(raw: str) -> list[dict]:

@@ -46,6 +46,10 @@ BATCH_SIZE = 3  # 每批送幾個人給 LLM
 MAX_PERSONALITY_CHARS = 200  # 每人描述上限（提升至 200：新 prompt 讓 LLM 能寫出更具體描述，100 會截斷完整句子）
 
 _EXTRACT_PROMPT_PATH = "/app/settings/prompts/personality_extraction_prompt.json"
+# 「描述要寫成什麼樣」的規則抽成共用檔：persona agent 需要同一份規則，
+# 各自複製一份的話，日後調整其中一邊會靜默分岔。比照 persona_examples.txt
+# 被 /askai 與插話共用的做法——共用的是**檔案**，兩邊各自讀。
+_DESCRIPTION_RULES_PATH = "/app/settings/prompts/persona_description_rules.txt"
 _extract_prompts: dict[str, str] | None = None
 _extraction_running = False  # 防止同時跑多個人格萃取（僅限單一 process）
 
@@ -62,6 +66,17 @@ def _load_extract_prompts() -> dict[str, str]:
         raise FileNotFoundError(f"找不到萃取 prompt 檔案: {path}")
     _extract_prompts = json.loads(path.read_text(encoding="utf-8"))
     return _extract_prompts
+
+
+def load_description_rules() -> str:
+    """讀取共用的「描述品質規則」（persona agent 讀同一個檔案）。
+
+    讀檔失敗時回空字串而非拋錯：少了這段規則描述品質會變差，但整個 04:00 排程
+    不該因為一個附加檔案不見就停擺。
+    """
+    from llm import prompt_files
+
+    return prompt_files.read_text(_DESCRIPTION_RULES_PATH, label="描述品質規則")
 
 
 def _get_db_conn():
@@ -355,6 +370,7 @@ async def extract_personalities(
         prompts = _load_extract_prompts()
         user_prompt = (
             prompts["user_prompt_template"]
+            .replace("{description_rules}", load_description_rules())
             .replace("{max_chars}", str(MAX_PERSONALITY_CHARS))
             .replace("{user_list}", user_list)
             .replace("{chat_log}", chat_log)

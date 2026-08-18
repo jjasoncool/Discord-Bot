@@ -14,9 +14,9 @@ import functools
 import json
 import logging
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
+from llm import prompt_files
 from llm.member_profile_store import get_member_profile_store
 from services.llm_service import LLMService
 from sys_settings.llm_settings import AmbientChatSettings
@@ -25,7 +25,6 @@ logger = logging.getLogger("discord_bot")
 
 _SETTINGS = AmbientChatSettings()
 _LLM_SERVICE: Optional[LLMService] = None
-_PROMPT_CACHE: dict = {"text": None, "mtime_ns": None}
 
 # 敏感關鍵詞硬過濾（backstop；prompt 已要求丟，這層再兜一次）。寧可誤殺邊緣梗。
 # 只收「多字、低誤判」的中文詞——刻意不放 T/P/GAY 這類短字/單字，避免把正常英文/字母誤殺。
@@ -58,20 +57,9 @@ def _has_sensitive(text: str) -> bool:
 
 
 def _load_tag_extractor_prompt() -> str:
-    path = Path(_SETTINGS.tag_extractor_prompt_path)
-    try:
-        if path.exists():
-            mtime_ns = path.stat().st_mtime_ns
-            if _PROMPT_CACHE["mtime_ns"] == mtime_ns and _PROMPT_CACHE["text"]:
-                return _PROMPT_CACHE["text"]
-            text = path.read_text(encoding="utf-8").strip()
-            if text:
-                _PROMPT_CACHE["text"] = text
-                _PROMPT_CACHE["mtime_ns"] = mtime_ns
-                return text
-    except Exception as exc:
-        logger.warning("載入 signature_tag extractor prompt 失敗（%s）：%s", path, exc)
-    return ""
+    return prompt_files.read_text(
+        _SETTINGS.tag_extractor_prompt_path, label="signature_tag extractor prompt"
+    )
 
 
 def _parse_tags(raw: str) -> list[dict]:
