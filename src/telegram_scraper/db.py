@@ -357,6 +357,34 @@ class TelegramDatabase:
             )
         return int(value) if value is not None else None
 
+    async def get_existing_message_ids(
+        self, telegram_chat_id: int, min_message_id: int, max_message_id: int
+    ) -> set[int]:
+        """撈某頻道在 [min, max] 區間內「DB 已經有」的 telegram_message_id 集合。
+
+        給週期性補掃當去重用：補掃把起點往回退之後，視窗內絕大多數訊息其實早就在
+        DB 裡，若不先擋掉，每一則都要跑完整個 `_process_message`（forward 白名單判斷
+        可能還會打 `client.get_entity`）才在最後 upsert 時發現重複——白工。
+
+        刻意一次撈成 set 回去比對，而不是每則查一次 DB：一輪一次查詢就夠，掃描迴圈
+        內只做記憶體比對。走 UNIQUE (telegram_chat_id, telegram_message_id) 索引。
+        """
+        if self.pool is None:
+            raise RuntimeError("資料庫尚未 connect")
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT telegram_message_id FROM telegram_messages
+                WHERE telegram_chat_id = $1
+                  AND telegram_message_id BETWEEN $2 AND $3;
+                """,
+                int(telegram_chat_id),
+                int(min_message_id),
+                int(max_message_id),
+            )
+        return {int(row["telegram_message_id"]) for row in rows}
+
     async def has_media_records(self, message_pk: int) -> bool:
         """確認此訊息是否已有媒體記錄。"""
         if self.pool is None:

@@ -24,6 +24,12 @@ EMOJI_REFETCH_CHANNEL = "telegram_emoji_refetch"
 # 不會留下永久空洞；純粹避免異常大缺口時一次打爆 Telegram rate limit。
 CATCHUP_MAX_PER_CYCLE = 200
 
+# 補掃起點相對 DB 最大 message_id 往回退多少個 id。退窗才看得到「中段的洞」
+#（即時事件漏收，但後續訊息正常收到 → max_id 已跳過那個洞）。
+# 視窗外的舊洞仍只有重啟時的全量歷史掃描補得到，調大這個值可換更長的回溯範圍，
+# 代價是每輪多撈同等數量的 metadata（已入庫者會被 known_ids 擋在處理流程外）。
+CATCHUP_GAP_WINDOW = 300
+
 # 補掃停用時的迴圈輪詢間隔（秒）——讓使用者改完 runtime_config 不必重啟即可恢復
 CATCHUP_DISABLED_RECHECK_SEC = 60
 
@@ -89,7 +95,14 @@ async def _catch_up_channel(
     db: TelegramDatabase,
     process_lock: asyncio.Lock,
 ) -> None:
-    """對單一頻道補掃「DB 內最大 message_id 之後」的訊息。"""
+    """對單一頻道補掃「視窗內的漏收訊息」＋「DB 內最大 message_id 之後」的新訊息。
+
+    起點刻意從 `max_id - CATCHUP_GAP_WINDOW` 起算，而不是 `max_id`：即時事件漏掉的
+    若是**中段**（例：2742/2743/2746 漏了，但 2745/2747 正常收到 → max_id 早就跳過去），
+    以 max_id 當起點永遠掃不到那些洞，只能等下次重啟的全量歷史掃描才補得回來
+    （實測曾讓早上的訊息卡到傍晚重啟才發出）。起點左移後，中段的洞與 max_id 之後的
+    新訊息在同一次掃描裡一起涵蓋，不需要另一條補洞路徑。
+    """
     chat_id = await _resolve_catchup_chat_id(client, source_channel)
     if chat_id is None:
         return
@@ -99,17 +112,32 @@ async def _catch_up_channel(
         # 該頻道還沒有任何資料 → 沒有安全的增量基準，交給啟動歷史掃描處理
         return
 
+    # 起點左移；offset_id 是「不含基準本身」，故退到 window 外一格才涵蓋整個視窗
+    window_start = max(last_id - CATCHUP_GAP_WINDOW, 0)
+    # 視窗內已在 DB 的 id 一次撈成 set：迴圈裡只做記憶體比對，不逐則查 DB
+    known_ids = await db.get_existing_message_ids(chat_id, window_start, last_id)
+
     fetched = 0
+    skipped = 0
     accepted = 0
     # reverse=True 時 Telethon 會把 offset_id 當「從此 id 之後開始」（內部 +1，不含基準本身），
     # 且回傳順序為舊 → 新，正好讓 BIGSERIAL 與訊息時序一致，relay 才能照時序發。
+    #
+    # limit 必須涵蓋「視窗」+「單輪新訊息上限」：limit 卡的是**撈回幾則**（fetched），不是
+    # 收下幾則。只給 CATCHUP_MAX_PER_CYCLE 的話，額度會被視窗內那些已存在的訊息吃光，
+    # 掃描在走到 max_id 之前就截斷 → 補到了洞卻補不到最新訊息，等於把補掃的主業廢掉。
     async for msg in client.iter_messages(
         source_channel,
         reverse=True,
-        offset_id=last_id,
-        limit=CATCHUP_MAX_PER_CYCLE,
+        offset_id=window_start,
+        limit=CATCHUP_GAP_WINDOW + CATCHUP_MAX_PER_CYCLE,
     ):
         fetched += 1
+        # 視窗內絕大多數是早就入庫的訊息，先擋掉：否則每則都要跑完整個 _process_message
+        #（含 forward 白名單判斷、可能打 client.get_entity）才在 upsert 時發現重複。
+        if msg.id in known_ids:
+            skipped += 1
+            continue
         # 與即時事件、refetch 共用同一把鎖，避免同一則訊息被並行處理（重複下載媒體）
         async with process_lock:
             if await handle_catchup_message(
@@ -117,13 +145,17 @@ async def _catch_up_channel(
             ):
                 accepted += 1
 
-    if fetched:
+    if accepted or fetched > skipped:
         print(
             f"[CatchUp] {source_channel} 補回漏收訊息："
-            f"基準 message_id={last_id} 之後撈到 {fetched} 筆、收下 {accepted} 筆"
+            f"視窗 {window_start}~{last_id} 撈到 {fetched} 筆、"
+            f"已存在略過 {skipped} 筆、收下 {accepted} 筆"
         )
-    if fetched >= CATCHUP_MAX_PER_CYCLE:
-        print(f"[CatchUp] {source_channel} 已達單輪上限（{CATCHUP_MAX_PER_CYCLE} 筆），剩餘部分下一輪繼續")
+    if fetched >= CATCHUP_GAP_WINDOW + CATCHUP_MAX_PER_CYCLE:
+        print(
+            f"[CatchUp] {source_channel} 已達單輪上限"
+            f"（{CATCHUP_GAP_WINDOW + CATCHUP_MAX_PER_CYCLE} 筆），剩餘部分下一輪繼續"
+        )
 
 
 async def _catch_up_loop(
@@ -138,8 +170,9 @@ async def _catch_up_loop(
 
     原本只靠即時事件 + 啟動時掃一次歷史，一旦事件遺失就得等下次重啟才會補上
     （實測每天都有漏，曾出現整整半天沒有任何新訊息進 DB）。這裡以各頻道在 DB
-    的最大 message_id 為基準做增量重掃，漏掉的訊息最多延遲一個週期就會自動
-    補進 DB 並 NOTIFY relay，不需人工重啟容器。
+    的最大 message_id 往回退一個視窗為基準做重掃（見 `_catch_up_channel`），
+    漏掉的訊息——含夾在已收訊息之間的中段缺口——最多延遲一個週期就會自動補進
+    DB 並 NOTIFY relay，不需人工重啟容器。
     """
     while True:
         interval_min = runtime_watcher.get_snapshot().catchup_interval_min
