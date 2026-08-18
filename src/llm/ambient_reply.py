@@ -58,6 +58,7 @@ from llm.chat_line import (
 )
 from llm.emoji_text_utils import is_emoji_or_symbol_only
 from llm.lemonade_gate import foreground_recently_active, stream_busy
+from sys_settings.time_settings import APP_TZ
 from llm.vision_image import DEFAULT_MAX_FRAMES, extract_key_frames, is_vision_image
 from llm.logger_factory import get_or_create_file_logger
 from services.llm_service import LLMService
@@ -68,8 +69,6 @@ logger = logging.getLogger("discord_bot")
 
 _SETTINGS = AmbientChatSettings()
 
-# chat_history 每行標 [HH:MM] 發話時刻（台北時區）→ 讓模型判斷新舊/順序，鎖定最新、別翻舊帳
-_TAIPEI_TZ = timezone(timedelta(hours=8))
 
 _DEFAULT_AMBIENT_PROMPT = (
     "你是 Discord 群裡的一位群友，個性溫和、偶爾俏皮。"
@@ -231,7 +230,7 @@ async def _fetch_recent(
     self_id = message.guild.me.id if message.guild and message.guild.me else None
     collected, participant_ids = await fetch_recent_lines(
         message.channel,
-        tz=_TAIPEI_TZ,
+        tz=APP_TZ,
         limit=_SETTINGS.history_limit,
         before=message,
         max_len=200,
@@ -353,7 +352,7 @@ def _format_recalled_ts(ts_str: Optional[str]) -> str:
     if not ts_str:
         return "?"
     try:
-        return datetime.fromisoformat(ts_str).astimezone(_TAIPEI_TZ).strftime("%Y-%m-%d %H:%M")
+        return datetime.fromisoformat(ts_str).astimezone(APP_TZ).strftime("%Y-%m-%d %H:%M")
     except Exception:
         return "?"
 
@@ -1200,7 +1199,7 @@ async def _run_one_ambient_pass(
             prompt_text = "(對方只 @ 了我，沒有文字)"
     else:
         asker_for_bundle = None
-        _ts = message.created_at.astimezone(_TAIPEI_TZ).strftime("%H:%M")
+        _ts = message.created_at.astimezone(APP_TZ).strftime("%H:%M")
         # 觸發訊息附在脈絡末尾時也要給編號並登記進 thread_map——否則模型想接「最新這一則」
         # 卻指不到它（reply 錨定就落空）。編號接續 _fetch_recent 已用掉的最大號。
         _next_no = (max(thread_map) if thread_map else 0) + 1
@@ -1208,7 +1207,7 @@ async def _run_one_ambient_pass(
             # 觸發訊息本體不截斷（time_only 不帶日期，與近期視窗一致）；compact=False 保留原貌
             chat_context = (chat_context or []) + [
                 format_chat_line(
-                    message, _TAIPEI_TZ, time_only=True, compact=False,
+                    message, APP_TZ, time_only=True, compact=False,
                     prefix=f"#{_next_no} ",
                 )
             ]

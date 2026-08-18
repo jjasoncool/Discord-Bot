@@ -48,6 +48,9 @@ from selenium.webdriver.firefox.service import Service
 FINGERPRINT_URL = "https://tls.peet.ws/api/all"
 OUTPUT_FILE = Path(__file__).parent / "fingerprints.json"
 
+# 全站時區的單一來源在 `sys_settings/time_settings.py` 的 APP_TZ，但 scraper 是獨立
+# 容器（掛載 ./src/scraper → /app），根目錄看不到 sys_settings，只能保留這一份。
+# 兩邊都吃 compose 的 TZ=Asia/Taipei，改動時請一起改。
 TZ_UTC8 = timezone(timedelta(hours=8))
 
 

@@ -150,7 +150,6 @@ class AskAICommandSettings(BaseSettings):
     max_context_to_send: int = 50
     min_recent_context: int = 25
     max_relevant_context: int = 25
-    taipei_utc_offset_hours: int = 8
 
     discord_context_begin: str = "<context:discord_chat_begin>"
     discord_context_end: str = "</context:discord_chat_end>"

@@ -18,7 +18,17 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
-# 伺服器時區（UTC+8 固定）
+
+# 公告宣告的「伺服器時間」（由下方 _TZ_MARKER 閘門確認過是 UTC+8）。
+#
+# **刻意不是 APP_TZ，也不該被「收斂」掉**——兩者今天同值，語意卻完全不同：
+#   APP_TZ    ＝「本機在哪個時區」，可用 APP_UTC_OFFSET_HOURS 設定
+#   SERVER_TZ ＝「這份資料宣告它的時間屬於哪個時區」，由遊戲決定、固定 UTC+8
+#
+# 混用的話，APP_TZ 一改就會有兩種災情：
+#   ① 公告「10:00（伺服器時間）」被當成新時區的 10:00 → 活動時間整批偏移
+#   ② event_fingerprint 用它正規化 → 既有指紋全部失配 → 去重表失效、
+#      所有舊活動被重新建立一次（而 created_events 是持久化的）
 SERVER_TZ = timezone(timedelta(hours=8))
 
 # ── 關鍵字 / 時區標記 ──

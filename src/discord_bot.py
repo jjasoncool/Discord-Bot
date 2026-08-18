@@ -167,8 +167,8 @@ async def on_ready():
 
     # 啟動人格萃取定期排程
     if not getattr(bot, '_personality_task_started', False):
-        from datetime import datetime, timezone, timedelta
-        TAIPEI_TZ = timezone(timedelta(hours=8))
+        from datetime import datetime, timedelta
+        from sys_settings.time_settings import APP_TZ
 
         async def _run_daily_maintenance_once():
             """每日維護：三個**彼此獨立**的步驟，各自 try / except，互不拖累。
@@ -235,7 +235,7 @@ async def on_ready():
                 from llm.personality_extractor import get_last_extraction_time
                 guild_for_check = bot.guilds[0] if bot.guilds else None
                 if guild_for_check:
-                    now = datetime.now(TAIPEI_TZ)
+                    now = datetime.now(APP_TZ)
                     # 「上一個應該跑的 04:00」：如果現在還沒過今天 04:00，上個就是昨天 04:00
                     last_scheduled_run = now.replace(hour=4, minute=0, second=0, microsecond=0)
                     if now < last_scheduled_run:
@@ -244,7 +244,7 @@ async def on_ready():
                     last_extract_utc = get_last_extraction_time(guild_for_check.id)
                     # metadata 存的是 UTC；轉台北時區再比
                     last_extract_local = (
-                        last_extract_utc.astimezone(TAIPEI_TZ)
+                        last_extract_utc.astimezone(APP_TZ)
                         if last_extract_utc else None
                     )
 
@@ -264,7 +264,7 @@ async def on_ready():
 
             while True:
                 try:
-                    now = datetime.now(TAIPEI_TZ)
+                    now = datetime.now(APP_TZ)
                     # 計算到下一個 04:00 的秒數
                     target = now.replace(hour=4, minute=0, second=0, microsecond=0)
                     if now >= target:

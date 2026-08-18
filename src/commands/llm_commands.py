@@ -4,10 +4,11 @@ import asyncio
 import functools
 import json
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import NamedTuple
 import base64
+import io
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -24,13 +25,13 @@ from llm.vision_image import (
 )
 from services.llm_service import LLMService
 from sys_settings.llm_settings import AskAICommandSettings, AskAIWebSettings
+from sys_settings.time_settings import APP_TZ
 from utils.utils import safe_send_interaction_message, check_guild
 
 logger = logging.getLogger("discord_bot")
 
 ASKAI_SETTINGS = AskAICommandSettings()
 WEB_SETTINGS = AskAIWebSettings()
-TAIPEI_TZ = timezone(timedelta(hours=ASKAI_SETTINGS.taipei_utc_offset_hours))
 PROMPT_FILE_PATH = Path(ASKAI_SETTINGS.prompt_file_path)
 IDENTITY_FILE_PATH = Path(ASKAI_SETTINGS.identity_file_path)
 GUARDRAILS_FILE_PATH = Path(ASKAI_SETTINGS.guardrails_file_path)
@@ -87,7 +88,7 @@ ASKAI_QUEUE = _AskaiQueue()
 
 def _format_log_block(*, title: str, body: str) -> str:
     """用明顯分隔符與時間戳包住每筆 log，便於人工閱讀。"""
-    ts = datetime.now(TAIPEI_TZ).strftime("%Y-%m-%d %H:%M:%S %z")
+    ts = datetime.now(APP_TZ).strftime("%Y-%m-%d %H:%M:%S %z")
     line = "=" * 28
     return (
         f"\n{line} {title} {line}\n"
@@ -206,7 +207,7 @@ def append_askai_response_log(
     )
 
     record = {
-        "time": datetime.now(TAIPEI_TZ).isoformat(),
+        "time": datetime.now(APP_TZ).isoformat(),
         "trace_id": trace_id,
         "error_kind": error_kind,
         "guild_id": guild_id,
@@ -447,7 +448,7 @@ class LLMCommands(commands.Cog):
             min_recent_context=min_recent_context,
             max_relevant_context=max_relevant_context,
             max_context_to_send=max_context_to_send,
-            taipei_tz=TAIPEI_TZ,
+            taipei_tz=APP_TZ,
             logger=logger,
         )
 
@@ -638,7 +639,7 @@ class LLMCommands(commands.Cog):
             f"{asker_display_name_raw}#{asker_short_id}"
             if asker_short_id else asker_display_name_raw
         )
-        now_str = datetime.now(TAIPEI_TZ).strftime("%Y-%m-%d %H:%M (UTC+8)")
+        now_str = datetime.now(APP_TZ).strftime("%Y-%m-%d %H:%M (UTC+8)")
         guild_name = interaction.guild.name if interaction.guild else "(DM)"
         channel_name = getattr(interaction.channel, "name", "") or "(unknown)"
         asker_profile_lines = [

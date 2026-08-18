@@ -3,11 +3,12 @@
 定期抽選指定身份組成員進行活躍確認，逾期未回覆則踢除。
 """
 import asyncio
+from sys_settings.time_settings import APP_TZ
 import json
 import logging
 import os
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
@@ -33,11 +34,10 @@ EXPIRE_CHECK_INTERVAL = 6 * 3600  # 6 小時
 # 踢除後重新加入的邀請連結
 REJOIN_INVITE_URL = "https://discord.gg/wuwachatroom"
 
-TZ_UTC8 = timezone(timedelta(hours=8))
 
 
 def _now_utc8() -> datetime:
-    return datetime.now(TZ_UTC8)
+    return datetime.now(APP_TZ)
 
 
 class RollCallRuntime:

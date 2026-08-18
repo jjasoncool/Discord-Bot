@@ -24,12 +24,12 @@ from llm.ambient_reply import _get_llm
 from llm.chat_line import fetch_recent_lines
 from llm.logger_factory import get_or_create_file_logger
 from sys_settings.llm_settings import DiaryReflectionSettings
+from sys_settings.time_settings import APP_TZ
 from utils.utils import ChannelConfig
 
 logger = logging.getLogger("discord_bot")
 
 _SETTINGS = DiaryReflectionSettings()
-_TAIPEI_TZ = timezone(timedelta(hours=8))  # 逐字稿標 [HH:MM] 發話時刻 → 日記能寫出時間感
 
 _DEFAULT_DIARY_PROMPT = (
     "你是 Discord 群裡的琇紫，在自己的頻道寫一段今天的日記——第一人稱、以你自己的"
@@ -91,7 +91,7 @@ async def _gather_day_transcript(channel: discord.abc.Messageable) -> list[str]:
         b_end = now if i == n_buckets - 1 else window_start + span * (i + 1)
         seg, _ = await fetch_recent_lines(
             channel,
-            tz=_TAIPEI_TZ,
+            tz=APP_TZ,
             limit=per_bucket,
             before=b_end,
             after=b_start,
