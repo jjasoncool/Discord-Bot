@@ -16,6 +16,8 @@
     cd src && python -m unittest test.test_shared_conventions -v
 """
 
+import ast
+import builtins
 import os
 import re
 import sys
@@ -187,6 +189,62 @@ class AnnouncementTimezoneTests(unittest.TestCase):
         self.assertEqual(
             baseline,
             event_fingerprint("坎特蕾拉", start.astimezone(other), end.astimezone(other)),
+        )
+
+
+class UndefinedConstantTests(unittest.TestCase):
+    """引用了不存在的模組層常數 → 執行期才 NameError。
+
+    **這組測試存在的原因**：一次 patch 腳本在寫檔前就中斷，`ESTIMATE_SCALE_RANGE`
+    的定義沒被寫進去，但引用它的程式碼寫進去了。`py_compile` 全過（Python 執行期
+    才解析名字）、303 個測試也全過（那段分支的條件在假資料裡從沒成立），
+    直到真的跑起來才炸。
+
+    只查 ALL_CAPS 名字：那幾乎一定是模組層常數，判定明確、誤判率低。
+    完整的名字解析要做作用域分析，那是 linter 的工作，這裡只補最會出事的那一類。
+    """
+
+    def test_no_constant_is_used_without_being_defined(self):
+        offenders = []
+        for rel, path in _source_files():
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            defined = set(dir(builtins))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Assign):
+                    for t in node.targets:
+                        if isinstance(t, ast.Name):
+                            defined.add(t.id)
+                        elif isinstance(t, ast.Tuple):
+                            defined.update(
+                                e.id for e in t.elts if isinstance(e, ast.Name)
+                            )
+                elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                    defined.add(node.target.id)
+                elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                    for a in node.names:
+                        defined.add((a.asname or a.name).split(".")[0])
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    defined.add(node.name)
+                elif isinstance(node, ast.Global):
+                    defined.update(node.names)
+                elif isinstance(node, (ast.For, ast.comprehension)):
+                    target = getattr(node, "target", None)
+                    if isinstance(target, ast.Name):
+                        defined.add(target.id)
+
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Name)
+                    and isinstance(node.ctx, ast.Load)
+                    and node.id.isupper()
+                    and len(node.id) > 2
+                    and node.id not in defined
+                ):
+                    offenders.append(f"{rel}:{node.lineno} {node.id}")
+
+        self.assertEqual(
+            offenders, [],
+            f"引用了沒有定義的常數（執行期才會 NameError）：{offenders}",
         )
 
 
