@@ -1307,6 +1307,7 @@ class PersonalityCommands(commands.Cog):
     @app_commands.describe(
         target="要分析的成員",
         model="指定模型（不填則用 config 的主 model）",
+        save="是否寫入 persona_agent 版本表（預設否，只看結果不留痕）",
     )
     @app_commands.checks.has_permissions(administrator=True)
     async def persona_agent_test_cmd(
@@ -1314,6 +1315,7 @@ class PersonalityCommands(commands.Cog):
         interaction: discord.Interaction,
         target: discord.Member,
         model: str | None = None,
+        save: bool = False,
     ):
         """對單一成員跑一次 persona agent（影子模式的除錯入口）。
 
@@ -1360,8 +1362,11 @@ class PersonalityCommands(commands.Cog):
                 allowed_ids=[user_id],   # 白名單只放這一人，工具層會擋掉其他查詢
             )
             try:
-                run = await persona_agent.run_for_user(
-                    user_id=user_id, ctx=ctx, model=target_model
+                run, validated = await persona_agent.run_and_persist(
+                    user_id=user_id, guild_id=guild_id, ctx=ctx,
+                    model=target_model,
+                    run_id=f"test-{interaction.id}",
+                    save=save,
                 )
             except Exception as exc:
                 logger.error("persona_agent_test 失敗: %s", exc, exc_info=True)
@@ -1377,7 +1382,9 @@ class PersonalityCommands(commands.Cog):
                 run.estimated_tokens, run.duration_ms / 1000,
                 json.dumps(run.diff, ensure_ascii=False) if run.diff else None,
             )
-            await self._report_agent_result(interaction, target, run, None)
+            await self._report_agent_result(
+                interaction, target, run, None, validated=validated, saved=save
+            )
 
         task = asyncio.create_task(_run_and_report())
         self._track_task(task)
@@ -1388,6 +1395,9 @@ class PersonalityCommands(commands.Cog):
         target: discord.Member,
         run,
         error: str | None,
+        *,
+        validated=None,
+        saved: bool = False,
     ) -> None:
         """把 agent 結果私訊給發起人；送不出去只記 log，不讓例外往外炸。
 
@@ -1416,6 +1426,19 @@ class PersonalityCommands(commands.Cog):
                 f"tokens≈{run.estimated_tokens} 耗時={run.duration_ms / 1000:.0f}s\n"
                 f"```\n{tool_lines[:1200]}\n```"
             )
+            if run.thinking_exhausted:
+                summary += "\n⚠️ thinking 把 context 用光，本次未經深思（品質要打折看）"
+            if validated is not None:
+                summary += (
+                    f"\n驗證：通過 **{len(validated.accepted)}** 項／拒絕 "
+                    f"{len(validated.rejected)} 項｜證據 {validated.evidence_claimed} 個、"
+                    f"假 {validated.evidence_bogus} 個（幻覺率 {validated.hallucination_rate}）"
+                )
+                if validated.skip_reason:
+                    summary += f"\n未寫入版本：{validated.skip_reason}"
+                for rej in validated.rejected[:3]:
+                    summary += f"\n  ✗ {rej['change'].get('trait')}：{rej['why'][:90]}"
+            summary += f"\n寫入版本表：{'是' if saved else '否（dry-run）'}"
             if run.error:
                 summary += f"\nerror: `{run.error[:200]}`"
             attachment = None

@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from llm.lemonade_gate import foreground_recently_active, stream_busy
+from services.llm_service import LLMAPIError
 from llm.persona_agent import tools as agent_tools
 from llm.persona_agent.schema import build_response_format
 from sys_settings.llm_settings import AmbientChatSettings
@@ -33,11 +34,40 @@ from sys_settings.llm_settings import AmbientChatSettings
 logger = logging.getLogger("discord_bot")
 
 MAX_STEPS = 8
-# 收集階段的累計上限。設定上 ctx_size=32768，但**實際可用的比帳面小很多**：
-# llama-server 的 KV 是多個 slot 共用，被並行請求（/askai、插話）擠壓時會縮水。
-# 實測單發 24,110 token 可過、但同時段的 ~17k 請求曾直接吃到
-# `Context size has been exceeded` → 保守抓 12k，剩下留給 thinking、輸出與並行波動。
-TOKEN_BUDGET = 12000
+
+#: 最終產出要不要開 thinking。**預設關閉**——mock benchmark（四個判斷陷阱、各跑兩次）
+#: 顯示開關對品質沒有可測差異：兩邊都正確推翻過時描述、判對互損文化、誠實標註無證據的
+#: 項目、零幻覺；開啟的那組反而出現一次自相矛盾（同一份 diff 既 keep 又 revise
+#: 「安靜寡言」）。代價卻是**慢 4.5 倍**（平均 233s vs 51s）。
+#:
+#: 真實資料上更慘：thinking 三戰三敗，每次都在推理階段把 32k context 用光
+#: （prompt 17k~22k + 推理 10k~12k），`finish_reason=length`、content 全空。
+#:
+#: 開關保留（`chat_template_kwargs.enable_thinking` 的轉接已打通），日後想再比較隨時能開。
+FINAL_STEP_THINKING = False
+
+# 收集階段的 prompt 上限（**以伺服器回報的 usage.prompt_tokens 為準，不是估的**）。
+#
+# ctx_size=32768 是 prompt + 生成**共用**的。關掉 thinking 後生成只剩答案本身
+# （實測 1,200~4,800 token），不必再為推理預留 20k → 預算從 12,000 拉到 24,000，
+# **省下來的空間拿去裝證據**。這個任務的判斷靠證據而非推理，多一倍資料比多想一輪值。
+#
+# 仍要留餘裕：估算會低估（曾估 14,501 而實際 22,379，差 1.54 倍），因為估算漏了
+# assistant 訊息的 tool_calls 結構、最終指示、以及 chat template 本身的標記。
+TOKEN_BUDGET = 20000
+
+#: 估算的自我校正上下限。估算一定低估（漏算 assistant 訊息的 tool_calls 結構、最終指示、
+#: chat template 標記），實測 12,000 的預算讓 prompt 衝到 17,191——**超標 43%**。
+#: 每輪用伺服器回報的實際值反推「上一輪估得多準」，之後的估算乘上這個係數：
+#: **用實測校正，不用猜倍數**。夾在範圍內避免單次異常把係數帶歪。
+ESTIMATE_SCALE_RANGE = (1.0, 4.0)
+# 預算用盡後，仍保留給 `search_messages` 的額外額度。
+#
+# 實測一次：模型在最後一步搜「PY」「米拉」「機械」——**問題問得完全正確**，卻正好撞上
+# 預算用盡，三個都回佔位字串。它只好在 notes 寫「無法確認」，但那些詞在 14 天內都還在
+# （PY 出現 14 次）。search 的回傳上限只有 50 則短訊息，砍它省不到多少 context，
+# 損失的卻是**查證能力**——那是 revise / keep 判斷的依據。
+SEARCH_RESERVE_TOKENS = 2500
 # 禮讓：前景（/askai、插話）在用就等；設上限避免旗標卡住時整批停擺
 YIELD_POLL_SECONDS = 2.0
 YIELD_MAX_WAIT_SECONDS = 600.0
@@ -158,6 +188,9 @@ class AgentRun:
     trace: list[StepTrace] = field(default_factory=list)
     duration_ms: int = 0
     estimated_tokens: int = 0
+    #: True 代表最終步的 thinking 把 context 想光（finish_reason=length、content 全空），
+    #: 改以關閉 thinking 重跑產出。輸入沒被動過，只是少了深思——評測時要分開看。
+    thinking_exhausted: bool = False
     error: Optional[str] = None
 
 
@@ -215,8 +248,12 @@ async def run_for_user(
         ]
         # 固定開銷（system prompt + 每次呼叫都重送的工具宣告）必須先計入，
         # 否則預算會系統性低估約 1,500 token
+        # 第一次呼叫前沒有實際值可用，先粗估；第一次呼叫後就換成伺服器回報的數字
         used_tokens = sum(estimate_tokens(str(m.get("content", ""))) for m in messages)
         used_tokens += estimate_tokens(json.dumps(agent_tools.TOOL_DEFINITIONS, ensure_ascii=False))
+        pending_tokens = 0
+        # 估算低估多少倍。第一輪沒有實際值可比，先假設準確；拿到實際值後就開始校正。
+        estimate_scale = 1.0
         loop = asyncio.get_running_loop()
 
         # ── 收集階段（thinking 關閉）─────────────────────────────────
@@ -234,6 +271,20 @@ async def run_for_user(
                 trace_id=trace,
             )
             run.steps = step
+            # 伺服器算的精確值，取代上一輪的估算（含 chat template 標記等我們看不到的部分）
+            actual = (result.usage or {}).get("prompt_tokens")
+            if isinstance(actual, int) and actual > 0:
+                if pending_tokens > 0 and actual > used_tokens:
+                    # 上一輪估了 pending_tokens，實際長了 (actual - used_tokens)。
+                    # 兩者比值＝估算的低估倍數 → 校正之後的估算。用實測，不猜倍數。
+                    lo, hi = ESTIMATE_SCALE_RANGE
+                    estimate_scale = max(lo, min(hi, (actual - used_tokens) / pending_tokens))
+                    logger.info(
+                        "persona agent trace=%s 估算校正：估 %d、實際長 %d → 係數 %.2f",
+                        trace, pending_tokens, actual - used_tokens, estimate_scale,
+                    )
+                used_tokens = actual
+                pending_tokens = 0
 
             if not result.wants_tool_call:
                 logger.info(
@@ -247,6 +298,10 @@ async def run_for_user(
                 "tool_calls": result.tool_calls,
             })
 
+            # 這一步有沒有真的執行到工具。全部被擋（只回佔位字串）就沒有繼續的理由——
+            # 否則批量被擋之後 pending 不再成長，迴圈會一路空轉到 max_steps。
+            executed_this_step = False
+
             # 模型常在同一步丟出多個 tool_calls；預算必須**逐次**檢查，
             # 否則一步塞六個 get_conversation 就會直接衝破上限。
             # 超出後仍要對每個 tool_call_id 回覆（協議要求），只是改回佔位字串。
@@ -255,9 +310,27 @@ async def run_for_user(
                 name = str(fn.get("name") or "")
                 arguments = fn.get("arguments") or "{}"
                 call_started = time.perf_counter()
-                if used_tokens >= token_budget:
+                # search_messages 走保留額度：預算用盡後仍可再查幾次（回傳小、價值高）
+                projected = used_tokens + pending_tokens * estimate_scale
+                over = projected >= token_budget
+                ceiling = token_budget + (
+                    SEARCH_RESERVE_TOKENS if name == "search_messages" else 0
+                )
+                if projected >= ceiling:
                     budget_exhausted = True
                     payload = _OMITTED_PAYLOAD
+                elif over:
+                    logger.info(
+                        "persona agent trace=%s 預算已滿，但放行 search_messages（保留額度）",
+                        trace,
+                    )
+                    payload = await loop.run_in_executor(
+                        None,
+                        functools.partial(
+                            agent_tools.dispatch, ctx, name=name, arguments=arguments
+                        ),
+                    )
+                    executed_this_step = True
                 else:
                     payload = await loop.run_in_executor(
                         None,
@@ -265,6 +338,7 @@ async def run_for_user(
                             agent_tools.dispatch, ctx, name=name, arguments=arguments
                         ),
                     )
+                    executed_this_step = True
                 elapsed_ms = int((time.perf_counter() - call_started) * 1000)
                 run.trace.append(StepTrace(
                     step=step,
@@ -283,13 +357,18 @@ async def run_for_user(
                     "name": name,
                     "content": payload,
                 })
-                used_tokens += estimate_tokens(payload)
+                # 這一步新增的工具結果還沒被伺服器算過，先估；下一輪呼叫後會被實際值取代
+                pending_tokens += estimate_tokens(payload)
 
-            if budget_exhausted or used_tokens >= token_budget:
+            if used_tokens + pending_tokens * estimate_scale >= (
+                token_budget + SEARCH_RESERVE_TOKENS
+            ):
                 budget_exhausted = True
+            if budget_exhausted and not executed_this_step:
                 logger.info(
-                    "persona agent trace=%s token 預算用盡（估 %d ≥ %d），停止收集",
-                    trace, used_tokens, token_budget,
+                    "persona agent trace=%s prompt 預算用盡（實際 %d + 增量估 %d×%.2f ≥ %d）"
+                    "且本步無工具執行成功，停止收集",
+                    trace, used_tokens, pending_tokens, estimate_scale, token_budget,
                 )
                 break
         else:
@@ -308,17 +387,33 @@ async def run_for_user(
         messages.append({"role": "user", "content": final_prompt})
 
         await _yield_to_foreground(trace)
-        final = await _call_model(
-            service,
-            messages=messages,
-            trace=trace,
+        final_kwargs = dict(
             model=model,
             response_format=build_response_format(),
-            think=True,
             temperature=0.3,
             timeout=final_timeout,
             trace_id=trace,
         )
+        try:
+            final = await _call_model(
+                service, messages=messages, trace=trace,
+                think=FINAL_STEP_THINKING, **final_kwargs
+            )
+        except LLMAPIError as exc:
+            # thinking 把 context 想光：finish_reason=length、content 全空、推理塞滿 32k。
+            # 關掉 thinking 重跑一次——**輸入完全沒動**，只是少了深思，這跟「裁掉資料再問」
+            # 是兩回事：那個會產出假陰性，這個只是品質降一級，而且有旗標標記得出來。
+            if getattr(exc, "kind", None) != "empty_content" or not FINAL_STEP_THINKING:
+                # thinking 本來就關著還空 content → 是真的異常，不該吞掉當成「想太久」
+                raise
+            run.thinking_exhausted = True
+            logger.warning(
+                "persona agent trace=%s thinking 用光 context，改以關閉 thinking 重試", trace
+            )
+            await _yield_to_foreground(trace)
+            final = await _call_model(
+                service, messages=messages, trace=trace, think=False, **final_kwargs
+            )
 
         try:
             diff = json.loads(final.content)
@@ -355,4 +450,136 @@ async def run_for_user(
             trace, run.status, run.steps, len(run.trace),
             run.estimated_tokens, run.duration_ms / 1000,
         )
+        if run.thinking_exhausted:
+            logger.warning(
+                "persona agent trace=%s 本次未經 thinking 產出（推理把 context 用光），"
+                "評測時需與正常結果分開看", trace,
+            )
 
+
+
+# ── 驗證 + 寫入（M3）────────────────────────────────────────────────────
+#: 連續失敗時的預算降級。**重點不是省 GPU（一人一晚約 3 分鐘），是避免沉默失敗**——
+#: 確定性失敗（例如某人的資料量就是撐爆 context）每晚重跑都一樣爆，而沒人會發現。
+#: 降到第 3 次仍失敗就隔離，讓它浮出來變成維運報告上的一行。
+DEGRADE_BY_FAILURES = {0: 1.0, 1: 0.7, 2: 0.5}
+QUARANTINE_AFTER_FAILURES = 3
+
+
+def compose_persona_text(changes: list[dict[str, Any]]) -> str:
+    """把通過驗證的變更組成完整人格描述。
+
+    `add` / `revise` / `keep` 三種都是在描述「這個人現在的樣子」，所以直接串起來就是
+    當前人格。**存完整文字而不只存 diff**：消費端（persona card / askai / 插話）要的是
+    「他現在什麼樣子」，只存 diff 的話每次讀都得重播全部歷史。diff 是給人稽核用的，
+    完整文字是給機器讀的，兩個都要存。
+    """
+    return "；".join(
+        str(c.get("text") or "").strip()
+        for c in changes
+        if str(c.get("text") or "").strip()
+    )
+
+
+async def run_and_persist(
+    *,
+    user_id: str,
+    guild_id: int,
+    ctx: agent_tools.ToolContext,
+    model: str,
+    run_id: str,
+    llm_service: Any = None,
+    save: bool = True,
+) -> tuple[AgentRun, Any]:
+    """跑一位使用者 → 驗證 → 寫入兩張表。回傳 `(AgentRun, ValidationResult|None)`。
+
+    `run_for_user` 保持純粹（只產出 diff、不碰 DB），寫入集中在這裡，M4 的批次直接
+    呼叫這支即可。`save=False` 時只驗證不寫，給除錯指令用。
+
+    **執行前先看連續失敗次數**：失敗越多次預算調得越保守，超過門檻就跳過並記
+    `quarantined`——不然某個人可能每晚都失敗、而沒有任何地方看得出來。
+    """
+    from llm.persona_agent import store, validation
+
+    loop = asyncio.get_running_loop()
+
+    async def _db(fn, *args, **kwargs):
+        """同步 DB 呼叫一律丟 executor。
+
+        `store` 與 `validation` 走的是同步 psycopg2；直接在 async 裡呼叫會**卡住整個
+        event loop**（音樂、Discord 心跳、插話全部停住）。M4 批次跑 10 人就是 60 次阻塞。
+        """
+        return await loop.run_in_executor(None, functools.partial(fn, *args, **kwargs))
+
+    failures = await _db(store.consecutive_failures, guild_id, user_id) if save else 0
+    if failures >= QUARANTINE_AFTER_FAILURES:
+        run = AgentRun(user_id=str(user_id), status="quarantined")
+        run.error = f"連續失敗 {failures} 次，本次跳過（需人工檢視）"
+        logger.warning("persona agent %s 已隔離：%s", user_id, run.error)
+        if save:
+            await _db(
+                store.record_run,
+                run_id=run_id, guild_id=guild_id, author_id=user_id,
+                status=run.status, steps=0, tool_calls=0, prompt_tokens=None,
+                thinking_exhausted=False, evidence_claimed=0, evidence_bogus=0,
+                accepted_changes=0, rejected_changes=0, skip_reason=run.error,
+                trace=[], duration_ms=0, error=run.error,
+            )
+        return run, None
+
+    budget = int(TOKEN_BUDGET * DEGRADE_BY_FAILURES.get(failures, 0.5))
+    if failures:
+        logger.info(
+            "persona agent %s 連續失敗 %d 次 → 預算降到 %d", user_id, failures, budget
+        )
+
+    run = await run_for_user(
+        user_id=user_id, ctx=ctx, model=model,
+        llm_service=llm_service, token_budget=budget, trace_id=run_id,
+    )
+
+    result = None
+    version = None
+    if run.diff is not None:
+        result = await _db(
+            validation.validate_diff, run.diff, user_id=user_id, fetch=ctx.fetch
+        )
+        if save and result.skip_reason is None:
+            base = "production"
+            try:
+                latest = await _db(store.latest_version, guild_id, user_id)
+                if latest:
+                    base = f"v{latest['version']}"
+            except Exception:
+                pass
+            version = await _db(
+                store.write_version,
+                guild_id=guild_id, author_id=user_id,
+                persona_text=compose_persona_text(result.accepted),
+                changes=result.accepted,
+                confidence=str(run.diff.get("confidence") or ""),
+                notes=str(run.diff.get("notes") or ""),
+                model=model, based_on=base,
+            )
+
+    if save:
+        await _db(
+            store.record_run,
+            run_id=run_id, guild_id=guild_id, author_id=user_id,
+            status=run.status, steps=run.steps, tool_calls=len(run.trace),
+            prompt_tokens=run.estimated_tokens,
+            thinking_exhausted=run.thinking_exhausted,
+            evidence_claimed=result.evidence_claimed if result else 0,
+            evidence_bogus=result.evidence_bogus if result else 0,
+            accepted_changes=len(result.accepted) if result else 0,
+            rejected_changes=len(result.rejected) if result else 0,
+            skip_reason=result.skip_reason if result else None,
+            trace=[{
+                "step": t.step, "tool": t.tool, "args": t.arguments,
+                "result": t.result_preview, "ms": t.elapsed_ms,
+            } for t in run.trace],
+            duration_ms=run.duration_ms, error=run.error,
+        )
+    if version:
+        logger.info("persona agent %s 寫入 v%d", user_id, version)
+    return run, result

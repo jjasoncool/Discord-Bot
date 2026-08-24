@@ -22,8 +22,21 @@ _CHANGE_SCHEMA: dict[str, Any] = {
             "description": "add=新增特徵；revise=修正既有描述；keep=維持不變",
         },
         "trait": {"type": "string", "description": "簡短特徵名"},
-        "text": {"type": "string", "description": "描述內容"},
-        "reason": {"type": "string", "description": "為何新增／修正／保留"},
+        "text": {
+            "type": "string",
+            "description": (
+                "這個人「是」怎樣——直述句。不要解釋為什麼改、不要提到既有描述、"
+                "不要寫「不只是」「而非」這種對照語氣；引用最多一個當例子。"
+                "這一欄會被串成最終的人格描述給下游使用，讀者不知道舊描述長什麼樣。"
+            ),
+        },
+        "reason": {
+            "type": "string",
+            "description": (
+                "你憑什麼這樣說——引用、與既有描述的對照、推翻或保留的理由通通放這裡。"
+                "這一欄只給人稽核，不會進入最終描述，可以寫長。"
+            ),
+        },
         "evidence_msg_ids": {
             "type": "array",
             "items": {"type": "string"},

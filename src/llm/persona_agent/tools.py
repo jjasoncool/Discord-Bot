@@ -177,6 +177,39 @@ def _fmt_ts(raw: str) -> str:
         return raw or ""
 
 
+def _coverage(messages: list[dict[str, str]], *, days: int, limit: int) -> dict[str, Any]:
+    """回報這批訊息**實際涵蓋多久**，以及是否被 limit 截斷。
+
+    存在理由是一次真實的錯誤判斷：模型要了 30 天、`limit=120`，對一週發言 1,934 則的
+    使用者實際只拿到 **5.3 小時**——而回傳裡只有 `count: 120`，看不出樣本被截斷。
+    模型因此寫出「舊描述的例子本次未出現」並據以 revise，但那些詞在 14 天內都還在
+    （其中一個出現 14 次）。
+
+    樣本被截斷本身沒問題，**讓模型誤以為看到全貌才是問題**。
+    """
+    if not messages:
+        return {"covers": None, "covers_hours": 0.0, "truncated": False}
+    try:
+        first = datetime.strptime(messages[0]["ts"], "%m-%d %H:%M")
+        last = datetime.strptime(messages[-1]["ts"], "%m-%d %H:%M")
+        hours = round(abs((last - first).total_seconds()) / 3600.0, 1)
+    except (KeyError, ValueError):
+        hours = 0.0
+    truncated = len(messages) >= limit
+    info: dict[str, Any] = {
+        "covers": f"{messages[0]['ts']} ~ {messages[-1]['ts']}",
+        "covers_hours": hours,
+        "truncated": truncated,
+    }
+    if truncated:
+        info["hint"] = (
+            f"已達 limit={limit}，這批只涵蓋最近 {hours} 小時（你要求 {days} 天）。"
+            "更早的發言不在這裡——要確認某個說法是否仍然成立，請用 search_messages 直接搜，"
+            "不要因為這批沒看到就斷定「不再出現」。"
+        )
+    return info
+
+
 def _rows_to_messages(
     rows: list[tuple], *, with_author: bool = False
 ) -> list[dict[str, str]]:
@@ -221,13 +254,36 @@ def _parse_personality(raw_text: str) -> str:
 def get_current_persona(ctx: ToolContext, *, user_id: Any) -> str:
     """讀該使用者目前的人格描述，供 agent 產出 diff 時當基準。
 
-    M1 只讀 production 的 `auto_personality`；M3 接上版本表後改為「有自己的版本就讀
-    自己的最新版，否則退回 production」，並把來源記進 `based_on`。
+    優先讀 agent 自己的最新版本，沒有才退回 production 的 `auto_personality`，
+    並把來源寫在 `source` / 版本號寫在 `version` —— 之後寫入版本表時記進 `based_on`，
+    才知道這一版是拿什麼疊上去的。
+
+    兩段查詢都走 `ctx.fetch`（而不是直接呼叫 store），維持可注入、單元測試不必碰 DB。
     """
     rejected = _check_allowed(ctx, user_id)
     if rejected:
         return rejected
     uid = str(user_id).strip()
+
+    own_sql = """
+        SELECT persona_text, version
+        FROM persona_agent_versions
+        WHERE guild_id = %s AND author_id = %s
+        ORDER BY version DESC LIMIT 1
+    """
+    try:
+        own = ctx.fetch(own_sql, (str(ctx.guild_id), uid))
+    except Exception as exc:
+        # 表還沒建（M3 之前）或查詢失敗 → 當作沒有自己的版本，退回 production
+        logger.info("讀取 agent 版本失敗，改用 production 基準 uid=%s: %s", uid, exc)
+        own = []
+    if own:
+        return _dump({
+            "user_id": uid,
+            "persona_text": own[0][0],
+            "version": own[0][1],
+            "source": f"v{own[0][1]}",
+        })
 
     sql = f"""
         SELECT text, metadata_->>'alias', metadata_->>'last_extracted_at'
@@ -309,14 +365,16 @@ def get_messages(
 
     messages = [m for m in _rows_to_messages(rows) if m["text"]]
     messages.reverse()
-    return _dump({
+    payload = {
         "user_id": uid,
         "days": days_value,
         "limit": limit_value,
         "count": len(messages),
         "clamped": {"days": days_clamped, "limit": limit_clamped},
+        **_coverage(messages, days=days_value, limit=limit_value),
         "messages": messages,
-    })
+    }
+    return _dump(payload)
 
 
 # ── 工具 3：關鍵詞追查 ──────────────────────────────────────────────────
@@ -372,6 +430,7 @@ def search_messages(
         "limit": limit_value,
         "count": len(messages),
         "clamped": {"days": days_clamped, "limit": limit_clamped},
+        "truncated": len(messages) >= limit_value,
         "messages": messages,
     })
 

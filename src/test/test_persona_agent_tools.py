@@ -174,16 +174,26 @@ class GuildScopeTests(unittest.TestCase):
     """③ guild_id 必帶：漏掉會撈到殭屍列當 diff 基準。"""
 
     def test_get_current_persona_filters_guild(self):
+        """沒有自己的版本時退回 production，且兩段查詢都要帶 guild_id。"""
         fetch = FakeFetch(results=[
+            [],  # persona_agent_versions：還沒有自己的版本
             [("[Auto Personality]\nalias: 米拉\npersonality: 直球型吐槽擔當",
               "米拉", "2026-08-17T20:13:26+00:00")],
         ])
         payload = json.loads(tools.get_current_persona(ctx(fetch), user_id=ALICE))
-        sql, params = fetch.calls[0]
-        self.assertIn("guild_id", sql)
-        self.assertIn(str(GUILD), params)
+        for sql, params in fetch.calls:
+            self.assertIn("guild_id", sql)
+            self.assertIn(str(GUILD), params)
         self.assertEqual(payload["persona_text"], "直球型吐槽擔當")
         self.assertEqual(payload["source"], "production_auto_personality")
+
+    def test_own_version_wins_over_production(self):
+        """有自己的版本就用自己的——diff 要疊在上一版之上，不是每次都跟 production 比。"""
+        fetch = FakeFetch(results=[[("已經是 agent 寫的第 3 版", 3)]])
+        payload = json.loads(tools.get_current_persona(ctx(fetch), user_id=ALICE))
+        self.assertEqual(payload["persona_text"], "已經是 agent 寫的第 3 版")
+        self.assertEqual(payload["source"], "v3")
+        self.assertEqual(len(fetch.calls), 1, "有自己的版本就不該再查 production")
 
     def test_get_current_persona_handles_missing_row(self):
         fetch = FakeFetch(results=[[]])
@@ -250,6 +260,32 @@ class BehaviourTests(unittest.TestCase):
         ]])
         msgs = json.loads(tools.get_messages(ctx(fetch), user_id=ALICE))["messages"]
         self.assertEqual([m["id"] for m in msgs], ["m2"])
+
+    def test_truncated_sample_says_so(self):
+        """模型要 30 天、limit 砍成 5 小時，卻只看到 count → 會誤判「不再出現」。"""
+        rows = [
+            row(f"m{i}", "c1", f"2026-08-01T{10 + i // 30:02d}:{i % 60:02d}:00+00:00",
+                ALICE, f"第{i}則")
+            for i in range(5)
+        ]
+        fetch = FakeFetch(results=[rows])
+        payload = json.loads(
+            tools.get_messages(ctx(fetch), user_id=ALICE, days=30, limit=5)
+        )
+        self.assertTrue(payload["truncated"], "拿滿 limit 就是被截斷")
+        self.assertIn("covers", payload)
+        self.assertIn("search_messages", payload["hint"], "要指路到正確的工具")
+        self.assertIn("30 天", payload["hint"])
+
+    def test_untruncated_sample_has_no_scary_hint(self):
+        fetch = FakeFetch(results=[[
+            row("m1", "c1", "2026-08-01T10:00:00+00:00", ALICE, "只有一則"),
+        ]])
+        payload = json.loads(
+            tools.get_messages(ctx(fetch), user_id=ALICE, days=30, limit=60)
+        )
+        self.assertFalse(payload["truncated"])
+        self.assertNotIn("hint", payload)
 
     def test_search_escapes_like_wildcards(self):
         fetch = FakeFetch()

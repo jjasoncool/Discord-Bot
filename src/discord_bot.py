@@ -289,6 +289,14 @@ async def on_ready():
     except Exception as _exc:
         logger.error("ai_interactions 建表啟動失敗: %s", _exc, exc_info=True)
 
+    # persona agent 的兩張影子表（比照上面的 ai_interactions；建表 idempotent、
+    # 失敗只 log 不 raise——影子模式不該拖垮 bot 啟動）
+    try:
+        from llm.persona_agent.store import ensure_table as _ensure_persona_agent
+        await asyncio.to_thread(_ensure_persona_agent)
+    except Exception as exc:
+        logger.warning("persona agent 資料表初始化失敗（影子模式功能將無法寫入）: %s", exc)
+
     # v2 風格召回：背景回填既有列的 embedding（idempotent；embed 端就緒後逐批做，不阻塞啟動）。
     # on_ready 可能 reconnect 重觸發 → 用 flag 避免重複起背景工作（回填本身也 idempotent，雙保險）。
     if not getattr(bot, "_ai_emb_backfill_started", False):
