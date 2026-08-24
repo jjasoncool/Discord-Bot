@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Tuple
 from urllib.parse import quote_plus
@@ -104,6 +105,26 @@ class LLMServiceSettings(BaseSettings):
             user=self.pgvector_user,
             password=self.pgvector_password,
         )
+
+    @contextmanager
+    def pgvector_cursor(self, *, commit: bool = False):
+        """借一個 pgvector cursor，用完自動關連線。
+
+        `commit=True` 時把整段包進交易（psycopg2 的 `with conn` 語意：正常結束就
+        commit、拋例外就 rollback）。**憑證的擁有者一併提供存取方式**——不然每個
+        呼叫端都要自己寫「開連線 → try → finally close」，`ai_interactions_store` 和
+        `persona_agent.store` 就各自抄了好幾份。
+        """
+        conn = self.pgvector_connect()
+        try:
+            if commit:
+                with conn, conn.cursor() as cur:
+                    yield cur
+            else:
+                with conn.cursor() as cur:
+                    yield cur
+        finally:
+            conn.close()
 
     def build_pgvector_database_url(self) -> str:
         """由 PGVECTOR_* 參數在程式內組裝 asyncpg 連線字串。"""
