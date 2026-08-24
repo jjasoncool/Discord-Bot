@@ -89,6 +89,80 @@ last_confirmed: 2026-03-31
 
 ---
 
+## 指令收斂與管理 Dashboard（規劃，未動工）
+
+<!-- @meta
+id: command-consolidation-dashboard
+type: DECISION
+status: draft
+last_confirmed: 2026-08-20
+depends_on: persona-extraction-agent
+affects: commands/, notify_server
+-->
+
+**問題**：目前 28 個 slash command，其中 AI／人格這群就有 9 個，而且用了**三種前綴**：
+
+| 前綴 | 指令 |
+|---|---|
+| `askai_` | `askai`、`askai_prompt_debug`、`askai_prompt_trace`、`askai_response_trace` |
+| `ai_` | `ai_diary` |
+| `personality_` | `personality_extract`、`personality_extract_status` |
+| `persona_` | `persona_agent_test` |
+| （無） | `forget_tag` |
+
+同一個領域三種叫法，指令列表已經找不到東西。
+
+### Phase 1：收斂成 subcommand group（低風險，可先做）
+
+Discord 原生支援兩層子指令，一組最多 25 個 —— 9 個指令會收成選單裡的**一個**項目：
+
+```
+/persona extract          （原 personality_extract）
+/persona status           （原 personality_extract_status）
+/persona test             （原 persona_agent_test）
+/persona forget_tag       （原 forget_tag）
+/persona diary            （原 ai_diary）
+/persona trace prompt|response   （原 askai_prompt_trace / askai_response_trace）
+```
+
+`/askai` **保持獨立** —— 使用者天天用，藏進子指令反而難找。
+
+**時機**：M4 排程上線時會再加指令（樣本清單維護、手動觸發），**一起改比較划算**，不要現在改一次、M4 再改一次。
+
+### Phase 2：管理面板（沿用既有 panel 機制）
+
+專案已有 `intro_panel` / `community_panel` / rollcall 的 `_try_refresh_admin_panel` —— 常駐訊息 + 按鈕，狀態變動時刷新。人格面板可直接沿用同一套：
+
+- 上次萃取時間 / 成功筆數 / 失敗清單
+- 按鈕：立即萃取、跑 agent（選成員）、看最近一次 diff
+- agent 執行中顯示進度（步數 / 已用 token）
+
+**比子指令好在**：不用記指令名，而且**看得到狀態**。
+
+### Phase 3：網頁 dashboard（真正的目標）
+
+`notify_server.py` 已經是 bot 內的 aiohttp server（`/health`、`/notify/{source}`），加唯讀路由即可。
+
+**資料源就是 M3 的兩張表**，所以這一階段**必須排在 M3 之後**：
+
+| 頁面 | 資料源 |
+|---|---|
+| 人格版本歷史 / 長期漂移 | `persona_agent_versions` |
+| 執行紀錄、失敗率、幻覺率趨勢 | `persona_agent_runs` |
+| production vs agent 並排比對（M6 評測用） | 兩張表 + `auto_personality` |
+
+**安全性**：只綁 host-only 介面或加 token，絕不開在對外網段 —— 內容是成員的完整發言證據。
+
+### 順序建議
+
+```
+M3（建表）→ Phase 1（子指令，與 M4 一起改）→ Phase 2（面板）→ Phase 3（網頁）
+```
+
+Phase 3 的價值最高但依賴最多；Phase 1 隨時可做但要挑對時機（避免改兩次）。
+
+---
+
 ## 共用元件索引（動手前先查這張表）
 
 <!-- @meta
@@ -311,6 +385,12 @@ agent 產出後多呼叫一次現有的 index_auto_personality  → 下游（per
 - **diff prompt 的互損文化寫法**（M2 撰寫 prompt 時一併定）
 
 ### 已完成的前置工作
+
+- **2026-08-25｜已知盲點：agent 看不到 bot 自己的發言**：`get_conversation` 還原現場時看不到插話內容——[discord_bot.py:446](src/discord_bot.py#L446) 的 `if not message.author.bot` 擋掉了 bot 訊息，實測最近 200 則插話**沒有任何一則**進 `data_discord_messages_index`。
+  **好的一面（本來就該這樣）**：不會把 bot 的發言誤算成群友的，也不會形成「bot 影響氣氛 → 人格描述反映 bot 自己的貢獻 → 又餵回 bot」的自我強化迴圈。
+  **盲點**：若某段對話是「A 說話 → bot 插話 → A 回應 bot」，agent 看到的是 A 兩句自言自語，中間那句不見了，可能誤判成自問自答或語意跳躍。目前幾次執行沒觀察到誤判（引用的證據都是真人對話），但**插話頻繁的頻道風險較高**。
+  **對照**：插話／askai 的 prompt **有**帶 bot 自己的回覆（`llm_service` 的 `bot_history`，渲染成 `<bot_history name="...">`，用途是讓模型認出 chat_history 裡哪幾行是自己講的）。所以「bot 看得到自己、agent 看不到 bot」是兩條路徑的刻意差異，不是遺漏。
+  **若日後要補**：`ai_interactions` 表存有插話的 `reply_message_id` 與 `reply_text`，可在 `get_conversation` 的時間視窗內併入，但要標明是 bot 發言、且要重新評估回饋迴圈風險。
 
 - **2026-08-19｜prompt 改為三層疊加（修掉我自己造的重複輪子）**：使用者指正「新增功能前先看有沒有原本的輪子，一直加獨立的會崩潰」。比對後確認 `persona_agent_prompt.json` 與 `personality_extraction_prompt.json` **13 條核心規則全部重疊**（角色設定／只能繁中／不要編造／自訂表情 `:xxx:` 規則／嚴禁廢話清單／要寫出跟別人不一樣的地方／角色定位…）。問題不只冗餘——**日後調整其中一邊，另一邊會靜默分岔**，與「招牌梗 sweep 黏在萃取裡」同類。
   **改法（比照 `persona_examples.txt` 被 /askai 與插話共用的既有慣例，共用的是檔案、兩邊各自讀）**：
