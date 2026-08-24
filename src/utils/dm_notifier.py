@@ -41,12 +41,19 @@ async def resolve_user(bot, user_id: int, *, guild: discord.Guild = None):
     return user
 
 
-async def send_dm(user, *, embed=None, content=None) -> bool:
-    """對已解析的 User/Member 發送 DM。True = 送達；False = 失敗（已 log），永不 raise。"""
+async def send_dm(user, *, embed=None, content=None, file=None) -> bool:
+    """對已解析的 User/Member 發送 DM。True = 送達；False = 失敗（已 log），永不 raise。
+
+    `file`：附件（例如太長塞不進訊息的 JSON 結果）。discord.py 的 `send` 對
+    `file` 用 MISSING 哨兵而非 None，傳 None 會炸 → 這裡條件帶入。
+    """
     if user is None:
         return False
     try:
-        await user.send(content=content, embed=embed)
+        kwargs = {"content": content, "embed": embed}
+        if file is not None:
+            kwargs["file"] = file
+        await user.send(**kwargs)
         logger.info(f"已發送 DM 給 {user.name}（ID: {user.id}）")
         return True
     except discord.Forbidden:

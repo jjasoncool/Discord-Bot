@@ -26,6 +26,7 @@ from llm.vision_image import (
 from services.llm_service import LLMService
 from sys_settings.llm_settings import AskAICommandSettings, AskAIWebSettings
 from sys_settings.time_settings import APP_TZ
+from utils.dm_notifier import send_dm
 from utils.utils import safe_send_interaction_message, check_guild
 
 logger = logging.getLogger("discord_bot")
@@ -1348,7 +1349,8 @@ class PersonalityCommands(commands.Cog):
 
         await interaction.followup.send(
             f"🔬 persona agent 開始跑 **{target.display_name}**（model=`{target_model}`）\n"
-            f"會禮讓 /askai 與插話，白天可能要等上一段時間；結果出來會再回報一次。",
+            f"會禮讓 /askai 與插話，白天可能要等上一段時間。\n"
+            f"**結果會私訊給你** —— interaction token 只有 15 分鐘，這支常跑更久。",
             ephemeral=True,
         )
 
@@ -1387,7 +1389,16 @@ class PersonalityCommands(commands.Cog):
         run,
         error: str | None,
     ) -> None:
-        """把 agent 結果回報到 Discord；送不出去只記 log，不讓例外往外炸。"""
+        """把 agent 結果私訊給發起人；送不出去只記 log，不讓例外往外炸。
+
+        **為什麼用 DM 而不是 followup**：interaction token 只有 15 分鐘，而這支 agent
+        會禮讓 /askai 與插話，實測跑過 34 分鐘——結果只能吞掉（實際發生過
+        `401 Invalid Webhook Token`）。DM 沒有時限，而且同樣只有發起人看得到。
+
+        **為什麼送出前要再驗一次管理員**：權限檢查在指令入口做過，但那是幾十分鐘前的事。
+        中間權限被移除的話，結果就不該再送過去——內容含成員的完整發言證據。
+        縱深防禦：入口擋一次、出口再擋一次，兩處都用同一支 `check_guild`。
+        """
         if error is not None:
             summary = f"❌ persona agent 執行失敗：`{error[:300]}`"
             attachment = None
@@ -1415,17 +1426,16 @@ class PersonalityCommands(commands.Cog):
                     filename=f"persona_diff_{target.id}.json",
                 )
 
-        # discord.py 的 file 預設是 MISSING 哨兵而非 None；傳 None 會炸，
-        # 而沒有 diff 正好是失敗路徑（error / context_exceeded）→ 必須條件帶入
-        kwargs: dict = {"ephemeral": True}
-        if attachment is not None:
-            kwargs["file"] = attachment
-        try:
-            await interaction.followup.send(summary[:1900], **kwargs)
-        except Exception as exc:
-            # followup token 15 分鐘就過期；agent 跑久了必然送不出去 → 結果已在 log
+        # 出口再驗一次管理員（沿用入口那支 check_guild，不另寫判斷）
+        if not await check_guild(interaction, admin_only=True):
             logger.warning(
-                "persona_agent_test 結果無法回傳 Discord（結果已寫入 log）: %s", exc
+                "persona_agent_test 結果不送出：發起人 %s 已非管理員", interaction.user
+            )
+            return
+
+        if not await send_dm(interaction.user, content=summary[:1900], file=attachment):
+            logger.warning(
+                "persona_agent_test 結果無法私訊（可能對方關閉 DM）；結果已寫入 log"
             )
 
     @app_commands.command(
