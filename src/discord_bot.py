@@ -171,14 +171,18 @@ async def on_ready():
         from sys_settings.time_settings import APP_TZ
 
         async def _run_daily_maintenance_once():
-            """每日維護：三個**彼此獨立**的步驟，各自 try / except，互不拖累。
+            """每日維護：四個步驟，各自 try / except，前面失敗不拖累後面。
 
               ① emoji 字典自動更新（讀 guild.emojis → 補空值項目）
               ② 招牌梗衰減 sweep（純 SQL GC／降級）
-              ③ 人格萃取（唯一會用到 LLM 的步驟）
+              ③ 人格萃取（production，唯一寫 auto_personality 的步驟）
+              ④ persona agent 影子模式（寫獨立表，`PersonaAgentSettings.enabled` 控制）
+
+            ①②③ 彼此無相依，④ 例外：它要拿 ③ 剛寫好的描述當第一次 diff 的基準，
+            也跟 ③ 搶同一顆 GPU，所以刻意排在 ③ 之後、且 ③ 遇鎖返回時連帶跳過。
 
             2026-08-18 拆分：原本 ② 藏在 ③ 內部（共用 `_extraction_running` 鎖、不另開排程），
-            但三者無資料相依。拆開後 ③ 日後換成 persona agent 實作時，只需替換這一步，
+            但 ①②③ 無資料相依。拆開後 ③ 日後換成 persona agent 實作時，只需替換這一步，
             ①② 不受影響。
 
             排程與啟動補跑共用此函式。③ 若遇到鎖（`PersonalityExtractionInProgressError`）
@@ -225,6 +229,27 @@ async def on_ready():
                     days=14,
                 )
             logger.info("人格萃取排程完成：萃取 %d 位使用者", len(results))
+
+            # ④ persona agent 影子模式（獨立資料表，不碰 auto_personality）
+            #    刻意排在 ③ 之後：兩者都吃 GPU，序列執行才不會互搶；而且 agent 的
+            #    diff 要拿 production 剛寫好的描述當第一次的基準。
+            try:
+                from llm.persona_agent.batch import run_batch
+                from sys_settings.llm_settings import PersonaAgentSettings
+
+                agent_settings = PersonaAgentSettings()
+                if agent_settings.enabled:
+                    runtime_config = load_llm_runtime_config(
+                        LLM_SETTINGS.llm_runtime_model_path
+                    )
+                    await run_batch(
+                        guild_id=guild.id,
+                        model=runtime_config.personality_model or runtime_config.model,
+                        settings=agent_settings,
+                    )
+            except Exception as exc:
+                # 影子模式失敗不該影響任何既有功能
+                logger.error("persona agent 批次失敗（不影響 production）: %s", exc, exc_info=True)
 
         async def _personality_schedule():
             # 啟動後等 60 秒再開始，讓其他服務先就緒
