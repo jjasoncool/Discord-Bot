@@ -481,6 +481,21 @@ def compose_persona_text(changes: list[dict[str, Any]]) -> str:
     )
 
 
+async def run_db(fn, *args, **kwargs):
+    """同步 DB 呼叫一律丟 executor。
+
+    `store`、`validation`、`batch.select_targets` 走的是同步 psycopg2；直接在 async 裡
+    呼叫會**卡住整個 event loop**（音樂、Discord 心跳、插話全部停住）。批次跑 10 人
+    就是 60 次阻塞，而 `select_targets` 那句實測就要 1 秒。
+
+    **放在模組層而不是 `run_and_persist` 內的 closure**：M4 的 `run_batch` 是第二個
+    async 進入點，closure 借不到就會各寫一份 `run_in_executor`。
+    `test_persona_agent_loop.BlockingCallTests` 會掃這兩支的原始碼把關。
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, functools.partial(fn, *args, **kwargs))
+
+
 async def run_and_persist(
     *,
     user_id: str,
@@ -501,23 +516,13 @@ async def run_and_persist(
     """
     from llm.persona_agent import store, validation
 
-    loop = asyncio.get_running_loop()
-
-    async def _db(fn, *args, **kwargs):
-        """同步 DB 呼叫一律丟 executor。
-
-        `store` 與 `validation` 走的是同步 psycopg2；直接在 async 裡呼叫會**卡住整個
-        event loop**（音樂、Discord 心跳、插話全部停住）。M4 批次跑 10 人就是 60 次阻塞。
-        """
-        return await loop.run_in_executor(None, functools.partial(fn, *args, **kwargs))
-
-    failures = await _db(store.consecutive_failures, guild_id, user_id) if save else 0
+    failures = await run_db(store.consecutive_failures, guild_id, user_id) if save else 0
     if failures >= QUARANTINE_AFTER_FAILURES:
         run = AgentRun(user_id=str(user_id), status="quarantined")
         run.error = f"連續失敗 {failures} 次，本次跳過（需人工檢視）"
         logger.warning("persona agent %s 已隔離：%s", user_id, run.error)
         if save:
-            await _db(
+            await run_db(
                 store.record_run,
                 run_id=run_id, guild_id=guild_id, author_id=user_id,
                 status=run.status, steps=0, tool_calls=0, prompt_tokens=None,
@@ -541,18 +546,18 @@ async def run_and_persist(
     result = None
     version = None
     if run.diff is not None:
-        result = await _db(
+        result = await run_db(
             validation.validate_diff, run.diff, user_id=user_id, fetch=ctx.fetch
         )
         if save and result.skip_reason is None:
             base = "production"
             try:
-                latest = await _db(store.latest_version, guild_id, user_id)
+                latest = await run_db(store.latest_version, guild_id, user_id)
                 if latest:
                     base = f"v{latest['version']}"
             except Exception:
                 pass
-            version = await _db(
+            version = await run_db(
                 store.write_version,
                 guild_id=guild_id, author_id=user_id,
                 persona_text=compose_persona_text(result.accepted),
@@ -563,7 +568,7 @@ async def run_and_persist(
             )
 
     if save:
-        await _db(
+        await run_db(
             store.record_run,
             run_id=run_id, guild_id=guild_id, author_id=user_id,
             status=run.status, steps=run.steps, tool_calls=len(run.trace),
