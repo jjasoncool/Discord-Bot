@@ -3,7 +3,7 @@
   "model": "Qwen3.8-27B-GGUF-UD-Q4_K_XL",
   "embed_model": "Qwen3-Embedding-0.6B-GGUF",
   "moderation_model": "user.Qwen2.5-7B-Instruct-GGUF-Q4_K_M",
-  "personality_model": "Qwen3-14B-GGUF",
+  "personality_model": "Qwen3.8-27B-GGUF-UD-Q4_K_XL",
   "ambient_model": "Qwen3.8-27B-GGUF-UD-Q4_K_XL",
   "backends": {
     "ollama": {

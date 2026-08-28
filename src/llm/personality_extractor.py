@@ -385,6 +385,12 @@ async def extract_personalities(
                 ],
                 temperature=0.3,
                 top_p=0.8,
+                # 明確關閉 thinking。切到 27B 之後（14B 沒有這個設定）它會沿用
+                # lemonade profile 的 enable_thinking=true，實測讓這支排程從 13.8 分
+                # 變成 96 分——慢 7 倍。而 mock benchmark（四個判斷陷阱各兩次）顯示
+                # thinking 對這類「照證據歸納」的任務沒有可測幫助，開啟那組反而出現
+                # 一次自相矛盾。付 7 倍時間買不到品質，還會排擠後面的 agent 批次。
+                think=False,
                 num_ctx=32768,
                 timeout=600,  # 人格萃取單批可能跑很久，覆蓋預設 300s
                 # 排程在 4am 一次跑完所有 batch，結束後不需再駐留；30 分鐘緩衝後釋放 VRAM
