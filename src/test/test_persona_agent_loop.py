@@ -469,30 +469,48 @@ class FailureCountingTests(unittest.TestCase):
 
 
 class BlockingCallTests(unittest.TestCase):
-    """`run_and_persist` 是 async，裡面的同步 DB 呼叫必須走 executor。
+    """async 進入點裡的同步 DB 呼叫必須走 executor。
 
-    `store` 與 `validation` 走同步 psycopg2；直接在 async 裡呼叫會卡住整個 event loop
-    （音樂、Discord 心跳、插話全停）。M4 批次跑 10 人就是 60 次阻塞。
+    `store`、`validation`、`batch.select_targets` 走同步 psycopg2；直接在 async 裡呼叫
+    會卡住整個 event loop（音樂、Discord 心跳、插話全停）。批次跑 10 人就是 60 次阻塞，
+    而 `select_targets` 那句實測就要 1 秒。
     掃 AST 而不是靠人記得——這種錯誤不會報錯，只會讓 bot 間歇性卡頓。
+
+    **掃描對象是清單而不是單一函式**：原本只掃 `run_and_persist`，於是 M4 新增的
+    `run_batch`（第二個 async 進入點）裸呼叫 `select_targets` 完全沒被擋下來。
+    日後再多一個 async 進入點，加進 `ASYNC_ENTRYPOINTS` 即可。
     """
 
-    def test_no_bare_store_or_validation_call_in_async(self):
+    #: (顯示名稱, 函式, 這支不可以裸呼叫的同步模組／函式名)
+    ASYNC_ENTRYPOINTS = [
+        ("agent.run_and_persist", "run_and_persist", {"store", "validation"}),
+        ("batch.run_batch", "run_batch", {"store", "validation"}),
+    ]
+
+    def test_no_bare_sync_db_call_in_async(self):
         import ast
         import inspect
 
-        src = inspect.getsource(agent.run_and_persist)
-        tree = ast.parse(src.lstrip())
+        from llm.persona_agent import batch
+
+        modules = {"run_and_persist": agent, "run_batch": batch}
+        # 裸呼叫的同步函式（非 module.attr 形式）也要擋
+        bare_names = {"select_targets"}
         offenders = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            fn = node.func
-            if (
-                isinstance(fn, ast.Attribute)
-                and isinstance(fn.value, ast.Name)
-                and fn.value.id in ("store", "validation")
-            ):
-                offenders.append(f"{fn.value.id}.{fn.attr} (line {node.lineno})")
+        for label, attr, banned in self.ASYNC_ENTRYPOINTS:
+            src = inspect.getsource(getattr(modules[attr], attr))
+            for node in ast.walk(ast.parse(src.lstrip())):
+                if not isinstance(node, ast.Call):
+                    continue
+                fn = node.func
+                if (
+                    isinstance(fn, ast.Attribute)
+                    and isinstance(fn.value, ast.Name)
+                    and fn.value.id in banned
+                ):
+                    offenders.append(f"{label}: {fn.value.id}.{fn.attr} (line {node.lineno})")
+                elif isinstance(fn, ast.Name) and fn.id in bare_names:
+                    offenders.append(f"{label}: {fn.id}() (line {node.lineno})")
         self.assertEqual(
             offenders, [],
             f"這些同步 DB 呼叫沒有走 executor，會卡住 event loop：{offenders}",

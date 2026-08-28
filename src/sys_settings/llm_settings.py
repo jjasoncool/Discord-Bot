@@ -6,12 +6,11 @@ import json
 import logging
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Tuple
+from typing import Any, Literal, Tuple
 from urllib.parse import quote_plus
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import Literal
 
 logger = logging.getLogger("discord_bot")
 
@@ -455,6 +454,60 @@ class AmbientChatSettings(BaseSettings):
 
     model_config = SettingsConfigDict(
         extra="ignore",
+        frozen=True,
+    )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: Any,
+        env_settings: Any,
+        dotenv_settings: Any,
+        file_secret_settings: Any,
+    ) -> Tuple[Any, ...]:
+        """停用 env/dotenv，僅接受初始化參數與 class 預設值。"""
+        return (init_settings,)
+
+
+class PersonaAgentSettings(BaseSettings):
+    """人格擷取 agent（影子模式）的排程設定。
+
+    與 production 萃取的關係：兩者寫不同的表、序列執行（agent 排在萃取之後），
+    彼此不知道對方存在。agent 失敗不影響 production，反之亦然。
+
+    **只吃 class 預設值，不吃環境變數**（同 `AmbientChatSettings` /
+    `DiaryReflectionSettings`）。少了下面那組 `model_config` 的話，欄位名會直接變成
+    環境變數名——`ENABLED` 打得開這支排程、`MODE` 改得掉樣本模式，而這種通用名字誰都
+    可能撞到；`mode` 又是 `Literal`，compose 隨便來一個 `MODE=production` 就會讓這個類
+    建構失敗。開關留在 code 裡，git 也才看得出誰什麼時候開的。
+    """
+
+    #: 開啟後才會接上 `discord_bot` 04:00 排程的第 ④ 步（production 跑完才輪到它）。
+    enabled: bool = True
+
+    #: sample＝每晚只跑 `sample_size` 人（輪替，最久沒跑的優先）
+    #: all   ＝跑所有符合門檻的人
+    #: 先 sample 幾晚把剩餘的失敗模式抓出來，穩定後改 all——改設定不必改程式。
+    mode: Literal["sample", "all"] = "sample"
+    sample_size: int = 6
+
+    #: 硬停時間（本地時；跨過就停手，沒跑到的人明晚優先）。
+    #: 實測活躍使用者約 4.4 分／人，56 人約 3.4 小時 → 04:15 開始會跑到 07:40，
+    #: 那時群裡開始有人聊天，agent 每步禮讓十分鐘再硬上反而最擾民。
+    deadline_hour: int = 7
+
+    #: 納入門檻。**刻意比 production 寬**（production 是 14 天 10 則）：
+    #: 14 天 <10 則的人 production 直接跳過，而那正是 agent 唯一明確贏的族群
+    #: （實測 7 天 1 則、90 天 91 則的案例，agent 自行擴大回溯後產出零幻覺的完整描述）。
+    min_messages_days: int = 90
+    min_messages: int = 5
+
+    model_config = SettingsConfigDict(
+        # siblings 用 extra="ignore" 是因為它們讀 `.env`——env_file 會把整份檔案的 key
+        # 全餵進來，forbid 會被無關的 key 炸掉。這個類不讀 `.env`，所以維持 forbid：
+        # 測試會用 `PersonaAgentSettings(mode="all")` 這種 kwargs 建構，打錯字要噴錯。
+        extra="forbid",
         frozen=True,
     )
 
