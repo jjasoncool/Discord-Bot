@@ -60,6 +60,9 @@ CREATE TABLE IF NOT EXISTS {RUNS_TABLE} (
   rejected_changes   INT NOT NULL DEFAULT 0,
   skip_reason        TEXT,
   trace              JSONB,
+  rejected           JSONB,
+  quote_unmatched    INT,
+  quote_misses       JSONB,
   duration_ms        INT,
   error              TEXT,
   created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -201,6 +204,9 @@ def record_run(
     accepted_changes: int,
     rejected_changes: int,
     skip_reason: Optional[str],
+    rejected: Optional[list[dict[str, Any]]],
+    quote_unmatched: Optional[int],
+    quote_misses: Optional[list[str]],
     trace: list[dict[str, Any]],
     duration_ms: int,
     error: Optional[str],
@@ -210,14 +216,37 @@ def record_run(
         INSERT INTO {RUNS_TABLE}
           (run_id, guild_id, author_id, status, steps, tool_calls, prompt_tokens,
            thinking_exhausted, evidence_claimed, evidence_bogus, accepted_changes,
-           rejected_changes, skip_reason, trace, duration_ms, error)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s)
+           rejected_changes, skip_reason, trace, rejected, quote_unmatched,
+           quote_misses, duration_ms, error)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,
+                %s::jsonb,%s,%s)
     """
+    def _json(value):
+        """序列化失敗不該賠掉整列。
+
+        `rejected` 裝的是 LLM 原樣輸出，jsonb 不吃的字元（`\u0000`）會讓整句 INSERT
+        炸掉；而「這次 run 沒被記錄」會連帶讓 `consecutive_failures` 數不到它，
+        隔離機制就永遠爬不到門檻。寧可丟掉這個欄位也要把 run 記下來。
+        """
+        if value is None:
+            return None
+        try:
+            return json.dumps(value, ensure_ascii=False).replace("\\u0000", "")
+        except (TypeError, ValueError) as exc:
+            logger.warning("persona agent run 的 %s 欄位序列化失敗，改存 null：%s",
+                           type(value).__name__, exc)
+            return None
+
     params = (
         run_id, str(guild_id), str(author_id), status, steps, tool_calls,
         prompt_tokens, thinking_exhausted, evidence_claimed, evidence_bogus,
         accepted_changes, rejected_changes, skip_reason,
-        json.dumps(trace, ensure_ascii=False), duration_ms, error,
+        _json(trace),
+        # `[]` 與 NULL 意義不同：前者是「沒有任何一項被退」，後者是「本次沒算」
+        _json(rejected),
+        quote_unmatched,
+        _json(quote_misses),
+        duration_ms, error,
     )
     try:
         with LLMServiceSettings().pgvector_cursor(commit=True) as cur:

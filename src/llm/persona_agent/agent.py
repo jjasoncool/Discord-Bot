@@ -528,7 +528,8 @@ async def run_and_persist(
                 status=run.status, steps=0, tool_calls=0, prompt_tokens=None,
                 thinking_exhausted=False, evidence_claimed=0, evidence_bogus=0,
                 accepted_changes=0, rejected_changes=0, skip_reason=run.error,
-                trace=[], duration_ms=0, error=run.error,
+                trace=[], rejected=None, quote_unmatched=None,
+                quote_misses=None, duration_ms=0, error=run.error,
             )
         return run, None
 
@@ -579,6 +580,10 @@ async def run_and_persist(
             accepted_changes=len(result.accepted) if result else 0,
             rejected_changes=len(result.rejected) if result else 0,
             skip_reason=result.skip_reason if result else None,
+            # 被退掉的完整內容：只記數字的話，「為什麼會幻覺」永遠查不下去
+            rejected=result.rejected if result else None,
+            quote_unmatched=result.quote_unmatched if result else None,
+            quote_misses=result.quote_misses if result else None,
             trace=[{
                 "step": t.step, "tool": t.tool, "args": t.arguments,
                 "result": t.result_preview, "ms": t.elapsed_ms,
