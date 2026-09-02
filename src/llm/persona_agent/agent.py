@@ -529,7 +529,8 @@ async def run_and_persist(
                 thinking_exhausted=False, evidence_claimed=0, evidence_bogus=0,
                 accepted_changes=0, rejected_changes=0, skip_reason=run.error,
                 trace=[], rejected=None, quote_unmatched=None,
-                quote_misses=None, duration_ms=0, error=run.error,
+                quote_misses=None, skipped_changes=None,
+                duration_ms=0, error=run.error,
             )
         return run, None
 
@@ -584,6 +585,13 @@ async def run_and_persist(
             rejected=result.rejected if result else None,
             quote_unmatched=result.quote_unmatched if result else None,
             quote_misses=result.quote_misses if result else None,
+            # 通過驗證卻沒寫成版本時（`skip_reason` 有值），內容只存在記憶體裡。
+            # 只記 `accepted_changes=5` 這個數字，「那五項寫了什麼」就永遠查不到——
+            # 而低量使用者能不能寫出東西，正是 M6 要判斷的。寫成版本的那條路不必存，
+            # 內容在 `persona_agent_versions` 裡。
+            skipped_changes=(
+                result.accepted if result and result.skip_reason is not None else None
+            ),
             trace=[{
                 "step": t.step, "tool": t.tool, "args": t.arguments,
                 "result": t.result_preview, "ms": t.elapsed_ms,

@@ -72,6 +72,7 @@ def _record(cur, **overrides):
         trace=[{"step": 1, "tool": "get_messages"}],
         rejected=[{"change": {"trait": "假的"}, "why": "引用了不存在的 msg_id"}],
         quote_unmatched=3, quote_misses=["肥矮醜就是我了"],
+        skipped_changes=None,
         duration_ms=250_000, error=None,
     )
     kwargs.update(overrides)
@@ -94,7 +95,8 @@ class RecordRunContractTests(unittest.TestCase):
     def test_new_columns_are_written(self):
         cur = FakeCursor()
         _record(cur)
-        for col in ("rejected", "quote_unmatched", "quote_misses"):
+        for col in ("rejected", "quote_unmatched", "quote_misses",
+                    "skipped_changes"):
             self.assertIn(col, cur.sql, f"{col} 沒有出現在 INSERT")
         self.assertIn(3, cur.params, "quote_unmatched 的值沒進參數")
         self.assertTrue(
@@ -125,6 +127,30 @@ class RecordRunContractTests(unittest.TestCase):
         # trace 有給值，所以字串型參數裡應該只剩 trace 那一個 jsonb
         jsonb_params = [p for p in cur.params if isinstance(p, str) and p.startswith("[")]
         self.assertEqual(len(jsonb_params), 1, "只有 trace 該被序列化")
+
+
+class SkippedChangesTests(unittest.TestCase):
+    """通過驗證卻沒寫成版本時，內容也要留下來。
+
+    `confidence=low` 的執行會產出正確的觀察卻不寫版本（模型自認資料不足）。
+    只記 `accepted_changes=5` 的話，「那五項寫了什麼」就永遠查不到——而低量使用者
+    到底寫不寫得出東西，正是 M6 要判斷的。實測 09-02 有 6 個人這樣，19 項零幻覺的
+    觀察全部消失。
+    """
+
+    def test_skipped_content_is_stored(self):
+        cur = FakeCursor()
+        _record(cur, skipped_changes=[{"trait": "夜貓", "text": "只在凌晨出現"}])
+        self.assertTrue(
+            any(isinstance(p, str) and "只在凌晨出現" in p for p in cur.params),
+            "沒寫成版本的內容應該留在 runs 表",
+        )
+
+    def test_none_when_the_version_was_written(self):
+        """有寫成版本時不必重複存——內容在 persona_agent_versions 裡。"""
+        cur = FakeCursor()
+        _record(cur, skipped_changes=None)
+        self.assertIn("skipped_changes", cur.sql)
 
 
 class SerialisationFailureTests(unittest.TestCase):
