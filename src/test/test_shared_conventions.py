@@ -7,6 +7,7 @@
 
   - 實體表名：四處各自拼 `f"data_{...}"`，其中兩處**沒有消毒**（SQL identifier 注入）
   - 全站時區：八處各自寫死 UTC+8，四種命名；唯一可設定的來源只有一處在用
+    （2026-09-02 追加：regex 版守衛被 `timezone as _tz` 的 import 別名繞過，改走 AST）
   - pgvector 連線：六處抄同樣的五個參數；要加 timeout 或換驅動得改六個地方
   - prompt 載入：三份一字不差的 mtime 快取實作
 
@@ -18,6 +19,7 @@
 
 import ast
 import builtins
+import functools
 import os
 import re
 import sys
@@ -34,21 +36,130 @@ from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS as H  # noq
 
 
 class Rule:
-    """一條「這件事只能有一個來源」的規則。"""
+    """一條「這件事只能有一個來源」的規則。
 
-    def __init__(self, name: str, pattern: str, canonical: str, allowed: set[str]):
+    偵測方式二選一：
+      - `pattern`：逐行 regex（遮掉註解與字串後比對）。形狀單純的用這個就夠。
+      - `finder`：吃檔案路徑、回傳行號 list。**會被 import 別名或寫法變形繞過的
+        用這個走 AST**——見 `_find_hardcoded_utc_offsets`。
+    """
+
+    def __init__(
+        self,
+        name: str,
+        canonical: str,
+        allowed: set[str],
+        *,
+        pattern: str | None = None,
+        finder=None,
+    ):
+        assert (pattern is None) != (finder is None), (
+            f"規則「{name}」只能有一種偵測方式（pattern 或 finder）"
+        )
         self.name = name
         self.pattern = pattern
+        self.finder = finder
         self.canonical = canonical
         #: 合法的例外。scraper 是獨立容器（掛載 ./src/scraper → /app），
         #: 根目錄看不到 sys_settings，只能自己保留一份。
         self.allowed = allowed
 
 
+@functools.cache
+def _parse(path: Path) -> ast.Module:
+    """解析一個原始碼檔成 AST；**同一個檔只解析一次**。
+
+    為什麼要快取：掃描的巢狀順序是「外層規則、內層檔案」，而 AST 的消費者又不只
+    一個（時區規則在 `NoReinventedWheelsTests`、未定義常數檢查在
+    `UndefinedConstantTests`，是兩個獨立的 test method）。**跨 test method 的重複
+    只有快取搆得到**——把迴圈順序倒過來只能省下同一個 method 內的重複。
+
+    這個檔的規則會持續長（docstring 明說「新增共用元件時順手加一條」），沒有快取
+    的話每加一條 AST 規則就多一趟全檔解析，成本線性成長。
+
+    前提：測試進程是短命的，跑的期間原始碼不會被改。若日後有測試需要「改檔案再
+    重掃」，那條測試得自己繞開這個快取（或呼叫 `_parse.cache_clear()`）。
+    """
+    return ast.parse(path.read_text(encoding="utf-8"))
+
+
+def _find_hardcoded_utc_offsets_in_source(src: str) -> list[int]:
+    r"""在原始碼字串裡找 `timezone(timedelta(hours=...))`，**連 import 別名一起抓**。
+
+    為什麼這條規則不用 regex：`discord_bot.py` 的日記排程曾經寫成
+
+        from datetime import timezone as _tz, timedelta as _td
+        DIARY_TZ = _tz(_td(hours=8))
+
+    形狀一模一樣，卻整整溜過 ``timezone\(timedelta\(hours=`` 這條 pattern。
+    **一個換個 import 別名就能繞過的守衛，可靠度等同寫在文件裡**——而本檔存在的
+    前提正是「文件會被略讀、紅掉的測試不會」。AST 看的是「這個名字綁到 datetime
+    的哪個東西」，改叫什麼都躲不掉。
+
+    只認「直接把 timedelta 呼叫塞進 timezone」這個慣用寫法（含 `datetime.timezone(...)`
+    的模組屬性形式）。先把 offset 存成變數再傳進去的繞法不擋——那已經是 linter
+    的作用域分析範圍，而本檔的取捨一貫是「判定明確、誤判率低」，因為**誤判會讓
+    容器啟動 gate 紅掉，比漏判更難收拾**。
+    """
+    return _scan_tz_calls(ast.parse(src))
+
+
+def _scan_tz_calls(tree: ast.Module) -> list[int]:
+    """`_find_hardcoded_utc_offsets_in_source` 的核心，抽出來讓檔案入口能共用快取的 AST。"""
+    # 本檔裡 timezone / timedelta 的所有叫法
+    tz_names: set[str] = set()
+    td_names: set[str] = set()
+    dt_modules: set[str] = set()  # import datetime as X → X.timezone(...)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "datetime":
+            for a in node.names:
+                if a.name == "timezone":
+                    tz_names.add(a.asname or a.name)
+                elif a.name == "timedelta":
+                    td_names.add(a.asname or a.name)
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name == "datetime":
+                    dt_modules.add(a.asname or a.name)
+
+    def _is_call_to(node, simple_names: set[str], attr: str) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        if isinstance(func, ast.Name):
+            return func.id in simple_names
+        return (
+            isinstance(func, ast.Attribute)
+            and func.attr == attr
+            and isinstance(func.value, ast.Name)
+            and func.value.id in dt_modules
+        )
+
+    hits: set[int] = set()
+    for node in ast.walk(tree):
+        if not _is_call_to(node, tz_names, "timezone"):
+            continue
+        for arg in node.args:
+            if _is_call_to(arg, td_names, "timedelta") and any(
+                kw.arg == "hours" for kw in arg.keywords
+            ):
+                hits.add(node.lineno)
+    return sorted(hits)
+
+
+def _find_hardcoded_utc_offsets(path: Path) -> list[int]:
+    """檔案版：語法壞掉的檔案回空 list（交給 py_compile / 其他測試去抱怨）。"""
+    try:
+        return _scan_tz_calls(_parse(path))
+    except (SyntaxError, UnicodeDecodeError):
+        return []
+
+
 RULES = [
     Rule(
         name="全站時區",
-        pattern=r"timezone\(timedelta\(hours=",
+        finder=_find_hardcoded_utc_offsets,
         canonical="sys_settings.time_settings.APP_TZ",
         allowed={
             "sys_settings/time_settings.py",
@@ -96,12 +207,16 @@ def _source_files():
         yield rel, path
 
 
+@functools.cache
 def _code_lines(path: Path) -> list[tuple[int, str]]:
     """回傳 (行號, 只剩程式碼的該行)——註解與字串內容都遮成空白。
 
     用 `tokenize` 而不是「開頭是不是 #」：說明文字裡本來就會提到被禁的樣式
     （例如 docstring 寫「原本六處各自 psycopg2.connect(...)」），用行首判斷會誤判，
     而**誤判會讓容器啟動 gate 紅掉**，比漏判更難收拾。
+
+    快取理由同 `_parse`：4 條 regex 規則會各掃一遍同一批檔，而 tokenize 是重工。
+    **回傳的 list 不可以被 caller 就地修改**（現在都只讀著跑 regex），否則會污染快取。
     """
     src = path.read_text(encoding="utf-8")
     lines = src.splitlines()
@@ -136,6 +251,9 @@ class NoReinventedWheelsTests(unittest.TestCase):
                 for rel, path in _source_files():
                     if rel in rule.allowed:
                         continue
+                    if rule.finder is not None:
+                        offenders.extend(f"{rel}:{i}" for i in rule.finder(path))
+                        continue
                     for i, line in _code_lines(path):
                         if re.search(rule.pattern, line):
                             offenders.append(f"{rel}:{i}")
@@ -144,6 +262,41 @@ class NoReinventedWheelsTests(unittest.TestCase):
                     f"「{rule.name}」只能有一個來源（{rule.canonical}）；"
                     f"以下自己造了一份：{offenders}",
                 )
+
+
+class TimezoneGuardTests(unittest.TestCase):
+    """守衛自己的守衛：證明「換個 import 別名」躲不掉。
+
+    2026-09-02 的真實漏網：`discord_bot.py` 的日記排程寫成 `_tz(_td(hours=8))`
+    （`timezone as _tz` / `timedelta as _td`），regex 版守衛完全沒反應，違規就這樣
+    綠燈躺著。改用 AST 之後補這一組——**沒有它，哪天有人把 finder「簡化」回 regex，
+    一樣不會有任何測試變紅**，等於白修一次。
+    """
+
+    def test_catches_plain_form(self):
+        src = "from datetime import timezone, timedelta\nTZ = timezone(timedelta(hours=8))\n"
+        self.assertEqual(_find_hardcoded_utc_offsets_in_source(src), [2])
+
+    def test_catches_aliased_form(self):
+        """真實漏網的那一種。"""
+        src = (
+            "from datetime import timezone as _tz, timedelta as _td\n"
+            "DIARY_TZ = _tz(_td(hours=8))\n"
+        )
+        self.assertEqual(_find_hardcoded_utc_offsets_in_source(src), [2])
+
+    def test_catches_module_attribute_form(self):
+        src = "import datetime as dt\nTZ = dt.timezone(dt.timedelta(hours=8))\n"
+        self.assertEqual(_find_hardcoded_utc_offsets_in_source(src), [2])
+
+    def test_ignores_timedelta_used_as_duration(self):
+        """`timedelta(hours=8)` 當「時間長度」是完全合法的，不可以誤判。"""
+        src = "from datetime import timedelta\nGRACE = timedelta(hours=8)\n"
+        self.assertEqual(_find_hardcoded_utc_offsets_in_source(src), [])
+
+    def test_ignores_timezone_utc(self):
+        src = "from datetime import timezone\nUTC = timezone.utc\n"
+        self.assertEqual(_find_hardcoded_utc_offsets_in_source(src), [])
 
 
 class AnnouncementTimezoneTests(unittest.TestCase):
@@ -207,7 +360,7 @@ class UndefinedConstantTests(unittest.TestCase):
     def test_no_constant_is_used_without_being_defined(self):
         offenders = []
         for rel, path in _source_files():
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = _parse(path)
             defined = set(dir(builtins))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Assign):

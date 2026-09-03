@@ -335,8 +335,8 @@ async def on_ready():
 
     # 啟動 AI 每日日記排程（每天 00:00 台北時區，在日記頻道寫一段當天感想）
     if not getattr(bot, '_diary_task_started', False):
-        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
-        DIARY_TZ = _tz(_td(hours=8))
+        from datetime import datetime as _dt, timedelta as _td
+        from sys_settings.time_settings import APP_TZ
 
         async def _diary_schedule():
             await asyncio.sleep(90)  # 等其他服務就緒
@@ -345,7 +345,7 @@ async def on_ready():
             ds = DiaryReflectionSettings()
             while True:
                 try:
-                    now = _dt.now(DIARY_TZ)
+                    now = _dt.now(APP_TZ)
                     target = now.replace(
                         hour=ds.schedule_hour, minute=ds.schedule_minute,
                         second=0, microsecond=0,
