@@ -364,11 +364,49 @@ class LlmHttpClient:
             ) from exc
         self._raise_for_status(resp)
 
+    def unload_lemonade_model(self, *, model: str, timeout: float = 60.0) -> None:
+        """POST /api/v1/unload——把 model 從 VRAM 卸下（Lemonade 原生 admin API）。
+
+        與 `_lemonade_load_model` 對稱；body 形狀 `{"model_name": ...}` 為 2026-09-02
+        對 Lemonade 11.5.0 實測確認（回 `200 {"status":"success"}`）。
+
+        **卸載後不需要「載回去」**：實測 Lemonade 收到該 model 的 chat 請求會自動
+        重新載入（冷載入約 22 秒），且 server 端持久化的 `recipe_options`
+        （ctx_size / sampling args）不會被洗掉。所以 caller 只要放開閘門即可。
+
+        順手把這顆 model 的 load cache 條目清掉：`_LEMONADE_LOADED` 記的是
+        「本 process 已對這個 (host, model, options) 推過 /api/v1/load」，模型一旦
+        被卸載，那個假設就不成立了。用精準移除而不是 `reset_lemonade_load_cache()`，
+        免得殃及其他 model（例如仍載著的 embedding）。
+
+        非 Lemonade 後端不該呼叫這個 method（caller 負責判斷 backend type）。
+        """
+        url = self._host + "/api/v1/unload"
+        try:
+            resp = self._sync.post(url, json={"model_name": model}, timeout=timeout)
+        except httpx.TimeoutException as exc:
+            raise LlmTimeoutError(
+                f"Lemonade /api/v1/unload timed out after {timeout}s for {model}"
+            ) from exc
+        except httpx.RequestError as exc:
+            raise LlmConnectionError(
+                f"Lemonade /api/v1/unload 連線錯誤 ({model}): {exc}"
+            ) from exc
+        self._raise_for_status(resp)
+
+        with _LEMONADE_LOAD_LOCK:
+            for key in [
+                k for k in _LEMONADE_LOADED
+                if k[0] == self._host and k[1] == model
+            ]:
+                _LEMONADE_LOADED.pop(key, None)
+            _LEMONADE_LAST_HEAL.pop((self._host, model), None)
+        logger.info("Lemonade model unloaded: model=%s", model)
+
     def _try_heal_lemonade_backend(self, model: str) -> bool:
         """偵測到 upstream wedge（downstream backend process 卡死）時，重發 /api/v1/load 把
         它 respawn。沿用該 model 最後一次載入的 recipe_options（ctx_size / llamacpp_args，從
         load cache 取），但 save_options=False → 只重生、不覆寫 recipe_options.json（不毒化）。
-        帶回原 options 是為了避免裸 reload 讓 ctx 掉回 Lemonade 預設(4096)、害原請求改撞 ctx 超限。
 
         回 True＝已送出 reload（值得 retry 原請求）；False＝冷卻中 / 無 model / reload 失敗。
         每個 (host, model) 設冷卻，避免 Lemonade 真的整台掛掉時狂發 load。
@@ -383,7 +421,7 @@ class LlmHttpClient:
                 return False  # 冷卻中：別在 Lemonade 真的掛掉時狂發 load
             _LEMONADE_LAST_HEAL[key] = now
             # 取這顆 model 最後一次載入用的 recipe_options（最近一筆）。掃 cache 在鎖內、安全；
-            # 找不到就 fallback 裸 reload（{}）。沿用 options 才不會讓 respawn 的 ctx 掉回預設。
+            # 找不到就 fallback 裸 reload（{}）。
             recipe: dict[str, Any] = {}
             for (cached_host, cached_model, opts_json) in _LEMONADE_LOADED:
                 if cached_host == self._host and cached_model == model:

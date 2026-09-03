@@ -393,7 +393,9 @@ async def extract_personalities(
                 think=False,
                 num_ctx=32768,
                 timeout=600,  # 人格萃取單批可能跑很久，覆蓋預設 300s
-                # 排程在 4am 一次跑完所有 batch，結束後不需再駐留；30 分鐘緩衝後釋放 VRAM
+                # 排程在 4am 一次跑完所有 batch，結束後不需再駐留；30 分鐘緩衝後釋放。
+                # ⚠️ 只有 Ollama 吃這個值；Lemonade 無 TTL 概念會忽略它，其 VRAM 由
+                # 產圖排程呼叫 `release_model()` 明確卸載。
                 keep_alive="30m",
             )
 

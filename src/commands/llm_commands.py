@@ -15,7 +15,7 @@ from discord.ext import commands
 
 import llm
 from llm.logger_factory import get_or_create_file_logger
-from llm.lemonade_gate import note_foreground_activity
+from llm.lemonade_gate import imagegen_busy, note_foreground_activity
 from llm.chat_line import name_with_anchor
 from llm.vision_image import (
     DEFAULT_MAX_FRAMES,
@@ -317,7 +317,12 @@ class LLMCommands(commands.Cog):
         pending = ASKAI_QUEUE.pending_summaries()
         await ASKAI_QUEUE.put(queue_item)
 
-        if pending:
+        if imagegen_busy():
+            # 產圖會獨佔 GPU 數十分鐘，這期間 chat_raw 會卡在閘門上。仍然照常排隊
+            # （不丟掉使用者的問題），但要講清楚為什麼慢——差別是使用者看到
+            # 「機器人壞了」還是「機器人在忙」。
+            queue_msg = "🎨 目前正在排程產圖，GPU 被佔用中；你的問題已排進佇列，產圖結束後會立刻處理"
+        elif pending:
             pending_list = "\n".join(f"  • {q}" for q in pending)
             queue_msg = f"🧾 已加入 AI 排隊（前面 {len(pending)} 則）"
         else:
@@ -705,8 +710,11 @@ class LLMCommands(commands.Cog):
             asker_profile=asker_profile_text,
             asker_display_name=asker_display_name,
             bot_display_name=bot_display_name,
-            # chat model 在最後一次 /askai 後 1h 內保持常駐，避開反覆 unload/reload
-            # 觸發的 Windows ephemeral port 與 runner crash；閒置超過 1h 才釋放 VRAM
+            # 閒置 1h 後才釋放 VRAM，避開反覆 unload/reload 觸發的 Windows
+            # ephemeral port 與 runner crash（Ollama 時代的實戰教訓，值刻意保留）。
+            # ⚠️ 只有 Ollama 吃這個值：Lemonade 沒有 TTL 概念，會被
+            # `_build_chat_extra_body` 丟進 ignored。Lemonade 下要讓出 VRAM 只有
+            # 一條路——產圖排程在 `gpu_exclusive` 內呼叫 `LLMService.release_model()`。
             keep_alive="1h",
             trace_id=trace_id,
         ))

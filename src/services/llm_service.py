@@ -555,6 +555,51 @@ class LLMService:
                 model, options, exc,
             )
 
+    async def release_model(self, model: str | None = None) -> bool:
+        """把 LLM 從後端卸下，讓出 VRAM。回 True＝真的送出了卸載動作。
+
+        **這是「意圖層」**：caller（產圖排程）只說「我要 GPU」，不必知道後端怎麼做。
+        換後端時只有這裡的分派要改，caller 一行都不用動。與 `keep_alive` 的分工：
+
+          - `keep_alive`＝「閒置 N 分鐘後**可以**放」——軟提示，後端能做就做
+            （Ollama 原生生效；Lemonade 無 TTL 概念，會忽略）
+          - `release_model()`＝「**現在馬上**放」——硬動作，每個後端一份實作
+
+        ⚠️ **呼叫端必須已經獨佔 GPU**（`gpu_exclusive(...)` 區段內）。否則卸載完會
+        馬上被下一個請求自動載回來——實測 Lemonade 收到 chat 就會自動 load。
+
+        ⚠️ **不可走 `chat_raw`**：`chat_raw` 會再 acquire 一次 `stream_exclusive()`，
+        而呼叫端已經持有閘門 → 死鎖。所以 Ollama 分支直接打 `self._client`。
+        """
+        target = model or self.resolve_request_model()
+        runtime_config = self._load_runtime_config_cached()
+        backend = runtime_config.backend if runtime_config is not None else "ollama"
+
+        if backend == "lemonade":
+            # admin API 是 sync HTTP，包 to_thread 避免阻塞 event loop
+            await asyncio.to_thread(
+                self._client.unload_lemonade_model, model=target,
+            )
+            logger.info("release_model: 已卸載 backend=lemonade model=%s", target)
+            return True
+
+        if backend == "ollama":
+            # Ollama 的原生卸載語意就是 keep_alive=0；送一個最小請求把它帶下去。
+            # （未在 live Ollama 上實測過——目前後端是 Lemonade。行為若不符，
+            #   要改的只有這五行，仲裁層與 caller 都不受影響。）
+            await self._client.chat_completion(
+                model=target,
+                messages=[{"role": "user", "content": "."}],
+                extra_body={"keep_alive": 0, "max_tokens": 1},
+                timeout=60.0,
+            )
+            logger.info("release_model: 已送出 keep_alive=0 backend=ollama model=%s", target)
+            return True
+
+        # vLLM：一 process 一 model、沒有 swap 概念，做不到也不需要
+        logger.debug("release_model: backend=%s 不支援卸載，略過（model=%s）", backend, target)
+        return False
+
     def _build_chat_extra_body(
         self,
         *,

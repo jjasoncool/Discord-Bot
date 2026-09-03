@@ -137,8 +137,10 @@ class ImpressionModerationService:
             top_p=0.2,
             repeat_penalty=1.05,
             num_ctx=2048,
-            # moderation 是 /impression 觸發的間歇性任務：最後一次後 30 分鐘 unload，
-            # 節省 VRAM 但不會太短導致頻繁 reload
+            # moderation 是 /impression 觸發的間歇性任務：閒置 30 分鐘後放掉，
+            # 節省 VRAM 但不會太短導致頻繁 reload。
+            # ⚠️ 只有 Ollama 吃這個值；Lemonade 無 TTL 概念會忽略它（見
+            # `llm_service._build_chat_extra_body`），其 VRAM 由 `release_model()` 明確卸載。
             keep_alive="30m",
         )
 
