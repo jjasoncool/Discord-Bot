@@ -25,6 +25,7 @@
 > 4. 保留可追溯來源，避免之後重複討論同一件事
 
 最後盤點紀錄（只保留近期；過往詳見 `TODO-completed.md` 各歸檔 entry）：
+- 2026-09-02（ComfyUI 產圖 + GPU 資源仲裁，**規劃定案・未開工**；本輪只做線上實測與一則註解清理，未動任何功能 code）：需求＝每天 03:00 排程產圖（角色換衣，依心情／日期／節日），10 張以內。**硬數據**：兩張 RX 9060 XT 各 16GB，27B+ctx32768 本來就跨兩顆吃滿 → 卸載 LLM 是唯一解（釘單顆並行方案否決）。**線上實測（Lemonade 11.5.0 / ComfyUI 0.34.2）**：`POST /api/v1/unload {"model_name":...}` ✅；**卸載後打 chat 會自動重載（22s）→「主動載回」「背景預熱」整段不需要** ✅；`recipe_options`（ctx 32768 + sampling args）不會被洗掉 ✅；**ComfyUI 看不到 Lemonade 的 VRAM**（Vulkan vs HIP，27B 在與不在都回報 free 15.78 GiB）→ 不可用它判斷夠不夠 ✅。**設計定案**：鎖改**租約+心跳**（續租點掛在本來就要做的 ComfyUI 輪詢上，不開 checker task、不猜 timeout）；租約 120s 管卡死、deadline 03:50 管超時（04:00 有維護四步要用 GPU）；租約過期接管者要清 cache + log error。**換後端**：Ollama 可續用（`keep_alive:0` 就是原生卸載語意），vLLM 不可；三處 `keep_alive` **保留**（一度決定刪除，使用者否決且正確：它是可攜層該有的行為，且註解含 Ollama 時代實戰教訓），只把註解改誠實。**prompt v1 走規則零 LLM**：節日查表 + 重用 00:00 AI 日記當心情來源。**本輪 code 異動**：① 拿掉 `_try_heal_lemonade_backend` 那句無法查證的「裸 reload 會掉回 ctx 4096」註解；② `DIARY_TZ` → `APP_TZ`；③ 時區守衛從 regex 改走 AST + 補 5 項自我守衛測試（342 測試全過，未 commit）。詳見 [ComfyUI 產圖區塊](#comfyui-產圖--gpu-資源仲裁2026-09-02-規劃定案未開工)。
 - 2026-08-18（Telegram 補掃補不到「中段缺口」，**已實作・未 commit・待部署驗證**）：使用者回報「重啟後又發一大堆早上 10-11 點的文章」，疑似重複。**查證＝不是重複、是首次補發**：`delivery_state` 全表無任何 `message_pk` 送超過 1 次，該批 8 則 `message_date` 10:31~11:03 但 `created_at` 全是 **17:24**（重啟才入庫）；早上 111 則中 34 則無 delivery 記錄者**全部**是 media group 成員（由首則代發），無法解釋的漏發 = 0。**根因**＝2026-08-02 版補掃的 `offset_id = max(message_id)` + `reverse=True` 只看得到比 max_id 更新的訊息，漏的若是**中段**（2742/2743/2746 漏但 2745/2747 已收 → max_id 早跳過去）永遠掃不到，只能等重啟全量掃描（本次卡 7 小時）。**修法＝指針左移**（使用者拍板改既有流程、不另開補洞路徑）：`offset_id = max_id - CATCHUP_GAP_WINDOW(300)`；配套 ①`limit` 加大成 `300+200`（limit 卡的是**撈回**幾則，沿用 200 會在 `window_start+200` 截斷）②新增 `db.get_existing_message_ids` 一次撈視窗內已有 id 成 set 過濾（否則 290 則已存在訊息各跑完整 `_process_message`）。**驗證**：容器內注入假 client/db 重現 8/18 真實缺口，洞全補回、新訊息照收、已存在 297 則零重跑；**反向驗證** limit 壓回 200 → 掃描截斷、洞與新訊息一則都收不到。**下一步**：`docker compose restart telegram-scraper`。詳見 [補掃區塊追加段](#telegram-漏收事件自動補掃2026-08-02-已實作2026-08-18-補上中段缺口盲區待部署驗證)。
 - 2026-08-18（人格萃取 Agent 影子模式，**規劃定案・未開工**；本輪只做查證與線上實測，未動任何 code／設定檔）：把每日 04:00 的固定人格萃取升級成 tool-calling agent，產出**可稽核的 diff** 而非整份覆蓋；影子模式並行、寫獨立表、**不動 production**。**線上實測（Lemonade 11.5.0 + Qwen3.8-27B-UD-Q4_K_XL / llamacpp b9747）**：tool calling ✅（`finish_reason=tool_calls`，4.4s / 33 tok/s）、`role:"tool"` 回合往返 ✅、`response_format: json_schema` strict ✅ → **不需自架 llama-server、不需 `--jinja`，M0 直接跳過**。**併發**：1 發 33 tok/s、2 發各 11~12、3 發各 7 → llama-server 多 slot 真並行但**總吞吐固定被平分**（故獨立進程方案會讓 askai 慢 3 倍）。**prompt cache**：冷 3417 tok/10.1s → 熱 18 tok/0.3s，且插入不同前綴後仍命中（多組 cache 並存）；插話 prompt 78%（10,823 字元）是靜態前綴，現有組裝順序已是最優。**資料面**：chat 表 273,780 筆 / 81 人 / `message_id` **100% 覆蓋**（evidence 機制成立）；訊息平均僅 11~38 字；14 天符合門檻 46 人、337,211 字。**五項定案**：①`personality_model` 統一改 27B（`max_models.llm=1` 會互踢）②04:00 觸發、production→agent **序列接力**（約 05:10 收工）③agent 跑在 bot process 內共用 `stream_exclusive`、**不可做成獨立腳本**、每 step 主動禮讓 ④**補第四支工具 `get_conversation`**（人格訊號在互動不在句子，不補會輸給現有 pipeline）+ context 改 token 預算 ⑤thinking 分兩段（收集關、產 diff 開，12 分/人 → 3 分/人）。**M1 第一項＝補 code 缺口**：`think` 覆寫管線完整存在，唯一斷點在 [_build_chat_extra_body](src/services/llm_service.py#L573-L588) 的 lemonade 分支把它丟掉。詳見 [Persona Agent 區塊](#persona-extraction-agent影子模式規劃定案)。
 - 2026-08-09（插話「談話自然」重構，**已實作・待部署驗證**；py_compile 全綠、146 測試全過、未 commit）：使用者提出兩個痛點——①一偵測到發言就馬上運算，沒等人講完；②聊天室常有多組人聊不同主題，機器人不知該加入哪個。**本輪量到基準**：自發插話「trace→送出」中位 **120.8s**（p90 165s、max 901s，n=3540）、PASS 率僅 15%、`ai_interactions` 5602 筆但負向反應只有 **13** 筆。**核心診斷**：問題不是它選錯主題，是**選的時候那條線還在、120 秒後講出來已經沒了**，而自發插話是裸 `channel.send` 無指向 → 必然像亂入；且節奏由冷卻計時器決定（每 5 分鐘準時報到）而非對話內容。**目標函數經使用者拍板＝自然/人性，GPU 節省降為副作用**。**四層方案**：L3 選線+reply 錨定（第一優先，讓「慢」變合理）、L4-b 接續自己的話、L2 debounce+typing 不搶話、L1 鉤子閘（**不用 LLM**＝結構演算法+少量 regex+k-NN，權重用 logistic regression 從 5602 筆學、標籤改用「插話後有沒有人接」而非 reaction）。順帶 `max_passes_per_burst` 3→1、`cooldown` 300→180。**使用者否決**：等鎖上限（GPU 本來就慢，放棄等於 /askai 忙時永遠不插話）、新鮮度丟棄（被接完也可以插，且丟棄＝白燒 120s 零產出）。**實作中修掉的缺陷**：L4-b 借用 directed 路徑會連 foreground 讓位/降溫硬閘/每小時上限一起繞過 → 加 `followup` 旗標分流閘門。**下一步**：`docker compose restart discord-bot` → 看 log 的「ambient 鉤子」分數分布調 `hook_threshold`、看「錨定=#N」確認模型有遵守選線契約。詳見 [自然插話重構區塊](#自然插話重構2026-08-09已實作待部署驗證)。
@@ -182,7 +183,7 @@ affects: 全專案
 |---|---|---|
 | 連 pgvector | `LLMServiceSettings().pgvector_connect()` | `psycopg2.connect(host=..., ...)` |
 | 取實體表名 | `HYBRID_RETRIEVAL_SETTINGS.chat_table()` / `.source_table(key)` / `.physical_table(name)` | `f"data_{...}"`（**且會漏掉 identifier 消毒**） |
-| 台北時區 | `sys_settings.time_settings.APP_TZ` | `timezone(timedelta(hours=8))`、或另立 `TAIPEI_TZ = APP_TZ` 別名 |
+| 台北時區 | `sys_settings.time_settings.APP_TZ` | `timezone(timedelta(hours=8))`（**含 import 別名，守衛走 AST**）、或另立 `TAIPEI_TZ = APP_TZ` 別名 |
 | 讀 prompt 檔（mtime 快取） | `llm.prompt_files.read_text()` / `read_json()` | 自己寫 `_PROMPT_CACHE` + `st_mtime_ns` |
 | 清理聊天文字（表情轉語意／去 URL／mention） | `personality_extractor._clean_text_for_extraction()` | 自己 regex |
 | 描述品質規則（嚴禁廢話那套） | `persona_description_rules.txt`，兩邊各自讀同一個檔 | 在新 prompt 裡重抄一份 |
@@ -209,6 +210,7 @@ affects: 全專案
 | Context / Prompt 優化 | 含 askai 身份感 + 人物對照三輪重構 + 人設深度重構（和風含蓄/30熟女/包容派）+ 智慧女性風格重寫（2026-05-18）+ few-shot 範例檔，待部署驗證 | 97% | [Context 優化](#context--prompt-優化專區) |
 | AI 偶爾插話 / 閒聊（功能二） | **Phase A+B 已實作（2026-06-21）**，待 docker 驗證；C（記憶寫入）待做 | 50% | [AI 偶爾插話](#ai-偶爾插話--閒聊功能二規劃中) |
 | 人格萃取 Agent（影子模式） | **規劃定案（2026-08-18）**；線上實測 tool calling／json_schema 全綠，M0 跳過 | 15% | [Persona Agent](#persona-extraction-agent影子模式規劃定案) |
+| ComfyUI 產圖 + GPU 資源仲裁 | **規劃定案（2026-09-02）**；unload／自動重載／VRAM 可見性已線上實測 | 20% | [ComfyUI 產圖](#comfyui-產圖--gpu-資源仲裁2026-09-02-規劃定案未開工) |
 | AI 私聊頻道 + 三層記憶（功能一·姊妹案） | 規劃完成（含道德守門）；人設 prompt 已就位；**本輪暫放旁邊** | 10% | [AI 私聊頻道](#ai-私聊頻道--三層記憶機制規劃中) |
 | 使用者指令記憶 (/remember) | 規劃中（與 AI 私聊頻道互補） | 5% | [/remember 規劃](#使用者指令記憶-remember-未來工作) |
 | Reaction 統計 / 社群互動玩法 | 規劃中 | 5% | [Reaction TODO](#reaction-統計與社群互動玩法) |
@@ -220,6 +222,174 @@ affects: 全專案
 > 已完成 / 過往工作（Bahamut scraper + 反爬基礎設施、幽靈點名核心 + DM、社群 ID 查詢 Phase 0、Telegram Relay、Music Bot 完整實作等）詳見 `TODO-completed.md`。
 >
 > **2026-08-18 歸檔**：活動公告自動建活動（17 筆已建立）、Telegram 自訂表情 → Discord App Emoji（10 個已上傳）、Telegram 多頻道來源 + 轉發去重（Gamedataleak 205 筆），三者皆已上線運作，連同 2026-06-25 ~ 2026-07-25 的盤點紀錄一併移入 `TODO-completed.md`。
+
+---
+
+## ComfyUI 產圖 + GPU 資源仲裁（2026-09-02 規劃定案，未開工）
+
+<!-- @meta
+id: comfyui-gpu-arbitration
+type: DECISION
+status: draft
+last_confirmed: 2026-09-02
+affects: llm/lemonade_gate, llm/llm_http_client, services/llm_service, imagegen/（新）
+-->
+
+**需求**：每天 **03:00** 排程產圖（特定角色換衣服，依心情／日期／節日決定），單次 10 張以內。
+**不是 on-request**，使用者不會按著等。
+
+**為什麼一定要卸載 LLM**（實測數字，不是推估）：兩張 RX 9060 XT **各 16GB**
+（`vram_total 17,095,983,104`）；27B UD-Q4_K_XL + ctx 32768 本來就 `llamacpp_device: "Vulkan0,Vulkan1"`
+跨兩顆吃滿。加上產圖，32GB 總量塞不下 → **卸載是唯一解**，不是保守選擇。
+（曾考慮「把 LLM 釘單顆、ComfyUI 用另一顆並行」→ 單顆 16GB 放不下 27B，否決。）
+
+### 線上實測結論（2026-09-02，對 `192.168.56.1:13305` Lemonade 11.5.0 / `:8188` ComfyUI 0.34.2）
+
+| 測項 | 結果 |
+|---|---|
+| unload API | `POST /api/v1/unload {"model_name":"..."}` → `200 {"status":"success"}`，與 `/api/v1/load` 對稱 |
+| 卸載生效 | health 的 `all_models_loaded` 中該 model 整個消失 |
+| **卸載後打 chat 會自動重載** | **會**，22 秒（含冷載入）回 200 → **「主動載回」與「背景預熱」整段不需要** |
+| recipe_options 是否被洗掉 | **沒有**。`ctx_size: 32768` 與全部 sampling args 原封不動（Lemonade 自己持久化在 `recipe_options.json`） |
+| 二次呼叫 | 1.8 秒 / 36.7 tok/s → 確認常駐熱狀態 |
+| ComfyUI 看不看得到 Lemonade 的 VRAM | **看不到**。27B 在與不在，`/system_stats` 都回報 free 15.78 GiB（Lemonade 走 Vulkan、ComfyUI 走 HIP，跨 process 查不到對方） |
+
+**衍生結論**
+1. `reset_lemonade_load_cache()` 從「必要」降級成「衛生」——Lemonade 自己記得 ctx_size，不清也不會錯；仍要清（模型卸載後「本 process 已推過 load options」的假設不成立），但**不再是單點故障**。
+2. **整體風險很低**：租約過期／bot crash／鎖沒放好，最壞只是下一次 /askai 慢 22 秒，**沒有永久損壞路徑**。
+3. **反過來**：正因為會自動載，「產圖期間絕不能有 LLM 請求漏進來」更要緊——一個漏網的背景插話就會把 27B 拉回 VRAM 跟 ComfyUI 搶。實作時要確認沒有任何路徑繞過鎖直接打 LLM。
+4. **不可**用 ComfyUI 的 `vram_free` 判斷「現在夠不夠」——這條路提早封掉，否則會寫出看似合理但永遠答錯的檢查。
+
+### 設計：租約 + 心跳（不是 timeout，也不是 checker task）
+
+**核心：timeout 是猜的，心跳是量的。** 純 timeout 分不出「跑很久」與「卡死」——設太短誤殺正常長工作，設太長讓 bot 死著。
+
+持有者拿**短期租約**（120s），每次證明還活著就續租。**續租點不用新造**：ComfyUI 的
+`/queue`、`/history/{prompt_id}` 本來就要輪詢才知道圖好了沒，**輪詢成功即心跳**。
+
+```python
+async with gpu_exclusive("imagegen", lease=120) as lease:
+    await unload_llm(chat_model)
+    reset_lemonade_load_cache()
+    while not done:
+        await asyncio.sleep(5)
+        status = await comfy.poll(prompt_id)   # 這一步成功 = 心跳
+        lease.renew()
+# 鎖釋放 → 下一個 LLM 請求進來，Lemonade 自動載回（22s）
+```
+
+- 正常跑 40 分鐘 → 續租 ~480 次，永不誤殺
+- ComfyUI 卡死 → 輪詢失敗 → 120s 後租約到期 → 鎖自動釋放
+- **租約長度與「產圖要跑多久」完全解耦**，只要比輪詢間隔長即可 → 不用猜任何時間
+- 不做 checker task：多一個會自己掛掉的元件，而且它要判斷「還在跑嗎」最後還是得問 ComfyUI
+
+**租約過期接管者不能只放鎖**：要順手 `reset_lemonade_load_cache()` + log 顯眼 error（不可靜默）。cache reset 冪等，重複清無副作用。
+
+**兩種時限要分清楚**（不同東西，都要有）：
+
+| | 管什麼 | 值 |
+|---|---|---|
+| 租約 | 卡死（liveness） | 120s，靠輪詢續 |
+| 整批 deadline | 跑太久（budget） | **03:50**，護欄而非預算；正常 10 張幾分鐘就收工 |
+
+deadline 存在的理由：**04:00 有每日維護四步**（emoji → 招牌梗 sweep → 人格萃取 → persona agent，跑到約 05:10），產圖不能占著不放。
+
+### 換後端可續用（Ollama 可，vLLM 不可）
+
+分三層，只有最薄一層要換：
+
+| 層 | 內容 | 換後端要動嗎 |
+|---|---|---|
+| 仲裁層 | 租約／心跳／deadline／誰在佔用 | ❌ 完全不動（管的是 GPU 這個資源） |
+| 意圖層 | `release_llm()` | ❌ 介面不動 |
+| 後端 adapter | 怎麼實現該意圖 | ✅ 每後端一份，都很小 |
+
+| 後端 | 卸載 | 載回 |
+|---|---|---|
+| Lemonade | `POST /api/v1/unload {"model_name":...}` | 不用做，下次 chat 自動載（22s） |
+| Ollama | 一次 `{"keep_alive": 0}` 的請求（**原生卸載語意**） | 不用做，收到請求就載 |
+| vLLM | ❌ 做不到（一 process 一模型、無 swap 概念） | — |
+
+**`keep_alive` 三處保留，只改註解**（`llm_commands` "1h"、`impression_moderation_service` "30m"、
+`personality_extractor` "30m"）。2026-09-02 曾一度決定刪除，**使用者否決且是對的**：它們確實在
+Lemonade 下被 `_build_chat_extra_body` 丟進 ignored，但**那正是可攜層該有的行為**——`keep_alive`
+表達的是意圖（「閒置多久可以放」），各後端能做到多少是後端的事；刪掉等於刪掉可攜性，和本節
+「換後端可續用」的目標自相矛盾。而且 `llm_commands` 那則註解裡藏著 Ollama 時代的實戰教訓
+（「避開反覆 unload/reload 觸發的 Windows ephemeral port 與 runner crash」），刪了下次換回 Ollama 會再踩一次。
+
+要改的是**註解**，把「保證會發生」的口氣改成誠實描述。兩個機制互補、不是替代：
+
+| | 語意 | 性質 | Lemonade | Ollama |
+|---|---|---|---|---|
+| `keep_alive` | 「閒置 N 分鐘後可以放」 | **軟提示**，後端能做就做 | 無 TTL 概念 → 忽略（已有 debug log） | ✅ 原生生效 |
+| `release_llm()` | 「**現在馬上**放」 | **硬動作**，每後端一份 adapter | `POST /api/v1/unload` | `keep_alive: 0` |
+
+### prompt 產生：v1 走規則，零 LLM 呼叫
+
+素材三個來源都是現成的：
+
+- **日期、節日** → `settings/` 一份 JSON 查表
+- **心情** → **重用 00:00 的 AI 日記**。03:00 剛好在它之後，讀日記頻道最後一則即當天心情；
+  頻道 id 也不用新設，`DiaryReflectionSettings.diary_channel_config_key` 已在 channel config 裡
+
+不用 LLM 的理由不只是省事：① ComfyUI prompt 是 **tag 語言不是自然語言**，LLM 產的自由文字難控難重現；
+② 一旦要 LLM，就得排在 unload 之前且同在鎖內，流程多一整段。
+**v2 想換成 LLM 生 tag 時介面完全不用改**——差別只是「誰產出那串 tag」。
+
+**發圖頻道＝日記頻道**（2026-09-02 使用者拍板）：沿用 `ai_diary_channel_id`
+（`= DiaryReflectionSettings.diary_channel_config_key`，值 `1495609627361017867`），
+**不新增任何設定**。該頻道因此成為「AI 的一天」的完整紀錄：00:00 寫日記 → 03:00 讀它決定心情 → 產圖發回同一處。
+
+⚠️ **心情來源的定位規則不可以寫成「讀最後一則」**。正常時序雖然對（00:00 日記 → 03:00 圖，
+03:00 當下最後一則就是當天日記），但兩種情況會抓錯：① 當天日記失敗沒發 → 讀到**前一天的圖**（無文字）；
+② 有人在該頻道留言。正確規則：**從新往回掃，找「當天（`APP_TZ`）由 bot 發出、`content` 非空、
+且無附件」的訊息**；找不到＝當天沒日記 → 心情來源缺席，退回純節日／日期規則。
+
+（順帶：`diary_reflection` 目前是 `diary_channel.send(diary)` 直接發，沒走 `post_to_channel`。
+產圖端仍走 `post_to_channel`；兩條路進同一個頻道是既有的小不一致，本案不處理，記在此備查。）
+
+### 實作順序
+
+1. ~~驗 `/api/v1/unload` 行為~~ ✅ 已完成（見上表）
+2. `unload_llm()` adapter + gate 租約化（lease / renew / owner / busy 查詢 / 過期接管）
+3. ComfyUI client：`POST /prompt` → 輪詢 `/history/{id}` → `GET /view` 取圖
+   （bot 在 Linux container，**拿不到** Windows 的 `D:\AI\ComfyUI\...\output`，只能走 HTTP）
+4. 接 03:00 排程 + 發圖
+5. **最後**做檔名正名（見下）
+
+**刻意重用既有輪子，不新造**
+- workflow JSON 用 `llm.prompt_files.read_json()`（已有 mtime 快取，與 `settings/prompts/` 慣例一致）
+- 發圖走 `utils.discord_content.post_to_channel`，不自己組 `channel.send`
+- 實作完成後在「共用元件索引」補一行：**GPU 佔用仲裁 → gate，不要自己開第二把鎖**
+
+### TODO
+
+- [ ] 步驟 2~4 實作
+- [ ] **prompt 精修（使用者指定，後續要做）**：心情 ↔ 服裝的搭配表、節日表。v1 先能跑，映射規則之後細調
+- [x] **（2026-09-02 定案）** 圖發到 `ai_diary_channel_id`，與日記同一頻道，不新增設定
+- [ ] 三處 `keep_alive` 的註解改成誠實描述（**參數保留**，只改註解；併入步驟 2）
+- [x] **（2026-09-02 已修）** `discord_bot.py:339` 的 `DIARY_TZ = _tz(_td(hours=8))` 違反
+      「全站時區只能用 `APP_TZ`」，因 `_tz`/`_td` 別名溜過 regex 守衛。**兩層都修了**：
+      ① 改用 `APP_TZ`；② 該條規則從 regex 改走 **AST**（`_find_hardcoded_utc_offsets`），
+      連 import 別名與 `datetime.timezone(...)` 模組屬性形式一起抓，並補 `TimezoneGuardTests`
+      五項守住（含「`timedelta(hours=8)` 當時間長度是合法的、不可誤判」）。
+      **驗證方式**：暫時還原成舊寫法 → 守衛確實紅在 `discord_bot.py:339` → 復原。
+      全專案掃過，這是唯一一處別名繞過（`extract_fingerprint` / `event_time_parser` 是既有合法例外）
+
+### 檔名正名（已同意，等步驟 2~4 完成後一起改）
+
+| 現在 | 改成 | import 點 |
+|---|---|---|
+| `llm/llm_http_client.py` | `llm/http_client.py`（套件名複述兩次） | 3 |
+| `llm/safe_llm_embedding.py` | `llm/embedding_client.py`（"safe" 是形容詞不是分類） | 6 |
+| `llm/chat_persistence.py` | `llm/store_chat.py`（它就是 store，卻跟另外 3 個 `*_store` 分家） | 12 |
+| `llm/diary_reflection.py` | `llm/ambient_diary.py`（它 import `ambient_reply`，是 ambient 家族） | 4 |
+| `llm/lemonade_gate.py` | 待定（`gpu_gate` / `resource_gate`）——**等它真的管到 GPU 資源再改**，否則名字更騙人 | 10 |
+
+**已決定不做**：`llm/`、`services/` 的資料夾重組（成本 ~160 個 import 點，效益只有排序好看）。
+子資料夾的判準是「≥6 檔／有封裝邊界／可預期會長」滿足其一——`persona_agent/`、`retrievers/web/`
+是對的示範，其餘各群目前都不達標。**ComfyUI 另開 `src/imagegen/`，不塞進 `llm/`**（塞了 `llm/`
+就變成「AI 相關雜物間」，重蹈 `services/` 覆轍）。
 
 ---
 
