@@ -224,15 +224,28 @@ class BehaviourTests(unittest.TestCase):
         self.assertEqual(sorted(msg.keys()), ["id", "text", "ts"])
         self.assertEqual(msg["ts"], "08-01 22:00", "時間要轉台北並砍到分鐘")
 
-    def test_conversation_keeps_author_because_it_varies(self):
+    def test_conversation_distinguishes_speakers_without_citable_ids(self):
+        """現場要分得出誰是誰，但旁人不可以帶 `id`。
+
+        原本這條驗的是「保留 author_id」，理由是作者會變、是判讀互動的關鍵。
+        那個意圖仍然成立，只是換了載體：本人留 `id`（可引用）、旁人留 `by` 代號
+        （可辨識但引用不到）。改結構的原因見 `tools._mask_other_authors`——
+        51 個假 id 裡 19 個是「真訊息但作者是別人」，prompt 警告過仍然會犯。
+        """
         fetch = FakeFetch(results=[
             [row("m2", "c1", "2026-08-01T22:10:00+08:00", ALICE, "你也太廢")],
-            [], [],
+            [row("m1", "c1", "2026-08-01T22:09:00+08:00", "OTHER", "我剛剛又死了")],
+            [row("m3", "c1", "2026-08-01T22:11:00+08:00", "OTHER", "閉嘴啦")],
         ])
-        msg = json.loads(
+        msgs = json.loads(
             tools.get_conversation(ctx(fetch), around_msg_id="m2")
-        )["messages"][0]
-        self.assertIn("author_id", msg)
+        )["messages"]
+        mine = [m for m in msgs if "id" in m]
+        others = [m for m in msgs if "id" not in m]
+        self.assertEqual([m["id"] for m in mine], ["m2"], "只有本人的訊息可引用")
+        self.assertTrue(all("author_id" not in m for m in msgs), "雪花號一律不外露")
+        self.assertEqual([m["by"] for m in others], ["他人1", "他人1"],
+                         "同一個旁人要是同一個代號，否則分不出互動")
 
     def test_text_is_cleaned_like_production_extraction(self):
         """共用了萃取的 prompt 規則，就必須共用它的前處理。
@@ -357,3 +370,50 @@ class SchemaTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MaskOtherAuthorsTests(unittest.TestCase):
+    """旁人的訊息不可以帶 `id`——引用不到才引用不錯。
+
+    `final_prompt` 早就警告過「引用不屬於這位使用者的 id，整筆結果都會被丟棄」，
+    但實測 51 個被擋下的假 id 裡有 **19 個（37%）是真訊息、只是作者是別人**。
+    指令下過還是會犯 → 改結構：沒有 id 欄位就抄不到。
+    """
+
+    def _ctx(self):
+        from llm.persona_agent.tools import ToolContext
+        return ToolContext.build(guild_id=1, allowed_ids=["SELF"])
+
+    def test_self_keeps_id_and_drops_redundant_author(self):
+        from llm.persona_agent.tools import _mask_other_authors
+        out = _mask_other_authors(self._ctx(), [
+            {"id": "m1", "ts": "10:00", "text": "我說的", "author_id": "SELF"},
+        ])
+        self.assertEqual(out[0]["id"], "m1")
+        self.assertNotIn("author_id", out[0], "單人查詢時作者恆定，留著只是燒 context")
+
+    def test_other_loses_id(self):
+        from llm.persona_agent.tools import _mask_other_authors
+        out = _mask_other_authors(self._ctx(), [
+            {"id": "m2", "ts": "10:01", "text": "別人說的", "author_id": "OTHER"},
+        ])
+        self.assertNotIn("id", out[0], "沒有 id 才引用不到")
+        self.assertNotIn("author_id", out[0])
+        self.assertEqual(out[0]["by"], "他人1")
+
+    def test_same_other_keeps_the_same_label(self):
+        """互動判讀要分得出「A 講完 B 接話」與「同一人自言自語」。"""
+        from llm.persona_agent.tools import _mask_other_authors
+        out = _mask_other_authors(self._ctx(), [
+            {"id": "a", "ts": "1", "text": "x", "author_id": "B"},
+            {"id": "b", "ts": "2", "text": "y", "author_id": "C"},
+            {"id": "c", "ts": "3", "text": "z", "author_id": "B"},
+        ])
+        self.assertEqual([m["by"] for m in out], ["他人1", "他人2", "他人1"])
+
+    def test_anchor_flag_survives(self):
+        from llm.persona_agent.tools import _mask_other_authors
+        out = _mask_other_authors(self._ctx(), [
+            {"id": "m", "ts": "1", "text": "t", "author_id": "SELF", "is_anchor": True},
+        ])
+        self.assertTrue(out[0]["is_anchor"])

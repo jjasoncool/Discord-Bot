@@ -436,6 +436,41 @@ def search_messages(
 
 
 # ── 工具 4：還原對話現場（勝負手）────────────────────────────────────────
+def _mask_other_authors(
+    ctx: ToolContext, messages: list[dict[str, str]]
+) -> list[dict[str, str]]:
+    """把**非本人**訊息的 `id` 拿掉，換成不可引用的代號。
+
+    **為什麼要動結構而不是加強 prompt**：`final_prompt` 早就寫著「引用不屬於這位
+    使用者的 id，整筆結果都會被丟棄」，但實測 51 個被驗證層擋下的假 id 裡，
+    **19 個（37%）是真訊息、只是作者是別人**——模型讀了現場、挑了喜歡的那句、
+    抄了那句的 id。指令已經下過了還是會犯，代表這不是措辭問題。
+
+    沒有 `id` 欄位可抄，就引用不了：把錯誤變成結構上不可能，而不是靠遵守。
+
+    保留 `by` 代號（他人1／他人2…）是因為**互動判讀需要分辨誰是誰**——「A 講完 B 接話」
+    與「同一個人自言自語」是兩回事，這正是這支工具存在的理由。用序號而非 author_id：
+    模型本來就不可能從雪花號認出是誰（工具沒回傳暱稱，人名都是從訊息文字裡讀到的），
+    留著只是給它一串可以誤抄的數字，順帶每則省下 19 個字元。
+    """
+    labels: dict[str, str] = {}
+    out: list[dict[str, str]] = []
+    for msg in messages:
+        author = msg.get("author_id", "")
+        item = dict(msg)
+        if author in ctx.allowed_ids:
+            # 本人：作者恆定，author_id 是多餘的；id 留著讓它引用
+            item.pop("author_id", None)
+        else:
+            item.pop("id", None)          # ← 沒有 id 就抄不到
+            item.pop("author_id", None)
+            if author not in labels:
+                labels[author] = f"他人{len(labels) + 1}"
+            item["by"] = labels[author]
+        out.append(item)
+    return out
+
+
 def get_conversation(
     ctx: ToolContext,
     *,
@@ -454,6 +489,8 @@ def get_conversation(
     **白名單套在錨點訊息的作者身上**：只能還原樣本使用者發言的現場，不能瀏覽任意對話。
     回傳會包含旁人的發言——這與現有 pipeline 餵給模型的交錯 chat_log 屬同等級，
     不是新增的暴露面。
+
+    **旁人的發言不帶 `id`**（只有 `by` 代號），所以引用不到——見 `_mask_other_authors`。
     """
     anchor_id = str(around_msg_id or "").strip()
     if not anchor_id:
@@ -527,7 +564,9 @@ def get_conversation(
     earlier.reverse()
     anchor_line = dict(anchor)
     anchor_line["is_anchor"] = True
-    conversation = earlier + [anchor_line] + _rows_to_messages(after_rows, with_author=True)
+    conversation = _mask_other_authors(
+        ctx, earlier + [anchor_line] + _rows_to_messages(after_rows, with_author=True)
+    )
 
     return _dump({
         "around_msg_id": anchor_id,
