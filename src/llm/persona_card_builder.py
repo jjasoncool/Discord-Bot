@@ -10,7 +10,20 @@ from llm.tokenization import tokens_for_debug
 # Persona RAG 預算與關聯控制（避免 token 爆量）
 PERSONA_MAX_PARTICIPANTS = 5
 PERSONA_MAX_CARDS = 3
-PERSONA_MAX_CARD_CHARS = 400
+
+#: 單張卡每個欄位的字數上限。**400 → 600（2026-09-07）**：persona agent 的產出是
+#: 累積式 diff，每版新增約一項、每項穩定 47 字，於是總長單調成長——
+#: v1 平均 296 字（10.9% 溢出）、v2 371（39.1%）、v3 424（**51.6% 溢出**，最長 888）。
+#: 影子模式下沒人讀所以沒有症狀，但 M7 一切換就會有一半的人拿到被腰斬的描述，
+#: 而截斷是從尾巴砍，砍掉的正是最新版新增的觀察。
+#:
+#: 代價實測可忽略：3 張卡多 600 字元 ≈ +375 tokens，佔 ctx 32768 的 1.1%；
+#: prompt 處理 245 tok/s，等於每次插話多約 1.5 秒。
+#:
+#: ⚠️ **這是治標**。每版 +1 項 × 47 字，600 大約撐到 v6 又會撞牆。真正的解法是讓
+#: agent 學會合併相近特徵而不是一直 add（v3 的 keep 66% / add 25% / revise 10%
+#: 說明它幾乎不刪東西）——那是 prompt 的事，不是常數的事。
+PERSONA_MAX_CARD_CHARS = 600
 PERSONA_MAX_IMPRESSIONS_PER_CARD = 3
 
 # Alias 正規化映射（可持續擴充）
