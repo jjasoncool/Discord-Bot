@@ -39,6 +39,13 @@ def select_targets(
 
     「最久沒跑」包含**從來沒跑過**的人（LEFT JOIN 後 NULL 排最前），所以新成員
     與剛納入門檻的人會自動優先，不必手動維護清單。
+
+    **上次跑完之後沒講過話的人會被跳過**。實測 68 個跑過的人裡有 43 個（63%）
+    在上次分析之後一句都沒說，卻每晚照樣被重新分析一次——每晚約 100 分鐘 GPU
+    有六成花在沒有新資訊的人身上。更糟的是它會製造幻覺：沒有新證據還要求模型
+    產出變更，它只能編（51 個被驗證層擋下的假 id 裡，32 個在 DB 裡根本不存在）。
+
+    「沒有新訊息」＝沒有任何新證據，既有描述就是最新結論，本來就不該重跑。
     """
     s = settings or PersonaAgentSettings()
     chat = HYBRID_RETRIEVAL_SETTINGS.chat_table()
@@ -56,17 +63,29 @@ def select_targets(
             FROM {store.RUNS_TABLE}
             WHERE guild_id = %s
             GROUP BY 1
+        ),
+        latest_msg AS (
+            SELECT metadata_->>'author_id' AS author_id,
+                   max(metadata_->>'timestamp') AS last_msg
+            FROM {chat}
+            WHERE metadata_->>'doc_type' = 'discord_chat'
+              AND metadata_->>'timestamp' >= %s
+            GROUP BY 1
         )
         SELECT e.author_id
         FROM eligible e
         LEFT JOIN last_run r ON r.author_id = e.author_id
+        LEFT JOIN latest_msg m ON m.author_id = e.author_id
+        -- 沒跑過的一律要跑；跑過的要有新訊息才重跑
+        WHERE r.ran_at IS NULL
+           OR (m.last_msg IS NOT NULL AND m.last_msg::timestamptz > r.ran_at)
         ORDER BY r.ran_at ASC NULLS FIRST, e.n DESC
     """
     # 時間界線用 tools 那支：字串比較才吃得到表達式索引，理由與注意事項都寫在那裡
     since = persona_tools._cutoff_iso(s.min_messages_days)
     try:
         with LLMServiceSettings().pgvector_cursor() as cur:
-            cur.execute(sql, (since, s.min_messages, str(guild_id)))
+            cur.execute(sql, (since, s.min_messages, str(guild_id), since))
             rows = cur.fetchall()
     except Exception as exc:
         logger.error("persona agent 選人失敗：%s", exc, exc_info=True)
@@ -76,7 +95,7 @@ def select_targets(
     if s.mode == "sample":
         targets = targets[: s.sample_size]
     logger.info(
-        "persona agent 本次對象 %d 人（mode=%s，符合門檻 %d 人）",
+        "persona agent 本次對象 %d 人（mode=%s，有新證據的 %d 人）",
         len(targets), s.mode, len(rows),
     )
     return targets
