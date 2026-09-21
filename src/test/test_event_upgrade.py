@@ -86,8 +86,10 @@ POST_NEXT_SEASON = (
 
 
 class FakeScheduledEvent:
-    def __init__(self, event_id):
+    def __init__(self, event_id, status=None):
+        import discord
         self.id = event_id
+        self.status = status or discord.EventStatus.active
         self.edits = []
 
     async def edit(self, **kwargs):
@@ -436,6 +438,37 @@ class RescheduleTests(SchedulerCaseBase):
         self.assertEqual(len(self.guild.created), 1, "重送改期公告不可建出第二個活動")
         self.assertEqual(len(self.db.rows), 1)
         self.assertEqual(list(self.db.rows.values())[0]["end_utc8"], "2027-10-06 03:59")
+
+
+class EndedEventTests(SchedulerCaseBase):
+    """使用者手動提早「結束」活動（≠ 刪除）：不得重建，也不該每次都白試一次編輯。"""
+
+    def _end(self, event_id):
+        import discord
+        self.guild.events[event_id].status = discord.EventStatus.completed
+
+    async def test_ended_event_is_not_recreated(self):
+        await self.run_post(POST_WITH_BODY, source="article", source_id="5340")
+        event_id = list(self.db.rows.values())[0]["discord_event_id"]
+        self._end(event_id)
+        await self.run_post(POST_LONG_BODY, source="fb", source_id="807", image=b"cover")
+        self.assertEqual(len(self.guild.created), 1, "結束的活動不可被重建")
+        self.assertEqual(len(self.db.rows), 1)
+
+    async def test_ended_event_is_not_edited(self):
+        """Discord 會拒絕編輯已結束的活動；先擋下來，不要白試、白抓封面、白記 warning。"""
+        await self.run_post(POST_NO_BODY, source="article", source_id="5340")
+        event_id = list(self.db.rows.values())[0]["discord_event_id"]
+        self._end(event_id)
+        await self.run_post(POST_LONG_BODY, source="fb", source_id="807", image=b"cover")
+        self.assertEqual(self.guild.events[event_id].edits, [], "不可對已結束的活動送出編輯")
+
+    async def test_future_season_still_creates_after_an_ended_one(self):
+        """舊檔期被結束掉，不可害到未來同名活動的新檔期（區間不重疊＝不同活動）。"""
+        await self.run_post(POST_WITH_BODY, source="article", source_id="5340")
+        self._end(list(self.db.rows.values())[0]["discord_event_id"])
+        await self.run_post(POST_NEXT_SEASON, source="fb", source_id="900")
+        self.assertEqual(len(self.guild.created), 2, "未來檔期必須照建")
 
 
 class TombstoneTests(SchedulerCaseBase):

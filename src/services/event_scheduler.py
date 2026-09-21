@@ -636,6 +636,14 @@ async def _upgrade_existing_event(guild, db, p: PlannedEvent, existing: dict, *,
                     existing.get("event_fingerprint"), existing.get("discord_event_id"))
         return
 
+    # 已結束／已取消的活動編輯不動（Discord 回 400）。沒有這道閘，使用者手動提早結束一個
+    # 活動之後，每來一篇同活動的新公告就會白試一次編輯、白記一行 warning、白抓一次封面。
+    if event.status in (discord.EventStatus.completed, discord.EventStatus.canceled):
+        logger.info("[event] 既有活動已%s，略過升級｜%s (id=%s)",
+                    "結束" if event.status is discord.EventStatus.completed else "取消",
+                    p.name, event.id)
+        return
+
     cover_bytes = await ensure_cover() if wants_cover else None
 
     # 改期時**必須**重建描述（活動時間就寫在第一行）；若這次的片段沒比較好，沿用既有片段，
