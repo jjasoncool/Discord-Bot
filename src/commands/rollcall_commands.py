@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from utils.utils import ChannelConfig, ITEMS_PER_PAGE
+from utils.utils import ChannelConfig, ITEMS_PER_PAGE, check_guild
 from services.rollcall_service import (
     RollCallService,
     RESPONSE_DEADLINE_DAYS,
@@ -94,14 +94,6 @@ class RollCallAdminView(discord.ui.View):
         cog = interaction.client.get_cog("RollCallCommands")
         return cog.service if cog else None
 
-    async def _check_admin(self, interaction: discord.Interaction) -> bool:
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message(
-                "只有管理員可以操作。", ephemeral=True
-            )
-            return False
-        return True
-
     # ── Row 0: 開關 + 手動點名 ──
 
     @discord.ui.button(
@@ -111,7 +103,7 @@ class RollCallAdminView(discord.ui.View):
         row=0,
     )
     async def enable(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._check_admin(interaction):
+        if not await check_guild(interaction, admin_only=True):
             return
         service = self._get_service(interaction)
         if not service:
@@ -131,7 +123,7 @@ class RollCallAdminView(discord.ui.View):
         row=0,
     )
     async def disable(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._check_admin(interaction):
+        if not await check_guild(interaction, admin_only=True):
             return
         service = self._get_service(interaction)
         if not service:
@@ -151,7 +143,7 @@ class RollCallAdminView(discord.ui.View):
         row=0,
     )
     async def manual_pick(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._check_admin(interaction):
+        if not await check_guild(interaction, admin_only=True):
             return
         service = self._get_service(interaction)
         if not service:
@@ -185,7 +177,7 @@ class RollCallAdminView(discord.ui.View):
         row=1,
     )
     async def show_pending(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._check_admin(interaction):
+        if not await check_guild(interaction, admin_only=True):
             return
         service = self._get_service(interaction)
         if not service:
@@ -225,7 +217,7 @@ class RollCallAdminView(discord.ui.View):
         row=1,
     )
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._check_admin(interaction):
+        if not await check_guild(interaction, admin_only=True):
             return
         service = self._get_service(interaction)
         if not service:
@@ -244,7 +236,7 @@ class RollCallAdminView(discord.ui.View):
         row=2,
     )
     async def set_target_role(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._check_admin(interaction):
+        if not await check_guild(interaction, admin_only=True):
             return
         await _show_role_config_menu(
             interaction,
@@ -260,7 +252,7 @@ class RollCallAdminView(discord.ui.View):
         row=2,
     )
     async def set_exclude_role(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._check_admin(interaction):
+        if not await check_guild(interaction, admin_only=True):
             return
         await _show_role_config_menu(
             interaction,
@@ -276,7 +268,7 @@ class RollCallAdminView(discord.ui.View):
         row=2,
     )
     async def preview_scope(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._check_admin(interaction):
+        if not await check_guild(interaction, admin_only=True):
             return
         service = self._get_service(interaction)
         if not service:
