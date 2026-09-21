@@ -16,7 +16,7 @@ monitored_channels_file = "settings/monitored_channels.json"
 
 import json
 import os
-from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message
+from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, check_guild
 from utils.dm_notifier import notify_keyword_hit
 
 
@@ -174,11 +174,6 @@ class UserCommands(commands.Cog):
         logger.info("已註冊 WatchKeywordsView persistent view")
         logger.info("已註冊 StopAllMonitoringView")
 
-    async def _check_guild_and_owner(self, interaction: discord.Interaction, owner_only: bool = False) -> bool:
-        """檢查命令是否在伺服器中使用且使用者是否為伺服器擁有者（如果啟用了限制）"""
-        from utils.utils import check_guild
-        return await check_guild(interaction, owner_only)
-
     async def _send_error_message(self, interaction: discord.Interaction, message: str):
         """發送錯誤訊息"""
         await safe_send_interaction_message(interaction, message, ephemeral=True)
@@ -204,7 +199,7 @@ class UserCommands(commands.Cog):
         """設定監控特定頻道的訊息"""
         logger.info(f'收到來自 {interaction.user} 的 /monitor_channel 斜線命令，參數: keywords="{keywords}", notify={notify}')
 
-        if not await self._check_guild_and_owner(interaction, owner_only=False):
+        if not await check_guild(interaction):
             return
 
         # 獲取使用者有權限查看的文字頻道和論壇頻道
@@ -306,7 +301,7 @@ class UserCommands(commands.Cog):
         """停止監控指定頻道"""
         logger.info(f'收到來自 {interaction.user} 的 /stop_monitoring 斜線命令')
 
-        if not await self._check_guild_and_owner(interaction, owner_only=False):
+        if not await check_guild(interaction):
             return
 
         guild_id = interaction.guild.id
@@ -412,7 +407,7 @@ class UserCommands(commands.Cog):
         """列出目前監控的所有頻道"""
         logger.info(f'收到來自 {interaction.user} 的 /list_monitored 斜線命令')
 
-        if not await self._check_guild_and_owner(interaction, owner_only=False):
+        if not await check_guild(interaction):
             return
 
         # 檢查是否有監控的頻道
@@ -542,7 +537,7 @@ class UserCommands(commands.Cog):
         """斜線命令：設定頻道中的關鍵字監控"""
         logger.info(f'收到來自 {interaction.user} 的 /watch_keywords 斜線命令')
 
-        if not await self._check_guild_and_owner(interaction, owner_only=False):
+        if not await check_guild(interaction):
             return
 
         action_view = WatchKeywordsView(self)
@@ -561,7 +556,7 @@ class UserCommands(commands.Cog):
     async def forget_tag_cmd(self, interaction: discord.Interaction):
         """斜線命令：讓成員 opt-out 自己的招牌梗（只能管理自己的）。"""
         logger.info(f'收到來自 {interaction.user} 的 /forget_tag 斜線命令')
-        if not await self._check_guild_and_owner(interaction, owner_only=False):
+        if not await check_guild(interaction):
             return
         import asyncio
         import functools
