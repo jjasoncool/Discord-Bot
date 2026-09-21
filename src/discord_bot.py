@@ -538,15 +538,21 @@ async def on_raw_message_delete(payload):
 
 
 async def _cleanup_created_event(discord_event_id: int, reason: str) -> None:
-    """Discord 端刪除/取消伺服器活動 → 連動清 created_events 指紋（下次重送可重建）。"""
+    """Discord 端刪除/取消伺服器活動 → 在 created_events 立**墓碑**（不是刪掉那一列）。
+
+    原本是實體刪除，理由是「下次重送可重建」。但同一個活動 article 與 FB 相隔 7~28 天
+    才會各報一次（實測），列一刪掉指紋就不擋了，那篇晚到的公告會把使用者剛刪掉的活動
+    原地復活。改成標記後，兩條比對路徑都還查得到，查到就什麼都不做。
+    """
     try:
         from services.base_monitor import get_shared_state_db
         db = await get_shared_state_db()
-        n = await db.delete_created_event_by_discord_id(discord_event_id)
+        n = await db.mark_created_event_deleted(discord_event_id)
         if n:
-            logger.info("[event] Discord 活動%s → 連動清指紋 %s 筆 (event_id=%s)", reason, n, discord_event_id)
+            logger.info("[event] Discord 活動%s → 已立墓碑 %s 筆，之後任何來源都不會重建 (event_id=%s)",
+                        reason, n, discord_event_id)
     except Exception as e:
-        logger.warning("[event] 活動%s連動清指紋失敗 (event_id=%s): %s", reason, discord_event_id, e)
+        logger.warning("[event] 活動%s立墓碑失敗 (event_id=%s): %s", reason, discord_event_id, e)
 
 
 @bot.event

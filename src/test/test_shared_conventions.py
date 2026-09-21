@@ -156,6 +156,25 @@ def _find_hardcoded_utc_offsets(path: Path) -> list[int]:
         return []
 
 
+def _find_hardcoded_article_urls(path: Path) -> list[int]:
+    """找寫死的官方公告網址。
+
+    為什麼這條要走 AST 而不是 regex：`_code_lines` 會把**字串內容整段遮掉**
+    （否則 docstring 裡提到被禁的寫法就會誤判），而網址正好只活在字串裡，
+    regex 規則對它是全盲的。f-string 也吃得到——JoinedStr 底下的常數片段
+    `"…/news/detail/"` 一樣是 ast.Constant。
+
+    起因：官方原文網址原本 article_monitor（轉發 embed）與 event_scheduler
+    （活動描述）各寫一份，改網址時只會改到其中一邊。
+    """
+    hits = []
+    for node in ast.walk(_parse(path)):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and "kurogames.com" in node.value and "news/detail" in node.value):
+            hits.append(node.lineno)
+    return hits
+
+
 RULES = [
     Rule(
         name="全站時區",
@@ -195,6 +214,12 @@ RULES = [
         # ambient_reply 是多檔疊層（identity+guardrails+行為+examples）且有自己的
         # 組裝順序，硬套單檔載入器反而更繞——形狀不同就不該硬收斂。
         allowed={"llm/prompt_files.py", "llm/ambient_reply.py"},
+    ),
+    Rule(
+        name="官方公告原文網址",
+        finder=_find_hardcoded_article_urls,
+        canonical="services.article_monitor.official_article_url()",
+        allowed={"services/article_monitor.py"},
     ),
 ]
 

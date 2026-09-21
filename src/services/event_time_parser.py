@@ -78,6 +78,7 @@ class ParsedEvent:
     title_hint: str                           # 錨點前文（給上層組指紋/活動名用）
     raw: str                                  # 命中的原始片段（debug）
     start_raw: Optional[str] = None           # 相對起點的原始字串（如「即日起」「2.4版本更新後」）
+    body: str = ""                            # 活動段落敘述片段（寫進活動描述；**不參與指紋**）
 
     @property
     def is_relative_start(self) -> bool:
@@ -197,6 +198,7 @@ def parse_events(
             title_hint=title_hint,
             raw=text[m.start():min(len(text), m.end() + 12)].strip(),
             start_raw=start_raw,
+            body=_extract_body(text, m, title_hint),
         ))
 
     return events
@@ -275,20 +277,81 @@ def _clean_title_hint(text: str, anchor: int, *, allow_bracket_fallback: bool = 
     return pre.strip(' 　・-—:：')[:40]
 
 
+# ── 活動段落片段（寫進 Discord 活動描述，讓使用者不必跳轉就看得懂是哪個活動） ──
+#
+# 為什麼需要：匯總帖一則訊息含 N 個活動，jump link 的最小粒度是「一則訊息」，
+# 點過去無法定位到某一個活動；把該活動自己的敘述帶進活動描述，使用者就不必跳轉。
+
+_BODY_WINDOW = 500        # 錨點前回看範圍（活動名那行之後、活動時間之前＝該活動的敘述）
+_BODY_AFTER = 260         # 錨點前取不到時（單一活動帖標題即活動名），改取活動時間之後這麼多字
+_BODY_MAX = 300           # 片段上限（Discord 活動描述總長只有 1000，要留給時間行與連結）
+_MD_LINK = re.compile(r'\[([^\]]*)\]\([^)]*\)')     # FB text_md 的 [文字](網址) → 只留文字
+_URL_IN_TEXT = re.compile(r'https?://\S+')
+_BODY_LEAD_TZ = re.compile(r'^\s*[（(]\s*(?:伺服器時間|UTC\s*[＋+]\s*8)\s*[）)]\s*')
+# 取後文時的停止詞：碰到下一個活動、導流句或規則說明就切斷（那些不是本活動的敘述）
+_BODY_CUT = re.compile(r'活動時間|點擊網頁|更多活動詳細說明|開放條件|喚取說明')
+
+
+def _clean_body_text(text: str) -> str:
+    """片段清理：markdown 連結只留文字、去裸 URL、壓平空白。"""
+    text = _MD_LINK.sub(r'\1', text)
+    text = _URL_IN_TEXT.sub('', text)
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+def _extract_body(text: str, match, title_hint: str) -> str:
+    """抽出該活動的敘述片段。
+
+    優先取「活動名那行之後 ~ 活動時間之前」（匯總帖與 FB 專屬貼文都是這個結構）。
+    取不到時（單一活動帖的活動名就是貼文標題，前文只有標題本身）改取活動時間之後的內容
+    （通常是獎勵說明），碰到停止詞就切斷。
+    """
+    anchor = match.start()
+    lines = [ln.strip(_HEAD_DECO) for ln in text[max(0, anchor - _BODY_WINDOW):anchor].split('\n')]
+    lines = [ln for ln in lines if ln]
+    # 丟掉「活動名那一行」本身及其之前；只認長度相近的行，避免把列舉句整句吃掉
+    # （喚取匯總帖的「『A』、『B』角色活動喚取…」列舉句就是該帖最好的敘述，要留著）
+    if title_hint:
+        for i in range(len(lines) - 1, -1, -1):
+            line = lines[i]
+            near = line == title_hint or line in title_hint or title_hint in line
+            if near and len(line) <= len(title_hint) + 6:
+                lines = lines[i + 1:]
+                break
+    body = _clean_body_text(' '.join(lines))
+
+    if not body or normalize_title(body) == normalize_title(title_hint):
+        after = _BODY_LEAD_TZ.sub('', text[match.end():match.end() + _BODY_AFTER].lstrip(' \u3000\n'))
+        cut = _BODY_CUT.search(after)
+        if cut:
+            after = after[:cut.start()]
+        body = _clean_body_text(after)
+
+    return body[:_BODY_MAX]
+
+
 # ── 指紋（跨來源去重；對抗審查確認必含 start/end，title 為輔） ──
 
 _NORM_STRIP = re.compile(r'[\s　【】\[\]「」『』（）()✦＊*※・,，。!！~～\-—:：|/\\]+')
+
+# 核心名括號：官方混用「」『』與**半形 <>**（例：「活動預告 | <群聲共振模擬域> 戰鬥活動即將開啟！」）。
+# 不收 <> 的代價：同一活動的預告帖與匯總帖算出不同指紋 → 重複建活動（實測 38 個標題受影響）。
+#
+# **刻意不收《》**：全庫 472 個標題用到它，其中 328 個包的是遊戲名「鳴潮」
+# （《鳴潮》3.6 版本 Twitch Drops…），收進來會把 328 個不同公告壓成同一個核心名。
+# 〈〉與全形＜＞在全庫 1366 個標題中一次都沒出現過，不需要處理。
+_CORE_NAME = re.compile(r'「([^」\n]{1,30})」|『([^』\n]{1,30})』|<([^>\n]{1,30})>')
 
 
 def normalize_title(title: str) -> str:
     """活動名正規化：剝裝飾/標點/空白，保留核心字。供跨來源指紋比對。
 
     跨來源穩定度：Article 標題常多一個 `[詩意標籤]`、FB 沒有，但兩者通常都帶
-    `「角色/武器名」`。故優先取「」『』內的核心名，沒有才退用【】[] tag，再退全文。
+    `「角色/武器名」`。故優先取「」『』<> 內的核心名，沒有才退用【】[] tag，再退全文。
     """
     if not title:
         return ""
-    quoted = re.findall(r'[「『]([^」』\n]{1,30})[」』]', title)
+    quoted = [g for m in _CORE_NAME.finditer(title) for g in m.groups() if g]
     if quoted:
         base = ''.join(quoted)
     else:

@@ -82,7 +82,14 @@ CREATE TABLE IF NOT EXISTS created_events (
     title             TEXT,
     start_utc8        TEXT,
     end_utc8          TEXT,
-    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    core_name         TEXT,                    -- 指紋核心名（同名改期比對）
+    has_image         INTEGER DEFAULT 0,       -- 目前活動有沒有封面（沒有才補，不換圖）
+    body              TEXT,                    -- 目前描述採用的活動段落片段（比長度決定要不要換）
+    superseded_by     TEXT,                    -- 分身列 → 指向正本指紋（排序永遠排在正本後面）
+    user_deleted      INTEGER DEFAULT 0,       -- 墓碑：使用者從 Discord 刪掉，任何來源都不得復活
+    deleted_at        TIMESTAMP,
+    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at        TIMESTAMP
 );
 
 -- 社群 ID 查詢：每 (guild, source, lookup_id) 唯一 thread，採「日期 hybrid」
@@ -108,6 +115,17 @@ _MIGRATIONS_SQL = [
     "ALTER TABLE bahamut_post_state ADD COLUMN continuation_msg_ids TEXT",
     "ALTER TABLE community_lookup_threads ADD COLUMN last_start_date TEXT",
     "ALTER TABLE community_lookup_threads ADD COLUMN last_end_date TEXT",
+    # created_events：支援「升級既有活動」而非只擋重複（封面/描述後補、官方改期、墓碑）
+    # 這批欄位在上面的 CREATE TABLE 也有一份 —— 新 DB 走建表、既有 DB 走這裡，兩邊要一起改。
+    # 只留「有人讀」的欄位＋兩個稽核時間戳；存了沒人讀的欄位會變成下一個人拿來當判準的誘餌。
+    "ALTER TABLE created_events ADD COLUMN core_name TEXT",       # 指紋核心名（同名改期比對）
+    "ALTER TABLE created_events ADD COLUMN has_image INTEGER DEFAULT 0",  # 沒有才補封面，不換圖
+    "ALTER TABLE created_events ADD COLUMN body TEXT",            # 目前描述採用的片段（比長度）
+    "ALTER TABLE created_events ADD COLUMN superseded_by TEXT",   # 分身列 → 指向正本指紋
+    "ALTER TABLE created_events ADD COLUMN user_deleted INTEGER DEFAULT 0",  # 墓碑：不得復活
+    "ALTER TABLE created_events ADD COLUMN deleted_at TIMESTAMP",
+    "ALTER TABLE created_events ADD COLUMN updated_at TIMESTAMP",
+    "CREATE INDEX IF NOT EXISTS idx_created_events_core ON created_events(core_name)",
 ]
 
 
@@ -175,14 +193,6 @@ class StateDB:
 
     # ── 活動公告 → Discord 活動：created_events（跨來源指紋去重） ──
 
-    async def is_event_created(self, fingerprint: str) -> bool:
-        """這個活動指紋是否已建過（跨來源去重的總閘）。"""
-        async with self.db.execute(
-            "SELECT 1 FROM created_events WHERE event_fingerprint=?",
-            (fingerprint,),
-        ) as cursor:
-            return await cursor.fetchone() is not None
-
     async def record_created_event(
         self,
         fingerprint: str,
@@ -194,43 +204,177 @@ class StateDB:
         title: str,
         start_utc8: str,
         end_utc8: str,
+        core_name: str = "",
+        has_image: bool = False,
+        body: str = "",
     ) -> None:
         """記錄已建立（或 dry-run 預定）的活動指紋。重複指紋保留首筆（INSERT OR IGNORE）。"""
         await self.db.execute(
             """INSERT OR IGNORE INTO created_events
                (event_fingerprint, discord_event_id, guild_id, source, source_id,
-                title, start_utc8, end_utc8)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                title, start_utc8, end_utc8, core_name, has_image, body, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
             (fingerprint, discord_event_id, guild_id, source, str(source_id),
-             title, start_utc8, end_utc8),
+             title, start_utc8, end_utc8, core_name, 1 if has_image else 0, body),
         )
         await self.db.commit()
 
-    async def delete_created_event_by_discord_id(self, discord_event_id: int) -> int:
-        """依 Discord event id 刪除 created_events 紀錄（Discord 端刪除/取消活動時連動）。
+    async def mark_created_event_deleted(self, discord_event_id: int) -> int:
+        """Discord 端刪除/取消活動 → 在 created_events 立**墓碑**，不是刪掉那一列。
 
-        刪掉後該活動指紋不再擋重建 → 重送同來源貼文可重新建立。回傳刪除筆數。
+        原本是實體 DELETE，理由寫「重送同來源貼文可重新建立」。但同一個活動 article 與 FB
+        相隔 7~28 天才會各報一次（實測），實體刪掉之後那篇晚到的公告就會把使用者剛刪掉的
+        活動原地復活 —— 那條重建路徑擋不住的，正是使用者真正會踩到的情況，故捨棄。
+        墓碑留著，兩條比對路徑都還查得到，只是查到就什麼都不做。
+
+        解除墓碑的唯一入口是 `/resend_article`（人明確要求重抓才會走 clear_event_tombstone
+        或 delete_created_event）。自動來源——排程輪詢與 push 通知——一律不得解除。
+        回傳標記筆數。
         """
         cur = await self.db.execute(
-            "DELETE FROM created_events WHERE discord_event_id=?", (discord_event_id,)
+            "UPDATE created_events SET user_deleted=1, deleted_at=CURRENT_TIMESTAMP "
+            "WHERE discord_event_id=? AND user_deleted=0",
+            (discord_event_id,),
         )
         await self.db.commit()
         return cur.rowcount
 
+    async def clear_event_tombstone(self, fingerprint: str) -> bool:
+        """解除墓碑。**只有 /resend_article 這種人為明確動作能呼叫** ——
+        自動來源（排程/推送）一律不得解除，否則墓碑就白立了。"""
+        cur = await self.db.execute(
+            "UPDATE created_events SET user_deleted=0, deleted_at=NULL "
+            "WHERE event_fingerprint=?",
+            (fingerprint,),
+        )
+        await self.db.commit()
+        return cur.rowcount > 0
+
+    async def delete_created_event(self, fingerprint: str) -> bool:
+        """整列刪除。用在「/resend_article 要求重建，而那個 Discord 活動已經不在了」——
+        列裡的 discord_event_id 指向一個死掉的活動，留著只會擋住重建。"""
+        cur = await self.db.execute(
+            "DELETE FROM created_events WHERE event_fingerprint=?", (fingerprint,)
+        )
+        await self.db.commit()
+        return cur.rowcount > 0
+
+    # created_events 的 SELECT 欄位順序（get / list / find 共用同一個 row → dict 轉換）
+    _EVENT_COLS = ("event_fingerprint, discord_event_id, guild_id, source, source_id, "
+                   "title, start_utc8, end_utc8, core_name, has_image, "
+                   "body, superseded_by, user_deleted")
+
+    @staticmethod
+    def _event_row_to_dict(row) -> Dict:
+        return {
+            "event_fingerprint": row[0], "discord_event_id": row[1], "guild_id": row[2],
+            "source": row[3], "source_id": row[4], "title": row[5],
+            "start_utc8": row[6], "end_utc8": row[7], "core_name": row[8] or "",
+            "has_image": bool(row[9]), "body": row[10] or "",
+            "superseded_by": row[11], "user_deleted": bool(row[12]),
+        }
+
     async def get_created_event(self, fingerprint: str) -> Optional[Dict]:
-        """取回指紋對應的已建活動（撤銷/更新用）。"""
+        """取回指紋對應的已建活動（撤銷/升級用）。"""
         async with self.db.execute(
-            """SELECT discord_event_id, guild_id, source, source_id, title, start_utc8, end_utc8
-               FROM created_events WHERE event_fingerprint=?""",
+            f"SELECT {self._EVENT_COLS} FROM created_events WHERE event_fingerprint=?",
             (fingerprint,),
         ) as cursor:
             row = await cursor.fetchone()
-        if row is None:
+        return self._event_row_to_dict(row) if row else None
+
+    async def find_overlapping_event(
+        self,
+        core_name: str,
+        start_utc8: str,
+        end_utc8: str,
+        *,
+        exclude_fingerprints: Optional[Set[str]] = None,
+    ) -> Optional[Dict]:
+        """同活動名、且時間區間**重疊**的既有活動（官方改期/延長 → 升級而非新建）。
+
+        不重疊＝不同檔期（例：[聲弦滌蕩] 每隔幾週開一次），必須各自建活動，
+        所以這裡刻意只認重疊，不認「同名就是同一個」。
+        時間字串格式固定為 'YYYY-MM-DD HH:MM'，字典序比較等同時間序。
+
+        exclude_fingerprints：**本輪已經配對掉的列**。匯總帖裡若有幾個活動的標題抽不出來、
+        一起退用貼文標題，就會同名而區間不同（實測全庫 1 則：article 995「往歲乘霄醒驚蟄」
+        1.1版本內容說明，3 個活動同名），彼此不可互相吃掉。
+        這裡刻意**不是**排除「整個 (source, source_id)」—— 那樣連 /resend_article 重送同一篇
+        改期公告都會對不到自己先前那一列，結果建出第二個活動。
+
+        排序：正本（superseded_by IS NULL）優先；created_at 只有秒精度，同批建立的列
+        會同秒，故再用 rowid 當決勝，避免回傳結果不定。
+        """
+        if not core_name:
             return None
-        return {
-            "discord_event_id": row[0], "guild_id": row[1], "source": row[2],
-            "source_id": row[3], "title": row[4], "start_utc8": row[5], "end_utc8": row[6],
-        }
+        sql = (f"SELECT {self._EVENT_COLS} FROM created_events "
+               "WHERE core_name = ? AND start_utc8 < ? AND ? < end_utc8")
+        params: List = [core_name, end_utc8, start_utc8]
+        for fingerprint in sorted(exclude_fingerprints or ()):
+            sql += " AND event_fingerprint <> ?"
+            params.append(fingerprint)
+        sql += " ORDER BY (superseded_by IS NULL) DESC, created_at DESC, rowid DESC LIMIT 1"
+        async with self.db.execute(sql, params) as cursor:
+            row = await cursor.fetchone()
+        return self._event_row_to_dict(row) if row else None
+
+    async def find_same_name_events(self, core_name: str) -> List[Dict]:
+        """同核心名的所有列（用來偵測「改期到完全不重疊的新區間」並示警）。"""
+        if not core_name:
+            return []
+        async with self.db.execute(
+            f"SELECT {self._EVENT_COLS} FROM created_events WHERE core_name = ?", (core_name,)
+        ) as cursor:
+            return [self._event_row_to_dict(r) for r in await cursor.fetchall()]
+
+    async def list_created_events(self) -> List[Dict]:
+        """全表列出（指紋遷移與對帳用；筆數是「活動數」量級，不會大）。"""
+        async with self.db.execute(
+            f"SELECT {self._EVENT_COLS} FROM created_events ORDER BY created_at"
+        ) as cursor:
+            return [self._event_row_to_dict(r) for r in await cursor.fetchall()]
+
+    async def update_created_event(
+        self,
+        fingerprint: str,
+        *,
+        new_fingerprint: Optional[str] = None,
+        source: Optional[str] = None,
+        source_id: Optional[str] = None,
+        title: Optional[str] = None,
+        start_utc8: Optional[str] = None,
+        end_utc8: Optional[str] = None,
+        core_name: Optional[str] = None,
+        has_image: Optional[bool] = None,
+        body: Optional[str] = None,
+        superseded_by: Optional[str] = None,
+    ) -> bool:
+        """就地更新既有活動列（升級描述/封面、官方改期換時間、指紋遷移）。
+
+        只有傳進來的欄位會被寫入（None＝不動）。回傳是否真的更新到一列。
+        新指紋若已被別列佔用（＝兩列其實是同一個活動）會 UNIQUE 失敗，
+        由呼叫端決定怎麼處理，不在這裡吞掉。
+        """
+        sets, params = ["updated_at = CURRENT_TIMESTAMP"], []
+        for col, val in (
+            ("event_fingerprint", new_fingerprint), ("source", source),
+            ("source_id", None if source_id is None else str(source_id)),
+            ("title", title), ("start_utc8", start_utc8), ("end_utc8", end_utc8),
+            ("core_name", core_name),
+            ("has_image", None if has_image is None else (1 if has_image else 0)),
+            ("body", body), ("superseded_by", superseded_by),
+        ):
+            if val is not None:
+                sets.append(f"{col} = ?")
+                params.append(val)
+        params.append(fingerprint)
+        cur = await self.db.execute(
+            f"UPDATE created_events SET {', '.join(sets)} WHERE event_fingerprint = ?",
+            params,
+        )
+        await self.db.commit()
+        return cur.rowcount > 0
 
     # ── Forum：forum_thread_state（PTT / Bahamut 共用） ──
 

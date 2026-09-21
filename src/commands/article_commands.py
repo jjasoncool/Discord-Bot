@@ -5,6 +5,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import asyncio
+import functools
 import logging
 import aiohttp
 import json
@@ -581,7 +582,9 @@ class ArticleCommands(commands.Cog):
                 # 根據 ID 取得文章
                 content = await self.article_monitor.fetch_article_by_id(article_id)
                 content_name = f"文章 `{article_id}`"
-                send_method = self.article_monitor.send_article_to_channel
+                # 人明確要求重抓 → 允許解除「使用者刪掉活動」的墓碑並重建
+                send_method = functools.partial(
+                    self.article_monitor.send_article_to_channel, force_event_rebuild=True)
                 logger.info(f"[RESEND_ROUTE] 路由到文章流程: article_id={article_id}")
 
             elif content_type in ("fb", "fb_post"):
@@ -599,7 +602,8 @@ class ArticleCommands(commands.Cog):
                     return
 
                 content_name = f"FB 貼文 `{fb_db_id}`"
-                send_method = self.fb_monitor.send_fb_post_to_channel
+                send_method = functools.partial(
+                    self.fb_monitor.send_fb_post_to_channel, force_event_rebuild=True)
                 logger.info(f"[RESEND_ROUTE] 路由到 FB 流程: fb_db_id={fb_db_id}")
 
             else:  # it_article（系統設備新知 / IT快訊）

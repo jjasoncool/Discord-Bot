@@ -18,6 +18,23 @@ from .base_monitor import BaseContentMonitor
 logger = get_discord_bot_logger()
 article_logger = get_article_monitor_logger()
 
+# 官方公告原文網址（**唯一來源**：轉發 embed 與自動建活動的描述都用這個，勿再各寫一份）
+OFFICIAL_ARTICLE_URL = "https://wutheringwaves.kurogames.com/zh-tw/main/news/detail/{article_id}"
+
+# 轉發到 Discord 的公告內文上限。
+# Discord embed description 硬上限是 4096，這裡刻意取更小值避免單篇洗版。
+# 取 1200 的依據（全庫 532 篇實測 2026-09-22）：字數 p50=400、p75=565、p90=2558，
+# 切 1200 有 85.2% 的公告完整發出；再拉到 2000/4000 也只多 2.6%/10.5%，
+# 卻會讓版本說明帖變成 40~50 行的牆。被截掉的部分由「閱讀完整公告」連結與 embed.url 兩個出口補。
+EMBED_DESC_LIMIT = 1200
+
+
+def official_article_url(article_id) -> Optional[str]:
+    """官方公告原文網址；article_id 缺失時回 None（embed url 傳 None 等同不設）。"""
+    if article_id in (None, "", "unknown"):
+        return None
+    return OFFICIAL_ARTICLE_URL.format(article_id=article_id)
+
 class ArticleMonitor(BaseContentMonitor):
     """官方文章更新類別"""
 
@@ -166,16 +183,19 @@ class ArticleMonitor(BaseContentMonitor):
         all_images = content_images + desc_images
 
         # 選擇要顯示的描述
-        display_description = ""
-        if parsed_description:
-            display_description = parsed_description
-        elif parsed_content:
-            # 如果沒有專門的描述，使用內容的前300字
-            display_description = parsed_content[:300] + "..." if len(parsed_content) > 300 else parsed_content
+        # 註：官方 API 的 article_desc 全庫 532 篇皆為空字串，實際永遠走 parsed_content；
+        #     兩邊都保留只是為了官方哪天真的開始給摘要。
+        #
+        # 歷史坑：這裡原本寫 `parsed_content[:300]`，本意只是「沒有摘要時的預覽」，
+        # 但因為摘要永遠是空的，那條 fallback 變成唯一路徑 —— 一篇 8000 字的版本說明帖
+        # 只發出前 300 字，導致自動建的活動連回來時，訊息裡一個字都沒提到那個活動。
+        display_description = parsed_description or parsed_content
 
-        # 限制描述長度（Discord Embed 描述限制 4096 字符）
-        if len(display_description) > 4000:
-            display_description = display_description[:3997] + "..."
+        source_url = official_article_url(article_id)
+        if len(display_description) > EMBED_DESC_LIMIT:
+            display_description = display_description[:EMBED_DESC_LIMIT].rstrip() + "…"
+            if source_url:
+                display_description += f"\n\n[閱讀完整公告 →]({source_url})"
 
         # 創建 Embed
         # 優先使用 start_time 作為時間戳，如果沒有則使用 create_time
@@ -198,7 +218,10 @@ class ArticleMonitor(BaseContentMonitor):
             title=article['article_title'][:256] if article.get('article_title') else "無標題",  # 標題限制 256 字符
             description=display_description,
             color=0x00ff00,
-            timestamp=timestamp
+            timestamp=timestamp,
+            # 標題可點 → 跳官網全文。被截斷的公告需要這個出口
+            #（對齊 fb_monitor.format_fb_embed 的 url=embed_url，原本只有 article 這邊漏掉）
+            url=source_url,
         )
 
         # 暫時隱藏文章 ID
@@ -214,13 +237,9 @@ class ArticleMonitor(BaseContentMonitor):
         # if article.get('game_id'):
         #     embed.add_field(name="🎮 遊戲 ID", value=article['game_id'], inline=True)
 
-        # 如果有解析出的完整內容且不太長，添加內容預覽
-        if parsed_content and len(parsed_content) <= 1000 and parsed_content != display_description:
-            embed.add_field(
-                name="📝 內容預覽",
-                value=parsed_content[:1000] + ("..." if len(parsed_content) > 1000 else ""),
-                inline=False
-            )
+        # 原本這裡有「📝 內容預覽」欄位，條件是 len(parsed_content) <= 1000 ——
+        # 意思是「文章越長看到的越少」，方向是反的；而且描述改成完整內文後它必定重複，
+        # 故移除。長公告改由上面的截斷 + 「閱讀完整公告」連結處理。
 
         # 處理圖片顯示
         logger.info(f"文章 {article.get('article_id', 'unknown')} 圖片處理開始")
@@ -272,8 +291,13 @@ class ArticleMonitor(BaseContentMonitor):
 
     # ── 發送 ──
 
-    async def send_article_to_channel(self, channel_id: int, article: Dict):
-        """發送文章到指定頻道（支援多圖片附件，並在超過限制時分批發送）"""
+    async def send_article_to_channel(self, channel_id: int, article: Dict,
+                                      *, force_event_rebuild: bool = False):
+        """發送文章到指定頻道（支援多圖片附件，並在超過限制時分批發送）。
+
+        force_event_rebuild：只有 /resend_article 會傳 True —— 允許自動建活動那條線
+        解除「使用者從 Discord 刪掉」的墓碑並重建。排程與推送路徑一律不傳。
+        """
         try:
             channel = self.bot.get_channel(channel_id)
             if not channel:
@@ -384,6 +408,7 @@ class ArticleMonitor(BaseContentMonitor):
             await schedule_from_article(
                 self.bot, article, channel_id,
                 message_url=getattr(sent_message, "jump_url", None),
+                force=force_event_rebuild,
             )
 
             logger.info(f"成功發送文章 {article['article_id']} 到頻道 {channel_id}")

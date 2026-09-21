@@ -160,7 +160,8 @@ class FBMonitor(BaseContentMonitor):
 
     # ── 發送 ──
 
-    async def send_fb_post_to_channel(self, channel_id: int, fb_post: Dict) -> bool:
+    async def send_fb_post_to_channel(self, channel_id: int, fb_post: Dict,
+                                      *, force_event_rebuild: bool = False) -> bool:
         """發送 FB 貼文到指定頻道"""
         try:
             channel = self.bot.get_channel(channel_id)
@@ -243,6 +244,7 @@ class FBMonitor(BaseContentMonitor):
             await schedule_from_fb(
                 self.bot, fb_post, channel_id,
                 message_url=getattr(sent_message, "jump_url", None),
+                force=force_event_rebuild,
             )
 
             logger.info(f"成功發送 FB 貼文 {fb_post['id']} 到頻道 {channel_id}")
