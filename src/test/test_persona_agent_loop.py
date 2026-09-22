@@ -564,6 +564,57 @@ class ToolDefinitionTests(unittest.TestCase):
         self.assertIn("語氣", desc)
 
 
+class ResolveKeepsTests(unittest.TestCase):
+    """`keep` 要真的是 keep——文字沿用上一版原文，不採用模型重寫的版本。
+
+    改這個之前 `keep` 是個謊言：schema 要求每一項都寫 `text`，所以標成「維持不變」
+    的項目還是得自己重寫一遍，實測 43.7% 的 keep 文字其實變了。下面兩組資料是
+    2026-09-22 從 `persona_agent_versions` 撈出來的真實案例。
+    """
+
+    BASE = [
+        {"trait": "口頭禪", "text": "「何意味」是固定口頭禪，用來表達困惑，常搭配疑惑類表情一起發。"},
+        {"trait": "貼圖使用習慣", "text": "貼圖使用極少，僅在看戲/吃瓜情境下偶爾用（吃瓜、疑惑類），情緒表達幾乎全靠打字"},
+    ]
+
+    def test_keep_restores_the_original_wording(self):
+        """真實案例：標 keep 卻多寫了「或無言」。"""
+        out = agent.resolve_keeps([
+            {"type": "keep", "ref": 1,
+             "text": "「何意味」是固定口頭禪，用來表達困惑或無言，常搭配疑惑類表情一起發。"},
+        ], self.BASE)
+        self.assertEqual(out[0]["text"], self.BASE[0]["text"])
+
+    def test_keep_does_not_lose_information(self):
+        """真實案例：標 keep 卻把「僅在看戲/吃瓜情境」整段砍掉。"""
+        out = agent.resolve_keeps([
+            {"type": "keep", "ref": 2, "text": "貼圖使用極少，情緒表達幾乎全靠打字"},
+        ], self.BASE)
+        self.assertIn("看戲/吃瓜情境", out[0]["text"], "keep 不可以遺失資訊")
+
+    def test_revise_keeps_the_models_text(self):
+        """想改就得標 revise——那才會被記成一次真正的修正。"""
+        out = agent.resolve_keeps([
+            {"type": "revise", "ref": 1, "text": "改成新的說法"},
+        ], self.BASE)
+        self.assertEqual(out[0]["text"], "改成新的說法")
+
+    def test_add_is_untouched(self):
+        out = agent.resolve_keeps([
+            {"type": "add", "ref": 0, "text": "全新的特徵"},
+        ], self.BASE)
+        self.assertEqual(out[0]["text"], "全新的特徵")
+
+    def test_bad_ref_falls_back_to_the_models_text(self):
+        """第一次跑是以 production 的散文為基準，沒有可指涉的項目。"""
+        for bad in (0, 99, None, "x"):
+            out = agent.resolve_keeps(
+                [{"type": "keep", "ref": bad, "text": "模型寫的"}], self.BASE)
+            self.assertEqual(out[0]["text"], "模型寫的", f"ref={bad!r} 應保留原樣")
+        out = agent.resolve_keeps([{"type": "keep", "ref": 1, "text": "模型寫的"}], None)
+        self.assertEqual(out[0]["text"], "模型寫的", "上一版沒有 changes 時保留原樣")
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -87,7 +87,7 @@ def ensure_table() -> None:
 def latest_version(guild_id: int, author_id: str) -> Optional[dict[str, Any]]:
     """取該使用者最新一版（沒有回 None）。第一次跑時回 None → 改讀 production 當基準。"""
     sql = f"""
-        SELECT version, persona_text, created_at
+        SELECT version, persona_text, created_at, changes
         FROM {VERSIONS_TABLE}
         WHERE guild_id = %s AND author_id = %s
         ORDER BY version DESC LIMIT 1
@@ -101,7 +101,9 @@ def latest_version(guild_id: int, author_id: str) -> Optional[dict[str, Any]]:
         return None
     if not row:
         return None
-    return {"version": row[0], "persona_text": row[1], "created_at": row[2]}
+    # `changes` 也回：`keep` 現在用編號指涉既有項目，解析時要拿上一版的原文照搬
+    return {"version": row[0], "persona_text": row[1], "created_at": row[2],
+            "changes": row[3] or []}
 
 
 #: 這些 skip_reason 是**合法結果，不是失敗**。模型自認資料不足而不寫版本，跟它跑掛掉

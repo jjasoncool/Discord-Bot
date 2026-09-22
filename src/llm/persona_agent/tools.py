@@ -251,6 +251,25 @@ def _parse_personality(raw_text: str) -> str:
 
 
 # ── 工具 1：讀現有人格描述（diff 的基準）─────────────────────────────────
+def _persona_items(changes: Any) -> list[dict[str, Any]]:
+    """把上一版的 `changes` 攤成帶編號的清單給模型指涉。
+
+    編號是 1-based 的位置索引，只在「這一次回傳」之內有效——下一版的第 2 項
+    未必是這一版的第 2 項。所以 `ref` 必須在同一輪內解析完，不可以存起來當長期識別碼。
+    """
+    if not isinstance(changes, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for n, c in enumerate(changes, 1):
+        if not isinstance(c, dict):
+            continue
+        text = str(c.get("text") or "").strip()
+        if not text:
+            continue
+        out.append({"n": n, "trait": str(c.get("trait") or ""), "text": text})
+    return out
+
+
 def get_current_persona(ctx: ToolContext, *, user_id: Any) -> str:
     """讀該使用者目前的人格描述，供 agent 產出 diff 時當基準。
 
@@ -266,7 +285,7 @@ def get_current_persona(ctx: ToolContext, *, user_id: Any) -> str:
     uid = str(user_id).strip()
 
     own_sql = """
-        SELECT persona_text, version
+        SELECT persona_text, version, changes
         FROM persona_agent_versions
         WHERE guild_id = %s AND author_id = %s
         ORDER BY version DESC LIMIT 1
@@ -280,9 +299,13 @@ def get_current_persona(ctx: ToolContext, *, user_id: Any) -> str:
     if own:
         return _dump({
             "user_id": uid,
-            "persona_text": own[0][0],
             "version": own[0][1],
             "source": f"v{own[0][1]}",
+            # **給編號，不給散文**：模型要能說「第 2 項不動」，就必須有「第 2 項」
+            # 這種東西可以指。只餵 `；` 黏起來的一整串時，它只能整段重新拆解、
+            # 重新命名、重新措辭——實測每晚重寫 46% 的文字、43.7% 標 keep 的項目
+            # 文字其實變了、85.5% 的 trait 標籤只出現在一個版本裡，全是這個成因。
+            "items": _persona_items(own[0][2]),
         })
 
     sql = f"""

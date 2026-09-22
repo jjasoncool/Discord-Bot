@@ -19,15 +19,28 @@ _CHANGE_SCHEMA: dict[str, Any] = {
         "type": {
             "type": "string",
             "enum": ["add", "revise", "keep"],
-            "description": "add=新增特徵；revise=修正既有描述；keep=維持不變",
+            "description": (
+                "add=新增特徵（ref 填 0）；revise=修正既有第 ref 項；"
+                "keep=第 ref 項原封不動（文字由程式沿用，你不必重寫）"
+            ),
         },
         "trait": {"type": "string", "description": "簡短特徵名"},
+        "ref": {
+            "type": "integer",
+            "description": (
+                "指涉既有描述的第幾項（`get_current_persona` 回傳的 `items[].n`）。"
+                "keep／revise 必填；add 沒有對應項目時填 0。"
+                "**keep 時本欄是唯一依據**：程式會把上一版該項的文字原樣沿用，"
+                "不採用你寫的 text。"
+            ),
+        },
         "text": {
             "type": "string",
             "description": (
                 "這個人「是」怎樣——直述句。不要解釋為什麼改、不要提到既有描述、"
                 "不要寫「不只是」「而非」這種對照語氣；引用最多一個當例子。"
                 "這一欄會被串成最終的人格描述給下游使用，讀者不知道舊描述長什麼樣。"
+                "**type=keep 時本欄會被忽略**（沿用 ref 指到的原文），填空字串即可。"
             ),
         },
         "reason": {
@@ -43,7 +56,8 @@ _CHANGE_SCHEMA: dict[str, Any] = {
             "description": "支持本項的訊息 ID；驗證層會反查是否真實存在且屬於該使用者",
         },
     },
-    "required": ["type", "trait", "text", "reason", "evidence_msg_ids"],
+    # strict 模式要求列出所有屬性；`ref` 用 0 表示「不指涉既有項目」
+    "required": ["type", "ref", "trait", "text", "reason", "evidence_msg_ids"],
     "additionalProperties": False,
 }
 

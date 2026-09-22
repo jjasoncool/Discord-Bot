@@ -466,6 +466,49 @@ DEGRADE_BY_FAILURES = {0: 1.0, 1: 0.7, 2: 0.5}
 QUARANTINE_AFTER_FAILURES = 3
 
 
+def resolve_keeps(
+    changes: list[dict[str, Any]], base_changes: Any
+) -> list[dict[str, Any]]:
+    """把 `keep` 的文字換成上一版 `ref` 指到的原文。
+
+    **`keep` 原本是個謊言**：schema 要求每一項都寫 `text`，所以模型標成「維持不變」
+    的項目還是得自己重寫一遍——實測 43.7% 的 keep 文字其實變了。真實案例：
+
+        v1  「何意味」是固定口頭禪，用來表達困惑，常搭配疑惑類表情一起發。
+        v2  「何意味」是固定口頭禪，用來表達困惑或無言，常搭配疑惑類表情一起發。
+                                              ↑ 標 keep 卻多了「或無言」
+
+        v1  貼圖使用極少，僅在看戲/吃瓜情境下偶爾用（吃瓜、疑惑類），情緒表達幾乎全靠打字
+        v2  貼圖使用極少，情緒表達幾乎全靠打字
+              ↑ 標 keep 卻遺失了一半資訊
+
+    沿用原文之後，想改就**必須**標成 revise——偽裝成 keep 的偷偷改寫不再可能。
+
+    `ref` 對不上（0、超出範圍、上一版沒有 changes）時保留模型寫的 text：
+    第一次跑是以 production 的散文為基準，那時根本沒有可指涉的項目。
+    """
+    items = agent_tools._persona_items(base_changes)
+    by_n = {i["n"]: i["text"] for i in items}
+    out: list[dict[str, Any]] = []
+    for c in changes:
+        if not isinstance(c, dict):
+            out.append(c)
+            continue
+        if str(c.get("type") or "") == "keep":
+            original = by_n.get(_as_int(c.get("ref")))
+            if original:
+                c = {**c, "text": original}
+        out.append(c)
+    return out
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def compose_persona_text(changes: list[dict[str, Any]]) -> str:
     """把通過驗證的變更組成完整人格描述。
 
@@ -548,17 +591,23 @@ async def run_and_persist(
     result = None
     version = None
     if run.diff is not None:
+        # **先解析 keep 再驗證**：keep 的文字沿用上一版原文，而驗證層會把空 text
+        # 當成「語意空殼」退掉。順序顛倒的話每個 keep 都會被誤殺。
+        latest = None
+        try:
+            latest = await run_db(store.latest_version, guild_id, user_id)
+        except Exception:
+            pass
+        if isinstance(run.diff.get("changes"), list):
+            run.diff["changes"] = resolve_keeps(
+                run.diff["changes"], latest.get("changes") if latest else None
+            )
+
         result = await run_db(
             validation.validate_diff, run.diff, user_id=user_id, fetch=ctx.fetch
         )
         if save and result.skip_reason is None:
-            base = "production"
-            try:
-                latest = await run_db(store.latest_version, guild_id, user_id)
-                if latest:
-                    base = f"v{latest['version']}"
-            except Exception:
-                pass
+            base = f"v{latest['version']}" if latest else "production"
             version = await run_db(
                 store.write_version,
                 guild_id=guild_id, author_id=user_id,

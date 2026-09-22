@@ -189,11 +189,26 @@ class GuildScopeTests(unittest.TestCase):
 
     def test_own_version_wins_over_production(self):
         """有自己的版本就用自己的——diff 要疊在上一版之上，不是每次都跟 production 比。"""
-        fetch = FakeFetch(results=[[("已經是 agent 寫的第 3 版", 3)]])
+        changes = [
+            {"trait": "口頭禪", "text": "「何意味」是固定口頭禪"},
+            {"trait": "貼圖", "text": "貼圖使用極少"},
+        ]
+        fetch = FakeFetch(results=[[("已經是 agent 寫的第 3 版", 3, changes)]])
         payload = json.loads(tools.get_current_persona(ctx(fetch), user_id=ALICE))
-        self.assertEqual(payload["persona_text"], "已經是 agent 寫的第 3 版")
         self.assertEqual(payload["source"], "v3")
         self.assertEqual(len(fetch.calls), 1, "有自己的版本就不該再查 production")
+        self.assertEqual([i["n"] for i in payload["items"]], [1, 2],
+                         "要給編號，模型才有辦法說「第 2 項不動」")
+        self.assertEqual(payload["items"][0]["text"], "「何意味」是固定口頭禪")
+
+    def test_items_skip_entries_without_text(self):
+        """沒有文字的項目不該佔掉編號——編號要對得上模型看到的清單。"""
+        changes = [{"trait": "a", "text": "有內容"}, {"trait": "b", "text": "  "},
+                   {"trait": "c", "text": "第三項"}]
+        fetch = FakeFetch(results=[[("x", 5, changes)]])
+        items = json.loads(tools.get_current_persona(ctx(fetch), user_id=ALICE))["items"]
+        self.assertEqual([i["text"] for i in items], ["有內容", "第三項"])
+        self.assertEqual([i["n"] for i in items], [1, 3], "編號沿用原始位置，不重新編")
 
     def test_get_current_persona_handles_missing_row(self):
         fetch = FakeFetch(results=[[]])
