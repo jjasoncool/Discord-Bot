@@ -236,5 +236,82 @@ class QuoteMatchTests(unittest.TestCase):
             .quote_unmatched, 0)
 
 
+class DropTests(unittest.TestCase):
+    """drop：刪除既有項目。不描述任何人，所以 text 與證據可空，但一定要說為什麼刪。"""
+
+    def _run(self, changes, base_refs=None):
+        return validation.validate_diff(
+            diff(changes), user_id=ALICE, fetch=fetch_only({"m1"}),
+            base_refs=base_refs,
+        )
+
+    def test_drop_needs_no_text_or_evidence(self):
+        r = self._run([{"type": "drop", "ref": 2, "trait": "", "text": "",
+                        "reason": "跟第 1 項重複", "evidence_msg_ids": []}])
+        self.assertEqual(len(r.accepted), 1)
+        self.assertEqual(r.rejected, [])
+
+    def test_drop_without_reason_is_rejected(self):
+        """沒理由的刪除等於又回到無聲消失。"""
+        r = self._run([{"type": "drop", "ref": 2, "trait": "", "text": "",
+                        "reason": "", "evidence_msg_ids": []}])
+        self.assertEqual(r.accepted, [])
+        self.assertIn("reason", r.rejected[0]["why"])
+
+
+class RefAccountingTests(unittest.TestCase):
+    """上一版每個編號都要恰好交代一次——**只記錄不擋**。
+
+    實測米拉 v7→v8 從 51 項只帶過來 31 項，20 項無聲消失；09-22 有一版兩個 keep
+    指到同一項，那一項被複製了一次。
+    """
+
+    def _acc(self, changes, base):
+        return validation.validate_diff(
+            diff(changes), user_id=ALICE, fetch=fetch_only({"m1"}), base_refs=base,
+        ).ref_accounting
+
+    def _k(self, ref, typ="keep"):
+        return change(type=typ, ref=ref)
+
+    def test_all_accounted(self):
+        acc = self._acc([self._k(1), self._k(2, "revise"),
+                         {"type": "drop", "ref": 3, "trait": "", "text": "",
+                          "reason": "r", "evidence_msg_ids": []}], [1, 2, 3])
+        self.assertEqual(acc, {"unaccounted": [], "duplicated": [], "unknown": []})
+
+    def test_silent_vanish_is_recorded(self):
+        """沒被提到的編號＝無聲消失。"""
+        acc = self._acc([self._k(1)], [1, 2, 3])
+        self.assertEqual(acc["unaccounted"], [2, 3])
+
+    def test_duplicate_ref_is_recorded(self):
+        """兩個 keep 指到同一項——那一項會被複製。"""
+        acc = self._acc([self._k(1), self._k(1)], [1])
+        self.assertEqual(acc["duplicated"], [1])
+
+    def test_unknown_ref_is_recorded(self):
+        acc = self._acc([self._k(9)], [1])
+        self.assertEqual(acc["unknown"], [9])
+        self.assertEqual(acc["unaccounted"], [1])
+
+    def test_add_does_not_count(self):
+        """add 不指涉既有項目，不算交代。"""
+        acc = self._acc([change(type="add", ref=0)], [1])
+        self.assertEqual(acc["unaccounted"], [1])
+
+    def test_no_base_means_no_accounting(self):
+        """第一次跑以 production 散文為基準，沒有編號可對。"""
+        self.assertIsNone(self._acc([self._k(1)], None))
+
+    def test_accounting_never_rejects(self):
+        """只記錄——先看遵守率再決定要不要強制。"""
+        r = validation.validate_diff(
+            diff([self._k(1)]), user_id=ALICE, fetch=fetch_only({"m1"}),
+            base_refs=[1, 2, 3])
+        self.assertEqual(len(r.accepted), 1)
+        self.assertIsNone(r.skip_reason)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -18,14 +18,14 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Optional, Sequence
+from typing import Any, Iterable, Optional, Sequence
 
 from llm.persona_agent import tools
 from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
 
 logger = logging.getLogger("discord_bot")
 
-VALID_TYPES = {"add", "revise", "keep"}
+VALID_TYPES = {"add", "revise", "keep", "drop"}
 VALID_CONFIDENCE = {"low", "medium", "high"}
 
 #: 沿用 tools 的型別，不另外定義一份（同一個東西兩個名字就是分岔的起點）
@@ -48,6 +48,10 @@ class ValidationResult:
     #: `None` 代表本次沒算（證據反查失敗，語料拿不到），與 0 意義不同。
     quote_unmatched: Optional[int] = 0
     quote_misses: list[str] = field(default_factory=list)
+    #: 上一版每個編號有沒有被交代（keep／revise／drop 擇一、恰好一次）。
+    #: **只記錄不擋**——先跑幾晚看遵守率再決定要不要強制。`None`＝本次沒有可對照
+    #: 的上一版（第一次跑，基準是 production 的散文，沒有編號）。
+    ref_accounting: Optional[dict[str, list[int]]] = None
 
     @property
     def hallucination_rate(self) -> float:
@@ -138,6 +142,12 @@ def _shape_problem(change: dict[str, Any]) -> Optional[str]:
     ctype = str(change.get("type") or "").strip()
     if ctype not in VALID_TYPES:
         return f"type 不合法：{ctype!r}"
+    if ctype == "drop":
+        # 刪除不描述任何人、也無法用訊息證明「某件事不再發生」——
+        # 所以 text 與證據都可空，但**一定要說為什麼刪**，否則又回到無聲消失
+        if not str(change.get("reason") or "").strip():
+            return "drop 必須附 reason（為什麼刪）"
+        return None
     if not str(change.get("trait") or "").strip():
         return "trait 為空"
     if not str(change.get("text") or "").strip():
@@ -151,11 +161,50 @@ def _shape_problem(change: dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _account_refs(changes: Any, base_refs: Iterable[int]) -> dict[str, list[int]]:
+    """上一版的每個編號，有沒有被恰好交代一次。
+
+    **為什麼要查**：模型不必用 drop 也能刪——只要不提那一項，那一項就消失了。
+    實測米拉 v7→v8 從 51 項帶過來 31 項，20 項無聲消失，沒有任何紀錄說刪了什麼、
+    為什麼刪；同時那 7 項「會用 X 形容 Y」的廢話卻被留下來。可稽核的 diff 唯獨
+    「刪除」沒有紀錄，所以要求每一項都明確 keep／revise／drop。
+
+    也順帶抓重複引用：09-22 那晚有一版「帶過來 28 項、上一版只有 27 項」，是兩個
+    keep 指到同一項，那一項被複製了一次。
+
+    回傳 `unaccounted`（沒被提到＝無聲消失）、`duplicated`（被提到兩次以上）、
+    `unknown`（指到上一版不存在的編號）。計的是模型的**意圖**：被驗證層退掉的
+    keep 也算有交代，因為這裡量的是「模型有沒有照規則逐項處理」。
+    """
+    base = set(base_refs)
+    seen: dict[int, int] = {}
+    unknown: list[int] = []
+    for c in changes if isinstance(changes, list) else []:
+        if not isinstance(c, dict):
+            continue
+        if str(c.get("type") or "") not in {"keep", "revise", "drop"}:
+            continue
+        try:
+            r = int(c.get("ref") or 0)
+        except (TypeError, ValueError):
+            r = 0
+        if r not in base:
+            unknown.append(r)
+            continue
+        seen[r] = seen.get(r, 0) + 1
+    return {
+        "unaccounted": sorted(base - set(seen)),
+        "duplicated": sorted(r for r, k in seen.items() if k > 1),
+        "unknown": sorted(set(unknown)),
+    }
+
+
 def validate_diff(
     diff: dict[str, Any],
     *,
     user_id: str,
     fetch: FetchFn,
+    base_refs: Optional[Iterable[int]] = None,
 ) -> ValidationResult:
     """逐項驗證 agent 產出的 diff。
 
@@ -193,6 +242,10 @@ def validate_diff(
         if problem:
             result.rejected.append({"change": change, "why": problem})
             continue
+        if str(change.get("type") or "") == "drop":
+            # 刪除沒有描述要驗、也沒有證據要反查，形狀對就收
+            result.accepted.append(change)
+            continue
         ids = [str(i) for i in change["evidence_msg_ids"]]
         bogus = [i for i in ids if i not in real]
         if bogus:
@@ -219,6 +272,9 @@ def validate_diff(
 
     if lookup_failed:
         result.quote_unmatched = None
+
+    if base_refs is not None:
+        result.ref_accounting = _account_refs(diff["changes"], base_refs)
 
     if not result.accepted:
         result.skip_reason = "沒有任何一項通過驗證"

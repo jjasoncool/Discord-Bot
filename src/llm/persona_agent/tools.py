@@ -263,6 +263,11 @@ def _persona_items(changes: Any) -> list[dict[str, Any]]:
     for n, c in enumerate(changes, 1):
         if not isinstance(c, dict):
             continue
+        # drop 會跟著 changes 一起存進版本表；下一晚若把它當一般項目重新編號，
+        # 被刪掉的特徵就會復活。只靠「text 為空就跳過」不夠——模型可能在 drop 的
+        # text 欄寫了東西。
+        if str(c.get("type") or "") == "drop":
+            continue
         text = str(c.get("text") or "").strip()
         if not text:
             continue

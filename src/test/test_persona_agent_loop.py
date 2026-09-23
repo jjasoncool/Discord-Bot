@@ -615,6 +615,27 @@ class ResolveKeepsTests(unittest.TestCase):
         self.assertEqual(out[0]["text"], "模型寫的", "上一版沒有 changes 時保留原樣")
 
 
+class DropCompositionTests(unittest.TestCase):
+    """drop 不可以串進描述，也不可以在下一晚復活。"""
+
+    def test_drop_is_not_composed_even_with_text(self):
+        """模型可能在 drop 的 text 欄寫了東西——那也不能出現在描述裡。"""
+        text = agent.compose_persona_text([
+            {"type": "keep", "text": "留下的"},
+            {"type": "drop", "text": "應該被刪掉的"},
+        ])
+        self.assertEqual(text, "留下的")
+
+    def test_dropped_item_does_not_come_back_next_night(self):
+        """drop 會跟著 changes 存進版本表；下一晚重新編號時不可以把它當一般項目。"""
+        from llm.persona_agent import tools
+        items = tools._persona_items([
+            {"type": "keep", "trait": "a", "text": "留下的"},
+            {"type": "drop", "trait": "b", "text": "應該被刪掉的"},
+        ])
+        self.assertEqual([i["text"] for i in items], ["留下的"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

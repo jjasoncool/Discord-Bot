@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS {RUNS_TABLE} (
   quote_unmatched    INT,
   quote_misses       JSONB,
   skipped_changes    JSONB,
+  ref_accounting     JSONB,
   duration_ms        INT,
   error              TEXT,
   created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -211,6 +212,7 @@ def record_run(
     quote_unmatched: Optional[int],
     quote_misses: Optional[list[str]],
     skipped_changes: Optional[list[dict[str, Any]]],
+    ref_accounting: Optional[dict[str, list[int]]],
     trace: list[dict[str, Any]],
     duration_ms: int,
     error: Optional[str],
@@ -221,9 +223,9 @@ def record_run(
           (run_id, guild_id, author_id, status, steps, tool_calls, prompt_tokens,
            thinking_exhausted, evidence_claimed, evidence_bogus, accepted_changes,
            rejected_changes, skip_reason, trace, rejected, quote_unmatched,
-           quote_misses, skipped_changes, duration_ms, error)
+           quote_misses, skipped_changes, ref_accounting, duration_ms, error)
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,
-                %s::jsonb,%s::jsonb,%s,%s)
+                %s::jsonb,%s::jsonb,%s::jsonb,%s,%s)
     """
     def _json(value):
         """序列化失敗不該賠掉整列。
@@ -251,6 +253,7 @@ def record_run(
         quote_unmatched,
         _json(quote_misses),
         _json(skipped_changes),
+        _json(ref_accounting),
         duration_ms, error,
     )
     try:

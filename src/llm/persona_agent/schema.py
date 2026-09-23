@@ -18,10 +18,11 @@ _CHANGE_SCHEMA: dict[str, Any] = {
     "properties": {
         "type": {
             "type": "string",
-            "enum": ["add", "revise", "keep"],
+            "enum": ["add", "revise", "keep", "drop"],
             "description": (
                 "add=新增特徵（ref 填 0）；revise=修正既有第 ref 項；"
-                "keep=第 ref 項原封不動（文字由程式沿用，你不必重寫）"
+                "keep=第 ref 項原封不動（文字由程式沿用，你不必重寫）；"
+                "drop=刪除第 ref 項（text 與 evidence 可空，reason 必填：為什麼刪）"
             ),
         },
         "trait": {"type": "string", "description": "簡短特徵名"},
@@ -29,7 +30,8 @@ _CHANGE_SCHEMA: dict[str, Any] = {
             "type": "integer",
             "description": (
                 "指涉既有描述的第幾項（`get_current_persona` 回傳的 `items[].n`）。"
-                "keep／revise 必填；add 沒有對應項目時填 0。"
+                "keep／revise／drop 必填；add 沒有對應項目時填 0。"
+                "**上一版的每個編號都要恰好出現一次**（keep、revise 或 drop 擇一）。"
                 "**keep 時本欄是唯一依據**：程式會把上一版該項的文字原樣沿用，"
                 "不採用你寫的 text。"
             ),

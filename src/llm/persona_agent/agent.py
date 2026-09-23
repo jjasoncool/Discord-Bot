@@ -520,7 +520,8 @@ def compose_persona_text(changes: list[dict[str, Any]]) -> str:
     return "；".join(
         str(c.get("text") or "").strip()
         for c in changes
-        if str(c.get("text") or "").strip()
+        # drop 是「刪掉這一項」，不是描述——就算模型在它的 text 裡寫了東西也不能串進去
+        if str(c.get("type") or "") != "drop" and str(c.get("text") or "").strip()
     )
 
 
@@ -572,7 +573,7 @@ async def run_and_persist(
                 thinking_exhausted=False, evidence_claimed=0, evidence_bogus=0,
                 accepted_changes=0, rejected_changes=0, skip_reason=run.error,
                 trace=[], rejected=None, quote_unmatched=None,
-                quote_misses=None, skipped_changes=None,
+                quote_misses=None, skipped_changes=None, ref_accounting=None,
                 duration_ms=0, error=run.error,
             )
         return run, None
@@ -603,8 +604,15 @@ async def run_and_persist(
                 run.diff["changes"], latest.get("changes") if latest else None
             )
 
+        # 上一版的編號清單：拿來查「每一項有沒有被交代」。沒有上一版（第一次跑、
+        # 基準是 production 的散文）就傳 None，不做這項檢查。
+        base_refs = (
+            [i["n"] for i in agent_tools._persona_items(latest.get("changes"))]
+            if latest else None
+        )
         result = await run_db(
-            validation.validate_diff, run.diff, user_id=user_id, fetch=ctx.fetch
+            validation.validate_diff, run.diff, user_id=user_id, fetch=ctx.fetch,
+            base_refs=base_refs,
         )
         if save and result.skip_reason is None:
             base = f"v{latest['version']}" if latest else "production"
@@ -641,6 +649,7 @@ async def run_and_persist(
             skipped_changes=(
                 result.accepted if result and result.skip_reason is not None else None
             ),
+            ref_accounting=result.ref_accounting if result else None,
             trace=[{
                 "step": t.step, "tool": t.tool, "args": t.arguments,
                 "result": t.result_preview, "ms": t.elapsed_ms,

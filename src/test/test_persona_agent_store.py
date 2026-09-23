@@ -73,6 +73,7 @@ def _record(cur, **overrides):
         rejected=[{"change": {"trait": "假的"}, "why": "引用了不存在的 msg_id"}],
         quote_unmatched=3, quote_misses=["肥矮醜就是我了"],
         skipped_changes=None,
+        ref_accounting={"unaccounted": [3], "duplicated": [], "unknown": []},
         duration_ms=250_000, error=None,
     )
     kwargs.update(overrides)
@@ -96,7 +97,7 @@ class RecordRunContractTests(unittest.TestCase):
         cur = FakeCursor()
         _record(cur)
         for col in ("rejected", "quote_unmatched", "quote_misses",
-                    "skipped_changes"):
+                    "skipped_changes", "ref_accounting"):
             self.assertIn(col, cur.sql, f"{col} 沒有出現在 INSERT")
         self.assertIn(3, cur.params, "quote_unmatched 的值沒進參數")
         self.assertTrue(
