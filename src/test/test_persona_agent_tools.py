@@ -234,6 +234,23 @@ class GuildScopeTests(unittest.TestCase):
         for bad in ("m1", "", None, "-5", "0"):
             self.assertIsNone(tools._snowflake_time(bad), repr(bad))
 
+    def test_out_of_range_ids_do_not_crash(self):
+        """審查重現：`1` 接 22 個 0 會讓 fromtimestamp 丟 ValueError，整個人那晚失敗。"""
+        from datetime import datetime, timezone
+        now = datetime(2026, 9, 24, tzinfo=timezone.utc)
+        for bad in ("1" + "0" * 22, str(2**63), str(2**64), "9" * 26):
+            self.assertIsNone(tools._snowflake_time(bad), bad[:8])
+            self.assertIsNone(tools._last_seen([bad], now=now), bad[:8])
+
+    def test_last_seen_ignores_non_list_and_future_ids(self):
+        """字串會被逐字元拆成 id "1"（算出 2015-01-01）；未來的時間只可能是錯的 id。"""
+        from datetime import datetime, timezone
+        now = datetime(2026, 9, 24, tzinfo=timezone.utc)
+        self.assertIsNone(tools._last_seen("1547184851646423110", now=now))
+        future = str(2**63 - 1)   # 2084 年
+        self.assertEqual(tools._last_seen([future, "1547184851646423110"], now=now),
+                         "09-09（15 天前）", "未來的 id 不算，其餘照算")
+
     def test_last_seen_counts_days_in_taipei_time(self):
         """UTC 16:30 已經是台北隔天——天數要照群組作息的本地日期算。"""
         from datetime import datetime, timezone

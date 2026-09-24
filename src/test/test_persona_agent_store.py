@@ -176,6 +176,22 @@ class SerialisationFailureTests(unittest.TestCase):
         )
 
 
+class LatestVersionTests(unittest.TestCase):
+    """「沒有舊版本」與「讀取失敗」必須分得開——後者當成前者會寫出殘缺版本。"""
+
+    def test_no_row_returns_none(self):
+        cur = FakeCursor()
+        with _patch_cursor(cur):
+            self.assertIsNone(store.latest_version(GUILD, ALICE))
+
+    def test_db_failure_raises_instead_of_returning_none(self):
+        settings = mock.MagicMock()
+        settings.pgvector_cursor.side_effect = RuntimeError("db down")
+        with mock.patch.object(store, "LLMServiceSettings", return_value=settings):
+            with self.assertRaises(RuntimeError):
+                store.latest_version(GUILD, ALICE)
+
+
 class EvidenceHistoryTests(unittest.TestCase):
     """同一段文字在所有版本引用過的證據——被換掉的正確證據要找得回來。"""
 

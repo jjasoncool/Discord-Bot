@@ -1310,11 +1310,11 @@ class PersonalityCommands(commands.Cog):
 
     @app_commands.command(
         name="persona_agent_test",
-        description="測試人格 Agent（管理員限定，只跑一人、不寫入資料庫）",
+        description="測試人格 Agent（管理員限定，只跑一人；預設不寫入資料庫）",
     )
     @app_commands.describe(
         target="要分析的成員",
-        model="指定模型（不填則用 config 的主 model）",
+        model="指定模型（不填則跟夜間批次一樣：personality_model，未設才用主 model）",
         save="是否寫入 persona_agent 版本表（預設否，只看結果不留痕）",
     )
     @app_commands.checks.has_permissions(administrator=True)
@@ -1333,7 +1333,8 @@ class PersonalityCommands(commands.Cog):
         池被瓜分導致 context 超限、吞吐 33→7 tok/s）。**必須跑在 bot 自己的 process 內**
         才測得到真實行為，這個指令就是那個入口。M4 排程上線後也是手動抽查的工具。
 
-        只讀不寫：結果只回報與寫 log，不碰任何資料表（寫入屬於 M3 的驗證層）。
+        預設只回報與寫 log、不碰任何資料表；`save=True` 時跟夜間批次走同一條路徑，
+        寫入版本表與 runs 表。模型不指定時也跟夜間批次用同一個，結果才代表 04:00 的行為。
         """
         if not interaction.guild:
             await safe_send_interaction_message(
@@ -1353,7 +1354,7 @@ class PersonalityCommands(commands.Cog):
         runtime_config = load_llm_runtime_config(
             LLMServiceSettings().llm_runtime_model_path
         )
-        target_model = model or runtime_config.model
+        target_model = model or runtime_config.personality_model or runtime_config.model
         user_id = str(target.id)
         guild_id = interaction.guild.id
 

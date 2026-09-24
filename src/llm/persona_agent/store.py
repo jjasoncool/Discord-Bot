@@ -86,20 +86,21 @@ def ensure_table() -> None:
 
 
 def latest_version(guild_id: int, author_id: str) -> Optional[dict[str, Any]]:
-    """取該使用者最新一版（沒有回 None）。第一次跑時回 None → 改讀 production 當基準。"""
+    """取該使用者最新一版。**沒有舊版本回 None；讀取失敗直接 raise**。
+
+    兩者不能混為一談：「沒有舊版本」是第一次跑，以 production 當基準；「讀取失敗」
+    時若也當成沒有舊版本，每個 keep 都會解析失敗而被退件，寫出一個只剩 add／revise
+    的殘缺版本。呼叫端（`agent.run_and_persist`）接到例外就不寫入。
+    """
     sql = f"""
         SELECT version, persona_text, created_at, changes
         FROM {VERSIONS_TABLE}
         WHERE guild_id = %s AND author_id = %s
         ORDER BY version DESC LIMIT 1
     """
-    try:
-        with LLMServiceSettings().pgvector_cursor() as cur:
-            cur.execute(sql, (str(guild_id), str(author_id)))
-            row = cur.fetchone()
-    except Exception as exc:
-        logger.warning("讀取最新版本失敗（視為沒有舊版本）：%s", exc)
-        return None
+    with LLMServiceSettings().pgvector_cursor() as cur:
+        cur.execute(sql, (str(guild_id), str(author_id)))
+        row = cur.fetchone()
     if not row:
         return None
     # `changes` 也回：`keep` 現在用編號指涉既有項目，解析時要拿上一版的原文照搬

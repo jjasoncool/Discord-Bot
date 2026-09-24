@@ -3,11 +3,11 @@
 驗證迴圈在各種模型行為下都收斂到明確狀態——agent 是黑箱，這些狀態就是之後
 （M3 寫進 runs 表後）唯一能拿來除錯與統計失敗率的東西：
 
-  ok / max_steps / rejected_schema / error
+  ok / max_steps / rejected_schema / context_exceeded / error
 
 以及三件錯了很難察覺的事：
   ① 工具結果要以 `role:"tool"` + 正確的 `tool_call_id` 回填，否則模型接不上
-  ② 收集階段 thinking 必須關、產出階段必須開（差距 12 分鐘 vs 3 分鐘／人）
+  ② 收集階段 thinking 必須關；產出階段跟著 `FINAL_STEP_THINKING`（預設關）
   ③ 任何例外都要收斂成 status，不能往外拋（批次執行時單人失敗不該波及其他人）
 
 執行：
@@ -116,7 +116,7 @@ class HappyPathTests(unittest.TestCase):
         self.assertEqual(tool_msg["name"], "get_messages")
 
     def test_final_step_gets_a_longer_timeout(self):
-        """產出步驟開 thinking 會吐數千推理 token，300 秒預設不夠。"""
+        """產出步驟若開 thinking 會吐數千推理 token，300 秒預設不夠。"""
         svc = FakeService([says("夠了"), says(VALID_DIFF)])
         run(svc)
         self.assertEqual(svc.calls[-1]["timeout"], agent.FINAL_TIMEOUT_SECONDS)
@@ -127,7 +127,7 @@ class HappyPathTests(unittest.TestCase):
 
         產出階段預設也是關的——mock benchmark（四陷阱各兩次）顯示開關對品質沒有可測
         差異，開啟那組反而出現一次自相矛盾，代價卻是慢 4.5 倍；真實資料上更是三戰三敗
-        （推理把 32k context 用光）。開關保留，日後想比較隨時能開。
+        （推理把 context 用光）。開關保留，日後想比較隨時能開。
         """
         svc = FakeService([
             says(tool_calls=[tool_call("get_messages", '{"user_id": "1001"}')]),
@@ -278,7 +278,7 @@ class PromptLayeringTests(unittest.TestCase):
 
 
 class ThinkingBudgetTests(unittest.TestCase):
-    """thinking 需要 context 才想得完，而 prompt 與生成是共用同一個 32k。
+    """thinking 需要 context 才想得完，而 prompt 與生成是共用同一個 context。
 
     實測一次：prompt 22,379 + 推理 10,387 ＝ 32,766，`finish_reason=length`、
     `content` 全空——不是失敗，是「想太久，還沒開始寫答案就沒紙了」。
@@ -709,14 +709,68 @@ class InheritKeepEvidenceTests(unittest.TestCase):
         self.assertEqual(out[0]["evidence_msg_ids"][0], "h1")
         self.assertNotIn("nope", out[0]["evidence_msg_ids"])
 
+    @staticmethod
+    def _sf(month, day, seq=0):
+        """造出 2026 年某天（UTC 中午）的 Discord snowflake id。"""
+        from datetime import datetime, timezone
+        ms = int(datetime(2026, month, day, 12, tzinfo=timezone.utc).timestamp() * 1000)
+        return str(((ms - 1420070400000) << 22) + seq)
+
+    def test_cap_keeps_the_newest_by_message_time_not_position(self):
+        """審查抓到的真實案例（550519819263541258 第 3 項，歷史 17 則）。
+
+        上一版兩則 09-20 的證據，在歷史裡排第 9、10 位（第一次被引用得早），
+        依位置取「最後 4 則」會把它們和 09-21 那則一起裁掉，last_seen 倒退成 09-19。
+        """
+        sf = self._sf
+        hist = ([sf(9, 18, k) for k in range(6)] + [sf(9, 19, k) for k in range(2)]
+                + [sf(9, 20, 0), sf(9, 20, 1), sf(9, 19, 9), sf(9, 21, 0),
+                   sf(9, 4, 0), sf(9, 12, 0), sf(9, 17, 0), sf(9, 17, 1), sf(9, 18, 9)])
+        text = "「糯糯」是他的專屬梗"
+        base = [{"type": "keep", "trait": "t", "text": text,
+                 "evidence_msg_ids": [sf(9, 20, 0), sf(9, 20, 1), sf(9, 19, 9)]}]
+        out = agent.inherit_keep_evidence(
+            [{"type": "keep", "ref": 1, "evidence_msg_ids": []}], base, {text: hist})
+        ids = out[0]["evidence_msg_ids"]
+        self.assertEqual(len(ids), 12)
+        self.assertEqual(ids[:8], hist[:8], "最早被引用的 8 則是這句話的依據")
+        for keep_me in (sf(9, 20, 0), sf(9, 20, 1), sf(9, 21, 0)):
+            self.assertIn(keep_me, ids, "訊息時間最新的不可以被裁掉")
+        self.assertNotIn(sf(9, 4, 0), ids, "中段最舊的才該被裁")
+
+        from datetime import datetime, timezone
+        now = datetime(2026, 9, 24, 12, tzinfo=timezone.utc)
+        self.assertTrue(tools._last_seen(ids, now=now).startswith("09-21"),
+                        "last_seen 不可以倒退")
+
+    def test_recited_evidence_survives_the_cap(self):
+        """prompt 說「附上新佐證會更新 last_seen」——模型照做，那則就必須留下。"""
+        sf = self._sf
+        hist = [sf(9, 1, k) for k in range(8)] + [sf(9, 20, 0)] + [sf(9, 5, k) for k in range(6)]
+        text = "「糯糯」是他的專屬梗"
+        base = [{"type": "keep", "trait": "t", "text": text, "evidence_msg_ids": [sf(9, 20, 0)]}]
+        out = agent.inherit_keep_evidence(
+            [{"type": "keep", "ref": 1, "evidence_msg_ids": [sf(9, 20, 0)]}], base, {text: hist})
+        self.assertIn(sf(9, 20, 0), out[0]["evidence_msg_ids"])
+
+    def test_future_id_does_not_take_a_newest_slot(self):
+        """未來時間只可能是錯的 id（`_last_seen` 也不採計）——不能佔住「最新 4 則」。"""
+        sf = self._sf
+        future = str(2**63 - 1)   # 2084 年
+        ids = [sf(8, d) for d in range(1, 9)] + [future, sf(9, 20)] + [sf(9, 1, k) for k in range(4)]
+        out = agent._cap_evidence(ids)
+        self.assertNotIn(future, out)
+        self.assertIn(sf(9, 20), out)
+
     def test_long_history_keeps_the_earliest(self):
         """歷史很長時，最早的（寫下這句話時的依據）不能被湊數的擠掉。"""
         hist = {"「糯糯」是他的專屬梗": [f"h{i}" for i in range(20)]}
+        new = self._sf(9, 23)   # 今晚新附的是最近的真實訊息
         out = agent.inherit_keep_evidence(
-            [{"type": "keep", "ref": 1, "evidence_msg_ids": ["new"]}], self.BASE, hist)
+            [{"type": "keep", "ref": 1, "evidence_msg_ids": [new]}], self.BASE, hist)
         ids = out[0]["evidence_msg_ids"]
         self.assertEqual(ids[:8], [f"h{i}" for i in range(8)])
-        self.assertEqual(ids[-1], "new", "今晚新附的一定留著")
+        self.assertIn(new, ids, "今晚新附的一定留著")
 
 
 class KeepEndToEndTests(unittest.TestCase):
@@ -794,6 +848,40 @@ class KeepEndToEndTests(unittest.TestCase):
              "evidence_msg_ids": []},
         ])
         self.assertEqual(recorded["evidence_claimed"], 1, "只算模型今晚附的那一個")
+
+    def test_unreadable_previous_version_writes_nothing(self):
+        """讀上一版失敗時不可以寫入：每個 keep 都會被退件，只剩 add 被寫成新版本。
+
+        審查後重現：10 項 keep＋1 項 add，讀取失敗時寫出了只有 1 項的版本，
+        而且 ref_accounting 是 None、lost 也記不到。
+        """
+        from llm.persona_agent import store
+        changes = [{"type": "keep", "ref": n, "trait": "", "text": "", "reason": "r",
+                    "evidence_msg_ids": []} for n in (1, 2)]
+        changes.append({"type": "add", "ref": 0, "trait": "新", "text": "新特徵",
+                        "reason": "r", "evidence_msg_ids": ["1552306186831794217"]})
+        run = agent.AgentRun(user_id=ALICE, status="ok", diff={
+            "user_id": ALICE, "changes": changes, "confidence": "medium", "notes": ""})
+
+        async def fake_run_for_user(**kw):
+            return run
+
+        recorded = {}
+        ctx = tools.ToolContext.build(
+            guild_id=1, allowed_ids=[ALICE],
+            fetch=lambda sql, params: [(i, "") for i in params[1] if i.isdigit()],
+        )
+        with mock.patch.object(agent, "run_for_user", side_effect=fake_run_for_user), \
+             mock.patch.object(store, "consecutive_failures", return_value=0), \
+             mock.patch.object(store, "latest_version", side_effect=RuntimeError("db down")), \
+             mock.patch.object(store, "write_version",
+                               side_effect=AssertionError("讀不到上一版時不可以寫入")), \
+             mock.patch.object(store, "record_run",
+                               side_effect=lambda **kw: recorded.update(kw) or True):
+            asyncio.run(agent.run_and_persist(
+                user_id=ALICE, guild_id=1, ctx=ctx, model="m", run_id="b", save=True,
+            ))
+        self.assertIn("讀取上一版失敗", recorded["skip_reason"], "要記下為什麼沒寫")
 
     def test_history_reaches_the_written_version(self):
         """歷史裡被換掉的證據要真的寫進新版本，不是只在函式裡算對。"""

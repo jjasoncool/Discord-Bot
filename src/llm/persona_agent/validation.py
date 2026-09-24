@@ -49,9 +49,10 @@ class ValidationResult:
     quote_unmatched: Optional[int] = 0
     quote_misses: list[str] = field(default_factory=list)
     #: 上一版每個編號有沒有被交代（keep／revise／drop 擇一、恰好一次），以及有交代
-    #: 卻被退件而實際消失的編號（`lost`）。**只記錄不擋**——先跑幾晚看遵守率再決定
-    #: 要不要強制。`None`＝本次沒有可對照的上一版（第一次跑，基準是 production 的
-    #: 散文，沒有編號）。
+    #: 卻被退件而實際消失的編號（`lost`，不寫新版本時為空）。**只記錄不擋**——先跑
+    #: 幾晚看遵守率再決定要不要強制。`None`＝本次沒有可對照的上一版：第一次跑（基準
+    #: 是 production 的散文，沒有編號）、讀上一版失敗、或 diff 在逐項驗證前就被拒絕
+    #: （結構不合法、user_id 不符）。
     ref_accounting: Optional[dict[str, list[int]]] = None
 
     @property
@@ -297,6 +298,11 @@ def validate_diff(
             continue
         raw_ids = change.get("evidence_msg_ids")
         ids = [str(i) for i in raw_ids] if isinstance(raw_ids, list) else []
+        if anchored and lookup_failed:
+            # 反查失敗時其他項目 fail-open，但 keep 不需要證據，沒驗過的 id 就不收：
+            # 沿用的證據會經由歷史一直留下去，沒驗過的 id 一旦進來就再也清不掉
+            change = {**change, "evidence_msg_ids": []}
+            ids = []
         bogus = [i for i in ids if i not in real]
         if bogus:
             result.evidence_bogus += len(bogus)
@@ -309,10 +315,16 @@ def validate_diff(
             # keep 只剔掉假的那幾個 id、項目留著：文字是上一版驗證過的原文，
             # 今晚多附的假 id 污染不到它。整項退掉的話，一個抄錯的 id
             # 就讓一項沒問題的描述無聲消失（09-24 有 5 項這樣沒了）。
-            # 假 id 照樣算進 evidence_bogus，幻覺率的分子不受影響。
+            # 假 id 照樣算進 evidence_bogus；剔掉的是哪幾個記在該項的
+            # `stripped_msg_ids`，稽核時查得到。不放進 `rejected`：那裡的每一筆
+            # 都會被算成退件數，除錯指令也會把它顯示成「✗ 拒絕」。
             logger.info("keep 第 %s 項的新證據有假 id，已剔除、項目保留：%s",
                         _ref(change), bogus)
-            change = {**change, "evidence_msg_ids": [i for i in ids if i in real]}
+            change = {
+                **change,
+                "evidence_msg_ids": [i for i in ids if i in real],
+                "stripped_msg_ids": bogus,
+            }
         # 通過驗證後才算引號——被退掉的項目不必再花這個力氣。
         # keep 不算：文字是沿用的原文、不是今晚寫的，而它的證據多半沒有重附，
         # 拿空的證據比對會把每個引號都算成沒命中。
@@ -333,15 +345,19 @@ def validate_diff(
     if lookup_failed:
         result.quote_unmatched = None
 
-    if base is not None:
-        result.ref_accounting = _account_refs(diff["changes"], base)
-        result.ref_accounting["lost"] = _lost_refs(result, base)
-
     if not result.accepted:
         result.skip_reason = "沒有任何一項通過驗證"
     elif str(diff.get("confidence") or "").lower() == "low":
         # confidence 只用在這裡：模型自認資料不足時不覆寫既有描述。
         # **不用它判斷單項可信度**——編造 ID 那次自己標的就是 high。
         result.skip_reason = "confidence=low（模型自認資料不足，不寫入新版本）"
+
+    if base is not None:
+        result.ref_accounting = _account_refs(diff["changes"], base)
+        # 不寫新版本時上一版原封不動，沒有任何項目消失——照算的話 confidence=low
+        # 那幾晚每次都會多出幾個假的 lost，加總「消失了幾項」就會高估
+        result.ref_accounting["lost"] = (
+            [] if result.skip_reason else _lost_refs(result, base)
+        )
 
     return result

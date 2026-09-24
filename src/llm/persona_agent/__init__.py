@@ -4,10 +4,12 @@
 規劃與工程節點詳見 `AI_HANDOFF_AND_TODO.md` 的 Persona Extraction Agent 區塊。
 
 模組分工：
-  - `tools`  ：四支唯讀工具 + function-calling 宣告與派發
-  - `schema` ：diff 輸出的 JSON schema
-  - `agent`  ：agent loop（收集 → 產出）
-  - `store`  ：兩張獨立資料表的讀寫（M3，尚未建立）
+  - `tools`      ：四支唯讀工具 + function-calling 宣告與派發
+  - `schema`     ：diff 輸出的 JSON schema
+  - `agent`      ：agent loop（收集 → 產出）＋ 驗證後寫入（`run_and_persist`）
+  - `validation` ：把模型輸出當不可信輸入逐項驗證
+  - `store`      ：兩張獨立資料表的讀寫
+  - `batch`      ：每晚的挑人與批次執行
 
 **刻意不在這裡 re-export**：所有呼叫端都走子模組（`from llm.persona_agent import agent,
 tools`），re-export 一份只會是死程式碼，而且會讓「碰到套件」就 eager import `agent`

@@ -5,15 +5,15 @@
     收集階段（thinking 關閉，最多 MAX_STEPS 步）
         每步前禮讓前景 → chat_with_tools(tools=...) → 有 tool_calls 就執行、回填
         沒有 tool_calls 或 token 預算用盡 → 跳出
-    產出階段（thinking 打開）
+    產出階段（thinking 依 FINAL_STEP_THINKING，預設關閉）
         chat_with_tools(response_format=diff schema) → 解析成 dict
 
-為什麼 thinking 分兩段：「下一步呼叫哪個工具」是機械決策（schema 已把選項限死，
-實測關閉思考時 4.4 秒就正確產出）；「新增還是修正、證據夠不夠」才需要推理。
-八步全開約 12 分／人，分段後約 3 分／人。
+收集階段一律不開 thinking：「下一步呼叫哪個工具」是機械決策（schema 已把選項限死，
+實測關閉思考時 4.4 秒就正確產出）。產出階段原本開著，實測沒有可量到的品質差異、
+卻慢 4.5 倍，真實資料上還會把 context 想光，所以也改成預設關閉（見 FINAL_STEP_THINKING）。
 
-M2 只到「產出可解析的 diff」為止，**不寫資料庫**。evidence 反查、confidence 門檻
-與版本寫入屬於 M3 的驗證層。
+`run_for_user` 只產出 diff、不寫資料庫；證據反查、confidence 門檻與版本寫入在
+`run_and_persist`。
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ MAX_STEPS = 8
 #: 項目、零幻覺；開啟的那組反而出現一次自相矛盾（同一份 diff 既 keep 又 revise
 #: 「安靜寡言」）。代價卻是**慢 4.5 倍**（平均 233s vs 51s）。
 #:
-#: 真實資料上更慘：thinking 三戰三敗，每次都在推理階段把 32k context 用光
+#: 真實資料上更慘：thinking 三戰三敗，每次都在推理階段把 context 用光
 #: （prompt 17k~22k + 推理 10k~12k），`finish_reason=length`、content 全空。
 #:
 #: 開關保留（`chat_template_kwargs.enable_thinking` 的轉接已打通），日後想再比較隨時能開。
@@ -48,9 +48,9 @@ FINAL_STEP_THINKING = False
 
 # 收集階段的 prompt 上限（**以伺服器回報的 usage.prompt_tokens 為準，不是估的**）。
 #
-# ctx_size=32768 是 prompt + 生成**共用**的。關掉 thinking 後生成只剩答案本身
-# （實測 1,200~4,800 token），不必再為推理預留 20k → 預算從 12,000 拉到 24,000，
-# **省下來的空間拿去裝證據**。這個任務的判斷靠證據而非推理，多一倍資料比多想一輪值。
+# context 是 prompt + 生成**共用**的。關掉 thinking 後生成只剩答案本身
+# （實測 1,200~4,800 token），不必再為推理預留 20k → 預算從 12,000 拉到 20,000，
+# **省下來的空間拿去裝證據**。這個任務的判斷靠證據而非推理，多裝資料比多想一輪值。
 #
 # 仍要留餘裕：估算會低估（曾估 14,501 而實際 22,379，差 1.54 倍），因為估算漏了
 # assistant 訊息的 tool_calls 結構、最終指示、以及 chat template 本身的標記。
@@ -71,8 +71,8 @@ SEARCH_RESERVE_TOKENS = 2500
 # 禮讓：前景（/askai、插話）在用就等；設上限避免旗標卡住時整批停擺
 YIELD_POLL_SECONDS = 2.0
 YIELD_MAX_WAIT_SECONDS = 600.0
-# 收集步驟關閉 thinking，走預設 timeout 即可；產出步驟開 thinking，實測會吐
-# 數千個推理 token（33 tok/s），300 秒的預設不夠用 → 比照人格萃取拉到 600 秒。
+# 產出步驟的 timeout。收集步驟走預設即可；產出步驟若打開 thinking 會吐數千個推理
+# token（33 tok/s），300 秒的預設不夠用 → 比照人格萃取拉到 600 秒。
 FINAL_TIMEOUT_SECONDS = 600
 
 _PROMPT_PATH = "/app/settings/prompts/persona_agent_prompt.json"
@@ -121,7 +121,7 @@ def load_prompts() -> dict[str, str]:
 def estimate_tokens(text: str) -> int:
     """粗估 token 數：CJK 一字約一 token，其餘約四字元一 token。
 
-    只用來守 context 預算，不需要精準——寧可略高估提早收手，也不要撐爆 32k
+    只用來守 context 預算，不需要精準——寧可略高估提早收手，也不要撐爆 context
     讓整輪白跑。用 token 而非「則數」是因為一則可能 5 字也可能 300 字。
     """
     if not text:
@@ -182,7 +182,7 @@ class AgentRun:
     """一位使用者的執行結果。"""
 
     user_id: str
-    status: str  # ok / rejected_schema / max_steps / error
+    status: str  # ok / rejected_schema / max_steps / context_exceeded / error / quarantined
     diff: Optional[dict[str, Any]] = None
     steps: int = 0
     trace: list[StepTrace] = field(default_factory=list)
@@ -378,7 +378,7 @@ async def run_for_user(
 
         run.estimated_tokens = used_tokens
 
-        # ── 產出階段（thinking 打開 + 強制 JSON schema）───────────────
+        # ── 產出階段（thinking 依 FINAL_STEP_THINKING + 強制 JSON schema）──
         final_prompt = prompts["final_prompt"]
         if budget_exhausted:
             final_prompt = (
@@ -400,7 +400,7 @@ async def run_for_user(
                 think=FINAL_STEP_THINKING, **final_kwargs
             )
         except LLMAPIError as exc:
-            # thinking 把 context 想光：finish_reason=length、content 全空、推理塞滿 32k。
+            # thinking 把 context 想光：finish_reason=length、content 全空、推理塞滿 context。
             # 關掉 thinking 重跑一次——**輸入完全沒動**，只是少了深思，這跟「裁掉資料再問」
             # 是兩回事：那個會產出假陰性，這個只是品質降一級，而且有旗標標記得出來。
             if getattr(exc, "kind", None) != "empty_content" or not FINAL_STEP_THINKING:
@@ -505,9 +505,10 @@ def resolve_keeps(
     return out
 
 
-#: keep 沿用證據的上限：最早的 8 則（寫下這句話時的證據）＋最新的 4 則（最近的佐證）。
-#: 不設上限的話，每晚多附一兩則就會一路長下去。只留最新的也不行——最早那幾則正是
-#: 這句話的依據，「糯糯」那項就是證據被換到只剩近期的，才看起來像幻覺。
+#: keep 沿用證據的上限：最早被引用的 8 則（寫下這句話時的依據）＋其餘當中**訊息時間**
+#: 最新的 4 則（最近的佐證）。不設上限的話，每晚多附一兩則就會一路長下去。只留最新的
+#: 也不行——最早那幾則正是這句話的依據，「糯糯」那項就是證據被換到只剩近期的，
+#: 評審才判成部分成立。
 KEEP_EVIDENCE_HEAD = 8
 KEEP_EVIDENCE_TAIL = 4
 
@@ -525,9 +526,13 @@ def inherit_keep_evidence(
     文字沿用（`resolve_keeps`）之後，證據也必須跟著沿用，這句話和它的依據才會
     一直綁在一起。`ref` 對不上的 keep 不動（沒有上一版可以沿用）。
 
-    `history`（`store.evidence_history`）是同一段文字在**所有**版本引用過的證據。
-    只看上一版的話，以前被換掉的正確證據就永遠回不來——排序是歷史在前、上一版
-    其次、今晚新附的最後，所以寫下這句話時的依據會落在保留的前 8 則裡。
+    `history`（`store.evidence_history`）是同一段文字在**所有**版本引用過的證據，
+    依首次被引用的版本先後排列；只看上一版的話，以前被換掉的正確證據就永遠回不來。
+    上一版的證據本來就在歷史裡，今晚新附的接在最後。
+
+    超過上限時的「最新 4 則」**依訊息時間挑，不依排列位置**：排列位置是「第一次被
+    引用的先後」，跟訊息新舊無關。依位置挑的話，一則 09-20 的證據若在 09-12 那版就被
+    引用過，會落在中段被裁掉——`last_seen` 從 09-20 倒退成 09-19，模型重附也留不住。
     """
     raw = base_changes if isinstance(base_changes, list) else []
     # 編號規則必須跟模型看到的清單一致，所以同樣從 `_persona_items` 取
@@ -545,11 +550,30 @@ def inherit_keep_evidence(
                     + [str(i) for i in (old if isinstance(old, list) else [])]
                     + [str(i) for i in (new if isinstance(new, list) else [])]
                 ))
-                if len(ids) > KEEP_EVIDENCE_HEAD + KEEP_EVIDENCE_TAIL:
-                    ids = ids[:KEEP_EVIDENCE_HEAD] + ids[-KEEP_EVIDENCE_TAIL:]
-                c = {**c, "evidence_msg_ids": ids}
+                c = {**c, "evidence_msg_ids": _cap_evidence(ids)}
         out.append(c)
     return out
+
+
+def _cap_evidence(ids: list[str]) -> list[str]:
+    """保留前 `KEEP_EVIDENCE_HEAD` 則，其餘依訊息時間取最新的 `KEEP_EVIDENCE_TAIL` 則。
+
+    解不出時間或時間在未來的 id 當作最舊；時間相同時依原本位置，所以輸出是固定的。
+    """
+    if len(ids) <= KEEP_EVIDENCE_HEAD + KEEP_EVIDENCE_TAIL:
+        return ids
+    head, rest = ids[:KEEP_EVIDENCE_HEAD], ids[KEEP_EVIDENCE_HEAD:]
+
+    now = time.time()
+
+    def by_time(k: int) -> tuple[float, int]:
+        t = agent_tools._snowflake_time(rest[k])
+        ts = t.timestamp() if t else float("-inf")
+        # 未來的時間只可能來自錯誤的 id（`_last_seen` 也不採計），不能讓它佔住「最新」的名額
+        return (ts if ts <= now else float("-inf"), k)
+
+    newest = sorted(range(len(rest)), key=by_time)[-KEEP_EVIDENCE_TAIL:]
+    return head + [rest[k] for k in newest]
 
 
 def _as_int(value: Any) -> int:
@@ -645,10 +669,12 @@ async def run_and_persist(
         # **先解析 keep 再驗證**：keep 的文字沿用上一版原文，而驗證層會把空 text
         # 當成「語意空殼」退掉。順序顛倒的話每個 keep 都會被誤殺。
         latest = None
+        latest_failed = False
         try:
             latest = await run_db(store.latest_version, guild_id, user_id)
-        except Exception:
-            pass
+        except Exception as exc:
+            latest_failed = True
+            logger.error("persona agent %s 讀取上一版失敗，本次不寫入：%s", user_id, exc)
         if isinstance(run.diff.get("changes"), list):
             run.diff["changes"] = resolve_keeps(
                 run.diff["changes"], latest.get("changes") if latest else None
@@ -671,6 +697,11 @@ async def run_and_persist(
         result.accepted = inherit_keep_evidence(
             result.accepted, latest.get("changes") if latest else None, history
         )
+        if latest_failed:
+            # 讀不到上一版就解析不了 keep：文字沒沿用成功，每個 keep 都因為 trait／text
+            # 為空被退件，寫出去的版本只剩 add／revise，而且沒有上一版可對帳、lost 也記
+            # 不到。實測 10 項 keep＋1 項 add 會寫出只有 1 項的版本。所以這次不寫。
+            result.skip_reason = "讀取上一版失敗（無法解析 keep），本次不寫入"
         if save and result.skip_reason is None:
             base = f"v{latest['version']}" if latest else "production"
             version = await run_db(

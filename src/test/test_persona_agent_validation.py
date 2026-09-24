@@ -290,8 +290,9 @@ class RefAccountingTests(unittest.TestCase):
 
     def test_rejected_drop_is_counted_as_lost(self):
         """沒附理由的 drop 被退——項目一樣消失，而且沒留下刪除理由。"""
-        acc = self._acc([{"type": "drop", "ref": 1, "trait": "", "text": "",
-                          "reason": "", "evidence_msg_ids": []}], [1])
+        acc = self._acc([self._k(2),
+                         {"type": "drop", "ref": 1, "trait": "", "text": "",
+                          "reason": "", "evidence_msg_ids": []}], [1, 2])
         self.assertEqual(acc["lost"], [1])
 
     def test_lost_ignores_refs_that_survived_elsewhere(self):
@@ -370,10 +371,43 @@ class AnchoredKeepTests(unittest.TestCase):
     def test_bogus_new_id_is_stripped_not_fatal(self):
         """keep 多附了一個抄錯的 id：剔掉那個 id，項目留著，假 id 照樣記進幻覺率。"""
         r = self._run([{**self.HONEST, "evidence_msg_ids": ["m1", "155000042933058"]}])
-        self.assertEqual(r.rejected, [])
+        self.assertEqual(r.rejected, [], "項目沒被退，不可以算進退件數")
         self.assertEqual(r.accepted[0]["evidence_msg_ids"], ["m1"])
+        self.assertEqual(r.accepted[0]["stripped_msg_ids"], ["155000042933058"],
+                         "剔掉的是哪個 id 要查得到，不能只剩一個數字")
         self.assertEqual(r.evidence_bogus, 1)
         self.assertEqual(r.evidence_claimed, 2)
+
+    def test_clean_keep_has_no_stripped_field(self):
+        r = self._run([{**self.HONEST, "evidence_msg_ids": ["m1"]}])
+        self.assertNotIn("stripped_msg_ids", r.accepted[0])
+
+    def test_unverifiable_new_ids_on_keep_are_not_kept(self):
+        """反查失敗時其他項目 fail-open，但 keep 不收沒驗過的 id：沿用的證據會永遠留下去。"""
+        def broken(sql, params):
+            raise RuntimeError("db down")
+        r = validation.validate_diff(
+            diff([{**self.HONEST, "evidence_msg_ids": ["1" + "0" * 22]}]),
+            user_id=ALICE, fetch=broken, base_refs=[1, 2])
+        self.assertEqual(len(r.accepted), 1, "keep 照樣保留")
+        self.assertEqual(r.accepted[0]["evidence_msg_ids"], [])
+
+    def test_no_version_written_means_nothing_lost(self):
+        """不寫新版本時上一版原封不動——lost 照算的話 confidence=low 那幾晚會高估。"""
+        bad_revise = change(type="revise", ref=2, evidence_msg_ids=["假的"])
+        low = validation.validate_diff(
+            diff([self.HONEST, bad_revise], confidence="low"),
+            user_id=ALICE, fetch=fetch_only({"m1"}), base_refs=[1, 2])
+        self.assertIsNotNone(low.skip_reason)
+        self.assertEqual(low.ref_accounting["lost"], [])
+        none_passed = validation.validate_diff(
+            diff([bad_revise]), user_id=ALICE, fetch=fetch_only({"m1"}), base_refs=[1, 2])
+        self.assertIn("沒有任何一項", none_passed.skip_reason)
+        self.assertEqual(none_passed.ref_accounting["lost"], [])
+        written = validation.validate_diff(
+            diff([self.HONEST, bad_revise]),
+            user_id=ALICE, fetch=fetch_only({"m1"}), base_refs=[1, 2])
+        self.assertEqual(written.ref_accounting["lost"], [2], "有寫新版本時才是真的消失")
 
     def test_keep_quotes_are_not_counted(self):
         """keep 的文字是沿用的原文、證據多半沒重附——拿空證據比對會把每個引號算成沒命中。"""

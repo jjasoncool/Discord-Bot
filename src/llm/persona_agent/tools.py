@@ -183,11 +183,17 @@ _DISCORD_EPOCH_MS = 1420070400000
 
 
 def _snowflake_time(msg_id: Any) -> Optional[datetime]:
+    """解不出來（非數字、超出 snowflake 範圍）回 None，不丟例外。
+
+    範圍要擋：`1` 後面接 22 個 0 這種 id 會讓 `fromtimestamp` 丟 ValueError
+    （year 77566），一路冒到 agent 迴圈，那個人整晚失敗、3 晚後被隔離。
+    snowflake 是 64 位元有號整數，上限 2**63 對應到 2084 年，一定在範圍內。
+    """
     try:
         n = int(msg_id)
     except (TypeError, ValueError):
         return None
-    if n <= 0:
+    if not 0 < n < 2**63:
         return None
     return datetime.fromtimestamp(((n >> 22) + _DISCORD_EPOCH_MS) / 1000, timezone.utc)
 
@@ -199,9 +205,13 @@ def _last_seen(evidence_ids: Any, *, now: datetime) -> Optional[str]:
     「本週沒看到」不再是刪除的理由，模型需要另一個依據——而「最後一次有佐證」
     比「這一週有沒有看到」可靠得多：很多特徵本來就不是每週都會出現。
     """
+    # 不是陣列就不算：字串會被逐字元拆開，"1547…" 會變成 id "1"，算出 2015-01-01
+    if not isinstance(evidence_ids, list):
+        return None
+    # 未來的時間只可能來自錯誤的 id，算進去會出現「-46619 天前」
     times = [
-        t for t in (_snowflake_time(i) for i in (evidence_ids or []) if i is not None)
-        if t is not None
+        t for t in (_snowflake_time(i) for i in evidence_ids)
+        if t is not None and t <= now
     ]
     if not times:
         return None
@@ -331,7 +341,7 @@ def get_current_persona(ctx: ToolContext, *, user_id: Any) -> str:
     try:
         own = ctx.fetch(own_sql, (str(ctx.guild_id), uid))
     except Exception as exc:
-        # 表還沒建（M3 之前）或查詢失敗 → 當作沒有自己的版本，退回 production
+        # 查詢失敗 → 當作沒有自己的版本，退回 production
         logger.info("讀取 agent 版本失敗，改用 production 基準 uid=%s: %s", uid, exc)
         own = []
     if own:

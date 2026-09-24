@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
-# 單筆變更：type / trait / text / reason / evidence_msg_ids 缺一不可。
-# additionalProperties=False 讓模型無法夾帶自創欄位（strict 模式的必要條件）。
+# 單筆變更：六個欄位都必須出現（strict 模式要求）；值能不能空由驗證層依 type 決定
+# （keep／drop 可以不附證據）。additionalProperties=False 讓模型無法夾帶自創欄位。
 _CHANGE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
