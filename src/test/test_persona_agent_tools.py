@@ -210,6 +210,40 @@ class GuildScopeTests(unittest.TestCase):
         self.assertEqual([i["text"] for i in items], ["有內容", "第三項"])
         self.assertEqual([i["n"] for i in items], [1, 3], "編號沿用原始位置，不重新編")
 
+    def test_items_carry_last_seen_from_their_evidence(self):
+        """keep 不再被逼著每晚重附證據——模型要改看「最後一次有佐證」判斷是否過時。
+
+        日期直接從訊息 id（Discord snowflake）解出，不多查 DB：有自己的版本時
+        仍然只有一次查詢。兩個 id 是「糯糯」那項的真實證據（09-01、09-09）。
+        """
+        changes = [
+            {"trait": "糯糯", "text": "「糯糯」是他的專屬梗",
+             "evidence_msg_ids": ["1544302219510292480", "1547184851646423110"]},
+            {"trait": "舊資料", "text": "沒有可解析的 id", "evidence_msg_ids": ["m1"]},
+        ]
+        fetch = FakeFetch(results=[[("x", 5, changes)]])
+        items = json.loads(tools.get_current_persona(ctx(fetch), user_id=ALICE))["items"]
+        self.assertEqual(len(fetch.calls), 1, "日期由 id 解出，不該多一次查詢")
+        self.assertRegex(items[0]["last_seen"], r"^09-09（\d+ 天前）$", "取最新的那一則")
+        self.assertNotIn("last_seen", items[1], "解不出日期就不給，不要給錯的")
+
+    def test_snowflake_time_matches_the_db_timestamp(self):
+        """DB 裡這則的 timestamp 是 2026-09-09T10:00:13.937+00:00。"""
+        t = tools._snowflake_time("1547184851646423110")
+        self.assertEqual(t.isoformat(), "2026-09-09T10:00:13.937000+00:00")
+        for bad in ("m1", "", None, "-5", "0"):
+            self.assertIsNone(tools._snowflake_time(bad), repr(bad))
+
+    def test_last_seen_counts_days_in_taipei_time(self):
+        """UTC 16:30 已經是台北隔天——天數要照群組作息的本地日期算。"""
+        from datetime import datetime, timezone
+        # 1547184851646423110 → 台北 09-09 18:00
+        now = datetime(2026, 9, 24, 16, 30, tzinfo=timezone.utc)  # 台北 09-25 00:30
+        self.assertEqual(tools._last_seen(["1547184851646423110"], now=now),
+                         "09-09（16 天前）")
+        self.assertIsNone(tools._last_seen([], now=now))
+        self.assertIsNone(tools._last_seen(None, now=now))
+
     def test_get_current_persona_handles_missing_row(self):
         fetch = FakeFetch(results=[[]])
         payload = json.loads(tools.get_current_persona(ctx(fetch), user_id=ALICE))

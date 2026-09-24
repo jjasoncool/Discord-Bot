@@ -21,7 +21,7 @@ _CHANGE_SCHEMA: dict[str, Any] = {
             "enum": ["add", "revise", "keep", "drop"],
             "description": (
                 "add=新增特徵（ref 填 0）；revise=修正既有第 ref 項；"
-                "keep=第 ref 項原封不動（文字由程式沿用，你不必重寫）；"
+                "keep=第 ref 項原封不動（文字與證據都由程式沿用，你不必重寫）；"
                 "drop=刪除第 ref 項（text 與 evidence 可空，reason 必填：為什麼刪）"
             ),
         },
@@ -55,7 +55,11 @@ _CHANGE_SCHEMA: dict[str, Any] = {
         "evidence_msg_ids": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "支持本項的訊息 ID；驗證層會反查是否真實存在且屬於該使用者",
+            "description": (
+                "支持本項的訊息 ID；驗證層會反查是否真實存在且屬於該使用者。"
+                "add／revise 必填；keep 可以是空陣列（沿用原本的證據），"
+                "這週有看到新的佐證才附；drop 可空"
+            ),
         },
     },
     # strict 模式要求列出所有屬性；`ref` 用 0 表示「不指涉既有項目」

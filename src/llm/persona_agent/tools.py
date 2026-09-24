@@ -177,6 +177,39 @@ def _fmt_ts(raw: str) -> str:
         return raw or ""
 
 
+#: Discord snowflake 的紀元（2015-01-01 UTC，毫秒）。訊息 id 的高位就是發送時間，
+#: 所以只有 id 也能知道日期，不必回 DB 查——實測與 DB 的 timestamp 一致到毫秒。
+_DISCORD_EPOCH_MS = 1420070400000
+
+
+def _snowflake_time(msg_id: Any) -> Optional[datetime]:
+    try:
+        n = int(msg_id)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    return datetime.fromtimestamp(((n >> 22) + _DISCORD_EPOCH_MS) / 1000, timezone.utc)
+
+
+def _last_seen(evidence_ids: Any, *, now: datetime) -> Optional[str]:
+    """證據裡最新一則的日期，例如 `09-09（15 天前）`。沒有可解析的 id 就回 None。
+
+    給模型判斷「這項是不是過時了」用。keep 不再被要求每晚重附證據之後，
+    「本週沒看到」不再是刪除的理由，模型需要另一個依據——而「最後一次有佐證」
+    比「這一週有沒有看到」可靠得多：很多特徵本來就不是每週都會出現。
+    """
+    times = [
+        t for t in (_snowflake_time(i) for i in (evidence_ids or []) if i is not None)
+        if t is not None
+    ]
+    if not times:
+        return None
+    last = max(times).astimezone(APP_TZ)
+    days = (now.astimezone(APP_TZ).date() - last.date()).days
+    return f"{last:%m-%d}（{days} 天前）"
+
+
 def _coverage(messages: list[dict[str, str]], *, days: int, limit: int) -> dict[str, Any]:
     """回報這批訊息**實際涵蓋多久**，以及是否被 limit 截斷。
 
@@ -302,6 +335,14 @@ def get_current_persona(ctx: ToolContext, *, user_id: Any) -> str:
         logger.info("讀取 agent 版本失敗，改用 production 基準 uid=%s: %s", uid, exc)
         own = []
     if own:
+        changes = own[0][2] if isinstance(own[0][2], list) else []
+        items = _persona_items(changes)
+        now = datetime.now(APP_TZ)
+        for item in items:
+            src = changes[item["n"] - 1]
+            seen = _last_seen(src.get("evidence_msg_ids"), now=now)
+            if seen:
+                item["last_seen"] = seen
         return _dump({
             "user_id": uid,
             "version": own[0][1],
@@ -310,7 +351,7 @@ def get_current_persona(ctx: ToolContext, *, user_id: Any) -> str:
             # 這種東西可以指。只餵 `；` 黏起來的一整串時，它只能整段重新拆解、
             # 重新命名、重新措辭——實測每晚重寫 46% 的文字、43.7% 標 keep 的項目
             # 文字其實變了、85.5% 的 trait 標籤只出現在一個版本裡，全是這個成因。
-            "items": _persona_items(own[0][2]),
+            "items": items,
         })
 
     sql = f"""

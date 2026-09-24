@@ -614,6 +614,155 @@ class ResolveKeepsTests(unittest.TestCase):
         out = agent.resolve_keeps([{"type": "keep", "ref": 1, "text": "模型寫的"}], None)
         self.assertEqual(out[0]["text"], "模型寫的", "上一版沒有 changes 時保留原樣")
 
+    def test_keep_restores_the_original_trait(self):
+        """09-22 有 17 個 keep 因為 trait 留空被退件，項目跟著消失。"""
+        out = agent.resolve_keeps([{"type": "keep", "ref": 1, "trait": ""}], self.BASE)
+        self.assertEqual(out[0]["trait"], "口頭禪")
+
+    def test_models_trait_used_when_original_has_none(self):
+        base = [{"trait": "", "text": "有文字沒 trait"}]
+        out = agent.resolve_keeps([{"type": "keep", "ref": 1, "trait": "模型補的"}], base)
+        self.assertEqual(out[0]["trait"], "模型補的")
+
+
+class InheritKeepEvidenceTests(unittest.TestCase):
+    """keep 沿用上一版的證據——這句話和它的依據要一直綁在一起。
+
+    「糯糯」那項的真實經過：09-01 寫下時證據是「這個糯糯不是 此糯糯」（撐住「糾正」），
+    之後每晚 keep 都從最近 7 天重挑證據，到 09-24 只剩「我是肥糯糯..剛入坑的新手」
+    這類——文字一字沒改，評審卻只看得到撐住其中一句的證據，判成「部分成立」。
+    """
+
+    BASE = [
+        {"type": "add", "trait": "糯糯梗", "text": "「糯糯」是他的專屬梗",
+         "evidence_msg_ids": ["1544302219510292480", "1547184851646423110"]},
+        {"type": "drop", "trait": "", "text": "", "evidence_msg_ids": []},
+        {"type": "keep", "trait": "肥", "text": "「肥」是常用詞", "evidence_msg_ids": ["e3"]},
+    ]
+
+    def test_original_evidence_travels_with_the_keep(self):
+        out = agent.inherit_keep_evidence(
+            [{"type": "keep", "ref": 1, "evidence_msg_ids": []}], self.BASE)
+        self.assertEqual(out[0]["evidence_msg_ids"],
+                         ["1544302219510292480", "1547184851646423110"])
+
+    def test_new_evidence_is_appended_not_swapped(self):
+        """今晚新附的接在後面——舊的不能被換掉，那正是衰減的機制。"""
+        out = agent.inherit_keep_evidence(
+            [{"type": "keep", "ref": 1,
+              "evidence_msg_ids": ["1552306186831794217", "1547184851646423110"]}],
+            self.BASE)
+        self.assertEqual(out[0]["evidence_msg_ids"], [
+            "1544302219510292480", "1547184851646423110", "1552306186831794217",
+        ], "重複的只留一份，新的接在最後")
+
+    def test_numbering_matches_what_the_model_saw(self):
+        """編號含被 drop 掉的位置（第 2 項），ref=3 要對到第 3 個 change，不是第 2 個。"""
+        out = agent.inherit_keep_evidence(
+            [{"type": "keep", "ref": 3, "evidence_msg_ids": []}], self.BASE)
+        self.assertEqual(out[0]["evidence_msg_ids"], ["e3"])
+
+    def test_cap_keeps_the_oldest_and_the_newest(self):
+        """上限 8＋4：最早的是這句話的依據，最新的是最近一次佐證，中間的才捨棄。"""
+        base = [{"type": "add", "trait": "t", "text": "x",
+                 "evidence_msg_ids": [f"old{i}" for i in range(10)]}]
+        out = agent.inherit_keep_evidence(
+            [{"type": "keep", "ref": 1, "evidence_msg_ids": ["new1", "new2"]}], base)
+        ids = out[0]["evidence_msg_ids"]
+        self.assertEqual(len(ids), agent.KEEP_EVIDENCE_HEAD + agent.KEEP_EVIDENCE_TAIL)
+        self.assertEqual(ids[:8], [f"old{i}" for i in range(8)])
+        self.assertEqual(ids[-2:], ["new1", "new2"])
+
+    def test_only_keep_is_touched(self):
+        changes = [
+            {"type": "revise", "ref": 1, "evidence_msg_ids": ["r"]},
+            {"type": "add", "ref": 0, "evidence_msg_ids": ["a"]},
+            {"type": "drop", "ref": 3, "evidence_msg_ids": []},
+        ]
+        self.assertEqual(agent.inherit_keep_evidence(changes, self.BASE), changes)
+
+    def test_unresolvable_ref_is_left_alone(self):
+        for base in (None, self.BASE):
+            out = agent.inherit_keep_evidence(
+                [{"type": "keep", "ref": 99, "evidence_msg_ids": ["m"]}], base)
+            self.assertEqual(out[0]["evidence_msg_ids"], ["m"])
+
+
+class KeepEndToEndTests(unittest.TestCase):
+    """走一次真實的 `run_and_persist`：解析 keep → 驗證 → 沿用證據 → 寫入。
+
+    資料是 09-24 那晚真實消失的項目：模型標 keep、證據留空、reason 寫「保守保留」，
+    舊規則下 5 項全被退件，那個人從 14 項掉到 9 項。
+    """
+
+    PREV = [
+        {"type": "keep", "trait": "汐黑記帳制度",
+         "text": "對「汐黑」會正式記帳，把每次黑汐的行為記成可抵銷的「罪」",
+         "evidence_msg_ids": ["1544302219510292480"]},
+        {"type": "keep", "trait": "6+5口頭禪",
+         "text": "「6+5」是口頭禪，且幾乎都用在「汐的隊友」身上",
+         "evidence_msg_ids": ["1547184851646423110"]},
+    ]
+
+    def _run(self, changes):
+        written = {}
+        recorded = {}
+        run = agent.AgentRun(user_id=ALICE, status="ok", diff={
+            "user_id": ALICE, "changes": changes, "confidence": "medium", "notes": "",
+        })
+
+        async def fake_run_for_user(**kw):
+            return run
+
+        def fake_write_version(**kw):
+            written.update(kw)
+            return 4
+
+        from llm.persona_agent import store
+        ctx = tools.ToolContext.build(
+            guild_id=1, allowed_ids=[ALICE],
+            fetch=lambda sql, params: [(i, "") for i in params[1] if i.isdigit()],
+        )
+        with mock.patch.object(agent, "run_for_user", side_effect=fake_run_for_user), \
+             mock.patch.object(store, "consecutive_failures", return_value=0), \
+             mock.patch.object(store, "latest_version",
+                               return_value={"version": 3, "changes": self.PREV}), \
+             mock.patch.object(store, "write_version", side_effect=fake_write_version), \
+             mock.patch.object(store, "record_run",
+                               side_effect=lambda **kw: recorded.update(kw) or True):
+            asyncio.run(agent.run_and_persist(
+                user_id=ALICE, guild_id=1, ctx=ctx, model="m", run_id="b", save=True,
+            ))
+        return written, recorded
+
+    def test_honest_keeps_survive_with_their_original_evidence(self):
+        reason = "本週發言未出現，無反證亦無正證，保守保留，信心降為 medium。"
+        written, recorded = self._run([
+            {"type": "keep", "ref": 1, "trait": "", "text": "", "reason": reason,
+             "evidence_msg_ids": []},
+            {"type": "keep", "ref": 2, "trait": "", "text": "", "reason": reason,
+             "evidence_msg_ids": []},
+        ])
+        self.assertEqual(recorded["rejected"], [], "老實說「沒看到、保留」不該被退件")
+        self.assertEqual(recorded["ref_accounting"]["lost"], [])
+        kept = written["changes"]
+        self.assertEqual([c["text"] for c in kept], [c["text"] for c in self.PREV])
+        self.assertEqual([c["trait"] for c in kept], ["汐黑記帳制度", "6+5口頭禪"])
+        self.assertEqual([c["evidence_msg_ids"] for c in kept],
+                         [c["evidence_msg_ids"] for c in self.PREV],
+                         "證據要跟著這句話走")
+        self.assertIn("汐黑", written["persona_text"])
+
+    def test_inherited_ids_are_not_recounted_as_claims(self):
+        """沿用的 id 寫入時就驗過了——再算進 evidence_claimed 會讓幻覺率的分母灌水。"""
+        _, recorded = self._run([
+            {"type": "keep", "ref": 1, "trait": "", "text": "", "reason": "r",
+             "evidence_msg_ids": ["1552306186831794217"]},
+            {"type": "keep", "ref": 2, "trait": "", "text": "", "reason": "r",
+             "evidence_msg_ids": []},
+        ])
+        self.assertEqual(recorded["evidence_claimed"], 1, "只算模型今晚附的那一個")
+
 
 class DropCompositionTests(unittest.TestCase):
     """drop 不可以串進描述，也不可以在下一晚復活。"""

@@ -278,7 +278,28 @@ class RefAccountingTests(unittest.TestCase):
         acc = self._acc([self._k(1), self._k(2, "revise"),
                          {"type": "drop", "ref": 3, "trait": "", "text": "",
                           "reason": "r", "evidence_msg_ids": []}], [1, 2, 3])
-        self.assertEqual(acc, {"unaccounted": [], "duplicated": [], "unknown": []})
+        self.assertEqual(acc, {"unaccounted": [], "duplicated": [], "unknown": [],
+                               "lost": []})
+
+    def test_rejected_revise_is_counted_as_lost(self):
+        """有交代、但被退件＝那一項實際消失了。只看 unaccounted 會以為沒事。"""
+        acc = self._acc([self._k(1), change(type="revise", ref=2, evidence_msg_ids=["假的"])],
+                        [1, 2])
+        self.assertEqual(acc["unaccounted"], [], "模型有交代第 2 項")
+        self.assertEqual(acc["lost"], [2], "但它被退件，實際上不見了")
+
+    def test_rejected_drop_is_counted_as_lost(self):
+        """沒附理由的 drop 被退——項目一樣消失，而且沒留下刪除理由。"""
+        acc = self._acc([{"type": "drop", "ref": 1, "trait": "", "text": "",
+                          "reason": "", "evidence_msg_ids": []}], [1])
+        self.assertEqual(acc["lost"], [1])
+
+    def test_lost_ignores_refs_that_survived_elsewhere(self):
+        """同一個編號有一個被退、另一個通過——那一項沒有消失。"""
+        acc = self._acc([self._k(1), change(type="revise", ref=1, evidence_msg_ids=["假的"])],
+                        [1])
+        self.assertEqual(acc["lost"], [])
+        self.assertEqual(acc["duplicated"], [1])
 
     def test_silent_vanish_is_recorded(self):
         """沒被提到的編號＝無聲消失。"""
@@ -311,6 +332,72 @@ class RefAccountingTests(unittest.TestCase):
             base_refs=[1, 2, 3])
         self.assertEqual(len(r.accepted), 1)
         self.assertIsNone(r.skip_reason)
+
+
+class AnchoredKeepTests(unittest.TestCase):
+    """指到上一版真實項目的 keep：文字、trait、證據都由程式沿用，不再逼模型重附證據。
+
+    舊規則逼模型二選一，兩條路都錯：老實留空 → 被退件、項目無聲消失；
+    從本週訊息湊幾則沾邊的 → 過關，但證據撐不住描述，看起來像幻覺。
+    下面的 reason 是 09-24 真實被退掉的 keep 原文。
+    """
+
+    HONEST = {
+        "type": "keep", "ref": 1, "trait": "6+5口頭禪",
+        "text": "「6+5」是口頭禪，且幾乎都用在「汐的隊友」身上",
+        "reason": "本週發言未出現「6+5」口頭禪，無反證亦無正證，保守保留，信心降為 medium。",
+        "evidence_msg_ids": [],
+    }
+
+    def _run(self, changes, base_refs=(1, 2), known=("m1",)):
+        return validation.validate_diff(
+            diff(changes), user_id=ALICE, fetch=fetch_only(set(known)),
+            base_refs=list(base_refs) if base_refs is not None else None,
+        )
+
+    def test_honest_keep_without_evidence_survives(self):
+        """真實案例：模型說「保守保留」卻因為沒附證據被退——這一項不該消失。"""
+        r = self._run([self.HONEST])
+        self.assertEqual(r.rejected, [])
+        self.assertEqual(len(r.accepted), 1)
+        self.assertEqual(r.ref_accounting["lost"], [])
+
+    def test_keep_needs_no_reason_or_trait(self):
+        """keep 只是在說「這項不動」——理由和 trait 空著也不能讓項目消失。"""
+        r = self._run([{**self.HONEST, "reason": "", "trait": ""}])
+        self.assertEqual(len(r.accepted), 1)
+
+    def test_bogus_new_id_is_stripped_not_fatal(self):
+        """keep 多附了一個抄錯的 id：剔掉那個 id，項目留著，假 id 照樣記進幻覺率。"""
+        r = self._run([{**self.HONEST, "evidence_msg_ids": ["m1", "155000042933058"]}])
+        self.assertEqual(r.rejected, [])
+        self.assertEqual(r.accepted[0]["evidence_msg_ids"], ["m1"])
+        self.assertEqual(r.evidence_bogus, 1)
+        self.assertEqual(r.evidence_claimed, 2)
+
+    def test_keep_quotes_are_not_counted(self):
+        """keep 的文字是沿用的原文、證據多半沒重附——拿空證據比對會把每個引號算成沒命中。"""
+        r = self._run([self.HONEST])
+        self.assertEqual(r.quote_unmatched, 0)
+
+    def test_unanchored_keep_still_needs_evidence(self):
+        """ref 對不上（第一次跑、基準是 production 的散文）：文字是模型寫的，照舊要證據。"""
+        for base in (None, (5,)):
+            r = self._run([self.HONEST], base_refs=base)
+            self.assertEqual(r.accepted, [], f"base_refs={base!r}")
+            self.assertIn("evidence_msg_ids 為空", r.rejected[0]["why"])
+
+    def test_add_and_revise_still_need_evidence(self):
+        """放寬只給 keep：新寫的文字沒有證據一樣不收。"""
+        for typ, ref in (("add", 0), ("revise", 1)):
+            r = self._run([change(type=typ, ref=ref, evidence_msg_ids=[])])
+            self.assertEqual(r.accepted, [], typ)
+
+    def test_add_with_bogus_id_is_still_rejected(self):
+        """剔除假 id 只給 keep——新寫的描述引了假 id，整項照舊退掉。"""
+        r = self._run([change(type="add", ref=0, evidence_msg_ids=["m1", "假的"])])
+        self.assertEqual(r.accepted, [])
+        self.assertIn("不存在或不屬於本人", r.rejected[0]["why"])
 
 
 if __name__ == "__main__":

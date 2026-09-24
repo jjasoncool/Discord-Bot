@@ -484,11 +484,13 @@ def resolve_keeps(
 
     沿用原文之後，想改就**必須**標成 revise——偽裝成 keep 的偷偷改寫不再可能。
 
+    trait 也沿用：09-22 有 17 個 keep 因為模型把 trait 留空而被退件，項目跟著消失。
+    上一版的 trait 是空的才用模型寫的。
+
     `ref` 對不上（0、超出範圍、上一版沒有 changes）時保留模型寫的 text：
     第一次跑是以 production 的散文為基準，那時根本沒有可指涉的項目。
     """
-    items = agent_tools._persona_items(base_changes)
-    by_n = {i["n"]: i["text"] for i in items}
+    by_n = {i["n"]: i for i in agent_tools._persona_items(base_changes)}
     out: list[dict[str, Any]] = []
     for c in changes:
         if not isinstance(c, dict):
@@ -497,7 +499,47 @@ def resolve_keeps(
         if str(c.get("type") or "") == "keep":
             original = by_n.get(_as_int(c.get("ref")))
             if original:
-                c = {**c, "text": original}
+                c = {**c, "text": original["text"],
+                     "trait": original["trait"] or c.get("trait", "")}
+        out.append(c)
+    return out
+
+
+#: keep 沿用證據的上限：最早的 8 則（寫下這句話時的證據）＋最新的 4 則（最近的佐證）。
+#: 不設上限的話，每晚多附一兩則就會一路長下去。只留最新的也不行——最早那幾則正是
+#: 這句話的依據，「糯糯」那項就是證據被換到只剩近期的，才看起來像幻覺。
+KEEP_EVIDENCE_HEAD = 8
+KEEP_EVIDENCE_TAIL = 4
+
+
+def inherit_keep_evidence(
+    accepted: list[dict[str, Any]], base_changes: Any
+) -> list[dict[str, Any]]:
+    """keep 沿用上一版該項的證據，再接上今晚新附的。
+
+    **要在驗證之後做**：驗證層只該反查模型今晚宣稱的 id。沿用的 id 寫進版本表時
+    就驗過了，混進去重驗會讓 `evidence_claimed` 灌水、幻覺率的分母變成另一個東西。
+
+    文字沿用（`resolve_keeps`）之後，證據也必須跟著沿用，這句話和它的依據才會
+    一直綁在一起。`ref` 對不上的 keep 不動（沒有上一版可以沿用）。
+    """
+    raw = base_changes if isinstance(base_changes, list) else []
+    # 編號規則必須跟模型看到的清單一致，所以同樣從 `_persona_items` 取
+    by_n = {i["n"]: raw[i["n"] - 1] for i in agent_tools._persona_items(raw)}
+    out: list[dict[str, Any]] = []
+    for c in accepted:
+        if isinstance(c, dict) and str(c.get("type") or "") == "keep":
+            original = by_n.get(_as_int(c.get("ref")))
+            if original is not None:
+                old = original.get("evidence_msg_ids")
+                new = c.get("evidence_msg_ids")
+                ids = list(dict.fromkeys(
+                    [str(i) for i in (old if isinstance(old, list) else [])]
+                    + [str(i) for i in (new if isinstance(new, list) else [])]
+                ))
+                if len(ids) > KEEP_EVIDENCE_HEAD + KEEP_EVIDENCE_TAIL:
+                    ids = ids[:KEEP_EVIDENCE_HEAD] + ids[-KEEP_EVIDENCE_TAIL:]
+                c = {**c, "evidence_msg_ids": ids}
         out.append(c)
     return out
 
@@ -613,6 +655,9 @@ async def run_and_persist(
         result = await run_db(
             validation.validate_diff, run.diff, user_id=user_id, fetch=ctx.fetch,
             base_refs=base_refs,
+        )
+        result.accepted = inherit_keep_evidence(
+            result.accepted, latest.get("changes") if latest else None
         )
         if save and result.skip_reason is None:
             base = f"v{latest['version']}" if latest else "production"

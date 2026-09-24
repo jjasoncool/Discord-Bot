@@ -48,9 +48,10 @@ class ValidationResult:
     #: `None` 代表本次沒算（證據反查失敗，語料拿不到），與 0 意義不同。
     quote_unmatched: Optional[int] = 0
     quote_misses: list[str] = field(default_factory=list)
-    #: 上一版每個編號有沒有被交代（keep／revise／drop 擇一、恰好一次）。
-    #: **只記錄不擋**——先跑幾晚看遵守率再決定要不要強制。`None`＝本次沒有可對照
-    #: 的上一版（第一次跑，基準是 production 的散文，沒有編號）。
+    #: 上一版每個編號有沒有被交代（keep／revise／drop 擇一、恰好一次），以及有交代
+    #: 卻被退件而實際消失的編號（`lost`）。**只記錄不擋**——先跑幾晚看遵守率再決定
+    #: 要不要強制。`None`＝本次沒有可對照的上一版（第一次跑，基準是 production 的
+    #: 散文，沒有編號）。
     ref_accounting: Optional[dict[str, list[int]]] = None
 
     @property
@@ -137,8 +138,19 @@ def _unmatched_quotes(change_text: str, corpus: str) -> list[str]:
     return misses
 
 
-def _shape_problem(change: dict[str, Any]) -> Optional[str]:
-    """形狀與語意檢查。回傳問題描述，沒問題回 None。"""
+def _ref(change: dict[str, Any]) -> int:
+    try:
+        return int(change.get("ref") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _shape_problem(change: dict[str, Any], *, anchored: bool = False) -> Optional[str]:
+    """形狀與語意檢查。回傳問題描述，沒問題回 None。
+
+    `anchored`＝這是指到上一版真實項目的 keep。它的文字、trait、證據都由程式沿用
+    （`agent.resolve_keeps`／`agent.inherit_keep_evidence`），模型只需要說「這項不動」。
+    """
     ctype = str(change.get("type") or "").strip()
     if ctype not in VALID_TYPES:
         return f"type 不合法：{ctype!r}"
@@ -147,6 +159,18 @@ def _shape_problem(change: dict[str, Any]) -> Optional[str]:
         # 所以 text 與證據都可空，但**一定要說為什麼刪**，否則又回到無聲消失
         if not str(change.get("reason") or "").strip():
             return "drop 必須附 reason（為什麼刪）"
+        return None
+    if anchored:
+        # **不再要求 keep 附本週的證據**。那條規則逼模型二選一，兩條路都是錯的：
+        #   - 老實留空 → 被退件、項目無聲消失。09-24 有人 5 項這樣沒了，reason 寫的是
+        #     「本週發言未出現…無反證亦無正證，保守保留」——模型的意思明明是保留。
+        #     這類退件四晚從 0 → 3 → 6 → 15 在增加。
+        #   - 從本週訊息湊幾則沾邊的 → 過關，但證據撐不住描述。「糯糯」那項的
+        #     「糾正別人」原本有證據（09-01「這個糯糯不是 此糯糯」），每晚換證據後
+        #     就只剩「我是肥糯糯」這種，評審判成「部分成立」算進幻覺，其實是真的。
+        # 文字是 resolve_keeps 沿用的原文，所以只剩「空的」這一種壞法要擋。
+        if not str(change.get("text") or "").strip():
+            return "text 為空（keep 的原文沒有沿用成功）"
         return None
     if not str(change.get("trait") or "").strip():
         return "trait 為空"
@@ -174,7 +198,9 @@ def _account_refs(changes: Any, base_refs: Iterable[int]) -> dict[str, list[int]
 
     回傳 `unaccounted`（沒被提到＝無聲消失）、`duplicated`（被提到兩次以上）、
     `unknown`（指到上一版不存在的編號）。計的是模型的**意圖**：被驗證層退掉的
-    keep 也算有交代，因為這裡量的是「模型有沒有照規則逐項處理」。
+    keep 也算有交代，因為這裡量的是「模型有沒有照規則逐項處理」。**結果**另外算
+    （`_lost_refs`）——只看這三項會以為沒有東西消失：09-24 帳面 25/26 人完整交代，
+    實際卻有 20 項因為 keep 被退件而不見。
     """
     base = set(base_refs)
     seen: dict[int, int] = {}
@@ -184,10 +210,7 @@ def _account_refs(changes: Any, base_refs: Iterable[int]) -> dict[str, list[int]
             continue
         if str(c.get("type") or "") not in {"keep", "revise", "drop"}:
             continue
-        try:
-            r = int(c.get("ref") or 0)
-        except (TypeError, ValueError):
-            r = 0
+        r = _ref(c)
         if r not in base:
             unknown.append(r)
             continue
@@ -197,6 +220,25 @@ def _account_refs(changes: Any, base_refs: Iterable[int]) -> dict[str, list[int]
         "duplicated": sorted(r for r, k in seen.items() if k > 1),
         "unknown": sorted(set(unknown)),
     }
+
+
+_REF_TYPES = {"keep", "revise", "drop"}
+
+
+def _lost_refs(result: ValidationResult, base_refs: Iterable[int]) -> list[int]:
+    """有交代、卻因為驗證退件而實際消失的上一版編號。
+
+    被退掉的 keep／revise 不會進版本表，舊的那一項也不會被帶過來——結果跟模型
+    根本沒提到它一樣。被退掉的 drop 也算：項目一樣消失了，而且沒有留下刪除理由。
+    """
+    def refs(changes: Iterable[Any]) -> set[int]:
+        return {
+            _ref(c) for c in changes
+            if isinstance(c, dict) and str(c.get("type") or "") in _REF_TYPES
+        }
+
+    rejected = refs(r.get("change") for r in result.rejected if isinstance(r, dict))
+    return sorted((rejected & set(base_refs)) - refs(result.accepted))
 
 
 def validate_diff(
@@ -233,12 +275,19 @@ def validate_diff(
     # 並讓 quote_unmatched 留 None，人工複查時才分得出「沒算」與「算了是 0」。
     lookup_failed = found is None
     real = {str(i): "" for i in claimed} if lookup_failed else found
+    # 轉成 set：下面判斷 anchored 和最後的帳目都要用，傳進來的若是 generator 只能讀一次
+    base = set(base_refs) if base_refs is not None else None
 
     for change in diff["changes"]:
         if not isinstance(change, dict):
             result.rejected.append({"change": change, "why": "不是物件"})
             continue
-        problem = _shape_problem(change)
+        anchored = (
+            base is not None
+            and str(change.get("type") or "") == "keep"
+            and _ref(change) in base
+        )
+        problem = _shape_problem(change, anchored=anchored)
         if problem:
             result.rejected.append({"change": change, "why": problem})
             continue
@@ -246,17 +295,28 @@ def validate_diff(
             # 刪除沒有描述要驗、也沒有證據要反查，形狀對就收
             result.accepted.append(change)
             continue
-        ids = [str(i) for i in change["evidence_msg_ids"]]
+        raw_ids = change.get("evidence_msg_ids")
+        ids = [str(i) for i in raw_ids] if isinstance(raw_ids, list) else []
         bogus = [i for i in ids if i not in real]
         if bogus:
             result.evidence_bogus += len(bogus)
-            result.rejected.append({
-                "change": change,
-                "why": f"引用了不存在或不屬於本人的 msg_id：{bogus}",
-            })
-            continue
-        # 通過驗證後才算引號——被退掉的項目不必再花這個力氣
-        if not lookup_failed:
+            if not anchored:
+                result.rejected.append({
+                    "change": change,
+                    "why": f"引用了不存在或不屬於本人的 msg_id：{bogus}",
+                })
+                continue
+            # keep 只剔掉假的那幾個 id、項目留著：文字是上一版驗證過的原文，
+            # 今晚多附的假 id 污染不到它。整項退掉的話，一個抄錯的 id
+            # 就讓一項沒問題的描述無聲消失（09-24 有 5 項這樣沒了）。
+            # 假 id 照樣算進 evidence_bogus，幻覺率的分子不受影響。
+            logger.info("keep 第 %s 項的新證據有假 id，已剔除、項目保留：%s",
+                        _ref(change), bogus)
+            change = {**change, "evidence_msg_ids": [i for i in ids if i in real]}
+        # 通過驗證後才算引號——被退掉的項目不必再花這個力氣。
+        # keep 不算：文字是沿用的原文、不是今晚寫的，而它的證據多半沒有重附，
+        # 拿空的證據比對會把每個引號都算成沒命中。
+        if not lookup_failed and not anchored:
             misses = _unmatched_quotes(
                 str(change.get("text") or ""),
                 # **比對基準要跟模型看到的一致**：工具回給模型的是
@@ -273,8 +333,9 @@ def validate_diff(
     if lookup_failed:
         result.quote_unmatched = None
 
-    if base_refs is not None:
-        result.ref_accounting = _account_refs(diff["changes"], base_refs)
+    if base is not None:
+        result.ref_accounting = _account_refs(diff["changes"], base)
+        result.ref_accounting["lost"] = _lost_refs(result, base)
 
     if not result.accepted:
         result.skip_reason = "沒有任何一項通過驗證"
