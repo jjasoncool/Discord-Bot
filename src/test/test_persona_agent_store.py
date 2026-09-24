@@ -176,6 +176,51 @@ class SerialisationFailureTests(unittest.TestCase):
         )
 
 
+class EvidenceHistoryTests(unittest.TestCase):
+    """同一段文字在所有版本引用過的證據——被換掉的正確證據要找得回來。"""
+
+    RIGHT = "1549060752508452916"   # 「智障的8:2原則還是太煩了」
+    WRONG = "1550426276672577557"   # 「看過有遊戲業的人發影片…」
+    TEXT = "會用具體的商業/管理術語形容遊戲/商業決策（「智障的8:2原則還是太煩了」）"
+
+    def _history(self, rows):
+        cur = FakeCursor()
+        cur.rows = rows
+        with _patch_cursor(cur):
+            return store.evidence_history(GUILD, ALICE), cur
+
+    def test_real_case_swapped_evidence_is_recovered(self):
+        """米拉第 6 項：v7～v10 引對的，v11 起被換成無關的那則。"""
+        rows = [([{"type": "add", "text": self.TEXT, "evidence_msg_ids": [self.RIGHT]}],),
+                ([{"type": "keep", "text": self.TEXT, "evidence_msg_ids": [self.RIGHT]}],),
+                ([{"type": "keep", "text": self.TEXT, "evidence_msg_ids": [self.WRONG]}],)]
+        history, cur = self._history(rows)
+        self.assertEqual(history[self.TEXT], [self.RIGHT, self.WRONG], "依版本先後、去重")
+        self.assertIn("guild_id", cur.sql)
+        self.assertIn("ORDER BY version", cur.sql, "先後順序決定誰排前面、誰會被上限擠掉")
+
+    def test_drops_and_empty_entries_are_ignored(self):
+        rows = [([{"type": "drop", "text": "刪掉的", "evidence_msg_ids": ["x"]},
+                  {"type": "add", "text": "  ", "evidence_msg_ids": ["y"]},
+                  {"type": "add", "text": "壞資料", "evidence_msg_ids": None},
+                  "不是物件"],)]
+        history, _ = self._history(rows)
+        self.assertEqual(history, {})
+
+    def test_text_is_matched_after_strip(self):
+        rows = [([{"type": "add", "text": " 同一句 ", "evidence_msg_ids": ["a"]}],),
+                ([{"type": "keep", "text": "同一句", "evidence_msg_ids": ["b"]}],)]
+        history, _ = self._history(rows)
+        self.assertEqual(history["同一句"], ["a", "b"])
+
+    def test_db_failure_returns_empty_not_raise(self):
+        """讀不到歷史就只沿用上一版——不可以因此擋掉整個人的寫入。"""
+        settings = mock.MagicMock()
+        settings.pgvector_cursor.side_effect = RuntimeError("db down")
+        with mock.patch.object(store, "LLMServiceSettings", return_value=settings):
+            self.assertEqual(store.evidence_history(GUILD, ALICE), {})
+
+
 class CallSiteTests(unittest.TestCase):
     """每個真實呼叫端都要跑得起來——包含平常不會執行的那個。"""
 

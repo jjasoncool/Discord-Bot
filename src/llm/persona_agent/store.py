@@ -107,6 +107,50 @@ def latest_version(guild_id: int, author_id: str) -> Optional[dict[str, Any]]:
             "changes": row[3] or []}
 
 
+def evidence_history(guild_id: int, author_id: str) -> dict[str, list[str]]:
+    """每段描述文字 → 它在所有版本裡引用過的證據 id（依版本先後、去重）。
+
+    給 keep 沿用證據用。**只看上一版不夠**：keep 以前每晚都從最近 7 天重挑證據，
+    正確的那則一旦被換掉，上一版就只剩湊數的。真實案例（米拉第 6 項，文字 v7～v12
+    一字未改）：
+
+        v7～v10  「智障的8:2原則還是太煩了」     ← 這句話的依據
+        v11～v12 「看過有遊戲業的人發影片…」     ← 09-23 被換成這則，跟描述無關
+
+    文字一字不差才算同一項。keep 從 09-22 起沿用原文，之後的鏈是連續的；
+    之前被標 keep 卻改寫過文字的（例如「糯糯」那項）追不回來。
+
+    讀取失敗回空 dict——等同只沿用上一版的證據，不擋寫入。
+    """
+    sql = f"""
+        SELECT changes
+        FROM {VERSIONS_TABLE}
+        WHERE guild_id = %s AND author_id = %s
+        ORDER BY version
+    """
+    try:
+        with LLMServiceSettings().pgvector_cursor() as cur:
+            cur.execute(sql, (str(guild_id), str(author_id)))
+            rows = cur.fetchall()
+    except Exception as exc:
+        logger.warning("讀取證據歷史失敗（keep 只沿用上一版的證據）：%s", exc)
+        return {}
+    history: dict[str, list[str]] = {}
+    for (changes,) in rows:
+        for c in changes if isinstance(changes, list) else []:
+            if not isinstance(c, dict) or str(c.get("type") or "") == "drop":
+                continue
+            text = str(c.get("text") or "").strip()
+            ids = c.get("evidence_msg_ids")
+            if not text or not isinstance(ids, list):
+                continue
+            seen = history.setdefault(text, [])
+            for i in ids:
+                if str(i) not in seen:
+                    seen.append(str(i))
+    return history
+
+
 #: 這些 skip_reason 是**合法結果，不是失敗**。模型自認資料不足而不寫版本，跟它跑掛掉
 #: 是兩回事——把前者算成失敗會讓話少的人被越勒越緊（預算降 70% → 50% → 隔離），
 #: 而他們正是最需要多撈資料的族群，方向剛好相反。

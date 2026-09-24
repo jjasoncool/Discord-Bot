@@ -687,6 +687,37 @@ class InheritKeepEvidenceTests(unittest.TestCase):
                 [{"type": "keep", "ref": 99, "evidence_msg_ids": ["m"]}], base)
             self.assertEqual(out[0]["evidence_msg_ids"], ["m"])
 
+    def test_swapped_evidence_comes_back_from_history(self):
+        """米拉第 6 項真實案例：上一版只剩被換進來的無關證據，正確的那則在更早的版本裡。"""
+        text = "會用具體的商業/管理術語形容遊戲/商業決策（「智障的8:2原則還是太煩了」）"
+        right, wrong = "1549060752508452916", "1550426276672577557"
+        base = [{"type": "keep", "trait": "商業術語", "text": text, "evidence_msg_ids": [wrong]}]
+        keep = [{"type": "keep", "ref": 1, "evidence_msg_ids": []}]
+
+        only_prev = agent.inherit_keep_evidence(keep, base)
+        self.assertEqual(only_prev[0]["evidence_msg_ids"], [wrong], "只看上一版就只有錯的")
+
+        out = agent.inherit_keep_evidence(keep, base, {text: [right, wrong]})
+        self.assertEqual(out[0]["evidence_msg_ids"], [right, wrong],
+                         "寫下這句話時的依據要回來，而且排在最前面")
+
+    def test_history_is_looked_up_by_the_original_text(self):
+        """歷史用上一版的原文查，不是模型寫的 text（keep 的 text 本來就該是空的）。"""
+        out = agent.inherit_keep_evidence(
+            [{"type": "keep", "ref": 1, "text": "模型亂寫的", "evidence_msg_ids": []}],
+            self.BASE, {"「糯糯」是他的專屬梗": ["h1"], "模型亂寫的": ["nope"]})
+        self.assertEqual(out[0]["evidence_msg_ids"][0], "h1")
+        self.assertNotIn("nope", out[0]["evidence_msg_ids"])
+
+    def test_long_history_keeps_the_earliest(self):
+        """歷史很長時，最早的（寫下這句話時的依據）不能被湊數的擠掉。"""
+        hist = {"「糯糯」是他的專屬梗": [f"h{i}" for i in range(20)]}
+        out = agent.inherit_keep_evidence(
+            [{"type": "keep", "ref": 1, "evidence_msg_ids": ["new"]}], self.BASE, hist)
+        ids = out[0]["evidence_msg_ids"]
+        self.assertEqual(ids[:8], [f"h{i}" for i in range(8)])
+        self.assertEqual(ids[-1], "new", "今晚新附的一定留著")
+
 
 class KeepEndToEndTests(unittest.TestCase):
     """走一次真實的 `run_and_persist`：解析 keep → 驗證 → 沿用證據 → 寫入。
@@ -704,7 +735,7 @@ class KeepEndToEndTests(unittest.TestCase):
          "evidence_msg_ids": ["1547184851646423110"]},
     ]
 
-    def _run(self, changes):
+    def _run(self, changes, history=None):
         written = {}
         recorded = {}
         run = agent.AgentRun(user_id=ALICE, status="ok", diff={
@@ -727,6 +758,7 @@ class KeepEndToEndTests(unittest.TestCase):
              mock.patch.object(store, "consecutive_failures", return_value=0), \
              mock.patch.object(store, "latest_version",
                                return_value={"version": 3, "changes": self.PREV}), \
+             mock.patch.object(store, "evidence_history", return_value=history or {}), \
              mock.patch.object(store, "write_version", side_effect=fake_write_version), \
              mock.patch.object(store, "record_run",
                                side_effect=lambda **kw: recorded.update(kw) or True):
@@ -762,6 +794,22 @@ class KeepEndToEndTests(unittest.TestCase):
              "evidence_msg_ids": []},
         ])
         self.assertEqual(recorded["evidence_claimed"], 1, "只算模型今晚附的那一個")
+
+    def test_history_reaches_the_written_version(self):
+        """歷史裡被換掉的證據要真的寫進新版本，不是只在函式裡算對。"""
+        early = "1549060752508452916"
+        written, recorded = self._run(
+            [{"type": "keep", "ref": 1, "trait": "", "text": "", "reason": "r",
+              "evidence_msg_ids": []},
+             {"type": "keep", "ref": 2, "trait": "", "text": "", "reason": "r",
+              "evidence_msg_ids": []}],
+            history={self.PREV[0]["text"]: [early, *self.PREV[0]["evidence_msg_ids"]]},
+        )
+        self.assertEqual(written["changes"][0]["evidence_msg_ids"],
+                         [early, *self.PREV[0]["evidence_msg_ids"]])
+        self.assertEqual(written["changes"][1]["evidence_msg_ids"],
+                         self.PREV[1]["evidence_msg_ids"], "沒有歷史的照舊沿用上一版")
+        self.assertEqual(recorded["evidence_claimed"], 0, "歷史的 id 不算今晚宣稱的")
 
 
 class DropCompositionTests(unittest.TestCase):

@@ -513,15 +513,21 @@ KEEP_EVIDENCE_TAIL = 4
 
 
 def inherit_keep_evidence(
-    accepted: list[dict[str, Any]], base_changes: Any
+    accepted: list[dict[str, Any]],
+    base_changes: Any,
+    history: Optional[dict[str, list[str]]] = None,
 ) -> list[dict[str, Any]]:
-    """keep 沿用上一版該項的證據，再接上今晚新附的。
+    """keep 沿用這段文字引用過的證據，再接上今晚新附的。
 
     **要在驗證之後做**：驗證層只該反查模型今晚宣稱的 id。沿用的 id 寫進版本表時
     就驗過了，混進去重驗會讓 `evidence_claimed` 灌水、幻覺率的分母變成另一個東西。
 
     文字沿用（`resolve_keeps`）之後，證據也必須跟著沿用，這句話和它的依據才會
     一直綁在一起。`ref` 對不上的 keep 不動（沒有上一版可以沿用）。
+
+    `history`（`store.evidence_history`）是同一段文字在**所有**版本引用過的證據。
+    只看上一版的話，以前被換掉的正確證據就永遠回不來——排序是歷史在前、上一版
+    其次、今晚新附的最後，所以寫下這句話時的依據會落在保留的前 8 則裡。
     """
     raw = base_changes if isinstance(base_changes, list) else []
     # 編號規則必須跟模型看到的清單一致，所以同樣從 `_persona_items` 取
@@ -531,10 +537,12 @@ def inherit_keep_evidence(
         if isinstance(c, dict) and str(c.get("type") or "") == "keep":
             original = by_n.get(_as_int(c.get("ref")))
             if original is not None:
+                past = (history or {}).get(str(original.get("text") or "").strip(), [])
                 old = original.get("evidence_msg_ids")
                 new = c.get("evidence_msg_ids")
                 ids = list(dict.fromkeys(
-                    [str(i) for i in (old if isinstance(old, list) else [])]
+                    [str(i) for i in past]
+                    + [str(i) for i in (old if isinstance(old, list) else [])]
                     + [str(i) for i in (new if isinstance(new, list) else [])]
                 ))
                 if len(ids) > KEEP_EVIDENCE_HEAD + KEEP_EVIDENCE_TAIL:
@@ -656,8 +664,12 @@ async def run_and_persist(
             validation.validate_diff, run.diff, user_id=user_id, fetch=ctx.fetch,
             base_refs=base_refs,
         )
+        # 有上一版才有 keep 可沿用，沒有就不必讀歷史（第一次跑省一次查詢）
+        history = (
+            await run_db(store.evidence_history, guild_id, user_id) if latest else None
+        )
         result.accepted = inherit_keep_evidence(
-            result.accepted, latest.get("changes") if latest else None
+            result.accepted, latest.get("changes") if latest else None, history
         )
         if save and result.skip_reason is None:
             base = f"v{latest['version']}" if latest else "production"
