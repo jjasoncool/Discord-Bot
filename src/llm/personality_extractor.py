@@ -385,7 +385,7 @@ async def extract_personalities(
                 ],
                 temperature=0.3,
                 top_p=0.8,
-                # 明確關閉 thinking。切到 27B 之後（14B 沒有這個設定）它會沿用
+                # 明確關閉 thinking。換成支援 thinking 的模型之後，不指定就會沿用
                 # lemonade profile 的 enable_thinking=true，實測讓這支排程從 13.8 分
                 # 變成 96 分——慢 7 倍。而 mock benchmark（四個判斷陷阱各兩次）顯示
                 # thinking 對這類「照證據歸納」的任務沒有可測幫助，開啟那組反而出現

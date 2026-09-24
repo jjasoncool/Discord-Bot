@@ -1,6 +1,6 @@
 """功能二記憶：使用者偏好事實抽取與寫入（Phase C-2/C-3 核心）。
 
-把一批插話頻道訊息餵 12B → 抽出「本人自我揭露的中性偏好」原子事實（守門：自他分流、
+把一批插話頻道訊息餵模型 → 抽出「本人自我揭露的中性偏好」原子事實（守門：自他分流、
 敏感丟、紅線丟）→ 經 corroboration（多次提到才升等）寫入共享 pgvector 記憶層。
 
 政策（見 AI_HANDOFF 功能二區塊）：
@@ -44,7 +44,7 @@ def _load_extractor_prompt() -> str:
 
 
 def _parse_facts(raw: str) -> list[dict]:
-    """從 12B 輸出穩健地解析 JSON facts 陣列（容忍 markdown 圍欄與前後雜訊）。"""
+    """從模型輸出穩健地解析 JSON facts 陣列（容忍 markdown 圍欄與前後雜訊）。"""
     if not raw:
         return []
     s = raw.strip()

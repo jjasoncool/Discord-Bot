@@ -1,6 +1,6 @@
 """MemoryService：跨功能共享的「記憶」單一接口（門面）。
 
-任何功能要用記憶，只 import 這個、呼叫語意清楚的方法，**不碰 pgvector / 12B / corroboration 細節**。
+任何功能要用記憶，只 import 這個、呼叫語意清楚的方法，**不碰 pgvector / 模型 / corroboration 細節**。
 底層委派給 `member_profile_store`（儲存）與 `preference_extractor`（抽取/升等），門面穩定、底層可換。
 
 各功能怎麼用：
@@ -62,7 +62,7 @@ class MemoryService:
 
     # ── 寫（抽取 / 升等 / 一步到位） ──────────────────────────────────
     async def extract(self, *, messages: list[dict], model: str) -> list[dict]:
-        """從一批訊息抽出候選偏好（12B 守門）。"""
+        """從一批訊息抽出候選偏好（模型守門）。"""
         from llm.preference_extractor import extract_preferences
         return await extract_preferences(messages=messages, model=model)
 

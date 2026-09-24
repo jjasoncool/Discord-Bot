@@ -183,7 +183,7 @@ def focus_news_query(cleaned: str, categories: str | None) -> str:
 # 為什麼國際金融題材要切 language=en：
 # zh-TW news engines 對美股/加密幣當日新聞命中差，題材源頭幾乎都是英文
 # (reuters/bloomberg/cnbc)，中文媒體常落後 6~24 小時。切到 en locale 才能撈到
-# 原始英文頭條；chat model（gemma 27B）自帶英→繁中能力，配 system prompt
+# 原始英文頭條；chat model 自帶英→繁中能力，配 system prompt
 # 「只能使用繁體中文」規則，最終輸出仍是繁中。
 #
 # 「網友說」歷史上只在 Reddit route 出現、未在 HARD 裡，因此維持 inline

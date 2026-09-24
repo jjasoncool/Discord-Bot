@@ -2,7 +2,7 @@
 
 走 `MemoryService` 門面，本檔只負責「訊息來源緩衝 + 排程 flush + 召回格式」這層膠水：
   - enqueue_for_memory：on_message 流裡，插話頻道每則（非 bot、有內容）收進緩衝。
-  - maybe_flush：背景排程週期呼叫；緩衝夠量且**前景(/askai)閒置**時才真的跑 12B 抽取（避免換模型）。
+  - maybe_flush：背景排程週期呼叫；緩衝夠量且**前景(/askai)閒置**時才真的跑模型抽取（避免換模型）。
   - recall_lines：插話生成前，召回該發話者的 trusted 偏好，注入 persona_context。
 """
 from __future__ import annotations
@@ -64,7 +64,7 @@ def buffer_size() -> int:
 async def maybe_flush(*, force: bool = False) -> dict:
     """背景排程呼叫：緩衝夠量且前景閒置時，跑一次偏好抽取沉澱。
 
-    閒置守門：stream 忙或 /askai 近期活躍 → 跳過（避免把 12B 換掉、跟前景搶）。
+    閒置守門：stream 忙或 /askai 近期活躍 → 跳過（避免把插話模型換掉、跟前景搶）。
     """
     if not _BUFFER:
         return {"flushed": 0, "reason": "empty"}

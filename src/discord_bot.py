@@ -148,7 +148,7 @@ async def on_ready():
         bot._raw_persist_task_started = True
         logger.info("raw 訊息備份定期 flush 已啟動（每 %d 秒）", RAW_FLUSH_INTERVAL_SECONDS)
 
-    # 啟動功能二記憶（偏好事實）定期批次抽取（閒置才真的跑 12B）
+    # 啟動功能二記憶（偏好事實）定期批次抽取（閒置才真的呼叫模型）
     from llm.ambient_memory import maybe_flush as _ambient_memory_flush
     from sys_settings.llm_settings import AmbientChatSettings as _AmbientSettings
     if not getattr(bot, '_ambient_memory_task_started', False):

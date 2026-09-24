@@ -1,6 +1,6 @@
 """功能二記憶：招牌梗 signature_tag 抽取與寫入（持久印象層）。
 
-把一批插話頻道訊息餵 12B → 抽出「某成員的招牌梗／口頭禪／自嘲外號」→ 經多層安全守門
+把一批插話頻道訊息餵模型 → 抽出「某成員的招牌梗／口頭禪／自嘲外號」→ 經多層安全守門
 （歸屬硬驗證、evidence 校驗、敏感過濾、spicy 非對稱門檻、每日去重 corroboration）寫入
 共享 pgvector 記憶層的 profile_kind='signature_tag'。
 
@@ -63,7 +63,7 @@ def _load_tag_extractor_prompt() -> str:
 
 
 def _parse_tags(raw: str) -> list[dict]:
-    """穩健解析 12B 輸出的 tag JSON 陣列。"""
+    """穩健解析模型輸出的 tag JSON 陣列。"""
     if not raw:
         return []
     s = raw.strip()

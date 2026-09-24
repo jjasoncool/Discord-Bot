@@ -317,7 +317,7 @@ class AmbientChatSettings(BaseSettings):
     style_refs_inject_count: int = 2      # 過地板後最多注入幾條（在池子裡抽樣 → 每次不同、不跳針）
     style_refs_min_positive: int = 1      # 至少幾個正向反應才進召回池
 
-    # 背景上下文：抓近期幾則當短期對話記憶（12B ctx 已調到 16384，可帶完整脈絡）
+    # 背景上下文：抓近期幾則當短期對話記憶（插話模型的 context 夠大，可帶完整脈絡）
     history_limit: int = 20
     # Phase B 認得人：召回在場成員 persona card（intro/impression/auto_personality）
     persona_top_k: int = 5
@@ -349,7 +349,7 @@ class AmbientChatSettings(BaseSettings):
     callback_line_max_chars: int = 120              # 注入行截斷（模糊印象不需長）
     callback_debug: bool = True                     # 調參用：把候選池/距離/三因子分/過哪關 log 進 discord_bot.log（調完關掉）
 
-    # 觸發門檻：插不插由 12B 判斷，「偶爾」感由冷卻 + 每小時上限保證（不用機率）
+    # 觸發門檻：插不插由模型判斷，「偶爾」感由冷卻 + 每小時上限保證（不用機率）
     min_chars: int = 4               # 太短（貼圖式單字）不插
     max_chars: int = 300             # 太長（長篇貼文）不插
     # 冷卻＝防洗版的安全網，不再是節拍器（話多話少的主旋鈕改為 hook_threshold）。
@@ -419,7 +419,7 @@ class AmbientChatSettings(BaseSettings):
     # 模型回此 sentinel（或空字串）代表「沒梗」→ 不發送
     silence_sentinel: str = "[PASS]"
 
-    # ── 看圖（ambient 模型需具 vision；QAT 12B 自帶 mmproj）──
+    # ── 看圖（ambient 模型需具 vision）──
     image_max_count: int = 9             # 一次請求最多帶幾張圖（含動圖拆出來的幀），硬上限
     image_max_bytes: int = 5 * 1024 * 1024
 

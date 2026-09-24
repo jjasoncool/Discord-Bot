@@ -5,13 +5,13 @@
 觸發哲學（由便宜到貴，任一關卡不過就 return，多數訊息連模型都不勞動）：
     硬性過濾（零成本）→ **靜默期**（等對話停一下再擷取脈絡）→ 內容閘（看整段 burst）
     → 冷卻 / 每小時上限 → foreground 讓位 → **鉤子閘**（零成本，決定值不值得花那 ~120s）
-    → 12B 判斷（回 / [PASS] 沉默）
+    → 模型判斷（回 / [PASS] 沉默）
 
 靜默期依對話節奏切換：慢節奏等到「夠久沒新訊息且沒人在打字」，熱聊只等一小段就開跑
 （熱聊等不到靜默，而且插話本來就不需要空檔）。一段 burst 合併成一次評估。
 
 節奏由「對話內容」決定，不由計時器決定：鉤子閘（`ambient_hooks`）算這一刻有沒有值得開口的
-訊號，`hook_threshold` 是話多話少的主旋鈕；冷卻退居防洗版的安全網。插不插最終仍由 12B 的
+訊號，`hook_threshold` 是話多話少的主旋鈕；冷卻退居防洗版的安全網。插不插最終仍由模型的
 `[PASS]` 說了算，鉤子只管「要不要喚醒它」。
 （歷史：曾有 `judge_sampling_rate` 純機率減壓閥，隨機丟棄評估——會丟掉好時機、留下爛時機，
 被有判斷依據的鉤子閘完全取代，已移除。）
@@ -21,8 +21,8 @@
 模型協調（對齊「只有 P0 才換大模型」共識）：
     - 生成走 `LLMService.generate_reply(model=ambient_model)`，內部經 `chat_raw` 持 `stream_exclusive()`，
       與 /askai 自動序列化、不並流。
-    - `/askai`（前景）活躍窗口內，背景插話暫停（`foreground_recently_active`），避免把大模型
-      換成 12B、下次 /askai 又換回去的 swap ping-pong。
+    - `/askai`（前景）活躍窗口內，背景插話暫停（`foreground_recently_active`），避免把 /askai 的模型
+      換成插話模型、下次 /askai 又換回去的 swap ping-pong。
 
 Phase A 記憶＝近期 `channel.history` 短期對話脈絡（不碰 RAG / persona card；那是 Phase B）。
 """
@@ -175,7 +175,7 @@ def _get_tracker(bot, channel_id: int) -> dict:
 def _write_ambient_debug(
     *, trace_id: str, prompt_record_log: str, outcome: str, reply: str
 ) -> None:
-    """把實際送進 12B 的完整 prompt（含三層 context）寫進 ambient_prompt.txt，供 debug。
+    """把實際送進模型的完整 prompt（含三層 context）寫進 ambient_prompt.txt，供 debug。
 
     outcome: reply | pass | error:<kind>。看這個檔就能確認「上下文有沒有被組進去」。
     """
@@ -248,7 +248,7 @@ async def _fetch_recent(
 def _rag_to_persona_lines(rag_context: Optional[list]) -> Optional[list[str]]:
     """把 retrieve_rag_context_sync 的結果轉成 persona_context 文字行（認得人）。
 
-    截斷每行、限制行數——12B 實測常駐 ctx 4096，persona card 偏長會吃爆 context。
+    截斷每行、限制行數——persona card 偏長會吃掉插話模型的 context，也拉長每次插話的 prompt 處理時間。
     """
     if not rag_context:
         return None
@@ -273,7 +273,7 @@ async def _build_persona_context(
     """Phase B：召回在場成員 persona card（intro/impression/auto_personality）。
 
     走既有 `retrieve_rag_context_sync`（吃純 id、不需 interaction）；sync LlamaIndex 放 executor。
-    embedding 走 Lemonade 獨立 port（不卸載 12B）。per-channel 短 TTL 快取避免每則打 pgvector。
+    embedding 走 Lemonade 獨立 port（不卸載插話模型）。per-channel 短 TTL 快取避免每則打 pgvector。
     best-effort：任何失敗回退到舊快取或 None，不影響插話本體。
     """
     now = time.monotonic()
@@ -873,7 +873,7 @@ async def maybe_ambient_reply(bot, message: discord.Message) -> None:
             # @ 才會再設 → 不會空轉；followup 另有 followup_max_chain 把關。
             if state["directed"] is not None:
                 continue
-            # 沒有新動靜 → 收手；自發輪次達上限也收手（避免超活躍頻道空燒 12B）
+            # 沒有新動靜 → 收手；自發輪次達上限也收手（避免超活躍頻道空燒模型）
             if not state["pending"] or passes >= _SETTINGS.max_passes_per_burst:
                 break
     finally:
@@ -1119,7 +1119,7 @@ async def _run_one_ambient_pass(
                 _log_skip(cid, f"已達每小時上限（{_SETTINGS.hourly_cap}），接續收手")
                 return
 
-    # ── 生成（12B；走 generate_reply → chat_raw 持 stream_exclusive）──
+    # ── 生成（走 generate_reply → chat_raw 持 stream_exclusive）──
     # 帶 #XXXX 錨點（與 chat_history 裡 bot 自己的行 name_with_anchor 一致）→ 讓模型能精準
     # 認出 chat_history 裡哪幾行是自己講的。guild.me 是 discord.py 即時提供的 bot Member（動態暱稱）。
     bot_display_name = None
@@ -1159,7 +1159,7 @@ async def _run_one_ambient_pass(
     system_prompt = _load_ambient_prompt()
     trace_id = f"amb-{message.channel.id}-{int(time.time() * 1000)}"
 
-    # 看圖：有圖就準備 vision payload（QAT 12B 自帶 vision，不必換模型）
+    # 看圖：有圖就準備 vision payload（插話模型本身支援 vision，不必換模型）
     image_payload = await _prepare_images(message) if has_image else None
     if not stripped and not image_payload and not directed:
         return  # 圖沒抓成功又沒文字 → 沒東西可接
