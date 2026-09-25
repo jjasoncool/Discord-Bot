@@ -674,6 +674,9 @@ class InheritKeepEvidenceTests(unittest.TestCase):
         self.assertEqual(ids[-2:], ["new1", "new2"])
 
     def test_only_keep_is_touched(self):
+        """revise 不沿用：它常是在推翻原句。真實案例——原句「會主動拋出職場與產業評論
+        （台積電抓工時、台奴…）」被 revise 成「不再是高頻的產業評論發起者」，沿用的話
+        撐原句的證據會掛到新句底下，剛好相反。"""
         changes = [
             {"type": "revise", "ref": 1, "evidence_msg_ids": ["r"]},
             {"type": "add", "ref": 0, "evidence_msg_ids": ["a"]},
@@ -761,6 +764,28 @@ class InheritKeepEvidenceTests(unittest.TestCase):
         out = agent._cap_evidence(ids)
         self.assertNotIn(future, out)
         self.assertIn(sf(9, 20), out)
+
+    def test_old_ids_attached_tonight_do_not_push_out_the_newest(self):
+        """審查找到的情境：模型用 search_messages 找到一批舊訊息附上來。
+
+        若「今晚附的一律保留」，最新的名額會被擠光——附 4 則 07-01 的舊訊息，
+        last_seen 就從 09-20 倒退成 09-01；附 13 則連最早的依據都被清空。
+        最新幾則依訊息時間挑，新的佐證本來就一定留得下，不需要另外保護。
+        """
+        from datetime import datetime, timezone
+        sf = self._sf
+        text = "「糯糯」是他的專屬梗"
+        hist = [sf(9, 1, k) for k in range(8)] + [sf(9, 20, k) for k in range(6)]
+        base = [{"type": "keep", "trait": "t", "text": text, "evidence_msg_ids": hist[-1:]}]
+        now = datetime(2026, 9, 25, tzinfo=timezone.utc)
+        for n in (4, 5, 13):
+            old = [sf(7, 1, k) for k in range(n)]
+            ids = agent.inherit_keep_evidence(
+                [{"type": "keep", "ref": 1, "evidence_msg_ids": old}], base, {text: hist}
+            )[0]["evidence_msg_ids"]
+            self.assertEqual(ids[:8], hist[:8], f"附 {n} 則：最早的依據要在")
+            self.assertTrue(tools._last_seen(ids, now=now).startswith("09-20"),
+                            f"附 {n} 則：last_seen 不可以倒退")
 
     def test_long_history_keeps_the_earliest(self):
         """歷史很長時，最早的（寫下這句話時的依據）不能被湊數的擠掉。"""

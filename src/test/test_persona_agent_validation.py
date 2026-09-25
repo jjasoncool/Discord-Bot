@@ -279,7 +279,7 @@ class RefAccountingTests(unittest.TestCase):
                          {"type": "drop", "ref": 3, "trait": "", "text": "",
                           "reason": "r", "evidence_msg_ids": []}], [1, 2, 3])
         self.assertEqual(acc, {"unaccounted": [], "duplicated": [], "unknown": [],
-                               "lost": []})
+                               "lost": [], "superseded": []})
 
     def test_rejected_revise_is_counted_as_lost(self):
         """有交代、但被退件＝那一項實際消失了。只看 unaccounted 會以為沒事。"""
@@ -327,12 +327,120 @@ class RefAccountingTests(unittest.TestCase):
         self.assertIsNone(self._acc([self._k(1)], None))
 
     def test_accounting_never_rejects(self):
-        """只記錄——先看遵守率再決定要不要強制。"""
+        """沒交代的只記錄不擋——先看遵守率再決定要不要強制（重複交代另有處理，見
+        OneChangePerRefTests）。"""
         r = validation.validate_diff(
             diff([self._k(1)]), user_id=ALICE, fetch=fetch_only({"m1"}),
             base_refs=[1, 2, 3])
         self.assertEqual(len(r.accepted), 1)
         self.assertIsNone(r.skip_reason)
+
+
+class DropEvidenceTests(unittest.TestCase):
+    def test_drop_ids_are_not_counted_as_claimed(self):
+        """drop 的 id 不反查，算進宣稱數的話幻覺率的分母會多出一批沒檢查過的 id。"""
+        drop = {"type": "drop", "ref": 1, "trait": "", "text": "", "reason": "重複",
+                "evidence_msg_ids": ["x", "y"]}
+        r = validation.validate_diff(
+            diff([drop, change()]), user_id=ALICE, fetch=fetch_only({"m1"}), base_refs=[1])
+        self.assertEqual(r.evidence_claimed, 1)
+        self.assertEqual(r.evidence_bogus, 0)
+
+
+class OneChangePerRefTests(unittest.TestCase):
+    """上一版的每一項只採用一筆變更——兩筆都寫進去，新版本就有兩條幾乎一樣的描述。
+
+    09-25 真實案例：同一人對第 6 項同時下了 keep 和 revise，兩筆都通過驗證。
+    """
+
+    KEEP6 = {"type": "keep", "ref": 6, "trait": "AI 接梗",
+             "text": "會把 AI 工具往荒謬/低俗方向接梗自嘲", "reason": "維持", "evidence_msg_ids": []}
+    REVISE6 = {"type": "revise", "ref": 6, "trait": "AI 接梗",
+               "text": "會把 AI 工具或遊戲角色商品往荒謬/低俗方向接梗自嘲",
+               "reason": "範圍變廣", "evidence_msg_ids": ["m1"]}
+
+    def _run(self, changes, base=(6, 7)):
+        return validation.validate_diff(
+            diff(changes), user_id=ALICE, fetch=fetch_only({"m1"}), base_refs=list(base))
+
+    def test_revise_wins_over_keep(self):
+        r = self._run([self.KEEP6, self.REVISE6, change(type="keep", ref=7)])
+        self.assertEqual([(c["type"], c["ref"]) for c in r.accepted],
+                         [("revise", 6), ("keep", 7)])
+        superseded = r.ref_accounting["superseded"]
+        self.assertIn("重複交代", superseded[0]["why"])
+        self.assertIn("沒有附證據", superseded[0]["why"], "沒東西可併就不能寫成「證據併入」")
+        self.assertEqual(superseded[0]["change"]["type"], "keep")
+        self.assertEqual(r.rejected, [], "沒有驗證失敗——退件數只算驗證失敗")
+
+    def test_item_is_not_counted_as_lost(self):
+        """被擋下的是重複的那筆，那一項本身還在——不能記成消失。"""
+        r = self._run([self.KEEP6, self.REVISE6, change(type="keep", ref=7)])
+        self.assertEqual(r.ref_accounting["lost"], [])
+        self.assertEqual(r.ref_accounting["duplicated"], [6], "重複照樣記錄")
+
+    def test_conflicts_keep_the_content(self):
+        """衝突時寧可保留內容：keep 勝過 drop；同類型取第一筆。"""
+        drop6 = {"type": "drop", "ref": 6, "trait": "", "text": "", "reason": "重複",
+                 "evidence_msg_ids": []}
+        r = self._run([drop6, self.KEEP6])
+        self.assertEqual([c["type"] for c in r.accepted], ["keep"])
+        r = self._run([self.REVISE6, dict(self.REVISE6, text="第二筆 revise")])
+        self.assertEqual([c["text"] for c in r.accepted], [self.REVISE6["text"]])
+
+    def test_revise_takes_tonights_evidence_from_the_losing_keep(self):
+        """同一晚又 keep 又 revise＝模型認為原句還成立，revise 是在補充。
+
+        真實案例（米拉 v10 第 25 項）：revise 的新句引用「黑料一堆低能台V」，revise 自己
+        附的證據撐不住；撐它的那則附在同一晚的 keep 上——不併的話引號對不上自己的證據。
+        """
+        keep = dict(self.KEEP6, evidence_msg_ids=["m2"])
+        revise = dict(self.REVISE6, text="慣用「低能」貶稱台V（「黑料一堆低能台V」）",
+                      evidence_msg_ids=["m1"])
+        r = validation.validate_diff(
+            diff([keep, revise]), user_id=ALICE,
+            fetch=fetch_only({"m1", "m2"}, {"m2": "黑料一堆低能台V"}), base_refs=[6])
+        self.assertEqual([c["type"] for c in r.accepted], ["revise"])
+        self.assertEqual(r.accepted[0]["evidence_msg_ids"], ["m1", "m2"])
+        self.assertEqual(r.quote_misses, [], "併進來的證據撐得住引號")
+
+    def test_duplicate_keeps_merge_their_evidence(self):
+        """真實案例：第 9 項下了兩次 keep，第二筆附了 09-20 的新發言當補充證據。
+        兩筆說的是同一句話——丟掉第二筆的話，那則新證據跟著不見、last_seen 停在舊日期。"""
+        first = dict(self.KEEP6, evidence_msg_ids=["m1"])
+        second = dict(self.KEEP6, reason="作為補充證據", evidence_msg_ids=["m2", "m1"])
+        r = validation.validate_diff(
+            diff([first, second]), user_id=ALICE, fetch=fetch_only({"m1", "m2"}),
+            base_refs=[6])
+        self.assertEqual(len(r.accepted), 1)
+        self.assertEqual(r.accepted[0]["evidence_msg_ids"], ["m1", "m2"])
+        self.assertEqual(r.rejected, [], "內容沒有少，不算退件")
+        self.assertEqual(r.ref_accounting["duplicated"], [6], "重複照樣記錄")
+        merged = r.ref_accounting["superseded"]
+        self.assertEqual(merged[0]["change"]["reason"], "作為補充證據",
+                         "併掉那筆的 reason 要查得到")
+
+    def test_superseded_keep_keeps_its_stripped_ids_on_record(self):
+        """併掉的那筆若有被剔除的假 id，稽核時要查得到是哪個。"""
+        first = dict(self.KEEP6, evidence_msg_ids=["m1"])
+        second = dict(self.KEEP6, evidence_msg_ids=["假的", "m2"])
+        r = validation.validate_diff(
+            diff([first, second]), user_id=ALICE, fetch=fetch_only({"m1", "m2"}),
+            base_refs=[6])
+        self.assertEqual(r.evidence_bogus, 1)
+        self.assertEqual(r.ref_accounting["superseded"][0]["change"]["stripped_msg_ids"], ["假的"])
+
+    def test_superseded_revise_quotes_are_not_counted(self):
+        """落選的 revise 不會寫入，它的引號對不上也不該算進統計。"""
+        second = dict(self.REVISE6, text="引用「根本沒講過的一句話」")
+        r = self._run([self.REVISE6, second])
+        self.assertEqual(r.quote_unmatched, 0)
+        self.assertEqual(r.quote_misses, [])
+
+    def test_adds_are_never_merged(self):
+        """add 沒有指涉既有項目，兩筆 add 是兩個不同的新特徵。"""
+        r = self._run([change(type="add", ref=0), change(type="add", ref=0, trait="另一個")])
+        self.assertEqual(len(r.accepted), 2)
 
 
 class AnchoredKeepTests(unittest.TestCase):

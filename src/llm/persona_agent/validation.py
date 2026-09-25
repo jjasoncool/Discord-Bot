@@ -38,7 +38,7 @@ class ValidationResult:
 
     accepted: list[dict[str, Any]] = field(default_factory=list)
     rejected: list[dict[str, Any]] = field(default_factory=list)
-    #: 宣稱的證據總數 / 其中查無此筆或不屬於本人的數量
+    #: 宣稱的證據數（drop 附的不算）／其中查無此筆或不屬於本人的數量
     evidence_claimed: int = 0
     evidence_bogus: int = 0
     #: 整筆不寫版本的原因（None 代表可以寫）
@@ -49,11 +49,13 @@ class ValidationResult:
     quote_unmatched: Optional[int] = 0
     quote_misses: list[str] = field(default_factory=list)
     #: 上一版每個編號有沒有被交代（keep／revise／drop 擇一、恰好一次），以及有交代
-    #: 卻被退件而實際消失的編號（`lost`，不寫新版本時為空）。**只記錄不擋**——先跑
-    #: 幾晚看遵守率再決定要不要強制。`None`＝本次沒有可對照的上一版：第一次跑（基準
+    #: 卻被退件而實際消失的編號（`lost`，不寫新版本時為空）。沒交代、指錯編號都**只記錄
+    #: 不擋**——先跑幾晚看遵守率再決定要不要強制；重複交代則會處理成只採一筆（見
+    #: `_one_change_per_ref`），編號照樣記在 `duplicated`，被取代的那幾筆連同原因記在
+    #: `superseded`。`None`＝本次沒有可對照的上一版：第一次跑（基準
     #: 是 production 的散文，沒有編號）、讀上一版失敗、或 diff 在逐項驗證前就被拒絕
     #: （結構不合法、user_id 不符）。
-    ref_accounting: Optional[dict[str, list[int]]] = None
+    ref_accounting: Optional[dict[str, list[Any]]] = None
 
     @property
     def hallucination_rate(self) -> float:
@@ -146,6 +148,15 @@ def _ref(change: dict[str, Any]) -> int:
         return 0
 
 
+def _is_anchored_keep(change: dict[str, Any], base: Optional[set[int]]) -> bool:
+    """指到上一版真實項目的 keep：文字、trait、證據都由程式沿用，不是模型今晚寫的。"""
+    return (
+        base is not None
+        and str(change.get("type") or "") == "keep"
+        and _ref(change) in base
+    )
+
+
 def _shape_problem(change: dict[str, Any], *, anchored: bool = False) -> Optional[str]:
     """形狀與語意檢查。回傳問題描述，沒問題回 None。
 
@@ -195,7 +206,7 @@ def _account_refs(changes: Any, base_refs: Iterable[int]) -> dict[str, list[int]
     「刪除」沒有紀錄，所以要求每一項都明確 keep／revise／drop。
 
     也順帶抓重複引用：09-22 那晚有一版「帶過來 28 項、上一版只有 27 項」，是兩個
-    keep 指到同一項，那一項被複製了一次。
+    keep 指到同一項，那一項被複製了一次（這裡只記錄；只留一筆由 `_one_change_per_ref` 處理）。
 
     回傳 `unaccounted`（沒被提到＝無聲消失）、`duplicated`（被提到兩次以上）、
     `unknown`（指到上一版不存在的編號）。計的是模型的**意圖**：被驗證層退掉的
@@ -224,6 +235,74 @@ def _account_refs(changes: Any, base_refs: Iterable[int]) -> dict[str, list[int]
 
 
 _REF_TYPES = {"keep", "revise", "drop"}
+
+
+#: 同一項被交代多次時採用哪一筆：revise 改了內容、keep 維持原樣、drop 刪除。
+#: 衝突時寧可保留內容（revise > keep > drop）；同類型取第一筆。
+_REF_PRIORITY = {"revise": 0, "keep": 1, "drop": 2}
+
+
+def _one_change_per_ref(
+    accepted: list[dict[str, Any]], base: set[int]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """上一版的每一項只採用一筆變更。回傳 `(採用, 被取代)`。
+
+    `_account_refs` 只記錄重複、不處理，於是兩筆都會寫進新版本。09-25 的真實案例：
+    同一人對第 6 項同時下了 keep 和 revise，新版本出現兩條幾乎一樣的描述——
+    「會把 AI 工具往荒謬/低俗方向接梗自嘲」與「會把 AI 工具或遊戲角色商品往荒謬/
+    低俗方向接梗自嘲」。bot 讀到的會是重複的內容。
+
+    **落選的是 keep 時，它今晚附的證據併進勝出那筆**（keep 或 revise）：
+      - 兩筆 keep 說的是同一句話，後面那筆常是模型在補證據。真實案例：有人對第 9 項下了
+        兩次 keep，第二筆附了 09-20 的新發言、reason 寫「作為第9項的補充證據」——
+        直接丟掉的話 `last_seen` 會停在 09-02。
+      - revise 勝出時也要併：同一晚對同一項又 keep 又 revise，代表模型認為原句還成立，
+        revise 是在補充。真實案例（米拉 v10 第 25 項）：revise 的新句引用「黑料一堆低能
+        台V」，但 revise 自己附的證據撐不住；撐它的那則附在同一晚的 keep 上。
+      - 只併**今晚已驗證**的 id，不併歷史；revise 為何不沿用歷史見 `agent.inherit_keep_evidence`。
+        若哪天模型同一晚 keep 又推翻同一項，今晚 keep 附的幾則會併到推翻的新句底下——
+        資料庫裡的 2 例都是補充，至今沒出現過，影響也只限今晚附的那幾則。
+
+    被取代的每一筆（含併掉的 keep）連同原因一起回傳，呼叫端記在
+    `ref_accounting["superseded"]`：它的 reason、`stripped_msg_ids` 才查得到。
+    """
+    winner: dict[int, int] = {}
+    for idx, c in enumerate(accepted):
+        ctype, r = str(c.get("type") or ""), _ref(c)
+        if ctype in _REF_PRIORITY and r in base:
+            cur = winner.get(r)
+            if cur is None or _REF_PRIORITY[ctype] < _REF_PRIORITY[str(accepted[cur].get("type"))]:
+                winner[r] = idx
+    extra: dict[int, list[str]] = {}
+    superseded: list[dict[str, Any]] = []
+    losers: set[int] = set()
+    for idx, c in enumerate(accepted):
+        ctype, r = str(c.get("type") or ""), _ref(c)
+        if ctype in _REF_PRIORITY and r in base and winner[r] != idx:
+            losers.add(idx)
+            chosen = str(accepted[winner[r]].get("type"))
+            if ctype == "keep" and chosen in ("keep", "revise"):
+                ids = c.get("evidence_msg_ids")
+                moved = [str(i) for i in (ids if isinstance(ids, list) else [])]
+                extra.setdefault(winner[r], []).extend(moved)
+                superseded.append({
+                    "change": c,
+                    "why": (f"第 {r} 項重複交代，採用 {chosen}，這筆 keep 今晚附的 "
+                            f"{len(moved)} 則證據併入" if moved else
+                            f"第 {r} 項重複交代，採用 {chosen}，這筆 keep 沒有附證據"),
+                })
+            else:
+                superseded.append({"change": c, "why": f"第 {r} 項重複交代，採用 {chosen}，這筆不寫入"})
+    kept: list[dict[str, Any]] = []
+    for idx, c in enumerate(accepted):
+        if idx in losers:
+            continue
+        if idx in extra:
+            ids = c.get("evidence_msg_ids")
+            own = [str(i) for i in ids] if isinstance(ids, list) else []
+            c = {**c, "evidence_msg_ids": list(dict.fromkeys(own + extra[idx]))}
+        kept.append(c)
+    return kept, superseded
 
 
 def _lost_refs(result: ValidationResult, base_refs: Iterable[int]) -> list[int]:
@@ -268,7 +347,10 @@ def validate_diff(
 
     claimed: list[str] = []
     for change in diff["changes"]:
-        if isinstance(change, dict) and isinstance(change.get("evidence_msg_ids"), list):
+        # drop 不需要證據，它附的 id 從來不會被判真假，所以不算進「宣稱的證據」——
+        # 算進去的話，幻覺率的分母會多出一批不可能被算成假的 id
+        if (isinstance(change, dict) and str(change.get("type") or "") != "drop"
+                and isinstance(change.get("evidence_msg_ids"), list)):
             claimed.extend(str(i) for i in change["evidence_msg_ids"])
     result.evidence_claimed = len(claimed)
     found = _real_evidence(fetch, user_id=user_id, ids=claimed)
@@ -283,11 +365,7 @@ def validate_diff(
         if not isinstance(change, dict):
             result.rejected.append({"change": change, "why": "不是物件"})
             continue
-        anchored = (
-            base is not None
-            and str(change.get("type") or "") == "keep"
-            and _ref(change) in base
-        )
+        anchored = _is_anchored_keep(change, base)
         problem = _shape_problem(change, anchored=anchored)
         if problem:
             result.rejected.append({"change": change, "why": problem})
@@ -325,25 +403,35 @@ def validate_diff(
                 "evidence_msg_ids": [i for i in ids if i in real],
                 "stripped_msg_ids": bogus,
             }
-        # 通過驗證後才算引號——被退掉的項目不必再花這個力氣。
-        # keep 不算：文字是沿用的原文、不是今晚寫的，而它的證據多半沒有重附，
-        # 拿空的證據比對會把每個引號都算成沒命中。
-        if not lookup_failed and not anchored:
+        result.accepted.append(change)
+
+    # 同一項被交代多次只採一筆。落選的不算退件（它沒有驗證失敗），記在
+    # ref_accounting 的 superseded——退件數才維持「驗證失敗」這一個意思。
+    superseded: list[dict[str, Any]] = []
+    if base is not None:
+        result.accepted, superseded = _one_change_per_ref(result.accepted, base)
+
+    # 引號比對放在最後：被退掉、被取代的項目不會寫入，不必算、也不該算進統計。
+    # 沿用上一版的 keep 不算：文字是原文、不是今晚寫的，而它的證據多半沒有重附，
+    # 拿空的證據比對會把每個引號都算成沒命中。ref 對不上的 keep 文字是模型寫的，照算。
+    if lookup_failed:
+        result.quote_unmatched = None
+    else:
+        for change in result.accepted:
+            if str(change.get("type") or "") == "drop" or _is_anchored_keep(change, base):
+                continue
             misses = _unmatched_quotes(
                 str(change.get("text") or ""),
                 # **比對基準要跟模型看到的一致**：工具回給模型的是
                 # `_clean_text_for_extraction` 的結果（去 URL、mention 轉 @某人、
                 # `<:x:123>` 轉 `:x:`）。拿 DB 原文比，模型忠實照抄也會對不上。
                 _JOIN.join(
-                    tools._clean_text_for_extraction(real.get(i, "")) for i in ids
+                    tools._clean_text_for_extraction(real.get(str(i), ""))
+                    for i in change.get("evidence_msg_ids") or []
                 ),
             )
             result.quote_unmatched += len(misses)
             result.quote_misses.extend(misses)
-        result.accepted.append(change)
-
-    if lookup_failed:
-        result.quote_unmatched = None
 
     if not result.accepted:
         result.skip_reason = "沒有任何一項通過驗證"
@@ -359,5 +447,6 @@ def validate_diff(
         result.ref_accounting["lost"] = (
             [] if result.skip_reason else _lost_refs(result, base)
         )
+        result.ref_accounting["superseded"] = superseded
 
     return result

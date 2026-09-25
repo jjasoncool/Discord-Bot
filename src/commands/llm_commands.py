@@ -1437,6 +1437,7 @@ class PersonalityCommands(commands.Cog):
             )
             if run.thinking_exhausted:
                 summary += "\n⚠️ thinking 把 context 用光，本次未經深思（品質要打折看）"
+            details = ""
             if validated is not None:
                 summary += (
                     f"\n驗證：通過 **{len(validated.accepted)}** 項／拒絕 "
@@ -1446,10 +1447,16 @@ class PersonalityCommands(commands.Cog):
                 if validated.skip_reason:
                     summary += f"\n未寫入版本：{validated.skip_reason}"
                 for rej in validated.rejected[:3]:
-                    summary += f"\n  ✗ {rej['change'].get('trait')}：{rej['why'][:90]}"
+                    details += f"\n  ✗ {rej['change'].get('trait')}：{rej['why'][:90]}"
+                # 同一項被交代多次時落選／併入的（不算退件，但除錯時要看得到）
+                superseded = (validated.ref_accounting or {}).get("superseded") or []
+                for sup in superseded[:3]:
+                    details += f"\n  ↺ {sup['change'].get('trait')}：{sup['why'][:90]}"
             summary += f"\n寫入版本表：{'是' if saved else '否（dry-run）'}"
             if run.error:
                 summary += f"\nerror: `{run.error[:200]}`"
+            # 細節放最後：訊息超過私訊上限時是從尾巴截，被切掉的只會是細節、不會是上面的狀態
+            summary += details
             attachment = None
             if run.diff is not None:
                 payload = json.dumps(run.diff, ensure_ascii=False, indent=2)

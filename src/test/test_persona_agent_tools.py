@@ -441,7 +441,7 @@ if __name__ == "__main__":
 class MaskOtherAuthorsTests(unittest.TestCase):
     """旁人的訊息不可以帶 `id`——引用不到才引用不錯。
 
-    `final_prompt` 早就警告過「引用不屬於這位使用者的 id，整筆結果都會被丟棄」，
+    `final_prompt` 當時就警告過「引用不屬於這位使用者的 id，整筆結果都會被丟棄」，
     但實測 51 個被擋下的假 id 裡有 **19 個（37%）是真訊息、只是作者是別人**。
     指令下過還是會犯 → 改結構：沒有 id 欄位就抄不到。
     """

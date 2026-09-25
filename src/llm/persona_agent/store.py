@@ -257,7 +257,7 @@ def record_run(
     quote_unmatched: Optional[int],
     quote_misses: Optional[list[str]],
     skipped_changes: Optional[list[dict[str, Any]]],
-    ref_accounting: Optional[dict[str, list[int]]],
+    ref_accounting: Optional[dict[str, list[Any]]],
     trace: list[dict[str, Any]],
     duration_ms: int,
     error: Optional[str],
