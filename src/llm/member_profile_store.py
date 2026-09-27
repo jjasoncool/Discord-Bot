@@ -70,8 +70,12 @@ class MemberProfileStore(Protocol):
         author_id: int,
         alias: str,
         personality: str,
-    ) -> None:
-        """將 LLM 自動萃取的人格描述寫入 RAG/向量資料庫。"""
+        extra_metadata: dict[str, str] | None = None,
+    ) -> bool:
+        """將 LLM 自動萃取的人格描述寫入 RAG/向量資料庫。回傳是否寫入成功。
+
+        `extra_metadata` 會蓋在預設 metadata 上。
+        """
 
 
 class NullMemberProfileStore:
@@ -120,8 +124,10 @@ class NullMemberProfileStore:
         author_id: int,
         alias: str,
         personality: str,
-    ) -> None:
-        _ = (guild_id, author_id, alias, personality)
+        extra_metadata: dict[str, str] | None = None,
+    ) -> bool:
+        _ = (guild_id, author_id, alias, personality, extra_metadata)
+        return False   # 沒有真的寫到任何地方
 
 
 class PgVectorMemberProfileStore:
@@ -402,9 +408,11 @@ class PgVectorMemberProfileStore:
         author_id: int,
         alias: str,
         personality: str,
-    ) -> None:
+        extra_metadata: dict[str, str] | None = None,
+    ) -> bool:
+        """寫入（同 doc_id 先刪後寫）。成功回 True；依賴未就緒或寫入失敗回 False（不丟例外）。"""
         if not self._dependencies_ready():
-            return
+            return False
 
         try:
             text = (
@@ -421,10 +429,14 @@ class PgVectorMemberProfileStore:
                 # 用 UTC ISO 8601；排程啟動補跑判斷會 query 這個欄位
                 "last_extracted_at": datetime.now(timezone.utc).isoformat(),
             }
+            # persona agent 發布精簡版時用來標記來源與版本
+            metadata.update(extra_metadata or {})
             doc_id = f"auto_personality:{guild_id}:{author_id}"
             await self._ainsert(doc_id=doc_id, text=text, metadata=metadata)
+            return True
         except Exception as exc:
             logger.error("寫入 auto personality 至 pgvector 失敗: %s", exc, exc_info=True)
+            return False
 
     # ── 功能二記憶：使用者偏好事實 preference_fact（Phase C-1 儲存層）─────────
     # 與 intro/impression/auto_personality 同表，用 profile_kind='preference_fact' 區分。

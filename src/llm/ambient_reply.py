@@ -245,6 +245,19 @@ async def _fetch_recent(
     return (collected or None, participant_ids)
 
 
+def _cut_at_boundary(text: str, max_chars: int) -> str:
+    """截到上限內最後一個「；」或「。」——不切半句；分隔符太前面（不到一半）才硬切。
+
+    persona 卡這一行是「自介：…。印象：…。AI觀察：條目；條目；…」。硬切會把最後一條切成
+    半句，意思可能整個變掉（「不再是主力」切成「不再」）。退到分隔符最多少一條，比留半句好。
+    精簡版在發布時就照這一行的上限算好預算（`persona_agent.publish`）；這裡是白天新增
+    自介／印象、或還沒改用精簡版的人描述太長時的安全網。
+    """
+    cut = text[:max_chars]
+    k = max(cut.rfind("；"), cut.rfind("。"))
+    return cut[:k] if k >= max_chars // 2 else cut
+
+
 def _rag_to_persona_lines(rag_context: Optional[list]) -> Optional[list[str]]:
     """把 retrieve_rag_context_sync 的結果轉成 persona_context 文字行（認得人）。
 
@@ -260,7 +273,7 @@ def _rag_to_persona_lines(rag_context: Optional[list]) -> Optional[list[str]]:
             continue
         text = " ".join(str(content).split())
         if len(text) > max_chars:
-            text = text[:max_chars] + "…"
+            text = _cut_at_boundary(text, max_chars) + "…"
         lines.append(text)
         if len(lines) >= _SETTINGS.persona_max_lines:
             break

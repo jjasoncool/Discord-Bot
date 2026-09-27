@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Any, Awaitable, Callable, Protocol
+from typing import Any, Awaitable, Callable, Collection, Protocol
 
 
 from llm.emoji_text_utils import (
@@ -515,10 +515,13 @@ async def run_personality_extraction(
     model: str | None = None,
     write_rag: bool = True,
     progress_callback: PersonalityExtractionProgressCallback | None = None,
+    exclude_author_ids: Collection[str] | None = None,
 ) -> dict[str, dict[str, str]]:
     """完整的人格萃取流程：撈資料 → 分組 → 萃取 → 寫入 RAG。
 
     guild: discord.Guild 物件，用於反查 display_name
+    exclude_author_ids: 寫入 RAG 時跳過的人（由 persona agent 精簡版負責的人，
+        見 `persona_agent.publish.production_skip_list`）；萃取照做、回傳照樣包含他們，只是不寫入
     回傳 {author_id: {"alias": str, "personality": str}}
     """
     global _extraction_running
@@ -531,6 +534,7 @@ async def run_personality_extraction(
         return await _run_personality_extraction_impl(
             guild=guild, days=days, channel_ids=channel_ids,
             model=model, write_rag=write_rag, progress_callback=progress_callback,
+            exclude_author_ids=exclude_author_ids,
         )
     finally:
         _extraction_running = False
@@ -544,6 +548,7 @@ async def _run_personality_extraction_impl(
     model: str | None = None,
     write_rag: bool = True,
     progress_callback: PersonalityExtractionProgressCallback | None = None,
+    exclude_author_ids: Collection[str] | None = None,
 ) -> dict[str, dict[str, str]]:
     # 解析模型：呼叫端指定 > config personality_model > config 主 model
     if not model:
@@ -629,8 +634,11 @@ async def _run_personality_extraction_impl(
 
     # 5. 寫入 RAG（可透過 write_rag=False 跳過，供預覽用）
     if write_rag and results and guild:
-        written = await save_personality_results(guild_id=guild.id, results=results)
-        logger.info("人格萃取：寫入 RAG %d 筆", written)
+        excluded = {str(a) for a in (exclude_author_ids or ())}
+        to_write = {uid: data for uid, data in results.items() if str(uid) not in excluded}
+        written = await save_personality_results(guild_id=guild.id, results=to_write)
+        logger.info("人格萃取：寫入 RAG %d 筆（跳過由 persona agent 精簡版負責的 %d 人）",
+                    written, len(results) - len(to_write))
 
     return results
 
@@ -652,13 +660,14 @@ async def save_personality_results(
     total = len(results)
     for uid, data in results.items():
         try:
-            await rag_port.index_auto_personality(
+            # 寫入函式自己吞例外、回傳成功與否——照回傳值計，不然失敗也會被算成成功
+            if await rag_port.index_auto_personality(
                 guild_id=guild_id,
                 author_id=int(uid),
                 alias=data["alias"],
                 personality=data["personality"],
-            )
-            written += 1
+            ):
+                written += 1
         except Exception as exc:
             logger.error("寫入 auto_personality 失敗: uid=%s err=%s", uid, exc)
         if progress_callback:

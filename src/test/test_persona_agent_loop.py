@@ -485,17 +485,20 @@ class BlockingCallTests(unittest.TestCase):
     ASYNC_ENTRYPOINTS = [
         ("agent.run_and_persist", "run_and_persist", {"store", "validation"}),
         ("batch.run_batch", "run_batch", {"store", "validation"}),
+        ("publish.run_publish", "run_publish", {"store", "validation"}),
+        ("publish.production_skip_list", "production_skip_list", {"store", "validation"}),
     ]
 
     def test_no_bare_sync_db_call_in_async(self):
         import ast
         import inspect
 
-        from llm.persona_agent import batch
+        from llm.persona_agent import batch, publish
 
-        modules = {"run_and_persist": agent, "run_batch": batch}
+        modules = {"run_and_persist": agent, "run_batch": batch, "run_publish": publish,
+                   "production_skip_list": publish}
         # 裸呼叫的同步函式（非 module.attr 形式）也要擋
-        bare_names = {"select_targets"}
+        bare_names = {"select_targets", "load_guild_state", "build_plans"}
         offenders = []
         for label, attr, banned in self.ASYNC_ENTRYPOINTS:
             src = inspect.getsource(getattr(modules[attr], attr))

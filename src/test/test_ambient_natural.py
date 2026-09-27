@@ -21,6 +21,7 @@ import sys
 import time
 import unittest
 from collections import deque
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -282,6 +283,32 @@ class ImageMarkerTests(unittest.TestCase):
     def test_plain_message_unchanged(self):
         line = format_chat_line(_msg("純文字"), TZ8, time_only=True)
         self.assertTrue(line.endswith("純文字"))
+
+
+class PersonaLineCutTests(unittest.TestCase):
+    """persona 卡超過每行上限時，切在最後一個「；」「。」——不留半句。"""
+
+    def test_cuts_at_the_last_separator(self):
+        text = "「米拉」— 自介：短。AI觀察：" + "；".join(["條目" + "字" * 20] * 5)
+        cut = ambient_reply._cut_at_boundary(text, 100)
+        self.assertLessEqual(len(cut), 100)
+        self.assertTrue(cut.endswith("字"), "結尾是一條完整的條目，不是半句")
+        self.assertIn(cut[cut.rfind("；") + 1:], text.split("；"), "最後一段是原本的整條")
+
+    def test_hard_cut_when_no_separator_nearby(self):
+        text = "字" * 300
+        self.assertEqual(ambient_reply._cut_at_boundary(text, 100), "字" * 100)
+        early = "短。" + "字" * 300          # 分隔符在很前面：退回去會丟掉幾乎整行
+        self.assertEqual(len(ambient_reply._cut_at_boundary(early, 100)), 100)
+
+    def test_lines_use_the_boundary_cut(self):
+        long_line = "「米拉」— AI觀察：" + "；".join(["條目" + "字" * 30] * 30)
+        settings = SimpleNamespace(persona_line_max_chars=200, persona_max_lines=6)
+        with mock.patch.object(ambient_reply, "_SETTINGS", settings):
+            lines = ambient_reply._rag_to_persona_lines([{"role": "user", "content": long_line}])
+        body = lines[0].removesuffix("…")
+        self.assertEqual(body[body.rfind("；") + 1:], "條目" + "字" * 30, "最後一段是完整的條目")
+        self.assertLessEqual(len(body), 200)
 
 
 class SilenceSentinelTests(unittest.TestCase):

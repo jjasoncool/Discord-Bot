@@ -11,18 +11,12 @@ from llm.tokenization import tokens_for_debug
 PERSONA_MAX_PARTICIPANTS = 5
 PERSONA_MAX_CARDS = 3
 
-#: 單張卡每個欄位的字數上限。**400 → 600（2026-09-07）**：persona agent 的產出是
-#: 累積式 diff，每版新增約一項、每項穩定 47 字，於是總長單調成長——
-#: v1 平均 296 字（10.9% 溢出）、v2 371（39.1%）、v3 424（**51.6% 溢出**，最長 888）。
-#: 影子模式下沒人讀所以沒有症狀，但 M7 一切換就會有一半的人拿到被腰斬的描述，
-#: 而截斷是從尾巴砍，砍掉的正是最新版新增的觀察。
+#: 單張卡每個欄位的字數上限（400 → 600，2026-09-07）。
 #:
-#: 代價實測可忽略：3 張卡多 600 字元 ≈ +375 tokens，佔 context 的比例很小；
-#: prompt 處理 245 tok/s，等於每次插話多約 1.5 秒。
-#:
-#: ⚠️ **這是治標**。每版 +1 項 × 47 字，600 大約撐到 v6 又會撞牆。真正的解法是讓
-#: agent 學會合併相近特徵而不是一直 add（v3 的 keep 66% / add 25% / revise 10%
-#: 說明它幾乎不刪東西）——那是 prompt 的事，不是常數的事。
+#: persona agent 的完整描述會一路長大，但 auto_personality 不放全文：M7 起寫進去的是
+#: `persona_agent.publish` 挑的精簡版，它的預算同時受這個上限與插話那一行的上限
+#: （`AmbientChatSettings.persona_line_max_chars`）限制，所以不會被這裡截斷。要調這個數字時，
+#: 精簡版的預算會跟著變——它在發布時讀的就是這個常數。
 PERSONA_MAX_CARD_CHARS = 600
 PERSONA_MAX_IMPRESSIONS_PER_CARD = 3
 
@@ -262,6 +256,16 @@ def _clean_auto_personality_text(raw: str) -> str:
     return result
 
 
+def persona_card_label(card: dict[str, Any]) -> str:
+    """卡片那一行開頭的標籤。`persona_agent.publish` 算精簡版預算時也用這支，兩邊才不會分岔。"""
+    alias = card.get("alias") or "未知"
+    person_id = str(card.get("person_id") or "")
+    # 末 4 碼當穩定身份錨點，跟 chat_history 行的 display_name#XXXX 對齊
+    # 完整 user_id 不進 prompt（降敏 + 省 token）；撞號代價只在 LLM 描述層
+    short_id = person_id[-4:] if len(person_id) >= 4 else ""
+    return f"{alias}#{short_id}" if short_id else alias
+
+
 def format_persona_cards_for_context(cards: list[dict[str, Any]]) -> list[dict[str, str]]:
     """將 persona cards 格式化為自然語言描述，供 LLM 理解群友人物背景。
 
@@ -279,12 +283,8 @@ def format_persona_cards_for_context(cards: list[dict[str, Any]]) -> list[dict[s
         }
     )
     for card in cards:
-        alias = card.get("alias") or "未知"
         person_id = str(card.get("person_id") or "")
-        # 末 4 碼當穩定身份錨點，跟 chat_history 行的 display_name#XXXX 對齊
-        # 完整 user_id 不進 prompt（降敏 + 省 token）；撞號代價只在 LLM 描述層
-        short_id = person_id[-4:] if len(person_id) >= 4 else ""
-        label = f"{alias}#{short_id}" if short_id else alias
+        label = persona_card_label(card)
 
         # 清理 intro（自我介紹）
         intro = _clean_intro_text(card.get("intro_summary") or "")

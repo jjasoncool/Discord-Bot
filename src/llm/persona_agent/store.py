@@ -76,7 +76,7 @@ CREATE INDEX IF NOT EXISTS idx_persona_runs_run_id ON {RUNS_TABLE} (run_id);
 
 
 def ensure_table() -> None:
-    """建表（idempotent）。失敗只 log 不 raise —— 影子模式不該拖垮排程。"""
+    """建表（idempotent）。失敗只 log 不 raise —— agent 不該拖垮排程。"""
     try:
         with LLMServiceSettings().pgvector_cursor(commit=True) as cur:
             cur.execute(_DDL)

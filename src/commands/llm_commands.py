@@ -944,7 +944,25 @@ class _PersonalityResultPagerView(discord.ui.View):
         self._disable_all()
         await interaction.response.edit_message(content="⏳ 正在寫入 RAG...", embed=None, view=self)
 
-        total = len(self.results)
+        # persona agent 的精簡版發布開啟時，由精簡版負責的人不寫——不然會把精簡版蓋回
+        # production 的描述，直到下一晚發布才換回來（沒開啟時名單是空的）
+        try:
+            from llm.persona_agent.publish import production_skip_list, split_uncovered
+
+            guild = interaction.guild
+            names = {str(m.id): m.display_name for m in guild.members} if guild else None
+            skip = await production_skip_list(self.guild_id, display_names=names)
+        except Exception as exc:
+            logger.error("讀取精簡版名單失敗，這次不寫入: %s", exc, exc_info=True)
+            await interaction.edit_original_response(
+                content="⚠️ 無法確認哪些人由 persona agent 的精簡版負責，這次不寫入，請稍後再試。",
+                view=self,
+            )
+            self.stop()
+            return
+        results, skipped = split_uncovered(self.results, skip)
+
+        total = len(results)
         progress_msg = await interaction.followup.send(
             f"⏳ 正在寫入 RAG（0/{total}）",
             ephemeral=True,
@@ -967,12 +985,17 @@ class _PersonalityResultPagerView(discord.ui.View):
         from llm.personality_extractor import save_personality_results
         written = await save_personality_results(
             guild_id=self.guild_id,
-            results=self.results,
+            results=results,
             progress_callback=_report,
         )
         if self.job:
             self.job.status = "written"
         final_text = f"✅ 已寫入 RAG：{written} 筆"
+        if skipped:
+            final_text += (
+                f"\n↷ 跳過 {len(skipped)} 位（由 persona agent 的精簡版負責）："
+                + "、".join(skipped[:20]) + ("…" if len(skipped) > 20 else "")
+            )
         try:
             await progress_msg.edit(content=final_text)
         except Exception as exc:
@@ -1325,7 +1348,7 @@ class PersonalityCommands(commands.Cog):
         model: str | None = None,
         save: bool = False,
     ):
-        """對單一成員跑一次 persona agent（影子模式的除錯入口）。
+        """對單一成員跑一次 persona agent（除錯入口）。
 
         **為什麼一定要有這個指令**：agent 走 `stream_exclusive()` 那把 process 內的
         全域鎖來跟 /askai、插話 協調「一次只做一件事」。用 `docker exec` 在旁邊的

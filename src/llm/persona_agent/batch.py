@@ -1,7 +1,7 @@
 """每晚一次的批次執行：挑人 → 逐一跑 → 到點收手。
 
-排在 production 萃取**之後**（04:00 排程的第 ④ 步），兩者寫不同的表、序列執行，
-彼此不知道對方存在。
+排在 production 萃取**之後**（04:00 排程的第 ④ 步），序列執行。這一步只寫 agent 自己的表；
+bot 讀的 `auto_personality` 由第 ⑤ 步 `publish` 寫。
 
 三個設計決定，每個都來自實測：
 
@@ -115,7 +115,7 @@ async def run_batch(
     """跑一輪批次，回傳統計。任何單人失敗都不會中斷整批。"""
     s = settings or PersonaAgentSettings()
     if not s.enabled:
-        logger.info("persona agent 影子模式未啟用，跳過")
+        logger.info("persona agent 未啟用，跳過")
         return {"skipped": 1}
 
     targets = await persona_agent.run_db(select_targets, guild_id, s)

@@ -171,15 +171,20 @@ async def on_ready():
         from sys_settings.time_settings import APP_TZ
 
         async def _run_daily_maintenance_once():
-            """每日維護：四個步驟，各自 try / except，前面失敗不拖累後面。
+            """每日維護：五個步驟。①②④⑤ 各自 try / except，失敗不拖累後面；③ 遇鎖只
+            log 後返回，其他例外會中止整個維護（④⑤ 不跑，等下一次 04:00；期間重啟的話
+            啟動補跑檢查會補跑）。
 
               ① emoji 字典自動更新（讀 guild.emojis → 補空值項目）
               ② 招牌梗衰減 sweep（純 SQL GC／降級）
-              ③ 人格萃取（production，唯一寫 auto_personality 的步驟）
-              ④ persona agent 影子模式（寫獨立表，`PersonaAgentSettings.enabled` 控制）
+              ③ 人格萃取（production，寫 auto_personality；發布開啟後跳過 ⑤ 要寫精簡版的人）
+              ④ persona agent（寫獨立表，`PersonaAgentSettings.enabled` 控制）
+              ⑤ 發布 agent 精簡版到 auto_personality（`PersonaAgentSettings.publish_mode` 控制）
 
             ①②③ 彼此無相依，④ 例外：它要拿 ③ 剛寫好的描述當第一次 diff 的基準，
             也跟 ③ 搶同一顆 GPU，所以刻意排在 ③ 之後、且 ③ 遇鎖返回時連帶跳過。
+            ⑤ 排在最後：把每個人最新的精簡版寫進 auto_personality；精簡版是空的人不動，
+            由 ③ 照常更新。
 
             2026-08-18 拆分：原本 ② 藏在 ③ 內部（共用 `_extraction_running` 鎖、不另開排程），
             但 ①②③ 無資料相依。拆開後 ③ 日後換成 persona agent 實作時，只需替換這一步，
@@ -212,8 +217,23 @@ async def on_ready():
                 PersonalityExtractionInProgressError,
                 run_personality_extraction,
             )
+            # 發布開啟時，⑤ 要寫精簡版的人 ③ 不寫：否則每晚 ③ 會先把精簡版蓋回 production
+            # 的描述，要等 ④ 跑完、⑤ 才換回來（約 3 小時）；這段時間重啟的話，補跑檢查看到
+            # ③ 已經跑過就不補，整天都是 production 的版本。讀名單失敗就照舊全寫。
+            def _display_names() -> dict[str, str]:
+                return {str(m.id): m.display_name for m in guild.members}
+
+            skip: set[str] = set()
             try:
-                results = await run_personality_extraction(guild=guild, days=14)
+                from llm.persona_agent.publish import production_skip_list
+
+                skip = await production_skip_list(guild.id, display_names=_display_names())
+            except Exception as exc:
+                logger.warning("讀取精簡版名單失敗，③ 照常寫入所有人: %s", exc)
+            try:
+                results = await run_personality_extraction(
+                    guild=guild, days=14, exclude_author_ids=skip,
+                )
             except PersonalityExtractionInProgressError:
                 logger.info("人格萃取略過：已有萃取正在執行中")
                 return
@@ -230,7 +250,7 @@ async def on_ready():
                 )
             logger.info("人格萃取排程完成：萃取 %d 位使用者", len(results))
 
-            # ④ persona agent 影子模式（獨立資料表，不碰 auto_personality）
+            # ④ persona agent（寫獨立資料表，不碰 auto_personality——那是 ⑤ 的事）
             #    刻意排在 ③ 之後：兩者都吃 GPU，序列執行才不會互搶；而且 agent 的
             #    diff 要拿 production 剛寫好的描述當第一次的基準。
             try:
@@ -248,8 +268,21 @@ async def on_ready():
                         settings=agent_settings,
                     )
             except Exception as exc:
-                # 影子模式失敗不該影響任何既有功能
+                # agent 失敗不該影響任何既有功能
                 logger.error("persona agent 批次失敗（不影響 production）: %s", exc, exc_info=True)
+
+            # ⑤ 發布精簡版：每個人 agent **最新**版本挑出來的精簡版（當晚 ④ 沒輪到的人也算），
+            #    見 `persona_agent.publish`。失敗時 ③ 跳過的人維持原本的描述，下一晚再寫。
+            try:
+                from llm.persona_agent.publish import effective_publish_mode, run_publish
+
+                await run_publish(
+                    guild_id=guild.id,
+                    mode=effective_publish_mode(),
+                    display_names=_display_names(),
+                )
+            except Exception as exc:
+                logger.error("persona 精簡版發布失敗（production 描述不受影響）: %s", exc, exc_info=True)
 
         async def _personality_schedule():
             # 啟動後等 60 秒再開始，讓其他服務先就緒
@@ -314,13 +347,13 @@ async def on_ready():
     except Exception as _exc:
         logger.error("ai_interactions 建表啟動失敗: %s", _exc, exc_info=True)
 
-    # persona agent 的兩張影子表（比照上面的 ai_interactions；建表 idempotent、
-    # 失敗只 log 不 raise——影子模式不該拖垮 bot 啟動）
+    # persona agent 的兩張表（比照上面的 ai_interactions；建表 idempotent、
+    # 失敗只 log 不 raise——agent 不該拖垮 bot 啟動）
     try:
         from llm.persona_agent.store import ensure_table as _ensure_persona_agent
         await asyncio.to_thread(_ensure_persona_agent)
     except Exception as exc:
-        logger.warning("persona agent 資料表初始化失敗（影子模式功能將無法寫入）: %s", exc)
+        logger.warning("persona agent 資料表初始化失敗（agent 將無法寫入）: %s", exc)
 
     # v2 風格召回：背景回填既有列的 embedding（idempotent；embed 端就緒後逐批做，不阻塞啟動）。
     # on_ready 可能 reconnect 重觸發 → 用 flag 避免重複起背景工作（回填本身也 idempotent，雙保險）。

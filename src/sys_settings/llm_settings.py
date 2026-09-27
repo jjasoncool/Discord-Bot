@@ -471,10 +471,12 @@ class AmbientChatSettings(BaseSettings):
 
 
 class PersonaAgentSettings(BaseSettings):
-    """人格擷取 agent（影子模式）的排程設定。
+    """人格擷取 agent 的排程設定。
 
-    與 production 萃取的關係：兩者寫不同的表、序列執行（agent 排在萃取之後），
-    彼此不知道對方存在。agent 失敗不影響 production，反之亦然。
+    與 production 萃取的關係：兩者序列執行（③ production → ④ agent → ⑤ 發布）。agent 的
+    完整描述寫自己的表（`persona_agent_versions`），bot 讀不到；⑤ 在 `publish_mode="on"`
+    時才把挑過的精簡版寫進 production 的 `auto_personality`，③ 則跳過由精簡版負責的人
+    （見 `persona_agent.publish`）。agent 失敗不影響 production，反之亦然。
 
     **只吃 class 預設值，不吃環境變數**（同 `AmbientChatSettings` /
     `DiaryReflectionSettings`）。少了下面那組 `model_config` 的話，欄位名會直接變成
@@ -511,6 +513,12 @@ class PersonaAgentSettings(BaseSettings):
     #: 實測活躍使用者約 4.4 分／人，56 人約 3.4 小時 → 04:15 開始會跑到 07:40，
     #: 那時群裡開始有人聊天，agent 每步禮讓十分鐘再硬上反而最擾民。
     deadline_hour: int = 7
+
+    #: M7：把精簡版寫進 `auto_personality` 給插話／askai 讀（04:00 排程的第 ⑤ 步，見
+    #: `persona_agent.publish`）。off＝不做；dry_run＝只算、寫 log，不寫入——上線前先看
+    #: 挑出來的東西對不對；on＝寫入。on 時 ③ 與手動萃取會跳過 ⑤ 要寫精簡版的人，不把它蓋回去。
+    #: `enabled` 關掉時一律當 off（`publish.effective_publish_mode`）：沒有新版本可發布。
+    publish_mode: Literal["off", "dry_run", "on"] = "dry_run"
 
     #: 納入門檻。**刻意比 production 寬**（production 是 14 天 10 則）：
     #: 14 天 <10 則的人 production 直接跳過，而那正是 agent 唯一明確贏的族群
