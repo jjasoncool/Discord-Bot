@@ -907,9 +907,12 @@ def _retrieve_rag_context_impl(
                     md = node.metadata if isinstance(node.metadata, dict) else {}
                     if str(md.get("guild_id", "")) != str(guild_id):
                         continue
+                    # node.metadata 不含 ref_doc_id（LlamaIndex 把它放在 node 本身），要從 node 取，
+                    # 才會跟 SQL 撈到的同一份文件去重——否則同一則印象會在卡片裡出現兩次
+                    ref_doc_id = getattr(getattr(node, "node", node), "ref_doc_id", None)
                     collected.append(
                         {
-                            "db_id": md.get("ref_doc_id") or md.get("doc_id") or md.get("document_id") or "",
+                            "db_id": ref_doc_id or md.get("ref_doc_id") or md.get("doc_id") or md.get("document_id") or "",
                             "text": node.text or "",
                             "metadata": md,
                             "source": "vector",
@@ -932,8 +935,9 @@ def _retrieve_rag_context_impl(
             dedup[dedup_key] = item
             continue
 
-        # 保留更高精度來源
-        priority = {"sql_identity": 3, "sql_alias": 2, "vector": 1}
+        # 保留更高精度來源（sql_participant 排在 vector 之上：同一份文件兩路都撈到時，
+        # 留 SQL 那筆，卡片的來源加分才不會掉到 vector 的）
+        priority = {"sql_identity": 4, "sql_alias": 3, "sql_participant": 2, "vector": 1}
         if priority.get(item.get("source", ""), 0) > priority.get(dedup[dedup_key].get("source", ""), 0):
             dedup[dedup_key] = item
 
