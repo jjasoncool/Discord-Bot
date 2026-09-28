@@ -11,6 +11,7 @@ from typing import Optional
 
 # 注意：需確保 utils 資料夾下的 utils.py 包含 create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, ChannelConfig 等定義
 from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, ChannelConfig, check_guild
+from utils.panel_bump import PanelBumper
 # 注意：需確保 services 資料夾下的 intro_profile_service.py 包含 IntroProfilePayload, ImpressionPayload, IntroProfileServiceProtocol, IntroProfileService 等定義
 from services.intro_profile_service import (
     IntroProfilePayload,
@@ -25,34 +26,10 @@ from settings.channel_registry import all_settings, get_setting, ChannelSetConte
 # 獲取 logger
 logger = logging.getLogger('discord_bot')
 INTRO_PANEL_RUNTIME_FILE = "settings/intro_panel_runtime.json"
+# 面板按鈕 custom_id：persistent view 與置底翻找殘留面板共用
+INTRO_CUSTOM_ID_OPEN = "intro_open_modal"
+INTRO_CUSTOM_ID_IMPRESSION = "intro_open_impression_modal"
 INTRO_SUBMISSION_RUNTIME_FILE = "settings/intro_submission_runtime.json"
-
-
-def _load_intro_panel_runtime_config() -> dict:
-    """只讀取 message_id（不進版控）"""
-    if not os.path.exists(INTRO_PANEL_RUNTIME_FILE):
-        return {}
-    try:
-        with open(INTRO_PANEL_RUNTIME_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            # 強制只保留 message_id
-            return {"intro_panel_message_id": data.get("intro_panel_message_id")}
-    except Exception as e:
-        logger.error(f"讀取 {INTRO_PANEL_RUNTIME_FILE} 失敗: {e}", exc_info=True)
-        return {}
-
-
-def _save_intro_panel_runtime_config(message_id: int) -> None:
-    """只寫入 message_id（不存其他東西）"""
-    try:
-        os.makedirs(os.path.dirname(INTRO_PANEL_RUNTIME_FILE), exist_ok=True)
-        data = {"intro_panel_message_id": message_id}
-        with open(INTRO_PANEL_RUNTIME_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        logger.info(f"已更新 runtime.json → message_id={message_id}")
-    except Exception as e:
-        logger.error(f"寫入 {INTRO_PANEL_RUNTIME_FILE} 失敗: {e}", exc_info=True)
-        raise
 
 
 def _load_intro_submission_runtime_config() -> dict:
@@ -524,11 +501,11 @@ class IntroPanelView(discord.ui.View):
         self.intro_service = intro_service
         self.management_cog = management_cog
 
-    @discord.ui.button(label="✍️ 填寫自我介紹", style=discord.ButtonStyle.primary, custom_id="intro_open_modal")
+    @discord.ui.button(label="✍️ 填寫自我介紹", style=discord.ButtonStyle.primary, custom_id=INTRO_CUSTOM_ID_OPEN)
     async def intro_open_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(IntroProfileModal(self.intro_service, self.management_cog))
 
-    @discord.ui.button(label="🗣️ 填寫對他人印象", style=discord.ButtonStyle.secondary, custom_id="intro_open_impression_modal")
+    @discord.ui.button(label="🗣️ 填寫對他人印象", style=discord.ButtonStyle.secondary, custom_id=INTRO_CUSTOM_ID_IMPRESSION)
     async def intro_open_impression_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
         logger.info(
             "intro_impression_button_clicked user_id=%s guild_id=%s channel_id=%s custom_id=%s",
@@ -545,6 +522,11 @@ class ManagementCommands(commands.Cog):
         self.bot = bot
         self.intro_profile_service: IntroProfileServiceProtocol = (
             intro_profile_service or IntroProfileService(rag_port=get_member_profile_store())
+        )
+        # 面板位置記在 runtime 檔的 intro_panel_channel_id / intro_panel_message_id（不寫 config.json）
+        self.intro_panel = PanelBumper(
+            INTRO_PANEL_RUNTIME_FILE, self._send_intro_panel_to_channel,
+            custom_ids=(INTRO_CUSTOM_ID_OPEN, INTRO_CUSTOM_ID_IMPRESSION), key_prefix="intro_panel_",
         )
 
     async def cog_load(self):
@@ -629,8 +611,7 @@ class ManagementCommands(commands.Cog):
         if not interaction.guild:
             return
 
-        config_file = "config.json"
-        config = ChannelConfig.load_config(config_file, caller="ManagementCommands")
+        config = ChannelConfig.load_config("config.json", caller="ManagementCommands")
         intro_channel_id = config.get("intro_channel_id", ChannelConfig.DEFAULT_ID)
         if intro_channel_id == ChannelConfig.DEFAULT_ID:
             logger.info("自動 bump 跳過：intro_channel_id 未設定。")
@@ -641,12 +622,7 @@ class ManagementCommands(commands.Cog):
             logger.warning("自動 bump 跳過：intro_channel_id 非有效文字頻道。id=%s", intro_channel_id)
             return
 
-        message, deleted_old = await self._publish_intro_panel(
-            guild=interaction.guild,
-            intro_channel=intro_channel,
-            config=config,
-            config_file=config_file,
-        )
+        message, deleted_old = await self.intro_panel.bump(intro_channel)
         logger.info(
             "自動 bump 完成：new_message_id=%s deleted_old=%s channel_id=%s",
             message.id,
@@ -1170,15 +1146,7 @@ class ManagementCommands(commands.Cog):
             )
             return
 
-        config_file = "config.json"
-        config = ChannelConfig.load_config(config_file, caller="ManagementCommands")
-
-        message, deleted_old = await self._publish_intro_panel(
-            guild=interaction.guild,
-            intro_channel=intro_channel,
-            config=config,
-            config_file=config_file,
-        )
+        message, deleted_old = await self.intro_panel.bump(intro_channel)
 
         deleted_note = "\n🧹 舊頻道面板已刪除。" if deleted_old else ""
         await safe_send_interaction_message(
@@ -1206,58 +1174,6 @@ class ManagementCommands(commands.Cog):
         embed = self._build_intro_panel_embed()
         return await intro_channel.send(embed=embed, view=IntroPanelView(self.intro_profile_service, self))
 
-    async def _publish_intro_panel(
-        self,
-        guild: discord.Guild,
-        intro_channel: discord.TextChannel,
-        config: dict,
-        config_file: str = "config.json",
-    ) -> tuple[discord.Message, bool]:
-        """統一發布流程：刪除舊面板、發送新面板、更新設定檔。"""
-        message, deleted_old = await self._replace_intro_panel_message(
-            guild,
-            intro_channel,
-            config,
-        )
-        # 其他設定仍維持寫回 config.json；面板訊息 ID 改由 runtime 檔管理
-        ChannelConfig.save_config(config, config_file, caller="ManagementCommands")
-        return message, deleted_old
-
-    async def _replace_intro_panel_message(
-        self,
-        guild: discord.Guild,
-        intro_channel: discord.TextChannel,
-        config: dict,
-    ) -> tuple[discord.Message, bool]:
-        """刪除舊面板並發新面板（runtime 只存 message_id）"""
-        deleted_old = False
-
-        runtime_cfg = _load_intro_panel_runtime_config()
-        old_channel_id = config.get("intro_panel_channel_id", ChannelConfig.DEFAULT_ID)
-        old_message_id = runtime_cfg.get("intro_panel_message_id", ChannelConfig.DEFAULT_ID)
-
-        if old_channel_id != ChannelConfig.DEFAULT_ID and old_message_id != ChannelConfig.DEFAULT_ID:
-            old_channel = guild.get_channel(int(old_channel_id))
-            if isinstance(old_channel, discord.TextChannel):
-                try:
-                    old_message = await old_channel.fetch_message(int(old_message_id))
-                    await old_message.delete()
-                    deleted_old = True
-                    logger.info(f"已刪除舊面板 message_id={old_message_id}")
-                except discord.NotFound:
-                    logger.info("舊面板不存在，略過刪除")
-                except discord.Forbidden:
-                    logger.warning("無權限刪除舊面板")
-
-        # 發送新面板
-        message = await self._send_intro_panel_to_channel(intro_channel)
-
-        # 更新 config.json（channel_id）
-        config["intro_panel_channel_id"] = intro_channel.id
-        # 更新 runtime.json（只存 message_id）
-        _save_intro_panel_runtime_config(message.id)
-
-        return message, deleted_old
 
 async def setup(bot):
     await bot.add_cog(ManagementCommands(bot))

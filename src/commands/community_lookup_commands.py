@@ -14,9 +14,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -39,6 +37,7 @@ from services.community_lookup_service import (
     BAHAMUT_POST_MIN,
 )
 from services.state_db import StateDB
+from utils.panel_bump import PanelBumper
 from utils.utils import ChannelConfig, safe_send_interaction_message
 
 
@@ -75,40 +74,6 @@ CUSTOM_ID_CONTROL_REFRESH = "community_lookup:control:refresh"
 def _now_local() -> datetime:
     """取得 container 系統時區的 aware datetime（docker-compose 設 TZ=Asia/Taipei）。"""
     return datetime.now().astimezone()
-
-
-# ═══════════════════════════════════════════════════
-# Runtime 檔（panel message_id）
-# ═══════════════════════════════════════════════════
-
-def _load_panel_runtime() -> dict:
-    if not os.path.exists(COMMUNITY_PANEL_RUNTIME_FILE):
-        return {}
-    try:
-        with open(COMMUNITY_PANEL_RUNTIME_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return {
-            "panel_channel_id": data.get("panel_channel_id"),
-            "panel_message_id": data.get("panel_message_id"),
-        }
-    except Exception as e:
-        logger.error(f"讀取 {COMMUNITY_PANEL_RUNTIME_FILE} 失敗: {e}", exc_info=True)
-        return {}
-
-
-def _save_panel_runtime(channel_id: int, message_id: int) -> None:
-    try:
-        os.makedirs(os.path.dirname(COMMUNITY_PANEL_RUNTIME_FILE), exist_ok=True)
-        with open(COMMUNITY_PANEL_RUNTIME_FILE, "w", encoding="utf-8") as f:
-            json.dump(
-                {"panel_channel_id": channel_id, "panel_message_id": message_id},
-                f,
-                ensure_ascii=False,
-                indent=2,
-            )
-    except Exception as e:
-        logger.error(f"寫入 {COMMUNITY_PANEL_RUNTIME_FILE} 失敗: {e}", exc_info=True)
-        raise
 
 
 # ═══════════════════════════════════════════════════
@@ -1326,8 +1291,8 @@ class CommunityLookupFlow:
         except discord.HTTPException:
             pass
 
-        # bump panel（背景 task，避免阻塞）
-        asyncio.create_task(self.cog.bump_panel_safe(interaction.guild, parent_channel))
+        # bump panel（背景執行、連發合併，不阻塞查詢流程）
+        self.cog.panel.request_bump(parent_channel)
 
     async def _append_section(
         self,
@@ -1436,7 +1401,10 @@ class CommunityLookupCommands(commands.Cog):
         self.state_db = state_db
         self.service = service
         self.flow = CommunityLookupFlow(self)
-        self._panel_lock = asyncio.Lock()
+        self.panel = PanelBumper(
+            COMMUNITY_PANEL_RUNTIME_FILE, self._send_community_panel_to_channel,
+            custom_ids=(CUSTOM_ID_PANEL_PTT, CUSTOM_ID_PANEL_BAHAMUT),
+        )
 
     async def cog_load(self):
         # Lazy init：沿用 base_monitor 的全域 StateDB，避免多實例
@@ -1462,37 +1430,6 @@ class CommunityLookupCommands(commands.Cog):
 
     async def _send_community_panel_to_channel(self, channel: discord.TextChannel) -> discord.Message:
         return await channel.send(embed=_build_community_panel_embed(), view=CommunityPanelView(self))
-
-    async def replace_community_panel_message(
-        self, guild: discord.Guild, panel_channel: discord.TextChannel,
-    ) -> tuple[discord.Message, bool]:
-        """刪舊發新。"""
-        runtime = _load_panel_runtime()
-        deleted = False
-        old_ch_id = runtime.get("panel_channel_id")
-        old_msg_id = runtime.get("panel_message_id")
-        if old_ch_id and old_msg_id:
-            old_ch = guild.get_channel(int(old_ch_id))
-            if isinstance(old_ch, discord.TextChannel):
-                try:
-                    old_msg = await old_ch.fetch_message(int(old_msg_id))
-                    await old_msg.delete()
-                    deleted = True
-                except discord.NotFound:
-                    pass
-                except discord.Forbidden:
-                    logger.warning("無權刪除舊社群查詢面板")
-        new_msg = await self._send_community_panel_to_channel(panel_channel)
-        _save_panel_runtime(panel_channel.id, new_msg.id)
-        return new_msg, deleted
-
-    async def bump_panel_safe(self, guild: discord.Guild, panel_channel: discord.TextChannel) -> None:
-        """每次查詢完呼叫（背景）。"""
-        try:
-            async with self._panel_lock:
-                await self.replace_community_panel_message(guild, panel_channel)
-        except Exception as e:
-            logger.error("bump_panel_safe 失敗: %s", e, exc_info=True)
 
     # ── Thread meta 反查（control button 用）──
 
@@ -1525,7 +1462,7 @@ class CommunityLookupCommands(commands.Cog):
                 ephemeral=True,
             )
             return
-        msg, deleted = await self.replace_community_panel_message(interaction.guild, panel_channel)
+        msg, deleted = await self.panel.bump(panel_channel)
         extra = "\n🧹 舊面板已刪除。" if deleted else ""
         await safe_send_interaction_message(
             interaction,

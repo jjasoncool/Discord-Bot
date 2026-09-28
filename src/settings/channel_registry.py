@@ -246,28 +246,17 @@ async def _handle_telegram_route(interaction: discord.Interaction):
     desc="使用者填寫自我介紹的頻道",
 )
 async def _on_set_intro(ctx: ChannelSetContext) -> Optional[str]:
-    # lazy import 避免與 management_commands 互相 import 造成循環
-    from commands.management_commands import (
-        _load_intro_panel_runtime_config,
-        _save_intro_panel_runtime_config,
-    )
-
     cog = ctx.bot.get_cog("ManagementCommands")
     if cog is None:
         return "\n⚠️ ManagementCommands Cog 尚未載入，面板未自動發送"
     try:
-        panel_message, deleted_old = await cog._replace_intro_panel_message(
-            ctx.guild, ctx.channel, ctx.config,
-        )
+        panel_message, deleted_old = await cog.intro_panel.bump(ctx.channel)
         note = f"\n🤖 已自動發送填寫面板:{panel_message.jump_url}"
         if deleted_old:
             note += "\n🧹 舊頻道面板已刪除。"
         return note
     except Exception as e:
         logger.error(f"設定自我介紹頻道後自動發送面板失敗: {e}", exc_info=True)
-        runtime_cfg = _load_intro_panel_runtime_config()
-        runtime_cfg.pop("intro_panel_message_id", None)
-        _save_intro_panel_runtime_config(ChannelConfig.DEFAULT_ID)
         return "\n⚠️ 自動發送面板失敗，系統會在下一次有人送出表單時自動重新 bump。"
 
 
@@ -303,9 +292,7 @@ async def _on_set_community_lookup(ctx: ChannelSetContext) -> Optional[str]:
     try:
         # 先寫 config，讓 cog 內 get_panel_channel 讀得到新頻道
         ctx.save()
-        panel_message, deleted_old = await community_cog.replace_community_panel_message(
-            ctx.guild, ctx.channel,
-        )
+        panel_message, deleted_old = await community_cog.panel.bump(ctx.channel)
         note = f"\n🤖 已自動部署社群查詢面板：{panel_message.jump_url}"
         if deleted_old:
             note += "\n🧹 舊頻道面板已刪除。"
