@@ -345,3 +345,13 @@ register_channel(
     color=discord.Color.dark_purple(),
     desc="AI 每天凌晨在此頻道寫一段當天的日記感想",
 )
+
+# 新成員歡迎訊息（純綁定）；member_welcome 在有人加入時讀這個 key 發送。
+# 未設定則整個功能靜默。
+register_channel(
+    "歡迎頻道",
+    discord.ChannelType.text,
+    "welcome_channel_id",
+    color=discord.Color.green(),
+    desc="新成員加入時自動發送歡迎訊息的文字頻道",
+)

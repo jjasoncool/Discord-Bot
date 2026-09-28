@@ -651,6 +651,13 @@ async def on_raw_reaction_remove(payload):
     except Exception as _exc:
         logger.debug("ai_interactions 反應記錄略過(remove): %s", _exc)
 
+
+@bot.event
+async def on_member_join(member):
+    """新成員加入 → 在歡迎頻道發歡迎訊息（未綁歡迎頻道則靜默）。"""
+    from services.member_welcome import send_welcome
+    await send_welcome(member)
+
 async def auto_start_article_monitor(bot):
     """自動啟動官方文章更新功能"""
     try:
