@@ -49,5 +49,6 @@
   "hardware_news_channel_id": 1355431176344703066,
   "ambient_chat_channel_id": 1276158258503094414,
   "ai_diary_channel_id": 1495609627361017867,
-  "welcome_channel_id": 1276457968539537409
+  "welcome_channel_id": 1276457968539537409,
+  "periodic_reminder_channel_id": 1480854656342294569
 }

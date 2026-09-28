@@ -342,3 +342,28 @@ register_channel(
     color=discord.Color.green(),
     desc="新成員加入時自動發送歡迎訊息的文字頻道",
 )
+
+
+# 週期活動提醒（深塔／海墟）；綁定當下自動建立訂閱身份組並發出訂閱面板。
+# 未設定則整個提醒功能靜默（排程照跑但不發）。
+@register_channel(
+    "週期提醒頻道",
+    discord.ChannelType.text,
+    "periodic_reminder_channel_id",
+    color=discord.Color.gold(),
+    desc="深塔／海墟重置提醒與訂閱面板的文字頻道",
+)
+async def _on_set_periodic_reminder(ctx: ChannelSetContext) -> Optional[str]:
+    cog = ctx.bot.get_cog("PeriodicReminderCommands")
+    if cog is None:
+        return "\n⚠️ PeriodicReminderCommands Cog 尚未載入，面板未自動部署"
+    try:
+        role = await cog.ensure_role(ctx.guild)
+        panel_message, deleted_old = await cog.panel.bump(ctx.channel)
+        note = f"\n🔔 訂閱身份組：{role.mention}\n🤖 已發出訂閱面板：{panel_message.jump_url}"
+        if deleted_old:
+            note += "\n🧹 舊面板已刪除。"
+        return note
+    except Exception as e:
+        logger.error(f"設定週期提醒頻道後部署面板失敗: {e}", exc_info=True)
+        return "\n⚠️ 建立身份組或發送面板失敗，下一次發提醒時會再試一次。"

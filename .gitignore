@@ -26,3 +26,4 @@ src/services/sent_articles.db-wal
 src/settings/music_runtime.json
 src/settings/rollcall_runtime.json
 src/settings/community_panel_runtime.json
+src/settings/periodic_reminder_runtime.json
