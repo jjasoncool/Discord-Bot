@@ -25,13 +25,14 @@
 > 4. 保留可追溯來源，避免之後重複討論同一件事
 
 最後盤點紀錄（只保留近期；過往詳見 `TODO-completed.md` 各歸檔 entry）：
+- 2026-09-29（週期活動提醒：深塔海墟，**已實作・586 測試全過・已 commit・待部署驗證**）：深塔／海墟各 28 天、週一 04:00 重置、錯開 14 天；重置前一天 20:00 正常 @、重置當下靜音 @ 自助訂閱身份組「深塔海墟提醒」；綁「週期提醒頻道」時自動建身份組＋發面板，每次提醒後面板刪舊發新置底。詳見 [週期活動提醒區塊](#週期活動提醒深塔海墟2026-09-29-已實作待部署驗證)。
+- 2026-09-28（grill：Persona M7 後續／ComfyUI 產圖／Telegram LLM 過濾／深塔海墟提醒，**討論中・未動 code**）：新增 Telegram 過濾與週期提醒兩個草稿區塊並寫入查證事實；ComfyUI 區塊開頭補過時狀態修正（步驟 2 已完成、鎖有漏洞）；過時項目歸檔到 `TODO-completed.md`（Persona 影子模式規劃、Telegram 媒體防雷、ComfyUI 步驟 2 與 `keep_alive` 註解、插話 Phase B 三項、Ollama 時代觀察項），Persona 區塊改成 M7 現況。
 - 2026-09-28（Telegram 相簿漏圖，**scraper＋relay 兩端已實作・545 測試全過・已 commit・已部署；今天缺的 87 張已於 15:58~16:07 補發完成**）：使用者回報 GameData #3223 相簿 8 張只發 1 張。**觸發點＝8/02 補掃 commit `fbd2d3c` 加的全域 `process_lock`**：本意是防「同一則」被三條路徑並行處理，卻把 Telethon 本來並行派發的相簿各張變成逐張排隊（組員寫入間隔 p90 0.03s → 2s），relay 0.5 秒到齊判斷等不到整組就先發、晚到的被丟棄。8/02 起 191 組相簿 77 組缺圖、共 237 張。**改法**：全域鎖 → 單則訊息鎖 `(chat_id, message_id)`（新 [message_lock.py](src/telegram_scraper/message_lock.py)）。**relay 端同輪修掉**（使用者拍板）：改成「哪個組員先到就收整組、等媒體到齊＋3 秒安靜才發、晚到的以（補圖）再發、補圖時效 12 小時」。**補今天缺圖**：先校正 delivery_state（補記實送沒標、撤記標了沒送）再重啟，由 reconcile 走正式路徑補發；唯讀預演＝23 則、87 張。詳見 [補掃區塊 2026-09-28 追加段](#telegram-漏收事件自動補掃2026-08-02-已實作2026-08-18-補上中段缺口盲區2026-09-28-全域鎖改單則訊息鎖修相簿漏圖待部署驗證)。
+- 2026-09-27（Persona Agent **M7 精簡版發布，已實作・510 測試全過・未 commit**；bot 已隨 09-27 重開跑新程式，⑤ 首次 dry_run 在 09-28 04:00）：**09-28 已 commit 並上線**；現況、定案、待辦與坑已收進 [Persona Agent M7 區塊](#persona-agent-m7精簡版發布2026-09-28-已上線觀察中)（原 HANDOFF 檔已刪除；舊的影子模式規劃已歸檔到 `TODO-completed.md`）。
 - 2026-09-22（活動自動發布「連結指向沒有該活動的訊息」+ 重複建活動，**已實作・397 測試全過・待部署驗證**）：使用者回報活動 `1539556072082112604`「[群聲共振模擬域]戰鬥活動」的「公告出處」點進去，那則訊息**一個字都沒提到這個活動**。**根因不在活動功能，在文章轉發**：活動偵測讀 `article_content_full`（該篇 8,454 字），轉發 embed 讀 `article_desc` —— 而 `article_desc` **全庫 532 篇皆為空字串**，於是「沒摘要就取前 300 字當預覽」那條 fallback 成了唯一路徑，8,454 字只發出 303 字；6 個活動名分別在第 1347~2010 字，全部被切掉。而 embed 連 `url=` 都沒設（FB 那邊有），訊息是條死路。**量化**：315 個 article 來源活動中 100 個（31.7%）的活動名在轉發訊息可見文字裡找不到。**同時修掉第二個 bug**：`normalize_title` 不認半形 `<>` → 「活動預告 \| <群聲共振模擬域>…」與「[群聲共振模擬域]戰鬥活動」指紋不同 → 同一活動建了兩個（線上 `…604` 與 `…681`）。**改法**：截斷 300→1200（全庫 p75 僅 565 字，85.2% 完整發出）+ 截斷時附官網連結 + embed 補 `url=`；活動描述嵌該活動的原文片段（匯總帖的 N 個活動各自可讀）；`normalize_title` 收 `<>`（**不收 `《》`**，472 個標題用它、其中 328 個包的是遊戲名「鳴潮」）；**後到的更好來源改為就地升級既有活動的封面與描述**（FB 832/834 有圖、article 三個封面欄位全庫皆空，且 FB 專屬貼文比匯總帖晚 7~28 天到）；同名+區間重疊視為官方改期而非新建（排除**本輪已配對的指紋**，否則 article 995 那種同名不同區間會被吃掉）；加建立/升級序列化鎖、指紋遷移、例外分離、補 log。**升級既有活動走四軸**（封面／描述／時間／名稱各自判斷）：中途曾用單一品質總分當唯一閘門，跑對抗性複查後確認那是錯的——422 筆規劃事件裡 294 筆同分，於是改期走不進換描述的分支（Discord 上時間改了、描述第一行的活動時間還是舊的）、專屬帖的短導言覆蓋匯總帖的長玩法說明（實測 370→118 字）、14.6% 的公告一個字都沒更新，故拆成四軸。**使用者從 Discord 刪掉的活動改立墓碑**（原本實體刪列，7~28 天後另一來源會把它原地復活），只有 `/resend_article` 解得開。**線上 DB 已先以指令套用欄位**（32 列不動，備份在 scratchpad），重啟後直接可用。詳見 [活動自動發布修正區塊](#活動自動發布連結指向錯誤--重複建活動2026-09-22-已實作待部署驗證)。
 - 2026-09-02（ComfyUI 產圖 + GPU 資源仲裁，**規劃定案・未開工**；本輪只做線上實測與一則註解清理，未動任何功能 code）：需求＝每天 03:00 排程產圖（角色換衣，依心情／日期／節日），10 張以內。**硬數據**：兩張 RX 9060 XT 各 16GB，27B+ctx32768 本來就跨兩顆吃滿 → 卸載 LLM 是唯一解（釘單顆並行方案否決）。**線上實測（Lemonade 11.5.0 / ComfyUI 0.34.2）**：`POST /api/v1/unload {"model_name":...}` ✅；**卸載後打 chat 會自動重載（22s）→「主動載回」「背景預熱」整段不需要** ✅；`recipe_options`（ctx 32768 + sampling args）不會被洗掉 ✅；**ComfyUI 看不到 Lemonade 的 VRAM**（Vulkan vs HIP，27B 在與不在都回報 free 15.78 GiB）→ 不可用它判斷夠不夠 ✅。**設計定案**：鎖改**租約+心跳**（續租點掛在本來就要做的 ComfyUI 輪詢上，不開 checker task、不猜 timeout）；租約 120s 管卡死、deadline 03:50 管超時（04:00 有維護四步要用 GPU）；租約過期接管者要清 cache + log error。**換後端**：Ollama 可續用（`keep_alive:0` 就是原生卸載語意），vLLM 不可；三處 `keep_alive` **保留**（一度決定刪除，使用者否決且正確：它是可攜層該有的行為，且註解含 Ollama 時代實戰教訓），只把註解改誠實。**prompt v1 走規則零 LLM**：節日查表 + 重用 00:00 AI 日記當心情來源。**本輪 code 異動**：① 拿掉 `_try_heal_lemonade_backend` 那句無法查證的「裸 reload 會掉回 ctx 4096」註解；② `DIARY_TZ` → `APP_TZ`；③ 時區守衛從 regex 改走 AST + 補 5 項自我守衛測試（342 測試全過，未 commit）。詳見 [ComfyUI 產圖區塊](#comfyui-產圖--gpu-資源仲裁2026-09-02-規劃定案未開工)。
 - 2026-08-18（Telegram 補掃補不到「中段缺口」，**已實作・未 commit・待部署驗證**）：使用者回報「重啟後又發一大堆早上 10-11 點的文章」，疑似重複。**查證＝不是重複、是首次補發**：`delivery_state` 全表無任何 `message_pk` 送超過 1 次，該批 8 則 `message_date` 10:31~11:03 但 `created_at` 全是 **17:24**（重啟才入庫）；早上 111 則中 34 則無 delivery 記錄者**全部**是 media group 成員（由首則代發），無法解釋的漏發 = 0。**根因**＝2026-08-02 版補掃的 `offset_id = max(message_id)` + `reverse=True` 只看得到比 max_id 更新的訊息，漏的若是**中段**（2742/2743/2746 漏但 2745/2747 已收 → max_id 早跳過去）永遠掃不到，只能等重啟全量掃描（本次卡 7 小時）。**修法＝指針左移**（使用者拍板改既有流程、不另開補洞路徑）：`offset_id = max_id - CATCHUP_GAP_WINDOW(300)`；配套 ①`limit` 加大成 `300+200`（limit 卡的是**撈回**幾則，沿用 200 會在 `window_start+200` 截斷）②新增 `db.get_existing_message_ids` 一次撈視窗內已有 id 成 set 過濾（否則 290 則已存在訊息各跑完整 `_process_message`）。**驗證**：容器內注入假 client/db 重現 8/18 真實缺口，洞全補回、新訊息照收、已存在 297 則零重跑；**反向驗證** limit 壓回 200 → 掃描截斷、洞與新訊息一則都收不到。**下一步**：`docker compose restart telegram-scraper`。詳見 [補掃區塊追加段](#telegram-漏收事件自動補掃2026-08-02-已實作2026-08-18-補上中段缺口盲區待部署驗證)。
-- 2026-08-18（人格萃取 Agent 影子模式，**規劃定案・未開工**；本輪只做查證與線上實測，未動任何 code／設定檔）：把每日 04:00 的固定人格萃取升級成 tool-calling agent，產出**可稽核的 diff** 而非整份覆蓋；影子模式並行、寫獨立表、**不動 production**。**線上實測（Lemonade 11.5.0 + Qwen3.8-27B-UD-Q4_K_XL / llamacpp b9747）**：tool calling ✅（`finish_reason=tool_calls`，4.4s / 33 tok/s）、`role:"tool"` 回合往返 ✅、`response_format: json_schema` strict ✅ → **不需自架 llama-server、不需 `--jinja`，M0 直接跳過**。**併發**：1 發 33 tok/s、2 發各 11~12、3 發各 7 → llama-server 多 slot 真並行但**總吞吐固定被平分**（故獨立進程方案會讓 askai 慢 3 倍）。**prompt cache**：冷 3417 tok/10.1s → 熱 18 tok/0.3s，且插入不同前綴後仍命中（多組 cache 並存）；插話 prompt 78%（10,823 字元）是靜態前綴，現有組裝順序已是最優。**資料面**：chat 表 273,780 筆 / 81 人 / `message_id` **100% 覆蓋**（evidence 機制成立）；訊息平均僅 11~38 字；14 天符合門檻 46 人、337,211 字。**五項定案**：①`personality_model` 統一改 27B（`max_models.llm=1` 會互踢）②04:00 觸發、production→agent **序列接力**（約 05:10 收工）③agent 跑在 bot process 內共用 `stream_exclusive`、**不可做成獨立腳本**、每 step 主動禮讓 ④**補第四支工具 `get_conversation`**（人格訊號在互動不在句子，不補會輸給現有 pipeline）+ context 改 token 預算 ⑤thinking 分兩段（收集關、產 diff 開，12 分/人 → 3 分/人）。**M1 第一項＝補 code 缺口**：`think` 覆寫管線完整存在，唯一斷點在 [_build_chat_extra_body](src/services/llm_service.py#L573-L588) 的 lemonade 分支把它丟掉。詳見 [Persona Agent 區塊](#persona-extraction-agent影子模式規劃定案)。
 - 2026-08-09（插話「談話自然」重構，**已實作・待部署驗證**；py_compile 全綠、146 測試全過、未 commit）：使用者提出兩個痛點——①一偵測到發言就馬上運算，沒等人講完；②聊天室常有多組人聊不同主題，機器人不知該加入哪個。**本輪量到基準**：自發插話「trace→送出」中位 **120.8s**（p90 165s、max 901s，n=3540）、PASS 率僅 15%、`ai_interactions` 5602 筆但負向反應只有 **13** 筆。**核心診斷**：問題不是它選錯主題，是**選的時候那條線還在、120 秒後講出來已經沒了**，而自發插話是裸 `channel.send` 無指向 → 必然像亂入；且節奏由冷卻計時器決定（每 5 分鐘準時報到）而非對話內容。**目標函數經使用者拍板＝自然/人性，GPU 節省降為副作用**。**四層方案**：L3 選線+reply 錨定（第一優先，讓「慢」變合理）、L4-b 接續自己的話、L2 debounce+typing 不搶話、L1 鉤子閘（**不用 LLM**＝結構演算法+少量 regex+k-NN，權重用 logistic regression 從 5602 筆學、標籤改用「插話後有沒有人接」而非 reaction）。順帶 `max_passes_per_burst` 3→1、`cooldown` 300→180。**使用者否決**：等鎖上限（GPU 本來就慢，放棄等於 /askai 忙時永遠不插話）、新鮮度丟棄（被接完也可以插，且丟棄＝白燒 120s 零產出）。**實作中修掉的缺陷**：L4-b 借用 directed 路徑會連 foreground 讓位/降溫硬閘/每小時上限一起繞過 → 加 `followup` 旗標分流閘門。**下一步**：`docker compose restart discord-bot` → 看 log 的「ambient 鉤子」分數分布調 `hook_threshold`、看「錨定=#N」確認模型有遵守選線契約。詳見 [自然插話重構區塊](#自然插話重構2026-08-09已實作待部署驗證)。
-- 2026-08-18（Telegram 媒體 spoiler 未帶到 Discord，**已實作，待部署驗證**）：症狀＝TG 影片有防雷、Discord 沒打碼。**relay 端無辜**（`AttachmentSpec.is_spoiler` → `discord.File(spoiler=)` → discord.py 自動加 `SPOILER_` 前綴，圖片也已有「spoiler 首圖不進 embed」分支）；**DB `telegram_message_media` 2696 筆 `is_spoiler` 全 false**。**根因**＝[`_build_media_item`](src/telegram_scraper/handlers.py#L140) 讀 `message.media_unread`（語意是「媒體未檢視」，語音/圓形影片用），真正旗標在 media 物件上的 `MessageMediaPhoto/Document.spoiler`。**修法**：①改讀 `getattr(media, "spoiler", False)`；②`db.update_media_spoiler()`（`IS DISTINCT FROM` 過濾空寫）；③「媒體已存在略過下載」分支補呼叫回填——**沒這段舊資料永遠錯**，`/resend_article` 舊影片仍不打碼。**驗證**：scraper 5 案全過、`discord.File(spoiler=True)` 實測輸出 `SPOILER_clip.mp4`、回填 SQL 以 BEGIN/ROLLBACK 實測（值變 UPDATE 1、值同 UPDATE 0、回滾後 2696 筆未動）。**未 commit**。**下一步**：重啟 telegram-scraper，歷史掃描會校正近 7 天旗標。詳見 [Telegram 媒體 spoiler 區塊](#telegram-媒體-spoiler防雷未帶到-discord2026-08-18-已實作待部署驗證)。
 - 2026-08-02（Telegram 漏收事件自動補掃，**已實作，待部署驗證**）：症狀＝「最新的 telegram 沒有轉發」。**relay 端無辜**（delivery_state 3119 筆、`last_polled_pk`=`max(id)`=12494，DB 內全送完）；**斷點在 scraper**——Telegram 已有 `Seele_WW_leak/9824`，DB 最大卻停在 **9823**（08-01 22:29:48+08）。用 `telegram_emoji_refetch` NOTIFY 測活性，scraper **秒回且成功即時抓回 9823** → 連線正常、非卡死。**根因**＝Telethon 漏派 NewMessage 事件（handler 完全沒被呼叫），而 [runner.py](src/telegram_scraper/runner.py) **只在啟動時掃一次歷史**，之後純靠即時事件 → 漏掉就永久漏掉。**非偶發**：以 `created_at - message_date > 5min` 回推「靠重啟才補進來」的比例 7/25 **28/63**、7/26 **59/121**，過去都是剛好有重啟蓋掉問題。**實作**＝每 15 分鐘（`catchup_interval_min`，可熱調整、`<=0` 停用）以各頻道 DB 最大 message_id 為基準做 `iter_messages(reverse=True, offset_id=基準, limit=200)` 增量重掃（已讀 Telethon 1.43.2 原始碼確認 reverse 下 `offset_id` 內部 +1＝不含基準、回傳舊→新保 PK 時序）；即時/補掃/refetch 共用 `process_lock` 序列化；單輪上限由舊往新掃故不留永久空洞；單頻道拋錯不拖垮迴圈。**順修** History log 把 Gamedataleak 訊息全標成 `source_channel=Seele_WW_leak` 的誤導 bug。**驗證**：py_compile 全綠、容器內 stub 煙霧測試 15 項全過、`get_peer_id` 與 DB chat_id 一致、實 DB 基準 Seele=9823/Gamedataleak=2669。**已 commit（`fbd2d3c`）**，`runtime_config.json` 刻意未動（受保護檔，程式端預設已生效）。**下一步**：`docker compose restart telegram-scraper` → 立刻補回 9824 → 觀察 `[CatchUp]` log。詳見 [Telegram 漏收事件自動補掃區塊](#telegram-漏收事件自動補掃2026-08-02-已實作待部署驗證)。
 
 ---
@@ -190,6 +191,7 @@ affects: 全專案
 | 清理聊天文字（表情轉語意／去 URL／mention） | `personality_extractor._clean_text_for_extraction()` | 自己 regex |
 | 描述品質規則（嚴禁廢話那套） | `persona_description_rules.txt`，兩邊各自讀同一個檔 | 在新 prompt 裡重抄一份 |
 | 人格素描的角色設定／繁中／表情規則 | 疊在 `personality_extraction_prompt.json` 的 `system_prompt` 之上 | 重寫一份 system prompt |
+| 面板置底（刪舊面板、發新面板、記住位置） | `utils.panel_bump.PanelBumper`（`bump` / `bump_safe` / 有人講話就置底用 `request_bump`） | 自己寫 `_load_*_runtime` + `fetch_message().delete()` + `send` + 鎖 |
 
 **合法的例外（形狀不同，硬收斂反而更糟，已寫進守衛的 allowlist）**
 - `scraper/tools/extract_fingerprint.py` 的時區：scraper 是獨立容器（掛 `./src/scraper` → `/app`），根目錄看不到 `sys_settings`。兩邊都吃 compose 的 `TZ=Asia/Taipei`
@@ -211,20 +213,169 @@ affects: 全專案
 | Discord Bot / AI 對話能力 | 已有可用基礎能力 | 80% | [專案架構](#專案-ai-架構總覽) |
 | Context / Prompt 優化 | 含 askai 身份感 + 人物對照三輪重構 + 人設深度重構（和風含蓄/30熟女/包容派）+ 智慧女性風格重寫（2026-05-18）+ few-shot 範例檔，待部署驗證 | 97% | [Context 優化](#context--prompt-優化專區) |
 | AI 偶爾插話 / 閒聊（功能二） | **Phase A+B 已實作（2026-06-21）**，待 docker 驗證；C（記憶寫入）待做 | 50% | [AI 偶爾插話](#ai-偶爾插話--閒聊功能二規劃中) |
-| 人格萃取 Agent（影子模式） | **規劃定案（2026-08-18）**；線上實測 tool calling／json_schema 全綠，M0 跳過 | 15% | [Persona Agent](#persona-extraction-agent影子模式規劃定案) |
-| ComfyUI 產圖 + GPU 資源仲裁 | **規劃定案（2026-09-02）**；unload／自動重載／VRAM 可見性已線上實測 | 20% | [ComfyUI 產圖](#comfyui-產圖--gpu-資源仲裁2026-09-02-規劃定案未開工) |
+| Persona Agent M7（精簡版發布） | **已上線（2026-09-28）**，觀察一週後決定拿掉 ③；精簡版品質問題討論中 | 85% | [Persona Agent M7](#persona-agent-m7精簡版發布2026-09-28-已上線觀察中) |
+| ComfyUI 產圖 + GPU 資源仲裁 | **規劃定案（2026-09-02）**；租約鎖與卸載 helper 已完成（`e13343d`），鎖有漏洞待修；落地細節討論中 | 25% | [ComfyUI 產圖](#comfyui-產圖--gpu-資源仲裁2026-09-02-規劃定案未開工) |
 | AI 私聊頻道 + 三層記憶（功能一·姊妹案） | 規劃完成（含道德守門）；人設 prompt 已就位；**本輪暫放旁邊** | 10% | [AI 私聊頻道](#ai-私聊頻道--三層記憶機制規劃中) |
 | 使用者指令記憶 (/remember) | 規劃中（與 AI 私聊頻道互補） | 5% | [/remember 規劃](#使用者指令記憶-remember-未來工作) |
 | Reaction 統計 / 社群互動玩法 | 規劃中 | 5% | [Reaction TODO](#reaction-統計與社群互動玩法) |
 | 點歌機器人（Music Bot） | 已上線運作 | 85% | [點歌機器人](#點歌機器人專區) |
-| Telegram relay 可靠性 | **補掃已實作（2026-08-02, `fbd2d3c`）+ 媒體 spoiler 已實作（2026-08-18, `77c812d`）**；兩者皆待重啟 telegram-scraper 驗證 | 90% | [漏收補掃](#telegram-漏收事件自動補掃2026-08-02-已實作待部署驗證) / [媒體 spoiler](#telegram-媒體-spoiler防雷未帶到-discord2026-08-18-已實作待部署驗證) |
+| Telegram relay 可靠性 | 補掃（`fbd2d3c`）與媒體防雷（`77c812d`，已上線、已歸檔）；**2026-09-28 相簿漏圖修正已部署** | 95% | [漏收補掃](#telegram-漏收事件自動補掃2026-08-02-已實作2026-08-18-補上中段缺口盲區2026-09-28-全域鎖改單則訊息鎖修相簿漏圖待部署驗證) |
 | 活動自動發布（公告 → Discord 伺服器活動） | **連結指向修正 + 重複活動修正已實作（2026-09-22）**；待重啟 discord-bot 驗證 | 85% | [活動自動發布修正](#活動自動發布連結指向錯誤--重複建活動2026-09-22-已實作待部署驗證) |
+| Telegram 訊息 LLM 過濾 + 隔離區 | **構想（2026-09-28）**，討論中 | 0% | [Telegram 過濾](#telegram-訊息-llm-過濾--隔離區2026-09-28-構想討論中) |
+| 週期活動提醒（深塔海墟） | **已實作並 commit（2026-09-29）**，頻道已綁定、身份組已建；待重啟驗證置底收斂 | 90% | [週期活動提醒](#週期活動提醒深塔海墟2026-09-29-已實作待部署驗證) |
+| 新成員歡迎訊息（接手 ProBot） | **已實作（2026-09-28）**，待重啟 discord-bot + 綁頻道驗證 | 90% | [新成員歡迎訊息](#新成員歡迎訊息接手-probot2026-09-28-已實作待部署驗證) |
 | 跨來源整合（Article/FB/PTT/TG） | 有方向，尚未全面收斂 | 35% | [跨來源整合](#跨來源整合專區) |
 | Discord Bot 管理入口 | 規劃中 | 10% | [管理 TODO](#discord-bot-管理入口與指令整理-todo) |
 
 > 已完成 / 過往工作（Bahamut scraper + 反爬基礎設施、幽靈點名核心 + DM、社群 ID 查詢 Phase 0、Telegram Relay、Music Bot 完整實作等）詳見 `TODO-completed.md`。
 >
 > **2026-08-18 歸檔**：活動公告自動建活動（17 筆已建立）、Telegram 自訂表情 → Discord App Emoji（10 個已上傳）、Telegram 多頻道來源 + 轉發去重（Gamedataleak 205 筆），三者皆已上線運作，連同 2026-06-25 ~ 2026-07-25 的盤點紀錄一併移入 `TODO-completed.md`。
+
+---
+
+## Telegram 訊息 LLM 過濾 + 隔離區（2026-09-28 構想，討論中）
+
+<!-- @meta
+id: telegram-llm-filter-quarantine
+type: TODO
+status: draft
+last_confirmed: 2026-09-28
+depends_on: telegram-catchup-sweep
+affects: Telegram relay、config.json
+-->
+
+**需求（使用者 2026-09-28 提出）**
+- Telegram 訊息轉進 Discord 前先用 LLM 判斷是不是垃圾發言：灌水（「最近有什麼水啊」「又水一次」這類）、情緒性罵人。
+- 垃圾發言不進主頻道，改發到**隔離區**：config 指定一個頻道（例如內鬼頻道），在裡面開一個 thread 專放垃圾發言。
+- 隔離區裡被誤判的訊息，要能手動（按鈕或其他方式）**放回主頻道**。
+
+**查證事實（2026-09-28，唯讀調查）**
+- **來源是兩個 Telegram 廣播頻道**（`Seele_WW_leak` 8.4 萬訂閱、`Gamedataleak` 1.2 萬），沒有網友留言 → 「垃圾發言」是**頻道管理員自己發的**（Seele 管理員 09-09 起的「今日首水」習慣、跟人互嗆）。目的頻道只有 #🌘角色內鬼情報（`1276423699851116544`）；GD 沒有自己的路由，靠「查不到就用第一個來源的路由」送到同一處。
+- **量**：近 14 天有文字的只有 120 則（約 8.6 則／天，尖峰 22 則／小時）；灌水約 5%、罵人約 3%，連同閒聊約一成。純媒體佔發送單位的一半。
+- **關鍵字不可行**：含「水」的 85 則裡只有約 10 則是灌水（水匣、汽水、山水…）；≤5 字多是有情報的圖說（「亚服」「预下载已开启」「V2来了」）；emoji 可能是角色代號（13653「🦊😭🥛…」對照 13664 是在爆主線角色）。
+- **插入點**：discord-bot 的 `services/telegram_relay_service.py` `_process_one`，相簿合併（`_collect_media_group`）之後、`resolve_telegram_routes` 之前（約 1773~1775 行）。scraper 容器沒有 LLM 設定也沒有 http 套件。
+- **判決必須持久化**：現在被「略過」的訊息不寫 `delivery_state`，每次重啟都會被 reconcile 重排重跑；不存判決就會每次重啟重判、重貼隔離區。
+- **放回主頻道**要走 relay 原本的發送流程；`resend_telegram_by_id`（`/resend_article`）不合併相簿、也不寫 `delivery_state`。
+- **順便發現的既有問題**：① 相簿晚到的成員不寫 `delivery_state`（DB 有 460 則），每次重啟空跑一次；② 發送失敗也推進游標，要等重啟才重試；③ `/server_manager` 的 Telegram 路由用來源**名稱**當 key 寫入，但只有 chat_id 當 key 才查得到（第一個來源除外）。
+- **離線測試樣本**（`telegram_messages.id`）
+  - 應隔離（灌水／閒聊）：13371、13404、13430、13431、13447、13451、13474、13643、13646、13649、13478、13650、13651、13661、13681、13766、13510
+  - 應隔離（罵人）：7378、7379、9028、9179、9842、1474、1475、6941、6953、13076、13362、13433、13449、13487、13638、13678
+  - 應放行（看起來像垃圾但有情報）：1、13025、9382、11368、12750、13685、13391、13392、12492、11584、6937、13299、11205、11557、4253、12190、9153、13189、13181、13182、12458、13475、9531、12285、13393、10025、13381、13387、13461、13481（13480 自寫假劇情的免責聲明，要看前文）、13682、13653、12071
+
+**狀態**：設計討論中（grill 進行中）；結論出來後回寫本區（過濾時機、LLM 不可用時的行為、放回後的排序與格式、誰能按按鈕等）。
+
+---
+
+## 週期活動提醒：深塔海墟（2026-09-29 已實作，待部署驗證）
+
+<!-- @meta
+id: periodic-event-reminder
+type: STATE
+status: confirmed
+last_confirmed: 2026-09-29
+depends_on: event-announce-link-and-dedup-fix
+affects: 排程、身份組、config.json
+-->
+
+**需求（使用者 2026-09-28 提出）**
+- 《鳴潮》的週期活動「深塔海墟」每四週重置一次，**重置時 @ 特定身份組**提醒。
+- 這個身份組**成員可自由領取**（自助加入／退出）。
+- 提醒要放**一般文字頻道還是論壇頻道**：使用者還在猶豫，要一起討論再決定。
+- 要跟既有的「公告 → 自動建 Discord 伺服器活動」怎麼整合，待確認。
+
+**查證事實（2026-09-28，唯讀調查）**
+- **週期**：深塔（逆境深塔）與海墟（冥歌海墟）各自每 **28 天**、**週一 04:00（UTC+8，用 `SERVER_TZ`）**重置，**兩者錯開 14 天**（每兩週輪到一個）。
+  - 海墟錨點 **2026-02-16 04:00**（唯一官方來源：FB 貼文 273）→ 下三次 10/26、11/23、12/21
+  - 深塔錨點 **2026-03-02 04:00**（聊天紀錄與使用者在 🤖公告與建議專區「新功能」討論串的手記）→ 下三次 10/12、11/09、12/07
+  - 11 個已知重置日全部落在 28 天格點上；官方從未公告週期 → 只能「錨點 + 28 天」。
+  - 版本維護撞重置日的例子：3.4 = 2026-06-08 週一 04:00~11:00（那期要等維護結束才能打，但週期沒被推移）。
+- **矩陣（終焉矩陣）跟版本走**，不是固定週期，無法用錨點推算。
+- 既有「公告 → 伺服器活動」**從未**替深塔／海墟建過活動（閘門要求「活動時間」字樣）。現有 8 個 bot 建的活動，「有興趣」人數全部是 0。
+- **伺服器**：Onboarding（原生「頻道與身分組」）關閉；bot 有 ADMINISTRATOR 且位置最高；24 個身份組全部 `mentionable=False`；程式裡沒有任何自助領身份組功能（`add_roles` 0 筆），persistent view 慣例成熟可沿用。
+- **候選頻道**：🍼深塔海墟矩陣-代打（text `1480854656342294569`，主題是代打免責聲明，@everyone 可看）；📶活動情報（forum `1276560265533587591`，@everyone 唯讀、無活躍貼文）；🌸祕密花園（深塔／海墟討論 601 則裡有 561 則在這，但「鳴潮皇帝」看不到）。
+- **論壇 @身份組 的通知行為未驗證**：據社群回報，超過 100 人的身份組在討論串裡可能被拒；bot 開新貼文時首則的身份組 ping 可能不通知；被加進串的人預設收到每則回覆的通知。
+- **坑**：新身份組**不要**加進幽靈點名的排除清單（那份清單幾乎包含所有自訂身份組，加進去等於訂提醒就免點名）；bot 沒有全域 `allowed_mentions`，提醒訊息要明確指定 `AllowedMentions(roles=[該身份組])`。
+
+**已定案（2026-09-28）**
+- 發在**一般文字頻道 🍼深塔海墟矩陣-代打**，不用論壇（這個群不用論壇、論壇 @ 通知不可靠；討論留在原本的地方）。
+- **一個身份組**涵蓋深塔與海墟（每兩週輪到誰就提醒誰）。
+- **第一版只做深塔、海墟**；設定設計成「一個項目＝起算日＋週期」的清單，矩陣日後有可靠來源再加。
+- **自助領取用按鈕**：面板上放「訂閱／取消訂閱」（persistent view），按下只回按的人看得到的訊息。
+- **面板不釘選、改置底，而且立即置底**：發完提醒、或提醒頻道裡**有人講話**就立即「刪舊發新」（bot 自己的訊息不算，避免循環）；連發時合併，同一時間最多一次在跑、一次排隊。走共用的 `utils.panel_bump.PanelBumper`。提醒訊息本身不附按鈕。面板顯示各項目的下次重置日期。
+- **提醒時間**：結束前提醒＝重置前一天 20:00，正常 @；重置提醒＝週一 04:00 準時，**靜音 @**（`silent=True`：有提及紅點、不推播）。
+- **身份組「深塔海墟提醒」**：綁提醒頻道時由 bot 自動建立（`mentionable=False`、無權限），被刪會自動重建；不加進點名排除清單；提醒只 @ 這個身份組。
+- **文案**：中性工具口吻，不用琇紫人設。
+- **起算日與週期寫在程式的設定類別**（改了要重啟；`config.json` 屬使用者設定檔，AI 不自行改寫）；時間一律用 `SERVER_TZ`。
+- **撞版本維護第一版不處理**（現有版本時間解析只記維護結束、只能用版本號查；約 20 期一次；重置提醒本來就靜音）。
+- **補發**：bot 離線錯過時，結束前提醒補到重置前、重置提醒補到當天 12:00；去重用 StateDB `sent_content`。不建 Discord 活動、不加管理指令。
+- **驗證**：單元測試以使用者手記為標準答案（海墟 8/3、8/31、9/28、10/26；深塔 8/17、9/14、10/12）；部署後依序：綁頻道看面板日期 → 按訂閱 → 整合腳本在正式頻道發真的「海墟已重置（到 10/26）」靜音 @ → 結束前提醒樣本發到只有管理員看得到的頻道測正常 @。
+- 使用者決定**先做深塔提醒**；Persona 後續、Telegram 過濾、ComfyUI 暫停。
+
+**實作（2026-09-29，已 commit）**
+- `sys_settings/periodic_reminder_settings.py`：起算日、週期、提醒時刻、身份組名稱、runtime 路徑
+- `services/periodic_reminder.py`：純邏輯（推算重置、到期／補發判斷、文案、面板內容）
+- `commands/periodic_reminder_commands.py`：排程迴圈（最多睡 1 小時就重算）、訂閱按鈕（persistent view）、`ensure_role`（id → 同名既有身份組 → 建立）、`on_message` 有人講話就置底
+- `settings/channel_registry.py`：登記「週期提醒頻道」，綁定時自動建身份組＋發面板；`discord_bot.py` 的 `COMMAND_MODULES` 加入；`.gitignore` 加 runtime 檔
+- `test/test_periodic_reminder.py` 33 項（突變驗證過：靜音顛倒、提醒晚一小時、週期改 27 天、拿掉今天／明天判斷都會紅）；文案只比對關鍵資訊（誰、項目、日期、今天／明天），不逐字比對
+- `test/integration/it_periodic_reminder.py`：手動發一則提醒實測（不寫 StateDB、不置底）
+
+**面板置底收斂（2026-09-29，586 測試全過，已 commit）**
+- 新增 `utils/panel_bump.py`：`PanelBumper` 只管「在哪、刪舊、發新、記住、同時只做一次」，面板長相由呼叫端的 `send` 決定。位置記在各自 runtime 檔的 `{key_prefix}channel_id / message_id`，寫入時保留其他欄位。**沒有完整紀錄時**才翻頻道最近 50 則，刪掉 bot 自己發、custom_id **精確**屬於該面板的殘留面板（社群查詢討論串的 `community_lookup:control:refresh` 不會被誤刪）。
+- **社群查詢**改用它（runtime 格式本來就相同，資料不用搬）；查詢後的置底改成 `request_bump`（連發合併）。
+- **自我介紹**改用它（`key_prefix="intro_panel_"`）：面板頻道 id 從 `config.json` 搬到 `settings/intro_panel_runtime.json`，**不再每次送出表單就重寫整份 `config.json`**。上線後第一次置底因為 runtime 只有訊息 id，會翻找刪掉現在的舊面板，之後就用紀錄。`config.json` 裡的 `intro_panel_channel_id` 已無人讀寫，使用者要刪可自行刪。
+- **音樂面板暫不接入**（見點歌機器人待辦）。
+- 動工前三份 runtime 檔已備份到 scratchpad（`runtime_backup_0929/`，主機重開會清空）。
+- 突變驗證：不比對 custom_id、連發不合併、只有訊息 id 就當完整紀錄、寫檔蓋掉其他欄位，四種都會紅。
+
+**部署與實測（使用者操作）**
+- [x] `docker compose restart discord-bot`（09-29 00:28；當時 logger 用 `__name__`，INFO 沒輸出，已改成 `discord_bot`，下次重啟才看得到「週期提醒：接下來 →」）
+- [x] `/server_manager` → 設定頻道 →「週期提醒頻道」選 🍼深塔海墟矩陣-代打（09-29 00:29；身份組 `1554168140441718885`、面板已發出）
+- [x] 按「訂閱」（身份組成員數 1）
+- [ ] 容器內 `python -m test.integration.it_periodic_reminder reset sea`：**已發送**（09-29）；待使用者確認手機沒跳通知、頻道有紅點
+- [ ] 容器內 `python -m test.integration.it_periodic_reminder ending tower <只有管理員看得到的頻道id>`：確認手機有跳通知
+- [ ] 10/11 20:00 第一則正式提醒：確認有發、面板被頂到最下面
+- [ ] **再重啟一次**（置底收斂＋log 修正要重啟才生效）後確認：
+  - 在提醒頻道講一句話 → 面板立即移到最下面
+  - 送出一次自介 → 舊的自介面板被刪、新面板在最下面，而且 `settings/intro_panel_runtime.json` 多了 `intro_panel_channel_id`、`config.json` 沒被改動
+  - 做一次社群查詢 → 查詢面板照常置底
+
+---
+
+## 新成員歡迎訊息：接手 ProBot（2026-09-28 已實作，待部署驗證）
+
+<!-- @meta
+id: member-welcome-message
+type: STATE
+status: confirmed
+last_confirmed: 2026-09-28
+affects: settings/channel_registry.py, services/member_welcome.py（新）, discord_bot.py, test/test_member_welcome.py（新）
+-->
+
+**需求**：ProBot 的加入歡迎訊息疑似失效，改由自家 bot 在歡迎頻道發同樣內容（@新成員 + 伺服器名 + 引導去規範頻道）。
+
+**機制一句話**：`on_member_join` 事件 → 讀 `welcome_channel_id` → 發一則純文字。
+
+**改動清單（全部 additive，不動既有流程）**
+1. `channel_registry.py`：`register_channel("歡迎頻道", text, "welcome_channel_id")`，沿用 `/server_manager` 綁頻道 UI，未設定＝功能靜默
+2. 新檔 `services/member_welcome.py`：文案純函式 + 讀頻道發送；略過 bot 帳號
+3. `discord_bot.py` 加 `@bot.event on_member_join`，只委派給上面的 service（沿用本專案「gateway 事件集中在 discord_bot.py、邏輯放 services」慣例；全專案原本無人監聽此事件，不會覆蓋）
+4. 規範頻道連結優先用 Discord 內建 `guild.rules_channel`（社群伺服器設定），不另開 config key
+5. 文案純函式補單元測試
+
+**已排除**：掛在 `ManagementCommands` 當 Cog listener——功能可行，但該檔是指令集中地，放事件會亂了分工（使用者 2026-09-28 指正）。
+
+**已知前提**：`intents.members = True` 已開（bot 能連上即代表開發者後台也已開）。
+
+**已定案（使用者 2026-09-28 確認）**：規範頻道已設為伺服器「規則頻道」→ 用 `guild.rules_channel`；文案先照抄 ProBot；上線後關掉 ProBot 歡迎功能。
+
+**實作細節**：只允許 @ 新成員本人（`AllowedMentions`）；bot 帳號、未綁頻道、頻道不在本伺服器、非文字頻道、發送失敗都靜默略過不拋例外。
+測試 `test_member_welcome.py` 8 項，已併入啟動 gate（全套 526 項綠）。
+
+**待驗證（使用者執行）**
+- [ ] 重啟 discord-bot
+- [ ] `/server_manager` → 設定頻道 → 「歡迎頻道」選目標頻道；確認 bot 在該頻道有「傳送訊息」權限
+- [ ] 關掉 ProBot 歡迎（ProBot 後台 Welcome & Goodbye 關閉，或在歡迎頻道拒絕 ProBot 的「傳送訊息」權限）
+- [ ] 找人（或小號）加入一次，確認文案、@ 與規範頻道連結正確
 
 ---
 
@@ -397,6 +548,15 @@ last_confirmed: 2026-09-02
 affects: llm/lemonade_gate, llm/llm_http_client, services/llm_service, imagegen/（新）
 -->
 
+> **2026-09-28 查證（本區塊部分狀態已過時）**
+> - 實作順序的步驟 2（租約鎖 + 卸載 helper）**已完成**：`e13343d`（2026-09-03）。
+> - ⚠️ **鎖有漏洞**：`services/llm_service.py` 的 `_chat_completion_checked` 先呼叫 `_ensure_model_loaded(model)`（:792），**之後**才 `async with stream_exclusive()`（:800）。產圖期間任何 chat 都會在排隊等鎖**之前**打 `POST /api/v1/load`，把 27B 載回 VRAM。產圖接進 bot 前必修。
+> - ComfyUI 09-28 連不上（TCP 通、HTTP 被 reset），checkpoint／LoRA 清單未知。
+> - Lemonade 已升到 **11.9.0**，下方 09-02 的三項實測（unload／自動重載／recipe 保留）是在 11.5.0 上做的，需要重測；`POST /free`（ComfyUI 放 VRAM）從未實測。
+> - 04:00 維護現在是**五步**，收工約 05:46；Persona ⑤ 的 `publish_mode` 已是 `on`。
+> - `src/test/integration/it_comfyui_image.py` 未 commit；它的 docstring 寫「與 Lemonade 綁不同 GPU」，與下方「27B 跨兩顆吃滿」矛盾，待使用者確認。
+> - 落地前的待決問題清單正在 grill 中，結論出來後回寫本區。
+
 **需求**：每天 **03:00** 排程產圖（特定角色換衣服，依心情／日期／節日決定），單次 10 張以內。
 **不是 on-request**，使用者不會按著等。
 
@@ -526,10 +686,9 @@ Lemonade 下被 `_build_chat_extra_body` 丟進 ignored，但**那正是可攜�
 
 ### TODO
 
-- [ ] 步驟 2~4 實作
+- [ ] 步驟 3~4 實作（步驟 2 已在 `e13343d` 完成，已歸檔）
 - [ ] **prompt 精修（使用者指定，後續要做）**：心情 ↔ 服裝的搭配表、節日表。v1 先能跑，映射規則之後細調
 - [x] **（2026-09-02 定案）** 圖發到 `ai_diary_channel_id`，與日記同一頻道，不新增設定
-- [ ] 三處 `keep_alive` 的註解改成誠實描述（**參數保留**，只改註解；併入步驟 2）
 - [x] **（2026-09-02 已修）** `discord_bot.py:339` 的 `DIARY_TZ = _tz(_td(hours=8))` 違反
       「全站時區只能用 `APP_TZ`」，因 `_tz`/`_td` 別名溜過 regex 守衛。**兩層都修了**：
       ① 改用 `APP_TZ`；② 該條規則從 regex 改走 **AST**（`_find_hardcoded_utc_offsets`），
@@ -555,214 +714,57 @@ Lemonade 下被 `_build_chat_extra_body` 丟進 ignored，但**那正是可攜�
 
 ---
 
-## Persona Extraction Agent（影子模式，規劃定案）
+## Persona Agent M7：精簡版發布（2026-09-28 已上線，觀察中）
 
 <!-- @meta
 id: persona-extraction-agent
-type: DECISION
+type: STATE
 status: confirmed
-last_confirmed: 2026-08-18
-depends_on: personality_extractor, llm_service, lemonade_gate, member_profile_store, chat_persistence
-affects: llm_service._build_chat_extra_body, discord_bot 排程, llm_runtime_config.json
+last_confirmed: 2026-09-28
+depends_on: personality_extractor, llm_service, lemonade_gate, member_profile_store
+affects: auto_personality、插話／askai 人物卡、discord_bot 04:00 排程
 -->
 
-**目標**：把每日 04:00 的固定 pipeline 升級成 tool-calling agent，讓模型自己決定撈多少資料、追查哪些線索，產出**可稽核的 diff**（而非整份覆蓋）。**影子模式**：與現有 pipeline 並行、寫獨立表、**不動 production 排程**（[discord_bot.py:169-266](src/discord_bot.py#L169-L266) 含啟動補跑邏輯，整段不碰）。
+> 早期「影子模式」規劃（M1~M6、線上實測、五項定案）已歸檔到 `TODO-completed.md`。
+> 原 `HANDOFF_2026-09-27_persona-agent-M7.md` 已刪除，仍有效的內容收在本區。
 
-### 本輪線上實測（2026-08-18，全部對真實服務打過）
+**架構（2026-09-28 定案）**：04:00 維護五步（`discord_bot._run_daily_maintenance_once`）
+① emoji 字典 → ② 招牌梗衰減 → ③ production 人格萃取（過渡期備援，只寫 ④ 沒涵蓋的人）
+→ ④ persona agent（每晚主力；完整描述寫 `persona_agent_versions`，bot 讀不到；只重跑上次跑完後有新發言的人）
+→ ⑤ 發布精簡版（`llm/persona_agent/publish.py`；**不經 LLM、整條原文照抄**，寫進 `auto_personality`；插話與 /askai 只讀這裡）。
 
-後端＝Lemonade 11.5.0（`192.168.56.1:13305`）+ `Qwen3.8-27B-GGUF-UD-Q4_K_XL`，llamacpp recipe b9747、ctx 32768、雙卡 Vulkan0+1。
+**狀態**
+- commit：`c544036`、`b3dad1c`、`aafdc85`、`948ab96`、`2a0d0cf`（`publish_mode="on"`）。
+- 09-28 14:01 手動跑 ⑤（on）寫入 62 人；09-29 04:00 起由排程寫入。約 05:45 跑到 ⑤。
+- ③ 仍對門檻內約 36 人跑 LLM（約 12 分鐘），但這些人都有精簡版，實際寫入 0 人；觀察約一週後決定拿掉 ③。
 
-- **tool calling ✅**：`finish_reason == "tool_calls"`、結構化 `tool_calls` 正確，**4.4 秒 / 33 tok/s**（speculative decoding draft 接受率 32/33）
-- **`role:"tool"` 回合往返 ✅**；**`response_format: json_schema` strict ✅**（輸出直接 `json.loads()` 過）
-- → **不需自架 llama-server、不需煩惱 `--jinja`（Lemonade 已處理），M0 直接跳過**
-- **併發**：1 發 33 tok/s、2 發各 11~12 tok/s、3 發各 7.0~7.5 tok/s，牆鐘皆未排隊 → llama-server **多 slot 真並行，但總吞吐固定（~22~33 tok/s）被平分**
-- **prompt cache**：A 前綴冷 3,417 tok / 10.1s → 熱 18 tok / **0.3s**；中間插入不同前綴 B 之後 A 仍命中 → **多組 cache 並存**（各 slot 各自 KV）
-- **大 context**：單發 11,954 tok prefill **35.2s @ 339 tok/s** 成功
-- **插話 prompt 結構**：實際 13,874 字元中 **10,823（78%）是靜態 system 前綴**；[llm_service.py:463-469](src/services/llm_service.py#L463-L469) 已把 volatile 全放 user message、`asker_profile` 擺 system 末端 → **最長共同前綴已最大化，無需改動**
-- **資料面（pgvector 實查）**：`data_discord_messages_index` 273,780 筆 / 81 人 / **`message_id` 100% 覆蓋**（Open Question「evidence 可否引用 msg_id」＝**是**）；訊息平均長度僅 **11~38 字**；7 天分層 A≥500:5人 / B100-499:13 / C30-99:12 / D10-29:10 / E<10:9人（5 人佔 57% 發言量）；14 天符合門檻 **46 人、337,211 字**
+**回滾**（依程式推得，未實測）：revert `2a0d0cf` → 重啟 → 下一個 04:00 由 ③ 把門檻內約 36 人覆寫回 ③ 的描述；
+門檻外約 26 人會停在最後一版精簡版（沒有備份，使用者已接受）。日間重啟不會立刻變回來（補跑檢查看到 ⑤ 的寫入時間會跳過）。
 
-### 五項定案
+**已接受的取捨（不要再提）**：啟動補跑看 `MAX(last_extracted_at)`；不備份 `auto_personality`；精簡版比 ③ 薄照換；近況沒有時間上限。
 
-**① `personality_model` 統一改 Qwen3.8-27B**
-Lemonade `max_models.llm = 1`（embedding 有獨立 slot pool 不衝突）。現況 production 用 `Qwen3-14B-GGUF`、agent 要用 27B → 兩顆互踢，每次請求重載。統一後 04:00 不再驅逐 27B，**早上第一次插話省下 30-60s 重載（[llm_http_client.py:337](src/llm/llm_http_client.py#L337) 註解）+ ~30s prefill**。不換 quant（Q5/Q6）——tool calling 只在現有 Q4_K_XL checkpoint 上驗證過，換 quant＝換掉唯一已驗證的變數。
+**已知、刻意沒處理**：被隔離的人停在最後一版精簡版；`index_auto_personality` 先刪後寫（embedding 失敗那人暫時沒描述）；
+③ 存入時硬切 200 字；④ 意思相近的條目可能兩條都被挑到；③ 與精簡版都不看招牌梗的 spicy／封鎖閘門。
 
-**② 04:00 觸發、production → agent 序列接力**
-① production 萃取：16 批 × ~135s（prefill 15k tok ÷ 339 + decode 3k tok ÷ 33）≈ **40 分鐘** → 約 04:40 結束；② agent 影子：10 人 × 2~3 分 ≈ **30 分鐘** → 約 **05:10 全部收工**。agent 啟動前先看 `personality_extractor._extraction_running` 旗標（唯讀，不改 production）。**不用時鐘錯開**——既然定案「一次只做一件事」，用排隊即可。
+**09-28 發現的品質問題（討論中）**
+- 隱私內容進了 prompt：62 筆中至少 5 筆含居住地、職業、宗教、持股；另有一筆寫了聚餐日期、店名、樓層。
+- 暱稱被當成口頭禪（KaTsuO 的「喵」其實是在叫柔柔喵；雞蛋飛 的「糯糯」其實是成員名）。
+- 群體用語被當成個人特徵（「484」寫在 3 個人身上、「何意味」2 人）。
+- 改版留下的比較句（「並非／而非／不只」）、「。；」雙標點、同一人意思重複的條目（至少 8 人）。
+- 兩位成員顯示名稱都是「DDLC」；③ 遺留的 Banana、Rie 描述內容是「無法分析」。
 
-**③ agent 跑在 bot process 內、共用 `stream_exclusive`**
-一次只做一件事。**不可做成獨立腳本／獨立容器**——會繞過 [lemonade_gate.py](src/llm/lemonade_gate.py) 開頭記載的 connection reset 坑，且吞吐三分天下讓 askai 慢 3 倍（實測 33 → 7~11 tok/s）。每個 step 前主動禮讓（`stream_busy()` / `foreground_recently_active(90)` 就 sleep 再看）；agent **不得**呼叫 `note_foreground_activity()`（會壓制插話 90 秒，[llm_settings.py:378](src/sys_settings/llm_settings.py#L378)）。
+**M7 之後待辦**：拿掉 ③（新成員第一版描述從哪來、補跑檢查改看什麼、手動萃取指令去留）；失敗的 run 隔天重跑；
+證據反查失敗的那晚不寫入；DB 安全網（`write_version` 失敗被當成功、只剩 drop 時寫出空描述）；人工校正管道。
 
-**④ 補第四支工具 `get_conversation(channel_id, around_msg_id, before=15, after=15)`**
-人格訊號在**互動**不在句子：實測訊息平均 14 字，「你開他」「剩我純心賞」單看零資訊。原 handoff 的三支工具只回單人碎片，模型只會**寫空話**或**腦補**——冒煙測試已示範：丟「你也太廢」→ 判「尖酸刻薄、帶有攻擊性」（實際是互損型社交）。**更關鍵：`evidence_msg_ids` 的稽核價值依賴上下文**，evidence 若是孤句，人工翻回去也驗不出對錯，防幻覺機制形同虛設。現有 pipeline 反而歪打正著（[personality_extractor.py:356](src/llm/personality_extractor.py#L356) 按時序交錯整批人訊息）→ **不補這支，agent 版會明確輸給現況**。
-context 改用 **token 預算**（[tokenization.py](src/llm/tokenization.py) 估算，累計上限 24,000，留 8,000 給 thinking + 輸出），**不用「則數」**（一則可能 5 字也可能 300 字）。
+**刻意不做**：revise 沿用舊證據（會灌高對話次數）；keep「今晚附的證據一律保留」（會擠掉最新名額）。
 
-**⑤ thinking 分兩段**
-「呼叫哪個工具」是機械決策（schema 已限死選項，實測 thinking 關閉時 4.4s / 42 tok 就正確產出）；「新增還是修正、證據夠不夠、跟舊描述矛盾嗎」才需要推理。8 步全開 ≈ 8 × 90s ≈ **12 分/人**（10 人 2 小時）；收集關閉、只有最後產 diff 開 ≈ **3 分/人**（10 人 30 分）。
-
-### 整體流程（定案）
-
-每日 04:00 由 `_run_daily_maintenance_once()` 序列觸發，**一次只做一件事**：
-
-```
-04:00  ① emoji 字典更新（已拆分 ✅）
-       ② 招牌梗 sweep（已拆分 ✅）
-       ③ production 人格萃取   約 40 分 → auto_personality（線上功能在吃）
-       ④ persona agent 影子     約 30 分 → persona_agent_versions（只有維運在看）
-05:10  收工
-```
-
-③④ 寫不同的表；persona card / /askai / 插話 完全不知道 ④ 存在（＝影子模式的定義）。
-
-agent 單人流程：
-
-```
-for 每位樣本使用者：
-  ├─ 組 messages（system=任務+工具契約 / user=這次分析誰）
-  ├─ loop（max_steps=8）：
-  │    ├─ 禮讓：stream_busy() / foreground_recently_active(90) → 等
-  │    ├─ 呼叫 LLM（thinking=OFF）帶 tools
-  │    ├─ 有 tool_calls → 執行工具 → append role:"tool" → 下一步
-  │    └─ 無 tool_calls 或 token 預算（24k）用盡 → 跳出
-  ├─ 最終步：thinking=ON + response_format=json_schema → 產 diff
-  ├─ 驗證層（程式碼判斷，非 LLM）：
-  │    ① JSON 合規？        否 → rejected_schema
-  │    ② evidence 存在且屬於本人？ 否 → rejected_evidence
-  │    ③ confidence=low / changes 空？ 是 → 標記資料不足、不寫版本
-  │    └─ 通過 → 套用 diff 產生完整 persona_text
-  └─ 寫 persona_agent_versions（新版本，永不覆蓋）+ persona_agent_runs（trace）
-```
-
-逐使用者獨立 try/except：**任一人失敗不影響其他人**。
-
-### 四支唯讀工具
-
-| 工具 | 用途 | 備註 |
-|---|---|---|
-| `get_current_persona(user_id)` | 讀現有描述當 diff 基準 | 第一次讀 production 的 `auto_personality`（**必帶 `guild_id`**），之後讀自己最新版 |
-| `get_messages(user_id, days, channel, limit)` | 主要資料來源 | days ≤ 90、limit ≤ 200，程式端夾住並在回傳註明 |
-| `search_messages(user_id, keyword, days, limit)` | 矛盾時找佐證 | limit ≤ 50 |
-| `get_conversation(channel_id, around_msg_id, before, after)` | **還原現場** | 勝負手；window ≤ 30。會回傳他人發言（與現有 pipeline 餵交錯 chat_log 同等級，非新增暴露面） |
-
-共同規則：唯讀、白名單強制檢查（`allowed_ids`）、回傳一律 JSON 字串、例外 catch 成 `{"error": ...}` 交給模型自行修正。
-
-### 兩張新表（普通 SQL 表，不進向量表）
-
-`persona_agent_versions`（成品，永久保存）
-- 欄位：`guild_id / author_id / version / persona_text / changes(JSONB) / confidence / notes / model / based_on / created_at`，`UNIQUE(guild_id, author_id, version)`
-- 功能：①M6 評比的對照組 ②稽核（reason + evidence 可翻回現場）③救援（現行 `auto_personality` 原地覆蓋、零歷史）④切換後成為正本 ⑤v2 漂移視覺化
-
-`persona_agent_runs`（過程 log，可定期清）
-- 欄位：`run_id / guild_id / author_id / status / steps / trace(JSONB) / duration_ms / error / created_at`
-- `status`：`ok / rejected_schema / rejected_evidence / max_steps / error`
-- 功能：①看 agent 決策路徑（黑箱除錯）②幻覺率＝`rejected_evidence` 比例（eval 直接取數）③失敗率（M4 驗收要求）④成本觀測決定樣本規模
-
-**為什麼不放進 `data_discord_member_profiles_index`**：①版本歷史會被語意召回撈出來當現況、污染 RAG ②不需要 embedding ③需要 `UNIQUE` 關聯約束，jsonb metadata 撐不起來。先例＝`ai_interactions`（同 DB 的普通 SQL 表）。
-
-### M1 第一項：`think` 參數的 code 缺口
-
-覆寫管線**完整存在**——[`resolve_request_think()`](src/services/llm_service.py#L243) 有明確優先序（override > `backends.ollama.extra_body.think` > 舊欄位 > True），一路傳到 `generate_reply(think=)` → `chat_raw(think=)` → `_build_chat_extra_body(think=)`，且已有 caller 在用（[llm_commands.py:680](src/commands/llm_commands.py#L680)、[diary_reflection.py:201](src/llm/diary_reflection.py#L201)）。
-
-**唯一斷點**在 [_build_chat_extra_body 的 lemonade 分支](src/services/llm_service.py#L573-L588)：非 ollama 後端直接把 `think` 丟進 `ignored` 只記 debug log；其 docstring 自承「非 ollama backend 此欄位無實際作用，仍保留以向後相容呼叫端」。**這是 Ollama → Lemonade 遷移時留下的斷點**，不是缺機制。
-
-**修法**：lemonade 分支把 `think` 映射成 `chat_template_kwargs.enable_thinking`。**預設維持 config 值、只有明確傳入才覆寫** → askai／插話／production 萃取行為完全不變。已實測 Lemonade **吃這個 per-request 覆寫**（本輪每發冒煙測試都在 body 直送 `{"enable_thinking": false}`，全部生效）。單元測試必須涵蓋「不傳參數時 extra_body 與現況位元相同」。附帶修好 [diary_reflection.py](src/llm/diary_reflection.py#L201) 的同名旋鈕（目前預設 `None`，尚未壞）。
-
-### agent 執行期間的影響面
-
-| 功能 | 影響 | 機制 |
-|---|---|---|
-| /askai、被 @ / reply 的插話 | ⏳ 排隊，最多等一個 agent step | `asyncio.Lock` FIFO 公平，agent 一步一放鎖 |
-| 自發插話 / 接續 / 記憶沉澱 | ❌ **整輪跳過**（不是延後） | [ambient_reply.py:1103](src/llm/ambient_reply.py#L1103)、[:1112](src/llm/ambient_reply.py#L1112)、[memory_service.py:89](src/services/memory_service.py#L89)、[ambient_memory.py:73](src/llm/ambient_memory.py#L73) 見 `stream_busy()` 即讓位 `return` |
-| 訊息寫入 pgvector | ⏳ 排隊，不掉 | [chat_persistence.py:173](src/llm/chat_persistence.py#L173) 同持一把鎖 |
-
-⚠️ `chat_raw` 的 timeout **在取得鎖之後才起算**（[ambient_reply.py:1267](src/llm/ambient_reply.py#L1267) 註解），等鎖無上限 → agent 必須維持「一步一放鎖」，絕不可跨 step 持鎖。
-
-### 工程節點（M1→M6）
-
-| 節點 | 內容 | 驗收標準 | 碰 production？ |
-|---|---|---|---|
-| **M1** | `think` 缺口 + 四支唯讀工具 + diff schema + 單元測試 | 容器內 `unittest discover` 全綠；夾取／白名單拒絕／`guild_id` 必帶／`think` 不傳時 extra_body 不變 四類皆有測 | ❌ 完全不碰（新模組無人呼叫，行為零改變） |
-| **M2** | agent loop（手寫、`max_steps=8`、禮讓、token 預算、逐步 log） | 單人跑通：log 顯示至少一次多輪工具呼叫、產出可解析 JSON、耗時落在 2~3 分/人 | ❌ dry-run，不寫 DB |
-| **M3** | 驗證層 + `store.py`（ensure_table／版本遞增／寫入） | **蓄意注入不存在的 msg_id → 該筆被攔，`status=rejected_evidence`** | ❌ 只寫新表 |
-| **M4** | 樣本批次 + 接進 04:00 第 ④ 步 + `personality_model` 改 27B | 單人失敗不影響其他人；失敗率記錄在 `runs` 表 | ⚠️ 第一次動排程，需重啟 bot |
-| **M5** | 與 production 平行跑一週 | 同一人的兩份輸出可並排比較 | 並行不互相影響 |
-| **M6** | 人工評比（具體性／幻覺率／矛盾處理／空洞比例）+ 決策文件 | 結論可以是「pipeline 更好」——那也是有效產出 | — |
-
-**節奏**：每個 M 完成後停下來給 Jason 檢視，不連續推進。M1~M3 完全不碰 production。
-
-**時序注意**：`personality_model` 改 27B **延到 M4 才做**。統一 27B 的目的是避免 agent 與 production 互踢模型，但 agent 到 M4 才真的跑批次；提早改只會讓 production 先變慢（20→40 分）並多一個變數。
-
-### 退場時程（若 M6 決定採用）
-
-```
-agent 產出後多呼叫一次現有的 index_auto_personality  → 下游（persona card / askai / 插話）零改動
-        ↓ 觀察一週
-停掉 production 萃取（emoji 字典與招牌梗 sweep 已於 2026-08-18 拆出，不受影響 ✅）
-```
-
-若不採用：agent 留著當實驗或直接移除，production 不受任何影響。
-
-### 主要風險
-
-| 風險 | 對應 |
-|---|---|
-| agent 版**輸給**現有 pipeline | 可接受的結論（M6 明文允許）。`get_conversation` 就是為了避免這個 |
-| 模型把互損文化讀成攻擊性 | 冒煙測試已重現（「你也太廢」→「尖酸刻薄、帶有攻擊性」）。diff prompt 須寫入該文化，eval 獨立列一欄 |
-| context 撐爆 32k | token 預算：累計 24k 上限、留 8k 給 thinking + 輸出；用 token 不用則數 |
-| agent 拖慢白天對話 | 04:00 執行 + 每 step 禮讓 + 一次只做一件 |
-| 8 步不夠用 | `runs.status='max_steps'` 比例會顯示；M2 即可觀察 |
-
-### 未定案（待 Jason 拍板）
-
-- **樣本使用者清單**（5~10 人）與代號對應表；建議組成：A 層×2、D/E 層×2（現行 `MIN_MESSAGES_PER_USER=10` 門檻下 E 層 9 人**從未被分析過**，是 agent 最可能贏的戰場）、C 層×2、曾抽壞案例×1。**M4 才需要**
-- **diff prompt 的互損文化寫法**（M2 撰寫 prompt 時一併定）
-
-### 已完成的前置工作
-
-- **2026-08-25｜已知盲點：agent 看不到 bot 自己的發言**：`get_conversation` 還原現場時看不到插話內容——[discord_bot.py:446](src/discord_bot.py#L446) 的 `if not message.author.bot` 擋掉了 bot 訊息，實測最近 200 則插話**沒有任何一則**進 `data_discord_messages_index`。
-  **好的一面（本來就該這樣）**：不會把 bot 的發言誤算成群友的，也不會形成「bot 影響氣氛 → 人格描述反映 bot 自己的貢獻 → 又餵回 bot」的自我強化迴圈。
-  **盲點**：若某段對話是「A 說話 → bot 插話 → A 回應 bot」，agent 看到的是 A 兩句自言自語，中間那句不見了，可能誤判成自問自答或語意跳躍。目前幾次執行沒觀察到誤判（引用的證據都是真人對話），但**插話頻繁的頻道風險較高**。
-  **對照**：插話／askai 的 prompt **有**帶 bot 自己的回覆（`llm_service` 的 `bot_history`，渲染成 `<bot_history name="...">`，用途是讓模型認出 chat_history 裡哪幾行是自己講的）。所以「bot 看得到自己、agent 看不到 bot」是兩條路徑的刻意差異，不是遺漏。
-  **若日後要補**：`ai_interactions` 表存有插話的 `reply_message_id` 與 `reply_text`，可在 `get_conversation` 的時間視窗內併入，但要標明是 bot 發言、且要重新評估回饋迴圈風險。
-
-- **2026-08-19｜prompt 改為三層疊加（修掉我自己造的重複輪子）**：使用者指正「新增功能前先看有沒有原本的輪子，一直加獨立的會崩潰」。比對後確認 `persona_agent_prompt.json` 與 `personality_extraction_prompt.json` **13 條核心規則全部重疊**（角色設定／只能繁中／不要編造／自訂表情 `:xxx:` 規則／嚴禁廢話清單／要寫出跟別人不一樣的地方／角色定位…）。問題不只冗餘——**日後調整其中一邊，另一邊會靜默分岔**，與「招牌梗 sweep 黏在萃取裡」同類。
-  **改法（比照 `persona_examples.txt` 被 /askai 與插話共用的既有慣例，共用的是檔案、兩邊各自讀）**：
-  ① 新增 `persona_description_rules.txt`＝描述品質規則（原本嵌在萃取的 `user_prompt_template` 裡）
-  ② `personality_extraction_prompt.json` 該段換成 `{description_rules}` 佔位，`personality_extractor.load_description_rules()` 代入（讀檔失敗回空字串，不讓附加檔案缺失拖垮 04:00 排程）
-  ③ `persona_agent_prompt.json` 砍到只留 `system_layer`＝**agent 專屬**（工具工作流、互損文化判讀、資料不足就說不足），896 字 → 691 字
-  ④ `agent.load_prompts()` 三層疊加：萃取 system_prompt ＋ 共用描述規則 ＋ agent 層，雙檔 mtime 快取
-  **測試**：新增 `PromptLayeringTests` 4 項，其中一項專門斷言「agent 層不該再抄一份共用規則」，避免下一輪漂回複製貼上；另一項守住萃取的 `{description_rules}` 有被代入（漏掉會把佔位符原樣送給模型）。**刻意不寫 golden-string 測試**——prompt 常手動微調，那會讓啟動 gate 動不動就紅。gate **267 測試全綠**。
-
-- **2026-08-19｜`/persona_agent_test` admin 除錯指令（未 commit，需重啟 bot 才會註冊）**：補完 M2 驗收的必要工具——agent 必須跑在 **bot 自己的 process 內**才測得到真實行為（`stream_exclusive()` 是 process-local，用 `docker exec` 在旁邊跑會讓禮讓機制完全失效，實測導致 context 超限與吞吐 33→7 tok/s）。位置：`PersonalityCommands` cog（`llm_commands.py`），參數 `target`（成員）+ `model`（選填），`administrator=True`。**只讀不寫**：結果回 Discord + 完整寫 log，不碰任何資料表。設計細節：①先 defer 再回一則「已開始」，實際執行丟 `asyncio.create_task` + `_track_task`（agent 可能跑數十分鐘）②**完整 diff 一律進 log**——followup token 只有 15 分鐘，跑久了送不出去也不能讓結果消失③diff 以 `discord.File` 附件回傳，避免 2000 字限制④白名單只放 target 一人，工具層會擋掉其他查詢。**修掉一個只在失敗路徑才會觸發的 bug**：`discord.py` 的 `file` 預設是 `MISSING` 哨兵而非 `None`，`file=None` 會炸，而「沒有 diff」正好就是 error / context_exceeded 路徑 → 改成條件帶入 kwargs。指令由啟動時的 `tree.sync()` 自動註冊（全域指令，可能要等一下才出現在 Discord UI）。
-
-- **2026-08-18｜M2 完成（安靜使用者驗收通過，未 commit）**：`persona_agent/agent.py`（手寫 loop）+ `TOOL_DEFINITIONS`／`dispatch()` + `settings/prompts/persona_agent_prompt.json`（system／user／final 三段，含**互損文化**教學）+ `test_persona_agent_loop.py`。gate **263 測試全綠**。
-  **驗收案例＝安靜使用者 `275276661312847872`（7天 1 則／14天 5 則／90天 91 則）**——正是專案要解的痛點：
-  - production（14 天視窗）只能寫出「低調觀察者，**僅出現兩次**提及伺服器差異…未展現強烈個人立場」
-  - agent 判斷資料不足 → **自行擴大到 90 天** → 找到 91 則 → 產出 2 add／1 revise／2 keep，notes 明寫「90 天內有 91 則發言，足以推翻『僅出現兩次』的舊描述」
-  - **evidence 16 個全部真實存在且屬於本人（16/16，零幻覺）**——M3 的過濾器提前驗過一次
-  - **互損文化判讀正確**：notes 寫「粗口與貶義詞多為群內互損或針對外部人物，不等同對群內成員攻擊」，並把「對外部人物的批評」與「群內互損」分成兩個 trait（比 prompt 教的還細）。冒煙測試那個「你也太廢→尖酸刻薄、攻擊性」的失敗模式未再出現
-  **限度**：n=1；agent 看 90 天 vs production 看 14 天不是控制變因（但「自己決定撈多久」正是設計優勢）；**活躍使用者尚未成功跑完**。
-- **2026-08-18｜測試方法的坑（重要，已修正認知）**：前四次 dry-run 全失敗（context 超限／timeout／裁切produced 假陰性）。根因**不是顯卡或伺服器**（`backend_health=ready`、無 watchdog reset），而是**我用 `docker exec` 在另一個 process 跑 agent** → `stream_exclusive()`／`stream_busy()`／`foreground_recently_active()` 都是**模組層、process-local**，兩把鎖互不相干 → 禮讓機制**從未觸發**（四次 log 中「禮讓前景」出現 0 次），agent 與 bot 的插話**正面對撞**（同時段 bot 跑了 15 次 ambient/askai）。後果：共用 KV 池被瓜分 → ~12k 就 `Context size has been exceeded`（單獨跑 24k 都過）；吞吐 33 → 7~11 tok/s → 最終步連 600s timeout 都不夠。**這反而實測證實了「agent 不可做成獨立腳本」這條定案**。修正：裁切機制整段移除，改 `status="context_exceeded"`（不產出降級結果，明晚重跑）；預算計入每次重送的 `TOOL_DEFINITIONS`（832 token）；`get_messages` 預設 200→60、上限→120；prompt 限制 `get_conversation` 最多 5 次（實測模型會叫到 9 次撐爆預算）。
-  **待辦**：活躍使用者必須在 **bot process 內**跑一次才算完整驗收 → 需要一個 admin 除錯指令（M4 也會用到）。
-  **待定政策（無限重跑防護，M3 建 runs 表時實作）**：連續失敗 1 次→預算降 70%；2 次→降 50% 且 `get_conversation` 上限降 3；≥3 次→跳過並記 `quarantined` 列進維運報告。**重點不是省 GPU（一人一晚約 3 分鐘），是避免沉默失敗**。
-
-- **2026-08-18｜M2 實作中的關鍵發現：可用 context 是浮動的共用資源**：第一次 dry-run 撞 `Context size has been exceeded`（HTTP 500）。探測後確認**不是硬上限問題**——單發 24,110 token 可過（`ctx_size=32768`），但同時段一個約 17k 的請求卻爆掉，因為 llama-server 的 KV 由多個 slot 共享，/askai 或插話同時在跑就會縮水。三道處置：
-  ① **工具 payload 精簡**：`get_messages` / `search_messages` 拿掉恆定的 `author_id`、`channel`，時間戳砍成台北時間 `MM-DD HH:MM`（原本每則帶完整 ISO + 微秒）。200 則從 **35,103 → 15,812 字元**（估算 token 10,395 → 6,764）。`get_conversation` 保留 `author_id`（那裡作者會變，是判讀互動的關鍵）。
-  ② **預算逐次檢查**：模型會在同一步丟出多個 `tool_calls`（實測一步六個 `get_conversation`），原本只在步末檢查預算完全來不及。改成每個 call 前檢查，超出後仍回覆每個 `tool_call_id`（協議要求）但換成佔位字串。`TOKEN_BUDGET` 24,000 → **9,000**。
-  ③ **context 超限自動恢復**：`_call_model()` 偵測到 `Context size has been exceeded` 就把較早的 `role="tool"` 內容換成佔位字串（**不刪訊息**——`tool_call_id` 必須與 assistant 的 `tool_calls` 一一對應）後重試一次。估算擋不住浮動的共用資源，必須能從中恢復。
-
-- **2026-08-18｜聊天表加索引（手動指令，刻意不寫進程式碼）**：`data_discord_messages_index` 原本**只有 pkey**，工具全表掃描。手動建三個表達式索引 + `ANALYZE`（統計沒更新時規劃器估 456 筆／實際 265,118 筆 → 走 Bitmap Scan 全撈再排序，是主要元兇）：
-  ```sql
-  CREATE INDEX CONCURRENTLY discord_messages_idx_author_ts  ON data_discord_messages_index ((metadata_->>'author_id'), (metadata_->>'timestamp'));
-  CREATE INDEX CONCURRENTLY discord_messages_idx_channel_ts ON data_discord_messages_index ((metadata_->>'channel_id'), (metadata_->>'timestamp'));
-  CREATE INDEX CONCURRENTLY discord_messages_idx_message_id ON data_discord_messages_index ((metadata_->>'message_id'));
-  ANALYZE data_discord_messages_index;
-  ```
-  配套：`tools.py` 的時間比較從 `::timestamptz` 改**字串比較**（轉型是 STABLE 無法建索引；全表 `+00:00` ISO 字串的字典序 == 時間序，與 `personality_extractor.fetch_recent_messages` 寫法一致）。實測 `get_messages` 752→**38ms**、`get_conversation` 3,551→**28ms**、`get_current_persona` 154→**7.5ms**。順帶加速 `context_retriever` / production 萃取（同一張表）。
-- **2026-08-18｜M2 管線缺口先行補上**：`chat_raw` 只回 content 字串、也不能送 `tools` / `response_format` → agent loop 無從取得 `tool_calls`。抽出共用的 `_chat_completion_checked()`（模型載入／vision 轉換／`stream_exclusive`／連線層 anomaly＋快照／`no_choices` 判讀），新增 `chat_with_tools()` 回傳 `ChatMessageResult(content, tool_calls, finish_reason, usage)`。**關鍵差異**：tool-calling 時空 content 是正常結果，故只在 content 與 tool_calls **同時為空**才判 `empty_content`（`chat_raw` 維持原本的空 content 即錯誤）。因共用同一條路徑，agent 自動遵守「一次只做一件事」。已用真實服務驗證 tool_calls 往返、`json_schema` strict 輸出、以及 `chat_raw` 無回歸。
-- **2026-08-18｜M1 完成（未 commit）**：`llm/persona_agent/` 新套件（`tools.py` 四支唯讀工具、`schema.py` diff strict schema、`__init__.py` re-export）+ `llm_service` 的 `think` 缺口修補（`resolve_request_think` 改 backend-aware、`_build_chat_extra_body` 的 lemonade 分支把 `think` 轉成 `chat_template_kwargs.enable_thinking`，**僅在明確傳入時覆寫**故既有 caller 行為不變）+ 兩支測試（`test_persona_agent_tools.py` 16 項、`test_llm_think_override.py` 15 項）。容器內 gate **242 測試全綠**（原 211）。另對真實 DB 做過煙霧測試，四支工具皆通。**M1 完全不碰 production 執行路徑**。
-
-- **2026-08-18｜04:00 排程三步驟拆分（commit `5b69042`）**：招牌梗 sweep 從 `_run_personality_extraction_impl` 移到 `signature_tag_extractor.run_signature_tag_sweep()`，`_run_personality_extraction_once` 更名 `_run_daily_maintenance_once` 並拆成 emoji／sweep／萃取三個各自 try/except 的步驟。**未來換掉萃取只需動一行**；順帶修掉「手動預覽（`write_rag=False`）會誤觸真實刪梗／降級」。容器內 211 測試全綠。
-- **2026-08-18｜清除 `auto_personality` 殭屍列**：12 筆 `guild_id='0'` 的舊格式殘留（`last_extracted_at` 為空、author_id 與正式版完全重複）已刪除，現為 65 筆／65 人完全對齊。原本無害（[context_retriever.py:771](src/llm/context_retriever.py#L771) 有 guild_id 過濾），刪除理由是避免新寫的 `get_current_persona` 漏帶 `guild_id` 時撈到舊基準產出錯誤 diff。**工具層仍強制帶 `guild_id`——正確性不靠資料剛好乾淨。**
+**坑**
+- log 會混入啟動測試的假紀錄（author=1/2、mode=on），別用 log 判斷寫入；⑤ 的 log 只印前 200 字。
+- 04:00～約 07:30 不要重啟。
+- 突變測試複製到容器 `/tmp`，只複製需要的目錄（`/app/telegram_scraper` 有 30 GB）。
+- `docker logs` 從容器建立起累積，查近期要加 `--since`。
+- async 裡的同步 DB 呼叫走 `run_db`（AST 把關；參數名叫 `store` 也會被誤判）。
+- pydantic settings 是 frozen，測試裡要整個換成 `SimpleNamespace`；測試用的假 auto doc 要帶 `alias` metadata。
 
 ---
 
@@ -882,37 +884,6 @@ last_confirmed: 2026-09-28
 **已 commit。下一步**：重啟後尚無新相簿進來，下一組相簿確認 bot log `media_count` 等於組員數、DB 組員 `created_at` 間隔回到 0.0x 秒。
 
 **仍可能缺圖的情境（非本次 bug，未處理）**：① 相簿已送一部分、缺的部分超過 12 小時才進 DB（例如 scraper 停機半天）→ 依設計不補；② scraper 下載失敗 → 媒體沒進 DB，沒人會發（有媒體卻無媒體列：6~9 月每月 1~7 則，幾乎不在相簿裡）；③ 影片壓縮後仍超過 Discord 上限 → 略過該檔但照樣標記已送（log 歷來共 5 次 `附件壓縮失敗或仍超限`）；④ Discord 發送失敗 → 不標記，要等下次 bot 重啟 reconcile 才重試。
-
----
-
-## Telegram 媒體 spoiler（防雷）未帶到 Discord（2026-08-18 已實作，待部署驗證）
-
-<!-- @meta
-id: telegram-media-spoiler
-type: STATE
-status: confirmed
-depends_on: telegram-catchup-sweep
-affects: telegram-relay
-last_confirmed: 2026-08-18
--->
-
-**症狀**：Telegram 影片有加 spoiler，轉到 Discord 沒有打碼。
-
-**診斷**：DB `telegram_message_media` **2696 筆 `is_spoiler` 全為 false**，零筆 true。relay 端其實**早就接好了**（`TelegramMediaRecord` → `AttachmentSpec` → `discord.File(spoiler=...)`，discord.py 2.7.1 會自動加 `SPOILER_` 檔名前綴；圖片路徑也已有「首圖若為 spoiler 就不塞進 embed、改走附件」的分支）。唯一斷點在 scraper 寫入端。
-
-**根因**：[handlers.py `_build_media_item`](src/telegram_scraper/handlers.py#L140) 讀 `message.media_unread`——那是「媒體尚未被檢視」（語音/圓形影片用），與防雷無關。真正的旗標在 **media 物件**上：`MessageMediaPhoto.spoiler` / `MessageMediaDocument.spoiler`（已用 Telethon 1.43.2 的 `inspect.signature` 確認欄位存在）。
-
-**實作**：
-- [handlers.py](src/telegram_scraper/handlers.py)：`is_spoiler` 改讀 `getattr(media, "spoiler", False)`。
-- [db.py](src/telegram_scraper/db.py)：新增 `update_media_spoiler(message_pk, is_spoiler)`，`WHERE ... AND is_spoiler IS DISTINCT FROM $2` → 值沒變就不寫。
-- [handlers.py](src/telegram_scraper/handlers.py)：「媒體已存在，略過下載」分支補呼叫回填。**沒有這段的話舊資料永遠錯**（該分支整段跳過 `upsert_media_items`），`/resend_article` 舊 spoiler 影片仍不會打碼。
-
-**已驗證**：
-- scraper 端 5 案全過（影片/圖片 × spoiler 真假 + 無媒體），並對照出舊寫法對 spoiler 影片確實回傳 False。
-- `discord.File(..., spoiler=True)` 實測輸出檔名 `SPOILER_clip.mp4`。
-- 回填 SQL 以 `BEGIN/ROLLBACK` 實測：值有變 → `UPDATE 1`、值相同 → `UPDATE 0`；回滾後全表 2696 筆未動。
-
-**未 commit。下一步**：重啟 `telegram-scraper`，啟動歷史掃描（168h）會順手把近 7 天媒體的 spoiler 旗標校正（log 出現 `已校正 spoiler 旗標 message_pk=...`）；之後新的 spoiler 影片轉到 Discord 應顯示為需點擊的模糊附件。**注意**：Discord 已發出的舊訊息無法回頭補打碼，回填只影響 DB 正確性與日後 `/resend_article`。
 
 ---
 
@@ -1059,11 +1030,6 @@ last_confirmed: 2026-04-19
 **部署驗證（待重啟 + 跑一輪確認）：**
 - [ ] 2026-05-18 智慧女性風格 + few-shot 範例效果（觀察：回應是否變短/留白變多、是否真的「點規律不點現象」、空話智者 / 毒舌分析師 failure mode 是否被擋掉、色色降級觸發是否更敏感）
 - [ ] 2026-04-27 三輪 askai 重構完整效果（#XXXX 對齊、target_profile 區塊、prompt 整合後回答長度與陪聊感、自我否定卡片是否仍能被 LLM 正常引用）
-- [ ] Ollama 重試邏輯（觀察 `[WARNING] Ollama 第 1 次呼叫失敗` log）
-- [ ] embedding `num_ctx=8192`（`curl http://192.168.56.1:11434/api/ps` 看 `qwen3-embedding:0.6b` 的 `size_vram` 從 ~5.7GB 降到 ~3.1GB）
-
-**外部環境：**
-- [ ] **Windows Ollama server 待調整**（使用者本機設定，AI 無法直接改）：`OLLAMA_KEEP_ALIVE=24h`（原 5m，每 5 分鐘反覆 unload/reload 是 Windows `wsarecv` / ephemeral port 耗盡主因）。`OLLAMA_MAX_LOADED_MODELS=2` 已設好、`OLLAMA_NUM_PARALLEL=1` 已設好。改完重啟 Ollama 後驗證 `server.log` 不再 5 分鐘一次的 `load request`。AMD 顯卡維持 `OLLAMA_VULKAN=true`。
 
 **新議題（未開工）：**
 - [ ] **/askai 指定 thread 查詢**：情境 A（人在 thread 內 `/askai`）已支援；情境 B（在他處指定 thread）不支援，因 slash command 無 thread 參數 + pgvector metadata 無 `thread_id` / `parent_id`。兩方案：Minimum 版（加 thread 參數 + retriever 吃 thread.history，≤3 處改動）/ 完整版（Minimum + chat_persistence 寫 thread_id + RAG 加 thread 過濾，需 migration）。AI 建議先 Minimum 版，使用者未選。
@@ -1591,9 +1557,7 @@ last_confirmed: 2026-08-09
 - **可調手感（config 起始值）**：base_probability、cooldown_seconds、hourly_cap、askai_grace_seconds。
 
 #### B — 認得人（persona card 召回；檔1 提前到此）
-- [ ] `ambient_reply` 接 `retrieve_rag_context_sync(question, guild_id, requester_user_id, participant_user_ids, …)`（吃純 id、**不需 interaction 重構**），把在場成員 persona card 轉成 `persona_context` 餵 `generate_reply`。
-- [ ] participant_user_ids ＝ 近期 `channel.history` 的發言者 + 當前作者；executor 跑（sync LlamaIndex）；best-effort（失敗→None）。
-- [ ] per-channel persona 短 TTL 快取（~60s），避免 armed 期間每則都打 pgvector。embedding 走 Lemonade 獨立 port（**不卸載 12B**，無 swap 風險）。
+- [x] 三項已實作（`ambient_reply._build_persona_context` 走 `retrieve_rag_context_sync`，`_PERSONA_CACHE` 依頻道短 TTL 快取）；原細項已歸檔（2026-09-28）。
 - **驗收**：群裡有 persona card 的人講話，琇紫接話帶得出對方調性；沒卡的人也不會卡住（degrade 成只有對話脈絡）。
 - **延後（非 v1 必要）**：`retrieve_discord_context` 泛化吃 channel 的 hybrid 長期對話召回——觸碰 /askai 核心、風險高，等 B 的 persona 召回不夠用再做。
 
@@ -2214,6 +2178,7 @@ last_confirmed: 2026-04-18
 
 **P1（體驗優化）：**
 - [ ] `/pause` 與 `/resume` 按鈕
+- [ ] 音樂面板改用共用置底元件 `utils.panel_bump.PanelBumper`（2026-09-29 決定**暫緩**：面板訊息存記憶體、按鈕狀態就地 edit、啟動時有清理流程、面板 id 與被設定熱重載監看的 `music_runtime.json` 同檔；要搬得先把面板 id 移到別的檔，上線那次會留一則舊面板要手動刪）
 - [x] 多歌單管理（多歌單下拉，可複選合併播放）— 2026-06-20，詳見 `TODO-completed.md` 歸檔
 - [ ] 快取空間管理（LRU 清理、磁碟用量監控）
 
@@ -2400,3 +2365,61 @@ last_confirmed: 2026-03-31
 - [ ] 指令數量是否下降或更清楚
 - [ ] 正式環境是否已隔離開發命令
 - [ ] 是否維持可回滾（舊入口仍可用）
+
+### 目標 4：權限檢查收斂（**2026-09-04 盤點完成・改動已還原・暫緩**）
+
+<!-- @meta
+id: permission-consolidation
+type: TODO
+status: blocked
+last_confirmed: 2026-09-04
+-->
+
+**暫緩原因**：使用者決定先專注 ComfyUI 串接，不想同時承擔這個改動的風險。實作過一次、
+測試全綠（353），但**已 `git checkout` 全數還原**，本節保留盤點結果，重做時不必再查一遍。
+
+**現況：同一件事有五種寫法**（23 個 slash 指令 + 21 個按鈕／選單 callback）
+
+| 寫法 | 用在哪 | 問題 |
+|---|---|---|
+| `@app_commands.checks.has_permissions(administrator=True)` | 5 個指令 | 錯誤訊息是英文預設值 |
+| `check_guild(interaction, owner_only=/admin_only=/required_role=)` | 函式體內，12 個指令 | 藏在第 4~6 行，盤點要逐一打開看 |
+| `user_commands._check_guild_and_owner()` | 5 個 callback | **只透傳 `owner_only`**，`admin_only` / `required_role` 被丟掉 → 該檔永遠設不了管理員限制 |
+| `management_commands._check_guild_and_owner()` | 8 個 callback | 同名但預設值相反（`owner_only=True`），兩個 cog 讀同一個名字得到不同行為 |
+| `rollcall._check_admin()` | 8 個按鈕 | 自己重寫，**少了「在不在伺服器內」** → 私訊時 `interaction.user` 是 `User` 沒有 `guild_permissions`，會 `AttributeError` |
+
+底層其實都通到 `utils/utils.py` 的 `check_guild()`；`check_role()` 是它的角色判斷零件，
+另外被 `commands/forum_monitor.py` 獨立使用（吃 member 不吃 interaction，所以不能合併）。
+
+**做過的方案（可直接重做）**
+1. `check_guild` → 更名 `check_permission`（33 處）——原名只描述四件事裡的第一件
+2. `utils/utils.py` 新增 `require_permission(owner=/admin=/role=)` 裝飾器 + `PermissionDenied`
+   （`app_commands.CheckFailure` 子類）；`check_permission` 自己會回中文訊息，而
+   `discord_bot.on_app_command_error` 會把非冷卻錯誤再回一句「執行命令時發生錯誤」，
+   **不自訂例外就會連發兩則**
+3. 17/23 指令改用裝飾器；三個薄包裝刪除，21 個 callback 改直呼 `check_permission`
+   （callback 不是 app command，用不了裝飾器）
+4. `test_commands` 6 個維持零檢查（見下）
+
+**重做時已知的三個坑**
+- `management_commands` 的 View 內是 `self.cog._check_guild_and_owner(...)`，跟其他寫法不同，
+  整批取代會漏掉兩處
+- `llm_commands` 的 `persona_agent_test` 是**入口出口各驗一次**（followup token 有 15 分鐘，
+  期間權限可能被撤銷）——那是刻意的縱深防禦，不可以當成重複刪掉
+- 裝飾器必須在 `@app_commands.command` 之下才會被註冊成 check
+
+**尚未解決（與本次收斂無關，但一起盤到）**
+- ⚠️ `/anonymous` **零權限檢查**：任何人可叫機器人匿名發訊息到他看得到的任何頻道。
+  `test_commands` 另外 5 個（`echo` / `list_forum_posts` / `ping` / `hello_world` /
+  `multi_select_demo`）同樣零檢查。使用者 2026-09-04 決定「沒有特別要求就先不用」動。
+- owner 語意不一致：`check_role` 中 OWNER_ID **自動通過**，`check_guild(admin_only=True)`
+  中**不會**——同一個 owner 走不同路徑結果不同
+- `config.json` 的 `role_mapping.Moderator` 是空陣列。`check_role` 對未設定的角色 fail-closed，
+  所以哪天有指令寫 `required_role="Moderator"`，除 owner 外全數被擋，而訊息會說「僅限具有
+  Moderator 角色的使用者使用」——看起來像權限不足，實際是設定沒填
+
+**待決：AST 守衛**
+提案是在 `test_shared_conventions.py` 加一條「每個 `@app_commands.command` 都必須有
+`@require_permission`」，白名單用**函式層級**（`檔名.函式名`）而非整檔豁免，新增指令忘記加就紅。
+但**它跑在容器啟動 gate 裡，誤判會讓 bot 起不來**，而本專案的取捨一貫是「寧可漏判不要誤判」。
+風險未評估完（指令宣告形式有幾種、AST 會不會漏、改名會怎樣），**先不加**。
