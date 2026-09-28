@@ -201,6 +201,23 @@ class GuildScopeTests(unittest.TestCase):
                          "要給編號，模型才有辦法說「第 2 項不動」")
         self.assertEqual(payload["items"][0]["text"], "「何意味」是固定口頭禪")
 
+    def test_served_version_is_recorded(self):
+        """交給模型的版本號要記下來：寫入前靠它核對模型看到的就是上一版。"""
+        fetch = FakeFetch(results=[[("x", 7, [{"trait": "a", "text": "有內容"}])]])
+        c = ctx(fetch)
+        tools.get_current_persona(c, user_id=ALICE)
+        self.assertEqual(c.served_versions, {ALICE: 7})
+
+    def test_failed_read_does_not_fall_back_to_production(self):
+        """讀自己的版本失敗 ≠ 沒有版本：精簡版發布後 auto_personality 只剩挑過的幾條，
+        拿它當基準，沒看到的條目在新版本裡會全部消失。要回報錯誤讓模型重試。"""
+        fetch = FakeFetch(raises=RuntimeError("connection reset"))
+        c = ctx(fetch)
+        payload = json.loads(tools.get_current_persona(c, user_id=ALICE))
+        self.assertIn("error", payload)
+        self.assertEqual(len(fetch.calls), 1, "不可以改查 production")
+        self.assertEqual(c.served_versions, {}, "沒交出任何版本")
+
     def test_items_skip_entries_without_text(self):
         """沒有文字的項目不該佔掉編號——編號要對得上模型看到的清單。"""
         changes = [{"trait": "a", "text": "有內容"}, {"trait": "b", "text": "  "},

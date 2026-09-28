@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Optional, Sequence
 
@@ -76,6 +76,9 @@ class ToolContext:
     guild_id: int
     allowed_ids: frozenset[str]
     fetch: FetchFn = _default_fetch
+    #: `get_current_persona` 實際交給模型的 agent 版本號（user_id → version）。寫入前拿來核對
+    #: 模型看到的就是上一版——沒看到上一版就寫，沒被提到的條目會全部消失
+    served_versions: dict[str, int] = field(default_factory=dict, compare=False, hash=False)
 
     @classmethod
     def build(
@@ -321,9 +324,8 @@ def _persona_items(changes: Any) -> list[dict[str, Any]]:
 def get_current_persona(ctx: ToolContext, *, user_id: Any) -> str:
     """讀該使用者目前的人格描述，供 agent 產出 diff 時當基準。
 
-    優先讀 agent 自己的最新版本，沒有才退回 production 的 `auto_personality`，
-    並把來源寫在 `source` / 版本號寫在 `version` —— 之後寫入版本表時記進 `based_on`，
-    才知道這一版是拿什麼疊上去的。
+    優先讀 agent 自己的最新版本，**沒有**才退回 production 的 `auto_personality`（新成員的第一版）；
+    讀取失敗則回報錯誤，不退回。交給模型的版本號記在 `ctx.served_versions`，寫入前核對。
 
     兩段查詢都走 `ctx.fetch`（而不是直接呼叫 store），維持可注入、單元測試不必碰 DB。
     """
@@ -341,10 +343,12 @@ def get_current_persona(ctx: ToolContext, *, user_id: Any) -> str:
     try:
         own = ctx.fetch(own_sql, (str(ctx.guild_id), uid))
     except Exception as exc:
-        # 查詢失敗 → 當作沒有自己的版本，退回 production
-        logger.info("讀取 agent 版本失敗，改用 production 基準 uid=%s: %s", uid, exc)
-        own = []
+        # 查詢失敗不能退回 production：精簡版發布後 auto_personality 只剩挑過的幾條，模型拿它
+        # 當基準，沒看到的條目在新版本裡就會全部消失。回報錯誤讓模型重試（實測會重試）
+        logger.warning("讀取 agent 版本失敗 uid=%s: %s", uid, exc)
+        return _error(f"查詢失敗：{type(exc).__name__}")
     if own:
+        ctx.served_versions[uid] = int(own[0][1])
         changes = own[0][2] if isinstance(own[0][2], list) else []
         items = _persona_items(changes)
         now = datetime.now(APP_TZ)

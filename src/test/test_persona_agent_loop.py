@@ -817,14 +817,17 @@ class KeepEndToEndTests(unittest.TestCase):
          "evidence_msg_ids": ["1547184851646423110"]},
     ]
 
-    def _run(self, changes, history=None):
+    def _run(self, changes, history=None, served=3, diff_user=ALICE):
         written = {}
         recorded = {}
         run = agent.AgentRun(user_id=ALICE, status="ok", diff={
-            "user_id": ALICE, "changes": changes, "confidence": "medium", "notes": "",
+            "user_id": diff_user, "changes": changes, "confidence": "medium", "notes": "",
         })
 
         async def fake_run_for_user(**kw):
+            # 模擬模型呼叫 get_current_persona 拿到的版本（真的工具會記在 ctx 上）
+            if served is not None:
+                kw["ctx"].served_versions[ALICE] = served
             return run
 
         def fake_write_version(**kw):
@@ -910,6 +913,38 @@ class KeepEndToEndTests(unittest.TestCase):
                 user_id=ALICE, guild_id=1, ctx=ctx, model="m", run_id="b", save=True,
             ))
         self.assertIn("讀取上一版失敗", recorded["skip_reason"], "要記下為什麼沒寫")
+
+    def test_model_that_never_saw_the_previous_version_writes_nothing(self):
+        """工具讀上一版失敗（或模型沒呼叫），寫入時卻讀得到：模型的 diff 交代不到上一版的
+        條目，照寫的話沒被提到的會全部消失。"""
+        add = [{"type": "add", "ref": 0, "trait": "新", "text": "新特徵", "reason": "r",
+                "evidence_msg_ids": ["1552306186831794217"]}]
+        for served in (None, 2):          # 沒拿到、拿到舊的一版
+            with self.subTest(served=served):
+                written, recorded = self._run(add, served=served)
+                self.assertEqual(written, {}, "模型沒看到上一版時不可以寫入")
+                self.assertIn("模型看到的不是上一版 v3", recorded["skip_reason"])
+
+    def test_blocked_run_records_no_lost_items(self):
+        """沒寫入就沒有東西消失：lost 要是空的（跟驗證層自己擋下時一致），不然加總會高估。"""
+        # 第 1 項的 revise 附假 id 被退件；其餘通過，才會真的寫出版本（對照組）
+        bogus = [{"type": "revise", "ref": 1, "trait": "改", "text": "改寫第一項", "reason": "r",
+                  "evidence_msg_ids": ["not-a-real-id"]},
+                 {"type": "keep", "ref": 2, "trait": "", "text": "", "reason": "r",
+                  "evidence_msg_ids": []},
+                 {"type": "add", "ref": 0, "trait": "新", "text": "新特徵", "reason": "r",
+                  "evidence_msg_ids": ["1552306186831794217"]}]
+        _, wrote = self._run(bogus, served=3)
+        self.assertEqual(wrote["ref_accounting"]["lost"], [1], "對照組：真的寫入時第 1 項會消失")
+        _, blocked = self._run(bogus, served=None)
+        self.assertEqual(blocked["ref_accounting"]["lost"], [])
+
+    def test_validation_reason_is_not_overwritten(self):
+        """驗證層的原因比較根本（user_id 不符），不能被「沒拿到上一版」蓋掉。"""
+        add = [{"type": "add", "ref": 0, "trait": "新", "text": "新特徵", "reason": "r",
+                "evidence_msg_ids": ["1552306186831794217"]}]
+        _, recorded = self._run(add, served=None, diff_user="999")
+        self.assertIn("user_id 不符", recorded["skip_reason"])
 
     def test_history_reaches_the_written_version(self):
         """歷史裡被換掉的證據要真的寫進新版本，不是只在函式裡算對。"""

@@ -707,6 +707,17 @@ async def run_and_persist(
             # 為空被退件，寫出去的版本只剩 add／revise，而且沒有上一版可對帳、lost 也記
             # 不到。實測 10 項 keep＋1 項 add 會寫出只有 1 項的版本。所以這次不寫。
             result.skip_reason = "讀取上一版失敗（無法解析 keep），本次不寫入"
+        elif latest and (served := ctx.served_versions.get(str(user_id))) != latest.get("version"):
+            # 模型沒拿到上一版（工具讀取失敗、沒呼叫，或中途有新版本）：它的 diff 交代不到
+            # 上一版的條目，照寫的話那些條目會無聲消失
+            seen = f"v{served}" if served is not None else "沒拿到"
+            # 驗證層已經給了原因（user_id 不符、confidence=low…）就留著，那個比較根本
+            result.skip_reason = result.skip_reason or (
+                f"模型看到的不是上一版 v{latest.get('version')}（{seen}），本次不寫入"
+            )
+            # 不寫就沒有東西消失——跟驗證層自己擋下時的處理一致，否則 lost 會高估
+            if result.ref_accounting is not None:
+                result.ref_accounting["lost"] = []
         if save and result.skip_reason is None:
             base = f"v{latest['version']}" if latest else "production"
             version = await run_db(
