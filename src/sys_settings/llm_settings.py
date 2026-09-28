@@ -518,7 +518,7 @@ class PersonaAgentSettings(BaseSettings):
     #: `persona_agent.publish`）。off＝不做；dry_run＝只算、寫 log，不寫入——上線前先看
     #: 挑出來的東西對不對；on＝寫入。on 時 ③ 與手動萃取會跳過 ⑤ 要寫精簡版的人，不把它蓋回去。
     #: `enabled` 關掉時一律當 off（`publish.effective_publish_mode`）：沒有新版本可發布。
-    publish_mode: Literal["off", "dry_run", "on"] = "dry_run"
+    publish_mode: Literal["off", "dry_run", "on"] = "on"
 
     #: 納入門檻。**刻意比 production 寬**（production 是 14 天 10 則）：
     #: 14 天 <10 則的人 production 直接跳過，而那正是 agent 唯一明確贏的族群
