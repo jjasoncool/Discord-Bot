@@ -13,6 +13,7 @@ from handlers import (
     handle_new_message,
     handle_refetch_message,
 )
+from message_lock import KeyedLock, message_lock_key
 from tg_config import TelegramConfig, TelegramRuntimeConfigWatcher
 
 
@@ -34,7 +35,7 @@ CATCHUP_GAP_WINDOW = 300
 CATCHUP_DISABLED_RECHECK_SEC = 60
 
 
-async def _handle_refetch_request(payload, client, config, runtime_watcher, db, process_lock) -> None:
+async def _handle_refetch_request(payload, client, config, runtime_watcher, db, message_locks) -> None:
     """處理一筆重抓要求：payload = JSON {chat_id, message_id}。"""
     try:
         data = json.loads(payload)
@@ -60,7 +61,7 @@ async def _handle_refetch_request(payload, client, config, runtime_watcher, db, 
         return
 
     try:
-        async with process_lock:
+        async with message_locks.hold(message_lock_key(msg)):
             await handle_refetch_message(msg, chat_id, client, config, runtime_watcher, db)
         print(f"[Refetch] 完成 chat_id={chat_id} msg_id={message_id}")
     except Exception as exc:
@@ -93,7 +94,7 @@ async def _catch_up_channel(
     config: TelegramConfig,
     runtime_watcher: TelegramRuntimeConfigWatcher,
     db: TelegramDatabase,
-    process_lock: asyncio.Lock,
+    message_locks: KeyedLock,
 ) -> None:
     """對單一頻道補掃「視窗內的漏收訊息」＋「DB 內最大 message_id 之後」的新訊息。
 
@@ -138,8 +139,8 @@ async def _catch_up_channel(
         if msg.id in known_ids:
             skipped += 1
             continue
-        # 與即時事件、refetch 共用同一把鎖，避免同一則訊息被並行處理（重複下載媒體）
-        async with process_lock:
+        # 同一則訊息與即時事件、refetch 互斥，避免被並行處理（重複下載媒體）
+        async with message_locks.hold(message_lock_key(msg)):
             if await handle_catchup_message(
                 msg, client, config, runtime_watcher, db, source_label=source_channel
             ):
@@ -164,7 +165,7 @@ async def _catch_up_loop(
     runtime_watcher: TelegramRuntimeConfigWatcher,
     db: TelegramDatabase,
     listen_channels: list[str],
-    process_lock: asyncio.Lock,
+    message_locks: KeyedLock,
 ) -> None:
     """週期性補掃：修補 Telethon 漏掉的即時 NewMessage 事件。
 
@@ -185,7 +186,7 @@ async def _catch_up_loop(
         for source_channel in listen_channels:
             try:
                 await _catch_up_channel(
-                    source_channel, client, config, runtime_watcher, db, process_lock
+                    source_channel, client, config, runtime_watcher, db, message_locks
                 )
             except asyncio.CancelledError:
                 raise
@@ -222,14 +223,17 @@ async def run_telegram_scraper(config: TelegramConfig) -> None:
 
     listen_channels = config.source_channels or [config.source_channel]
 
-    # 即時事件 / 補掃 / refetch 三條路徑都會處理訊息，共用一把鎖序列化，
+    # 即時事件 / 補掃 / refetch 三條路徑都會處理訊息，以「單則訊息」為單位上鎖，
     # 避免同一則訊息被並行處理造成重複下載媒體或搶寫同一筆記錄。
-    process_lock = asyncio.Lock()
+    # 不能用一把全域鎖：相簿的每張圖是各自一則訊息、Telethon 會同時派發，全域鎖會讓它們
+    # 排隊逐張「寫入→下載→NOTIFY」，組員間隔拉長到秒級，relay 等不到整組就先發，
+    # 晚到的圖整批漏發（2026-08-02 起全域鎖期間實測 191 組相簿有 77 組缺圖）。
+    message_locks = KeyedLock()
 
     @client.on(events.NewMessage(chats=listen_channels))
     async def on_new_message(event: events.NewMessage.Event) -> None:
         """即時新訊息事件入口 — 監聽所有 source_channels。"""
-        async with process_lock:
+        async with message_locks.hold(message_lock_key(event.message)):
             await handle_new_message(event, client, config, runtime_watcher, db)
 
     catchup_task: asyncio.Task | None = None
@@ -248,7 +252,7 @@ async def run_telegram_scraper(config: TelegramConfig) -> None:
                 # 持有 task 參照，避免被 GC 掉導致重抓靜默失敗
                 task = asyncio.create_task(
                     _handle_refetch_request(
-                        payload, client, config, runtime_watcher, db, process_lock
+                        payload, client, config, runtime_watcher, db, message_locks
                     )
                 )
                 refetch_tasks.add(task)
@@ -301,7 +305,7 @@ async def run_telegram_scraper(config: TelegramConfig) -> None:
 
         catchup_interval_min = runtime_watcher.get_snapshot().catchup_interval_min
         catchup_task = asyncio.create_task(
-            _catch_up_loop(client, config, runtime_watcher, db, listen_channels, process_lock),
+            _catch_up_loop(client, config, runtime_watcher, db, listen_channels, message_locks),
             name="telegram_catch_up",
         )
         if catchup_interval_min > 0:
