@@ -2,7 +2,7 @@
 
 守的幾件事：
   - 只挑證據跨 ≥2 次對話的條目（擋「一次當成習慣」），整條挑、不切半句
-  - 基本個性（證據跨度長）與近況（最近還有佐證）各有位置，用不完的互讓
+  - 基本個性（證據跨度長）先挑、最多一半預算；其餘條目依對話次數填滿，用不完的互讓
   - 預算扣掉標籤、自介與印象，發布當下插話那一行不超過上限——用 bot 讀取時的同一套函式驗
   - 寫入時標上來源與版本；寫入失敗算失敗，不能算成功
   - 發布開啟後，production 萃取（③／手動）跳過 ⑤ 要寫的人；精簡版變空的人回到 ③ 手上
@@ -71,6 +71,16 @@ class SelectLiteTests(unittest.TestCase):
         self.assertEqual([i.section for i in r.items], ["core", "recent", "recent"])
         self.assertEqual(r.text, "基本個性；最近的；稍早的")
 
+    def test_recent_prefers_items_seen_in_more_conversations(self):
+        """真實案例：9 次對話的特徵被一條晚幾分鐘、字數多的條目擠掉。次數多的先挑，次數
+        相同才比時間；輸出也照這個順序——插話截斷時從尾巴切，先丟比較不重要的。"""
+        frequent = item("常出現" + "字" * 20, ago(1.2), ago(1.4), ago(1.6), ago(1.8))  # 4 次
+        newer = item("較新的" + "字" * 20, ago(1), ago(1.1))                            # 2 次
+        only_one = publish.select_lite([newer, frequent], 30, now=NOW)
+        self.assertEqual([i.text for i in only_one.items], [frequent["text"]])
+        both = publish.select_lite([newer, frequent], 500, now=NOW)
+        self.assertEqual([i.text for i in both.items], [frequent["text"], newer["text"]])
+
     def test_budget_is_respected_and_items_are_never_cut(self):
         items = [item("字" * n, ago(1), ago(3 + n)) for n in (40, 35, 30, 25)]
         r = publish.select_lite(items, 70, now=NOW)
@@ -80,7 +90,9 @@ class SelectLiteTests(unittest.TestCase):
             self.assertIn(piece, originals, "只能整條放，不能切半句")
 
     def test_core_is_capped_at_half_when_recent_competes(self):
-        cores = [item(f"基本{i}" + "字" * 18, ago(40), ago(20 - i)) for i in range(4)]
+        """第一輪基本個性最多一半預算。第二輪沒排進去的基本個性會跟近況一起依對話次數排——
+        次數比近況多就可能超過一半（使用者 09-28 接受）；這裡次數相同，近況靠時間排進來。"""
+        cores =[item(f"基本{i}" + "字" * 18, ago(40), ago(20 - i)) for i in range(4)]
         recent = item("最近" + "字" * 18, ago(0.5), ago(2))
         r = publish.select_lite([*cores, recent], 60, now=NOW)
         self.assertIn("recent", [i.section for i in r.items], "近況要留得到位置")

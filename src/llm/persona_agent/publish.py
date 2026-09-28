@@ -8,8 +8,9 @@
   1. 門檻：證據跨 ≥2 次對話（相隔 >30 分鐘算另一次）。擋掉「一次當成習慣」——
      例如「北側」在那個人全部發言裡只出現過 1 次，卻被寫成「會用…」。
   2. 基本個性：最多用一半預算，證據跨度 ≥14 天的，跨度越長越優先。
-  3. 近況：剩下的預算，其餘條目（含沒排進上一段的基本個性）依最後一次有佐證的時間
-     （last_seen）由新到舊——所以基本個性用不完的空間自然讓給近況，反之亦然。
+  3. 近況：剩下的預算，其餘條目（含沒排進上一段的基本個性）依對話次數由多到少，次數
+     相同再依最後一次有佐證的時間（last_seen）由新到舊——所以基本個性用不完的空間自然
+     讓給近況，反之亦然。
   4. 放不下的整條跳過，不切半句；文字一模一樣的只放一次。輸出時基本個性在前、近況在後。
 
 **預算＝一行的上限扣掉標籤、自介與印象**：插話那一行是「「標籤」— 自介。印象。AI觀察」，
@@ -145,15 +146,20 @@ def select_lite(changes: Any, budget: int, *, now: Optional[datetime] = None) ->
     def by_span(c: LiteItem) -> tuple:
         return (-c.span_days, c.n)
 
-    def by_recency(c: LiteItem) -> tuple:
-        return (-c.last_seen.timestamp(), c.n)
+    def by_weight(c: LiteItem) -> tuple:
+        # 對話次數多的先：門檻本身就是「重複出現才算數」，越常出現越能代表這個人。只看
+        # 最後佐證時間的話，同一天差幾分鐘就決定誰進得去——實測一條 9 次對話的特徵被
+        # 晚幾分鐘、字數多的條目擠掉。次數相同才比時間
+        return (-c.episodes, -c.last_seen.timestamp(), c.n)
 
     take(sorted((c for c in candidates if c.section == "core"), key=by_span),
          int(budget * CORE_SHARE))
-    take(sorted(candidates, key=by_recency), budget)
+    take(sorted(candidates, key=by_weight), budget)
 
+    # 近況段內也照挑選的順序：插話截斷時從尾巴切，先丟次數少的（基本個性整段排在前面，
+    # 包括第二輪才挑進來的）
     ordered = (sorted((p for p in picked if p.section == "core"), key=by_span)
-               + sorted((p for p in picked if p.section == "recent"), key=by_recency))
+               + sorted((p for p in picked if p.section == "recent"), key=by_weight))
     return LiteResult(text=_SEP.join(p.text for p in ordered), items=ordered,
                       eligible=len({c.text for c in candidates}))
 
