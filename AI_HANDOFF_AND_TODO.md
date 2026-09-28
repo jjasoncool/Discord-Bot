@@ -25,6 +25,7 @@
 > 4. 保留可追溯來源，避免之後重複討論同一件事
 
 最後盤點紀錄（只保留近期；過往詳見 `TODO-completed.md` 各歸檔 entry）：
+- 2026-09-28（Telegram 相簿漏圖，**scraper＋relay 兩端已實作・545 測試全過・已 commit・已部署；今天缺的 87 張已於 15:58~16:07 補發完成**）：使用者回報 GameData #3223 相簿 8 張只發 1 張。**觸發點＝8/02 補掃 commit `fbd2d3c` 加的全域 `process_lock`**：本意是防「同一則」被三條路徑並行處理，卻把 Telethon 本來並行派發的相簿各張變成逐張排隊（組員寫入間隔 p90 0.03s → 2s），relay 0.5 秒到齊判斷等不到整組就先發、晚到的被丟棄。8/02 起 191 組相簿 77 組缺圖、共 237 張。**改法**：全域鎖 → 單則訊息鎖 `(chat_id, message_id)`（新 [message_lock.py](src/telegram_scraper/message_lock.py)）。**relay 端同輪修掉**（使用者拍板）：改成「哪個組員先到就收整組、等媒體到齊＋3 秒安靜才發、晚到的以（補圖）再發、補圖時效 12 小時」。**補今天缺圖**：先校正 delivery_state（補記實送沒標、撤記標了沒送）再重啟，由 reconcile 走正式路徑補發；唯讀預演＝23 則、87 張。詳見 [補掃區塊 2026-09-28 追加段](#telegram-漏收事件自動補掃2026-08-02-已實作2026-08-18-補上中段缺口盲區2026-09-28-全域鎖改單則訊息鎖修相簿漏圖待部署驗證)。
 - 2026-09-22（活動自動發布「連結指向沒有該活動的訊息」+ 重複建活動，**已實作・397 測試全過・待部署驗證**）：使用者回報活動 `1539556072082112604`「[群聲共振模擬域]戰鬥活動」的「公告出處」點進去，那則訊息**一個字都沒提到這個活動**。**根因不在活動功能，在文章轉發**：活動偵測讀 `article_content_full`（該篇 8,454 字），轉發 embed 讀 `article_desc` —— 而 `article_desc` **全庫 532 篇皆為空字串**，於是「沒摘要就取前 300 字當預覽」那條 fallback 成了唯一路徑，8,454 字只發出 303 字；6 個活動名分別在第 1347~2010 字，全部被切掉。而 embed 連 `url=` 都沒設（FB 那邊有），訊息是條死路。**量化**：315 個 article 來源活動中 100 個（31.7%）的活動名在轉發訊息可見文字裡找不到。**同時修掉第二個 bug**：`normalize_title` 不認半形 `<>` → 「活動預告 \| <群聲共振模擬域>…」與「[群聲共振模擬域]戰鬥活動」指紋不同 → 同一活動建了兩個（線上 `…604` 與 `…681`）。**改法**：截斷 300→1200（全庫 p75 僅 565 字，85.2% 完整發出）+ 截斷時附官網連結 + embed 補 `url=`；活動描述嵌該活動的原文片段（匯總帖的 N 個活動各自可讀）；`normalize_title` 收 `<>`（**不收 `《》`**，472 個標題用它、其中 328 個包的是遊戲名「鳴潮」）；**後到的更好來源改為就地升級既有活動的封面與描述**（FB 832/834 有圖、article 三個封面欄位全庫皆空，且 FB 專屬貼文比匯總帖晚 7~28 天到）；同名+區間重疊視為官方改期而非新建（排除**本輪已配對的指紋**，否則 article 995 那種同名不同區間會被吃掉）；加建立/升級序列化鎖、指紋遷移、例外分離、補 log。**升級既有活動走四軸**（封面／描述／時間／名稱各自判斷）：中途曾用單一品質總分當唯一閘門，跑對抗性複查後確認那是錯的——422 筆規劃事件裡 294 筆同分，於是改期走不進換描述的分支（Discord 上時間改了、描述第一行的活動時間還是舊的）、專屬帖的短導言覆蓋匯總帖的長玩法說明（實測 370→118 字）、14.6% 的公告一個字都沒更新，故拆成四軸。**使用者從 Discord 刪掉的活動改立墓碑**（原本實體刪列，7~28 天後另一來源會把它原地復活），只有 `/resend_article` 解得開。**線上 DB 已先以指令套用欄位**（32 列不動，備份在 scratchpad），重啟後直接可用。詳見 [活動自動發布修正區塊](#活動自動發布連結指向錯誤--重複建活動2026-09-22-已實作待部署驗證)。
 - 2026-09-02（ComfyUI 產圖 + GPU 資源仲裁，**規劃定案・未開工**；本輪只做線上實測與一則註解清理，未動任何功能 code）：需求＝每天 03:00 排程產圖（角色換衣，依心情／日期／節日），10 張以內。**硬數據**：兩張 RX 9060 XT 各 16GB，27B+ctx32768 本來就跨兩顆吃滿 → 卸載 LLM 是唯一解（釘單顆並行方案否決）。**線上實測（Lemonade 11.5.0 / ComfyUI 0.34.2）**：`POST /api/v1/unload {"model_name":...}` ✅；**卸載後打 chat 會自動重載（22s）→「主動載回」「背景預熱」整段不需要** ✅；`recipe_options`（ctx 32768 + sampling args）不會被洗掉 ✅；**ComfyUI 看不到 Lemonade 的 VRAM**（Vulkan vs HIP，27B 在與不在都回報 free 15.78 GiB）→ 不可用它判斷夠不夠 ✅。**設計定案**：鎖改**租約+心跳**（續租點掛在本來就要做的 ComfyUI 輪詢上，不開 checker task、不猜 timeout）；租約 120s 管卡死、deadline 03:50 管超時（04:00 有維護四步要用 GPU）；租約過期接管者要清 cache + log error。**換後端**：Ollama 可續用（`keep_alive:0` 就是原生卸載語意），vLLM 不可；三處 `keep_alive` **保留**（一度決定刪除，使用者否決且正確：它是可攜層該有的行為，且註解含 Ollama 時代實戰教訓），只把註解改誠實。**prompt v1 走規則零 LLM**：節日查表 + 重用 00:00 AI 日記當心情來源。**本輪 code 異動**：① 拿掉 `_try_heal_lemonade_backend` 那句無法查證的「裸 reload 會掉回 ctx 4096」註解；② `DIARY_TZ` → `APP_TZ`；③ 時區守衛從 regex 改走 AST + 補 5 項自我守衛測試（342 測試全過，未 commit）。詳見 [ComfyUI 產圖區塊](#comfyui-產圖--gpu-資源仲裁2026-09-02-規劃定案未開工)。
 - 2026-08-18（Telegram 補掃補不到「中段缺口」，**已實作・未 commit・待部署驗證**）：使用者回報「重啟後又發一大堆早上 10-11 點的文章」，疑似重複。**查證＝不是重複、是首次補發**：`delivery_state` 全表無任何 `message_pk` 送超過 1 次，該批 8 則 `message_date` 10:31~11:03 但 `created_at` 全是 **17:24**（重啟才入庫）；早上 111 則中 34 則無 delivery 記錄者**全部**是 media group 成員（由首則代發），無法解釋的漏發 = 0。**根因**＝2026-08-02 版補掃的 `offset_id = max(message_id)` + `reverse=True` 只看得到比 max_id 更新的訊息，漏的若是**中段**（2742/2743/2746 漏但 2745/2747 已收 → max_id 早跳過去）永遠掃不到，只能等重啟全量掃描（本次卡 7 小時）。**修法＝指針左移**（使用者拍板改既有流程、不另開補洞路徑）：`offset_id = max_id - CATCHUP_GAP_WINDOW(300)`；配套 ①`limit` 加大成 `300+200`（limit 卡的是**撈回**幾則，沿用 200 會在 `window_start+200` 截斷）②新增 `db.get_existing_message_ids` 一次撈視窗內已有 id 成 set 過濾（否則 290 則已存在訊息各跑完整 `_process_message`）。**驗證**：容器內注入假 client/db 重現 8/18 真實缺口，洞全補回、新訊息照收、已存在 297 則零重跑；**反向驗證** limit 壓回 200 → 掃描截斷、洞與新訊息一則都收不到。**下一步**：`docker compose restart telegram-scraper`。詳見 [補掃區塊追加段](#telegram-漏收事件自動補掃2026-08-02-已實作2026-08-18-補上中段缺口盲區待部署驗證)。
@@ -765,7 +766,7 @@ agent 產出後多呼叫一次現有的 index_auto_personality  → 下游（per
 
 ---
 
-## Telegram 漏收事件自動補掃（2026-08-02 已實作；2026-08-18 補上「中段缺口」盲區，待部署驗證）
+## Telegram 漏收事件自動補掃（2026-08-02 已實作；2026-08-18 補上「中段缺口」盲區；2026-09-28 全域鎖改單則訊息鎖修相簿漏圖，待部署驗證）
 
 <!-- @meta
 id: telegram-catchup-sweep
@@ -773,7 +774,7 @@ type: STATE
 status: confirmed
 depends_on: telegram-multi-source
 affects: telegram-relay
-last_confirmed: 2026-08-18
+last_confirmed: 2026-09-28
 -->
 
 **症狀**：使用者回報「最新的 telegram 沒有轉發」。
@@ -788,7 +789,7 @@ last_confirmed: 2026-08-18
 **實作（本輪）**：
 - [db.py](src/telegram_scraper/db.py)：新增 `get_max_message_id(telegram_chat_id)`，走既有 UNIQUE(chat_id, message_id) 索引取增量基準。
 - [runner.py](src/telegram_scraper/runner.py)：新增 `_catch_up_channel` / `_catch_up_loop` / `_resolve_catchup_chat_id`（chat_id 快取）。以 `iter_messages(channel, reverse=True, offset_id=<DB 最大 message_id>, limit=200)` 增量重掃——已讀 Telethon 1.43.2 原始碼確認 reverse 模式下 `offset_id` 會 `+1`，即**從基準之後開始、不含基準本身**，且回傳為舊→新（PK 與時序一致）。
-- **序列化鎖**：即時事件 / 補掃 / refetch 三條路徑共用一把 `process_lock`，避免同一則訊息並行處理造成重複下載媒體。
+- **序列化鎖**：即時事件 / 補掃 / refetch 三條路徑共用一把 `process_lock`，避免同一則訊息並行處理造成重複下載媒體。**（2026-09-28 已改為單則訊息鎖，全域鎖造成相簿漏圖，見文末追加段）**
 - **單輪上限 200 筆/頻道**：由舊往新掃，超出部分下一輪接著補，**不會留下永久空洞**；達上限會明確 log。
 - **容錯**：單頻道拋錯（FloodWait 等）只 log 並續跑其他頻道，不拖垮迴圈；`run_until_disconnected` 結束時 cancel 補掃 task。
 - [tg_config.py](src/telegram_scraper/tg_config.py)：`catchup_interval_min`（預設 **15** 分鐘）進 `TelegramConfig` 與 runtime snapshot，可從 `runtime_config.json` 熱調整；`<= 0` 為停用（迴圈保留，改回正值免重啟即恢復）。
@@ -835,6 +836,52 @@ last_confirmed: 2026-08-18
 **限制**：視窗外的舊洞（> `max_id - 300`）仍只有重啟全量掃描補得到；要延長回溯就調大 `CATCHUP_GAP_WINDOW`，代價是每輪多撈同量 metadata。
 
 **未 commit。下一步**：`docker compose restart telegram-scraper` → 觀察 `[CatchUp] <頻道> 補回漏收訊息：視窗 X~Y 撈到 N 筆、已存在略過 M 筆、收下 K 筆`。
+
+### 追加（2026-09-28）：全域 `process_lock` 讓相簿漏圖 → 改單則訊息鎖
+
+**症狀**：使用者回報 GameData #3223 相簿「後面一堆圖片漏發」——8 張只發出 1 張；同時段 #3213 8 張發 1 張、#3231 7 張發 6 張。
+
+**機制（一句話）**：全域鎖把「同時到的相簿各張」變成逐張排隊，relay 的 0.5 秒到齊判斷等不到整組就先發，晚到的組員走「交由首則處理」被丟掉。
+
+**查證（非推測）**：
+- **加鎖原因**（`fbd2d3c` commit 訊息）：補掃上線後，即時事件 / 補掃 / refetch 可能同時處理**同一則**訊息 → 加鎖防重複下載。但實作成**一把全域鎖**，連「不同訊息」也一起序列化。
+- **Telethon 預設並行派發**：1.43.2 `sequential_updates=False`，每個 update 各開一個 task（容器內已讀 `telethon/client/updates.py:284` 原始碼）→ 相簿各張本來同時處理；唯一讓它排隊的就是這把鎖。
+- **時間點吻合**：相簿組員寫入 DB 的間隔，7/31 以前 p90 **0.03 秒**（7/31 兩張間隔 0.001 秒）；commit 當天 8/02 11:01 之後第一組相簿（18:07）起即變成逐張，9 月中位數 **0.76 秒**、p90 **2 秒**、最大 12 秒。
+- **影響量**（bot log `media group 合併 ... media_count=N` 對照 DB 該組實際媒體數）：7 月 70 組中 9 組不足（21 張）；**8/02 起 191 組中 77 組不足（237 張）**；9/28 單日 40 組中 21 組（82 張）。
+
+**修法**：新增 [message_lock.py](src/telegram_scraper/message_lock.py)（`KeyedLock` + `message_lock_key`），[runner.py](src/telegram_scraper/runner.py) 三條路徑改用 `message_locks.hold((chat_id, message_id))`：**同一則訊息仍互斥（保留原本加鎖的目的），不同訊息恢復並行**。key 取 Telethon `Message.chat_id`（marked id，容器內實測 = DB `telegram_chat_id` 格式 `-100…`），三條路徑拿到的都是 Message 物件，key 一致。無人持有的 key 即回收，dict 不會長大。
+
+**已驗證**：容器內 `unittest discover` **534 測試全過**（新增 [test_telegram_message_lock.py](src/test/test_telegram_message_lock.py) 8 條：同 key 互斥、相簿 8 張可同時進入、例外／取消後不漏回收、跨頻道同 id 不撞 key）；**反向驗證**：把 `hold` 換成全域鎖 → 相簿測試逾時失敗。`py_compile`（scraper 容器 py3.12）PASS。
+
+**relay 端同輪一起修（使用者拍板「一起修正」）**——加鎖前 7 月仍約 1 成相簿缺圖，relay 自己有三個洞：只數訊息列不管媒體列寫入沒、晚到組員走「交由首則處理」直接丟棄（重啟 reconcile 也一樣跳過 → 永久漏發）、已發送標記用的是合併**前**的組員清單（實送了卻沒標、沒送卻標了都有）。
+**機制（一句話）**：不再「只有首則能發」，改成**哪個組員先到就由它收整組**，等到齊才發；發完還有沒送的，以「（補圖）」再發一則。改動全在 [telegram_relay_service.py](src/services/telegram_relay_service.py)：
+- **到齊判斷** `_wait_group_settled`：每個組員都有媒體列（`get_group_member_states`，`has_media=false` 視為就緒）**且** 3 秒內沒有新組員／新就緒；湊滿 10 則（Telegram 相簿上限）且都就緒就不等；上限 60 秒，逾時先發已就緒的。
+- **同組同時只有一個收集者** `_process_group_member`：收集中到的組員只登記 `_dirty_groups` 就返回（不佔處理槽空等），收集者發完回頭複查；「檢查 dirty → 移出 active」之間無 await，不會有組員卡在空檔。
+- **各頻道只發還沒送的** `_group_pending_for_channel`：組內已有人送過 → 標題加「（補圖）」；**補圖時效 12 小時**（`_GROUP_FOLLOWUP_MAX_AGE`，以該組首次送出時間算）——重啟時 reconcile 會把全部沒 delivery 記錄的組員（現約 460 筆、158 組舊相簿）重新排入，沒有時效會把舊缺圖一口氣倒進頻道。發之前先快篩，沒有該發的（或全過時效）就不等安靜期。
+- 只標記**實際合併送出**的組員；重送模式（replay）不看 delivery_state、以 processed 集合防同輪重送。
+- `render()` 加 `title_suffix` 參數；`get_grouped_message_pks` 移除（改用 `get_group_member_states` + `get_delivered_at`）。
+
+**已驗證（relay）**：新增 [test_telegram_relay_media_group.py](src/test/test_telegram_relay_media_group.py) 11 條（逐則寫入整組一次送、媒體未寫入要等、收集中到的組員不阻塞不重送、發送中到的以補圖送、發完才到的補圖不丟、逾時先發其餘補圖、過時效不發且不空等、全送過直接結束、重送模式只送一次、非首則觸發保留說明文字、單則訊息不變）；**反向驗證**：同樣的測試套舊版 relay → 關鍵 3 條全失敗。全套 **545 測試全過**。
+**坑**：relay 測試的 logger 會寫進正式 `logs/discord_bot.log`——第一次跑時用了真實 grouped_id/pk，log 在 **15:50:39~41** 留下幾行假的「media group 合併 grouped_id=14324643361830837 …」（含一行 pks=[13916…13923] media_count=8，**不是真的送出**）。已改用假 id；日後用 log 還原送出狀態時要排除這幾行（校正腳本以「合併後 60 秒內有 delivery 記錄」過濾）。
+
+**今天漏的圖補發（使用者拍板「補圖片」）**：
+- **做法**：不另寫發送腳本，走新版 relay 的正式路徑——重啟時 reconcile 排入未送組員 → 以「（補圖）」送出。前提是先把今天相簿的 delivery_state 校正成「實際送出」：以 bot log 合併紀錄為準（pks 裡媒體寫入最早的 `media_count` 則＝實送），**補記** 實送沒標的（否則會被當晚到組員重送）、**撤記** 標了沒送的（否則永遠不補）。
+- **校正腳本**：scratchpad `fix_album_delivery_state.py`（`docker exec -i telegram-scraper python - [--apply] < …`；bot 停機時也能跑）。09-28 15:55 dry-run：39 組、補記 57 筆、撤記 9 筆、待補發 **87 張**、無法判定 0。
+- **唯讀預演**（新版 relay + 真 DB + 校正計畫套在記憶體、發送換成記錄器）：reconcile 排入 460 筆 → **23 則補圖、共 87 張**，其餘 0 則送出（舊相簿全被時效擋下）。
+- **15:57 已套用**（備份 scratchpad `delivery_state_backup_20260928_155656.sql`，4108 列 → 4156 列＝+57−9；套用後複跑＝23 組、0 筆待校正、87 張待補發）。
+- **順序必須是**：停 bot → 備份 `telegram_relay_delivery_state` → `--apply` → 啟動 bot。舊版 bot 在跑時每來一組相簿就再產生不一致的標記，所以不能先套用再重啟。**需在 09-28 22:15 前啟動**（最早一組缺圖相簿首次送出於 10:15:47，超過 12 小時時效就不補）。
+
+**已知殘留（未處理）**：
+1. 並行恢復後，兩則**不同**訊息若同時帶同一個尚未下載的自訂表情，會同時寫同一個 `emoji_{doc_id}` 檔——8/02 以前本來就如此，機率低，未加鎖。
+2. History 啟動掃描本來就沒上鎖，維持原狀。
+3. 8/02~9/27 的舊缺圖（約 155 張）不補——超過補圖時效，使用者只要求補今天。
+4. 補圖訊息的說明文字：組員多半沒有文字，補圖只有標題「來源（補圖）」與 footer `msg #… · db#…` 指向原相簿。
+
+**部署與補發結果（09-28）**：scraper 15:56 重啟、bot 15:58 啟動；reconcile 排入 460 筆 → **23 則補圖、87 張全數送出**（log `followup=True`；使用者確認「補圖沒問題」）。其中 GameData #3198、#3201 是 146MB 影片，two-pass 壓縮到 99.9MB 花約 8 分鐘，16:06/16:07 才送出——壓縮期間佔住處理槽，屬既有行為。另注意 bot 容器啟動時會跑單元測試，log 裡 `grouped_id=990000000000001` 的合併／逾時紀錄都是測試。
+
+**已 commit。下一步**：重啟後尚無新相簿進來，下一組相簿確認 bot log `media_count` 等於組員數、DB 組員 `created_at` 間隔回到 0.0x 秒。
+
+**仍可能缺圖的情境（非本次 bug，未處理）**：① 相簿已送一部分、缺的部分超過 12 小時才進 DB（例如 scraper 停機半天）→ 依設計不補；② scraper 下載失敗 → 媒體沒進 DB，沒人會發（有媒體卻無媒體列：6~9 月每月 1~7 則，幾乎不在相簿裡）；③ 影片壓縮後仍超過 Discord 上限 → 略過該檔但照樣標記已送（log 歷來共 5 次 `附件壓縮失敗或仍超限`）；④ Discord 發送失敗 → 不標記，要等下次 bot 重啟 reconcile 才重試。
 
 ---
 

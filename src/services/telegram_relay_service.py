@@ -18,6 +18,7 @@ import tempfile
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote_plus
@@ -568,22 +569,49 @@ class TelegramMessageRepository:
         )
 
 
-    async def get_grouped_message_pks(self, grouped_id: int, chat_id: int) -> list[int]:
-        """取得同一 media group 的所有 message pk（按 telegram_message_id 排序）。"""
+    async def get_group_member_states(self, grouped_id: int, chat_id: int) -> list[tuple[int, bool]]:
+        """取得同一 media group 的組員 (pk, 是否就緒)，按 telegram_message_id 排序。
+
+        scraper 先寫訊息列、下載完才寫媒體列，「列存在」不代表圖已就緒；
+        沒有媒體的組員（has_media=false）視為就緒。
+        """
         if self.pool is None:
             raise RuntimeError("TelegramMessageRepository 尚未 connect")
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT id
-                FROM telegram_messages
-                WHERE grouped_id = $1 AND telegram_chat_id = $2
-                ORDER BY telegram_message_id ASC;
+                SELECT
+                    m.id,
+                    (NOT m.has_media OR EXISTS (
+                        SELECT 1 FROM telegram_message_media mm WHERE mm.message_id = m.id
+                    )) AS ready
+                FROM telegram_messages m
+                WHERE m.grouped_id = $1 AND m.telegram_chat_id = $2
+                ORDER BY m.telegram_message_id ASC;
                 """,
                 int(grouped_id),
                 int(chat_id),
             )
-        return [int(row["id"]) for row in rows]
+        return [(int(row["id"]), bool(row["ready"])) for row in rows]
+
+    async def get_delivered_at(self, message_pks: list[int], discord_channel_id: int) -> dict[int, datetime]:
+        """回傳這批 pk 中已送到該頻道者的 {pk: delivered_at}。"""
+        if self.pool is None:
+            raise RuntimeError("TelegramMessageRepository 尚未 connect")
+        pks = [int(pk) for pk in message_pks]
+        if not pks:
+            return {}
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT message_pk, delivered_at
+                FROM telegram_relay_delivery_state
+                WHERE message_pk = ANY($1::bigint[]) AND discord_channel_id = $2;
+                """,
+                pks,
+                int(discord_channel_id),
+            )
+        return {int(row["message_pk"]): row["delivered_at"] for row in rows}
 
 
 class MessageRouteResolver:
@@ -811,7 +839,12 @@ class TelegramRenderAdapter:
             balanced.append(chunk)
         return balanced
 
-    def render(self, message: TelegramMessageRecord, emoji_map: dict | None = None) -> RenderPlan:
+    def render(
+        self,
+        message: TelegramMessageRecord,
+        emoji_map: dict | None = None,
+        title_suffix: str = "",
+    ) -> RenderPlan:
         attachments: list[AttachmentSpec] = []
         seen_media_keys: set[str] = set()
 
@@ -846,7 +879,7 @@ class TelegramRenderAdapter:
         resolve_emoji = (lambda did: (emoji_map or {}).get(did)) if emoji_map else None
         rendered_text = apply_message_entities(message.text or "", message.entities, resolve_emoji=resolve_emoji)
         content = rendered_text.strip()
-        source_name = message.chat_title or self._get_source_channel_name()
+        source_name = (message.chat_title or self._get_source_channel_name()) + title_suffix
 
         chunks = self._split_text(content, self._DESCRIPTION_MAX_CHARS) if content else [""]
         total = len(chunks)
@@ -1369,6 +1402,11 @@ class MessageRelayWorker:
         self._queued_set: set[int] = set()  # 追蹤已在 queue 中的 PK，防止重複入隊
         self._last_polled_pk: int = 0
 
+        # 正在收集的 media group（key=(chat_id, grouped_id)）。收集期間到的組員只登記到
+        # _dirty_groups 就返回，由收集者發完後回頭複查，不各自佔處理槽空等。
+        self._active_groups: set[tuple[int, int]] = set()
+        self._dirty_groups: set[tuple[int, int]] = set()
+
     @property
     def running(self) -> bool:
         return self._running
@@ -1669,66 +1707,253 @@ class MessageRelayWorker:
             "telegram_message_id": tg_msg_id,
         }
 
-    # media group 等待同組訊息到齊的秒數
-    _GROUP_WAIT_SEC = 3.0
+    # media group 到齊判斷：scraper 先寫訊息列、下載完才寫媒體列，組員也可能逐則進來，
+    # 所以要「每個組員都有媒體」且「這麼久沒有新組員、也沒有新就緒」才算到齊
+    _GROUP_QUIET_SEC = 3.0
+    # 等待上限：超過就先發已就緒的，其餘晚到的走補圖
+    _GROUP_MAX_WAIT_SEC = 60.0
     # 等待期間輪詢 DB 的間隔秒數
     _GROUP_POLL_INTERVAL = 0.5
+    # Telegram 相簿最多 10 則；湊滿且都就緒就不必再等安靜期
+    _TELEGRAM_ALBUM_MAX = 10
+    # 補圖時效：該組首次送出超過這麼久，晚到的組員就不補發。重啟時 reconcile 會把所有
+    # 沒有 delivery 記錄的組員重新排入，沒有時效會把舊相簿的缺圖一口氣倒進頻道。
+    _GROUP_FOLLOWUP_MAX_AGE = timedelta(hours=12)
+    _GROUP_FOLLOWUP_TITLE_SUFFIX = "（補圖）"
 
-    async def _collect_media_group(self, message: TelegramMessageRecord) -> TelegramMessageRecord:
-        """等待同一 media group 的訊息到齊，合併成單一虛擬訊息。
-
-        策略：短暫等待（_GROUP_WAIT_SEC），輪詢 DB 直到組員數穩定，
-        然後把所有組員的 media_items 合併到第一則訊息上。
-        """
-        grouped_id = message.grouped_id
-        chat_id = message.telegram_chat_id
-        if grouped_id is None:
-            return message
-
-        prev_count = 0
-        elapsed = 0.0
-        while elapsed < self._GROUP_WAIT_SEC:
+    async def _wait_group_settled(self, grouped_id: int, chat_id: int) -> list[tuple[int, bool]]:
+        """輪詢到整組到齊（或逾時），回傳組員 (pk, 是否就緒)。"""
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        last_change = started
+        previous: Optional[list[tuple[int, bool]]] = None
+        while True:
+            members = await self.repository.get_group_member_states(grouped_id, chat_id)
+            now = loop.time()
+            if members != previous:
+                previous = members
+                last_change = now
+            all_ready = bool(members) and all(ready for _, ready in members)
+            if all_ready and (
+                len(members) >= self._TELEGRAM_ALBUM_MAX
+                or now - last_change >= self._GROUP_QUIET_SEC
+            ):
+                return members
+            if now - started >= self._GROUP_MAX_WAIT_SEC:
+                logger.warning(
+                    "Telegram relay media group 等待逾時，先發已就緒者: grouped_id=%s members=%s",
+                    grouped_id, members,
+                )
+                return members
             await asyncio.sleep(self._GROUP_POLL_INTERVAL)
-            elapsed += self._GROUP_POLL_INTERVAL
-            sibling_pks = await self.repository.get_grouped_message_pks(grouped_id, chat_id)
-            if len(sibling_pks) == prev_count:
-                break  # 數量穩定，認為到齊
-            prev_count = len(sibling_pks)
 
-        sibling_pks = await self.repository.get_grouped_message_pks(grouped_id, chat_id)
-
-        if len(sibling_pks) <= 1:
-            return message
-
-        # 合併所有 sibling 的文字與媒體到第一則訊息
+    async def _merge_group_messages(self, pks: list[int]) -> Optional[TelegramMessageRecord]:
+        """把多則組員的文字與媒體合併到第一則上，成為單一虛擬訊息。"""
         merged_text_parts: list[str] = []
         merged_media: list[TelegramMediaRecord] = []
         first_msg: Optional[TelegramMessageRecord] = None
-        all_pks: list[int] = []
+        merged_pks: list[int] = []
 
-        for pk in sibling_pks:
-            sibling = await self.repository.get_message_by_pk(pk)
-            if sibling is None:
+        for pk in pks:
+            member = await self.repository.get_message_by_pk(pk)
+            if member is None:
                 continue
-            all_pks.append(pk)
+            merged_pks.append(pk)
             if first_msg is None:
-                first_msg = sibling
-            if sibling.text.strip():
-                merged_text_parts.append(sibling.text.strip())
-            merged_media.extend(sibling.media_items)
+                first_msg = member
+            if member.text.strip():
+                merged_text_parts.append(member.text.strip())
+            merged_media.extend(member.media_items)
 
         if first_msg is None:
-            return message
+            return None
 
-        merged_text = "\n".join(merged_text_parts)
-        first_msg.text = merged_text
+        first_msg.text = "\n".join(merged_text_parts)
         first_msg.media_items = merged_media
-
         logger.info(
             "Telegram relay media group 合併: grouped_id=%s pks=%s media_count=%s",
-            grouped_id, all_pks, len(merged_media),
+            first_msg.grouped_id, merged_pks, len(merged_media),
         )
         return first_msg
+
+    async def _is_force_replay(self, chat_id: int, message_pk: int) -> bool:
+        """依「這則訊息的來源」各別判斷是否強制重送；查 pk 時帶上 chat_id 鎖定來源，
+        避免 telegram_message_id 跨來源重號時抓錯訊息。"""
+        replay_msg_id = self.route_resolver.resolve_replay_msg_id(chat_id)
+        if replay_msg_id is None:
+            return False
+        replay_pk = await self.repository.get_pk_by_telegram_message_id(replay_msg_id, chat_id)
+        return replay_pk is not None and message_pk >= replay_pk
+
+    async def _advance_cursor(self, message_pk: int) -> None:
+        self._last_polled_pk = max(self._last_polled_pk, message_pk)
+        await self.repository.set_runtime_cursor_pk(self._last_polled_pk)
+
+    async def _group_pending_for_channel(
+        self,
+        grouped_id: int,
+        candidate_pks: list[int],
+        group_pks: list[int],
+        channel_id: int,
+        force_replay: bool,
+    ) -> tuple[list[int], bool]:
+        """回傳 (這個頻道該發的組員 pk, 是否為補圖)。
+
+        組內已有組員送到該頻道 → 這次是補晚到的圖；補圖超過時效則回傳空清單。
+        """
+        if force_replay:
+            # 重送模式不看 delivery_state；這一輪已送過的（已標 processed）不再送
+            return [pk for pk in candidate_pks if not self._seen_processed(pk)], False
+
+        delivered = await self.repository.get_delivered_at(group_pks, channel_id)
+        pending = [pk for pk in candidate_pks if pk not in delivered]
+        if not pending or not delivered:
+            return pending, False
+
+        first_sent = min(delivered.values())
+        if datetime.now(timezone.utc) - first_sent > self._GROUP_FOLLOWUP_MAX_AGE:
+            logger.info(
+                "Telegram relay 相簿補圖已過時效，略過: grouped_id=%s channel_id=%s pending=%s first_sent=%s",
+                grouped_id, channel_id, pending, first_sent,
+            )
+            return [], True
+        return pending, True
+
+    async def _process_group_member(self, message: TelegramMessageRecord, started: float) -> None:
+        """media group 組員入口：同組同時只有一個收集者，其餘組員登記後返回。"""
+        key = (message.telegram_chat_id, int(message.grouped_id))
+        if key in self._active_groups:
+            self._dirty_groups.add(key)
+            logger.info(
+                "Telegram relay media group 成員，交由進行中的收集處理: message_pk=%s grouped_id=%s",
+                message.message_pk, message.grouped_id,
+            )
+            return
+
+        self._active_groups.add(key)
+        try:
+            while True:
+                self._dirty_groups.discard(key)
+                await self._publish_group_pending(message, started)
+                # 收集期間有組員登記 → 回頭複查一次（晚到的會以補圖送出）。
+                # 這個檢查到移出 _active_groups 之間沒有 await，組員不會卡在空檔沒人處理。
+                if key not in self._dirty_groups:
+                    break
+        finally:
+            self._active_groups.discard(key)
+            self._dirty_groups.discard(key)
+
+    async def _publish_group_pending(self, trigger: TelegramMessageRecord, started: float) -> None:
+        """把 media group 裡「還沒送到各路由頻道」的組員合併送出。
+
+        不論哪個組員先觸發都一樣：等整組到齊 → 各頻道挑出還沒送的 → 合併成一則送出。
+        組內已有組員送過（組員晚到、上次等待逾時）時，改以「（補圖）」送出剩下的。
+        """
+        chat_id = trigger.telegram_chat_id
+        grouped_id = int(trigger.grouped_id)
+
+        route_ids = self.route_resolver.resolve_telegram_routes(chat_id)
+        if not route_ids:
+            logger.info(
+                "Telegram relay 無路由，略過: message_pk=%s chat_id=%s telegram_message_id=%s",
+                trigger.message_pk, chat_id, trigger.telegram_message_id,
+            )
+            self._mark_processed(trigger.message_pk)
+            return
+
+        members = await self.repository.get_group_member_states(grouped_id, chat_id)
+        group_pks = [pk for pk, _ in members] or [trigger.message_pk]
+        force_replay = await self._is_force_replay(chat_id, min(group_pks))
+
+        # 先確認有沒有該發的：收尾複查、重啟時 reconcile 排入的舊組員多半沒有，
+        # 這時不必等整組到齊的安靜期
+        needs_publish = False
+        for channel_id in route_ids:
+            pending, _ = await self._group_pending_for_channel(
+                grouped_id, group_pks, group_pks, channel_id, force_replay,
+            )
+            if pending:
+                needs_publish = True
+                break
+        if not needs_publish:
+            for pk in group_pks:
+                self._mark_processed(pk)
+            await self._advance_cursor(max(group_pks))
+            return
+
+        members = await self._wait_group_settled(grouped_id, chat_id)
+        group_pks = [pk for pk, _ in members] or group_pks
+        ready_pks = [pk for pk, ready in members if ready]
+
+        published_count = 0
+        sent_pks: set[int] = set()
+        followup = False
+        for channel_id in route_ids:
+            pending, is_followup = await self._group_pending_for_channel(
+                grouped_id, ready_pks, group_pks, channel_id, force_replay,
+            )
+            if not pending:
+                continue
+
+            channel = await self._resolve_channel(channel_id)
+            if channel is None:
+                logger.warning("Telegram relay 目標頻道不存在或不可發送: channel_id=%s", channel_id)
+                continue
+            logger.info(
+                "Telegram relay 發送目標: channel_id=%s guild=%r channel=%r",
+                channel_id,
+                getattr(getattr(channel, "guild", None), "name", "N/A"),
+                getattr(channel, "name", "N/A"),
+            )
+
+            merged = await self._merge_group_messages(pending)
+            if merged is None:
+                continue
+            if not merged.text.strip() and not merged.media_items:
+                logger.info("Telegram relay media group 無可發內容，略過: grouped_id=%s pks=%s", grouped_id, pending)
+                continue
+
+            emoji_map = await self._resolve_custom_emojis(merged.entities)
+            plan = self.render_adapter.render(
+                merged,
+                emoji_map=emoji_map,
+                title_suffix=self._GROUP_FOLLOWUP_TITLE_SUFFIX if is_followup else "",
+            )
+            try:
+                published_count += await self.publisher.publish_to_channel(channel, plan)
+                # 只標記這次實際合併送出的組員；還沒就緒的留著，到了再以補圖送出
+                for pk in pending:
+                    await self.repository.mark_message_published(pk, channel_id)
+                sent_pks.update(pending)
+                followup = followup or is_followup
+            except Exception as exc:
+                logger.error(
+                    "Telegram relay 發送失敗: message_pk=%s channel_id=%s err=%s",
+                    merged.message_pk,
+                    channel_id,
+                    exc,
+                    exc_info=True,
+                )
+
+        for pk in sent_pks:
+            self._mark_processed(pk)
+        await self._advance_cursor(max(group_pks))
+
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        result = "published" if published_count > 0 else "failed_or_skipped"
+        logger.info(
+            "telegram_relay_result message_pk=%s telegram_chat_id=%s telegram_message_id=%s route_count=%s published_count=%s latency_ms=%s result=%s grouped_id=%s group_size=%s followup=%s",
+            trigger.message_pk,
+            chat_id,
+            trigger.telegram_message_id,
+            len(route_ids),
+            published_count,
+            latency_ms,
+            result,
+            grouped_id,
+            len(sent_pks),
+            followup,
+        )
 
     async def _process_one(self, message_pk: int) -> None:
         if self._seen_processed(message_pk):
@@ -1740,6 +1965,12 @@ class MessageRelayWorker:
             logger.warning("Telegram relay 查無訊息: message_pk=%s", message_pk)
             return
 
+        # media group 整組處理；要排在「空訊息」判斷之前——組員的圖可能還在下載，
+        # 此刻沒有媒體不代表是空訊息
+        if message.grouped_id is not None:
+            await self._process_group_member(message, started)
+            return
+
         # 跳過無內容訊息（無文字且無媒體，通常是 Telegram 服務通知）
         if not message.text.strip() and not message.media_items:
             logger.info(
@@ -1749,28 +1980,6 @@ class MessageRelayWorker:
             )
             self._mark_processed(message_pk)
             return
-
-        # media group 合併：同一 grouped_id 只由最小 pk 負責發送
-        sibling_pks: list[int] = []
-        if message.grouped_id is not None:
-            sibling_pks = await self.repository.get_grouped_message_pks(
-                message.grouped_id, message.telegram_chat_id,
-            )
-            first_pk = sibling_pks[0] if sibling_pks else message_pk
-            if message_pk != first_pk:
-                # 非組內第一則 → 標記已處理，由第一則統一發送
-                logger.info(
-                    "Telegram relay media group 成員，交由首則處理: "
-                    "message_pk=%s grouped_id=%s first_pk=%s",
-                    message_pk, message.grouped_id, first_pk,
-                )
-                self._mark_processed(message_pk)
-                self._last_polled_pk = max(self._last_polled_pk, message_pk)
-                await self.repository.set_runtime_cursor_pk(self._last_polled_pk)
-                return
-
-            # 是第一則 → 等待同組到齊，合併媒體
-            message = await self._collect_media_group(message)
 
         route_ids = self.route_resolver.resolve_telegram_routes(message.telegram_chat_id)
         if not route_ids:
@@ -1788,15 +1997,7 @@ class MessageRelayWorker:
         plan = self.render_adapter.render(message, emoji_map=emoji_map)
         published_count = 0
 
-        # 依「這則訊息的來源」各別判斷是否強制重送；查 pk 時帶上 chat_id 鎖定來源，
-        # 避免 telegram_message_id 跨來源重號時抓錯訊息。
-        replay_msg_id = self.route_resolver.resolve_replay_msg_id(message.telegram_chat_id)
-        force_replay = False
-        if replay_msg_id is not None:
-            replay_pk = await self.repository.get_pk_by_telegram_message_id(
-                replay_msg_id, message.telegram_chat_id,
-            )
-            force_replay = replay_pk is not None and message_pk >= replay_pk
+        force_replay = await self._is_force_replay(message.telegram_chat_id, message_pk)
 
         for channel_id in route_ids:
             channel = await self._resolve_channel(channel_id)
@@ -1825,10 +2026,6 @@ class MessageRelayWorker:
             try:
                 published_count += await self.publisher.publish_to_channel(channel, plan)
                 await self.repository.mark_message_published(message_pk, channel_id)
-                # 同時標記所有 sibling 為已發送，避免重複送出
-                for sib_pk in sibling_pks:
-                    if sib_pk != message_pk:
-                        await self.repository.mark_message_published(sib_pk, channel_id)
             except Exception as exc:
                 logger.error(
                     "Telegram relay 發送失敗: message_pk=%s channel_id=%s err=%s",
@@ -1838,14 +2035,8 @@ class MessageRelayWorker:
                     exc_info=True,
                 )
 
-        # 標記自己與所有 sibling 為已處理
         self._mark_processed(message_pk)
-        for sib_pk in sibling_pks:
-            self._mark_processed(sib_pk)
-
-        max_pk = max([message_pk] + sibling_pks) if sibling_pks else message_pk
-        self._last_polled_pk = max(self._last_polled_pk, max_pk)
-        await self.repository.set_runtime_cursor_pk(self._last_polled_pk)
+        await self._advance_cursor(message_pk)
         latency_ms = int((time.perf_counter() - started) * 1000)
         result = "published" if published_count > 0 else "failed_or_skipped"
         logger.info(
@@ -1858,7 +2049,7 @@ class MessageRelayWorker:
             latency_ms,
             result,
             message.grouped_id,
-            len(sibling_pks) if sibling_pks else 1,
+            1,
         )
 
     # 同時處理訊息的並行上限（避免大檔壓縮卡住整條 pipeline）
