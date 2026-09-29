@@ -25,6 +25,7 @@
 > 4. 保留可追溯來源，避免之後重複討論同一件事
 
 最後盤點紀錄（只保留近期；過往詳見 `TODO-completed.md` 各歸檔 entry）：
+- 2026-09-29（新增 repo 根目錄 `AGENTS.md`，**未 commit**）：每次工作都要遵守的規則（討論方式、使用者資料檔高嚴重性規則、Docker 限制、共用元件、程式碼與測試慣例）從本檔與本機記憶搬過去，讓所有 session、一般子代理、雲端都自動載入（Claude Code v2.1.277 以上；repo 裡不要放 `CLAUDE.md`／`CLAUDE.local.md`，否則改讀那個檔）。本檔開頭改成「本檔維護規則」，並寫明每段搬去哪。新規則：討論與 grill 的每一輪都回寫**待決問題（選項＋建議）**；問題每輪只談一個主題、約 3～5 題。依此補寫 Telegram 過濾、ComfyUI、Persona M7 三個暫停主題的待決問題與當時的建議。
 - 2026-09-29（log 統一改成 `__name__` ＋ 設定檔，**已實作・595 測試全過・已 commit・已上線**；06:22 重啟後實測：3 小時 781 行、每行帶模組名稱、httpx 逐筆請求 0 行、測試紀錄只進 `test_run.log`、handler 沒有重複（唯一的重複行是 Telegram 啟動時的相簿補圖略過訊息，見 Telegram 過濾區塊）；之後加上 `discord.player` 壓到 WARNING（每播完一首歌一行 ffmpeg 結束訊息，約 250 行／天，下次重啟生效）與「json 裡的 logger 名稱都要對得到模組」的測試）：原本只有 `discord_bot` 這個 logger 掛了輸出，其他名稱的 logger 紀錄**既不顯示也不進 log 檔**（實證：09-29 00:29 建身份組那筆不在 log）。改為：① 新增 `settings/logging.json`（dictConfig）：root 輸出到畫面＋`discord_bot.log`；類別 logger `article_monitor`／`llm_anomaly` 各寫自己的檔、不往 root 傳；httpx／httpcore／urllib3／llama_index 等壓到 WARNING；每行多印模組名稱 `[時間] [等級] [模組] 訊息`。② `utils/logger_config.py` 改成只讀設定檔（import 即套用、冪等；`LOG_LEVEL` 可覆寫 root 等級）。③ 60 個模組從 `getLogger('discord_bot')` 改 `getLogger(__name__)`；`discord_bot.py` 主程式以 script 執行，明確命名 `discord_bot`；`bot.run(..., log_handler=None)` 避免 discord.py 重複輸出。④ 測試模式：`test/__init__.py` 設 `APP_TEST_LOG_FILE`，所有檔案輸出（含 `llm.logger_factory` 的 prompt 除錯檔）改寫到 `/logs/test_run.log`，實測跑完正式 log 位元組數不變。⑤ 守衛：模組 logger 一律 `__name__`（AST 判斷，類別 logger 與 `discord_bot.py` 例外）、不准 `print`；Rule 的 allowed 支援資料夾。突變驗證都會紅。**要拆分類時**：在 json 加一個 handler＋一個以模組前綴為名的 logger（例：`services.telegram_relay_service`），重啟即可，不動程式碼。**下一批**：telegram-scraper 約 45 處 `print` 改 logger；該容器只掛 `./src/telegram_scraper`，要共用 `settings/logging.json` 得改 compose 掛載（需使用者重建容器）。
 - 2026-09-29（週期活動提醒：深塔海墟，**已實作・586 測試全過・已 commit・待部署驗證**）：深塔／海墟各 28 天、週一 04:00 重置、錯開 14 天；重置前一天 20:00 正常 @、重置當下靜音 @ 自助訂閱身份組「深塔海墟提醒」；綁「週期提醒頻道」時自動建身份組＋發面板，每次提醒後面板刪舊發新置底。詳見 [週期活動提醒區塊](#週期活動提醒深塔海墟2026-09-29-已實作待部署驗證)。
 - 2026-09-28（grill：Persona M7 後續／ComfyUI 產圖／Telegram LLM 過濾／深塔海墟提醒，**討論中・未動 code**）：新增 Telegram 過濾與週期提醒兩個草稿區塊並寫入查證事實；ComfyUI 區塊開頭補過時狀態修正（步驟 2 已完成、鎖有漏洞）；過時項目歸檔到 `TODO-completed.md`（Persona 影子模式規劃、Telegram 媒體防雷、ComfyUI 步驟 2 與 `keep_alive` 註解、插話 Phase B 三項、Ollama 時代觀察項），Persona 區塊改成 M7 現況。
@@ -38,59 +39,40 @@
 
 ---
 
-## 協作流程契約（強制，優先於全文其他段落）
+## 本檔維護規則（強制）
 
 <!-- @meta
 id: collaboration-rules
 type: CONTRACT
 status: confirmed
-last_confirmed: 2026-03-31
+last_confirmed: 2026-09-29
 -->
 
-### 使用者指定的討論流程
+> **每次工作都要遵守的規則**，2026-09-29 起搬到 repo 根目錄的 `AGENTS.md`（所有 session、子代理、雲端都會自動載入）。原本這裡的段落對應如下：
+> - 「使用者指定的討論流程」→ `AGENTS.md`「與使用者溝通」
+> - 「禁止未經確認刪除/覆寫使用者資料檔（高嚴重性）」→ `AGENTS.md` 同名段落（四條照原文，例子更新為現有檔案）
+> - 「注意事項」（Docker 限制、碼風）→ `AGENTS.md`「資料與環境（硬規則）」「程式碼」
+> - 「共用元件索引」→ `AGENTS.md`「共用元件」
+>
+> 這裡只留維護本檔的規則。
 
-1. 每次討論先給**完整架構**，不能只回片段。
-2. 清楚標示「本輪改了哪些共識」。
-3. 最後做「整體確認」：已定案 / 未定案 / 下一步。
-4. 盡量避免反覆單題選單式問答，改用完整方案溝通。
+### 文件閉環
 
-### 文件閉環規範
+每一輪原則上遵循：`讀取需要區塊 -> 沿用共識 -> 討論/執行 -> 回寫 -> 下輪再讀`
 
-每一輪原則上遵循：`讀取需要區塊 -> 沿用共識 -> 討論/執行 -> 必要時回寫 -> 下輪再讀`
-
-補充：
-- 不要求每輪都全文重讀。
-- 應優先讀取與當前任務直接相關的區塊；只有在需要交叉確認依賴、主線變更、或資訊不足時，才擴大閱讀範圍。
-- 只有在本輪有實作異動、共識更新、TODO 狀態變更、或使用者明確要求時，才需要回寫本檔。
+- 不要求每輪都全文重讀；優先讀與當前任務直接相關的區塊，需要交叉確認依賴、主線變更或資訊不足時才擴大範圍。
+- 本輪有實作異動、共識更新、**待決問題新增或變動**（題目、選項、建議）、TODO 狀態變更，或使用者明確要求時，就要回寫本檔。討論與 grill 的每一輪都算。
 
 ### TODO 更新規則
 
 1. 完成項目要打勾。
 2. 完成且無未完成關聯時，應自待辦移除。
 3. 若仍有依賴未完成項目，保留並註記依賴。
-4. 僅在本輪有實作異動、共識更新、TODO 狀態變更、或使用者明確要求時，才需要回寫本檔進度。
-5. 若主線已切換，必須同步更新：
+4. 若主線已切換，必須同步更新：
    - 現況摘要
    - 管理級總覽
    - 原主線區塊 status
    - 必要時將舊主線移入 `TODO-completed.md`
-
-### 禁止未經確認刪除/覆寫使用者資料檔（高嚴重性）
-
-1. **禁止**在未取得使用者明確同意前，執行任何可能刪除、清空、覆寫資料檔的操作。
-2. 針對以下類型檔案，一律視為「高風險資料」：
-   - runtime 狀態檔（例如：`src/services/sent_articles.json`）
-   - 使用者設定檔、快取、歷史紀錄、session、資料庫檔
-3. 如需修改高風險資料檔，必須先說明風險與影響、提供備份/回復方案、取得使用者同意。
-4. 若發生誤刪/誤覆寫，需立即升級為高嚴重性事故（凍結 -> 復原 -> 紀錄防再發）。
-
-### 注意事項
-
-- AI 禁止執行會變更環境狀態的 Docker 指令（`docker compose up/down/build/restart`、`docker rm`、`docker rmi` 等）。
-- 允許 AI 執行唯讀/除錯類 Docker 指令（`docker ps`、`docker logs`、`docker exec` 查詢、`docker inspect`）。
-- 若需要變更環境，AI 只能提供建議指令，由使用者自行在終端執行。
-- 碼風慣例：4 空白縮排、繁體中文註解。
-- 非同步開發：`asyncio` / `Telethon` / `asyncpg`。
 
 ---
 
@@ -168,40 +150,23 @@ Phase 3 的價值最高但依賴最多；Phase 1 隨時可做但要挑對時機�
 
 ---
 
-## 共用元件索引（動手前先查這張表）
+## 共用元件索引（已搬到 `AGENTS.md`）
 
 <!-- @meta
 id: shared-components-index
 type: CONTRACT
-status: confirmed
-last_confirmed: 2026-08-19
+status: deprecated
+last_confirmed: 2026-09-29
 affects: 全專案
 -->
 
-> **本專案大部分由 AI 協作，最常見的錯誤是「沒查就自己寫一份」。**
-> 新增任何 helper 前先看這張表；表裡有的一律沿用，不要另立。
-> 這些規則由 `src/test/test_shared_conventions.py` **自動守衛**（掃原始碼、進啟動 gate），
-> 違反會讓容器起不來——文件會被略讀，紅掉的測試不會。
-
-| 需要做什麼 | 用這個 | 不要自己寫 |
-|---|---|---|
-| 連 pgvector | `LLMServiceSettings().pgvector_connect()` | `psycopg2.connect(host=..., ...)` |
-| 取實體表名 | `HYBRID_RETRIEVAL_SETTINGS.chat_table()` / `.source_table(key)` / `.physical_table(name)` | `f"data_{...}"`（**且會漏掉 identifier 消毒**） |
-| 台北時區 | `sys_settings.time_settings.APP_TZ` | `timezone(timedelta(hours=8))`（**含 import 別名，守衛走 AST**）、或另立 `TAIPEI_TZ = APP_TZ` 別名 |
-| 讀 prompt 檔（mtime 快取） | `llm.prompt_files.read_text()` / `read_json()` | 自己寫 `_PROMPT_CACHE` + `st_mtime_ns` |
-| 清理聊天文字（表情轉語意／去 URL／mention） | `personality_extractor._clean_text_for_extraction()` | 自己 regex |
-| 描述品質規則（嚴禁廢話那套） | `persona_description_rules.txt`，兩邊各自讀同一個檔 | 在新 prompt 裡重抄一份 |
-| 人格素描的角色設定／繁中／表情規則 | 疊在 `personality_extraction_prompt.json` 的 `system_prompt` 之上 | 重寫一份 system prompt |
-| 寫 log | `logger = logging.getLogger(__name__)`；去向／等級／分類全寫在 `settings/logging.json`（dictConfig）；類別 logger 用 `get_article_monitor_logger()`／`get_llm_anomaly_logger()`；測試模式自動改寫到 `/logs/test_run.log` | `getLogger("寫死名稱")`、`print`（守衛會擋）、自己加 handler |
-| 面板置底（刪舊面板、發新面板、記住位置） | `utils.panel_bump.PanelBumper`（`bump` / `bump_safe` / 有人講話就置底用 `request_bump`） | 自己寫 `_load_*_runtime` + `fetch_message().delete()` + `send` + 鎖 |
+> 2026-09-29 起，共用元件表在 `AGENTS.md`「共用元件」，由 `src/test/test_shared_conventions.py` 守衛。這裡只留下各個合法例外的緣由，供追查時參考。
 
 **合法的例外（形狀不同，硬收斂反而更糟，已寫進守衛的 allowlist）**
 - `scraper/tools/extract_fingerprint.py` 的時區：scraper 是獨立容器（掛 `./src/scraper` → `/app`），根目錄看不到 `sys_settings`。兩邊都吃 compose 的 `TZ=Asia/Taipei`
 - `emoji_text_utils._load_descriptions`：永久快取 + 明確 `reload_descriptions()`，因為字典是被 04:00 排程改寫後主動重載，不是靠 mtime 輪詢
 - `ambient_reply._load_ambient_prompt`：多檔疊層且有自己的組裝順序
 - `llm_service._load_runtime_config_cached`：讀 pydantic 設定物件，錯誤處理不同
-
-**新增共用元件時**：在 `test_shared_conventions.py` 的 `RULES` 加一條，下一個人就不會重造。
 
 ---
 
@@ -264,7 +229,23 @@ affects: Telegram relay、config.json
   - 應隔離（罵人）：7378、7379、9028、9179、9842、1474、1475、6941、6953、13076、13362、13433、13449、13487、13638、13678
   - 應放行（看起來像垃圾但有情報）：1、13025、9382、11368、12750、13685、13391、13392、12492、11584、6937、13299、11205、11557、4253、12190、9153、13189、13181、13182、12458、13475、9531、12285、13393、10025、13381、13387、13461、13481（13480 自寫假劇情的免責聲明，要看前文）、13682、13653、12071
 
-**狀態**：設計討論中（grill 進行中）；結論出來後回寫本區（過濾時機、LLM 不可用時的行為、放回後的排序與格式、誰能按按鈕等）。
+**待決問題（grill 暫停中，2026-09-28；每題附當時的建議）**
+- **判錯時偏哪邊**：建議「拿不準就放行」。頻道價值在爆料、短訊息多半是情報；錯放一則水代價小，錯關一則情報代價大。
+- **LLM 不能用時**：建議直接放行。打 LLM 前先看 GPU 租約（產圖期間完全不碰 LLM，避免觸發 27B 重載搶 VRAM）；被 /askai 等短暫佔用時最多等 60 秒。
+- **垃圾的定義**：建議只用一個標準——「對看頻道的人有沒有遊戲資訊」。灌水、罵人、閒聊（「追月节快乐」）都隔離；帶髒話但有資訊的放行（「我操 老库牛逼，又开服这么早」）。標籤（灌水／罵人／閒聊／正常）存進 DB 供統計。
+- **反方向（主頻道 → 隔離區）**：建議第一版不做；每次「放回」都記錄下來，當作判錯樣本調 prompt。
+- **隔離 thread 開在哪**：建議開在 #🌘角色內鬼情報 底下的公開 thread；母頻道做成 /server_manager 可改的設定。
+- **誰能按「放回主頻道」**：建議管理員（同點名管理按鈕）。注意 `role_mapping` 的 Moderator 目前是空的，用它等於只有 owner 能按。
+- **判斷單位**：相簿整組判、整組隔離；只有圖片沒文字的一律放行；只有一張 Telegram 貼圖的用規則直接隔離；判斷時附同頻道前幾則當上下文（例：13481 是 13480 自寫假劇情的免責聲明）。
+- **順序 vs 速度**：建議改成一次只處理一則，保證 Discord 上的順序（量小，尖峰一小時 22 則）。
+- **上線方式**：建議先用上方的歷史樣本離線測，「有情報卻被隔離」為 0 才上線，不跑影子模式。
+- **順便發現的既有問題**：建議「相簿晚到成員不寫 delivery_state」這次一起修（同一段程式）；其餘兩項記待辦。
+
+**不反對就照做的預設**：判斷用主模型並關閉思考（不用 7B 審核模型，Lemonade 一次只放一個大模型，會互相擠出）；判決存新表（判決、標籤、理由、隔離訊息 id、放回者、放回時間），隔離那則也寫 delivery_state；放回走 relay 原本的發送流程（不走 `resend_telegram_by_id`，它不合併相簿、不寫紀錄）；放回後隔離區那則改成「已由 X 放回」並停用按鈕；按鈕用固定 custom_id＋用訊息 id 查 DB；`/resend_article` 不過濾、補掃與重播要過濾、不回頭判歷史訊息；thread 被刪或封存時自動重建／解封。
+
+**開工前注意**：另一個工作階段 09-28 改過 `telegram_relay_service.py` 的相簿處理（已 commit `3a1379c`、`ea81a83`），動工前先確認現況。
+
+**狀態**：設計討論中（grill 暫停）；以上建議都還沒經使用者確認。
 
 ---
 
@@ -577,7 +558,17 @@ affects: llm/lemonade_gate, llm/llm_http_client, services/llm_service, imagegen/
 > - Lemonade 已升到 **11.9.0**，下方 09-02 的三項實測（unload／自動重載／recipe 保留）是在 11.5.0 上做的，需要重測；`POST /free`（ComfyUI 放 VRAM）從未實測。
 > - 04:00 維護現在是**五步**，收工約 05:46；Persona ⑤ 的 `publish_mode` 已是 `on`。
 > - `src/test/integration/it_comfyui_image.py` 未 commit；它的 docstring 寫「與 Lemonade 綁不同 GPU」，與下方「27B 跨兩顆吃滿」矛盾，待使用者確認。
-> - 落地前的待決問題清單正在 grill 中，結論出來後回寫本區。
+> - 落地前的待決問題見下方「待決問題（grill 暫停中）」。
+
+**待決問題（grill 暫停中，2026-09-28；每題附當時的建議）**
+- **頻道裡每天出現幾張、誰挑**：建議先跑兩週「產完放進只有管理員看得到的暫存區，按按鈕挑哪幾張發到日記頻道」，之後再考慮全自動。暫存區的「按鈕放行」跟 Telegram 隔離區的「放回主頻道」是同一種機制，做一次共用。
+- **尺度**：建議嚴格全年齡——prompt 不放身材相關 tag、負面 prompt 放 nsfw 類、加全年齡 rating tag。身材設定只留在文字人設。
+- **角色長相一致性**：建議先只靠 tag 上線，從產出挑一張「定裝照」，之後拿來當 IPAdapter 參考圖或練 LoRA 的素材。
+- **心情從哪來**（會推翻「03:00 往回掃日記頻道」的定案）：建議 00:00 寫完日記後（LLM 還載著）多做一次分類，把心情歸到固定幾類存起來；03:00 仍然完全不用 LLM。理由：日記是含蓄散文，規則抽不準；往回掃也可能把「附件上傳失敗、退成純文字」的訊息誤認成日記。
+- **產圖期間有人 @ 琇紫**：建議立刻回一句固定台詞（不經 LLM），例：「正在換衣服，等一下再聊」。目前的行為是一直等到產圖結束（最久 50 分鐘）才回。
+- **只有使用者知道的事實**：ComfyUI 平常是否常駐（09-28 連不上）；ComfyUI 用哪張卡（測試檔 docstring 寫「與 Lemonade 綁不同 GPU」，與本區「27B 跨兩顆吃滿」矛盾）。
+
+**不反對就照做的預設**：修鎖漏洞（任何會讓 Lemonade 載入模型的呼叫都要先拿鎖，把 `_ensure_model_loaded` 移進 `stream_exclusive`）；先確認 ComfyUI 活著且佇列是空的才拿租約、卸載 LLM，否則當天跳過；10 張拆成 10 個任務，每張 360 秒逾時，任一張逾時就中止整批並 `/interrupt`，已完成的照常處理；收工一律先 `POST /free` 讓 ComfyUI 釋放 VRAM 再放鎖（要跟 Lemonade 11.9.0 的三項實測一起驗證）；錯過 03:00 不補跑；節日表第一版手填未來兩年；embedding 小模型不卸載；`lemonade_gate` 改名 `gpu_gate`；圖檔名加日期並保留存檔。
 
 **需求**：每天 **03:00** 排程產圖（特定角色換衣服，依心情／日期／節日決定），單次 10 張以內。
 **不是 on-request**，使用者不會按著等。
@@ -704,7 +695,7 @@ Lemonade 下被 `_build_chat_extra_body` 丟進 ignored，但**那正是可攜�
 **刻意重用既有輪子，不新造**
 - workflow JSON 用 `llm.prompt_files.read_json()`（已有 mtime 快取，與 `settings/prompts/` 慣例一致）
 - 發圖走 `utils.discord_content.post_to_channel`，不自己組 `channel.send`
-- 實作完成後在「共用元件索引」補一行：**GPU 佔用仲裁 → gate，不要自己開第二把鎖**
+- ~~實作完成後在「共用元件索引」補一行~~：GPU 獨佔（`lemonade_gate.gpu_exclusive`）已寫進 `AGENTS.md`「共用元件」（2026-09-29）
 
 ### TODO
 
@@ -774,6 +765,14 @@ affects: auto_personality、插話／askai 人物卡、discord_bot 04:00 排程
 - 群體用語被當成個人特徵（「484」寫在 3 個人身上、「何意味」2 人）。
 - 改版留下的比較句（「並非／而非／不只」）、「。；」雙標點、同一人意思重複的條目（至少 8 人）。
 - 兩位成員顯示名稱都是「DDLC」；③ 遺留的 Banana、Rie 描述內容是「無法分析」。
+
+**待決問題（grill 暫停中，2026-09-28；每題附當時的建議）**
+- **隱私**：建議不發布職業、居住地、宗教、財務（持股、薪資）、政治立場、健康、具體行程（日期＋地點）。做法：④ 的 prompt 加規則不記錄這些類別，⑤ 再用關鍵字當後備（④ 只重跑有新發言的人，舊版本裡的條目要靠 ⑤ 擋）。另建議把招牌梗的 spicy 閘門也套到精簡版（之前列為刻意沒處理，但性化引用已經進到 prompt）。
+- **歸因錯誤**：建議兩個都做——④ 執行時附成員別名表，並加「別人的暱稱不算口頭禪」；⑤ 發布前跨人比對，同一個加引號的詞出現在 2 個人以上的描述裡，就當群體用語、全部不發（純規則，不經 LLM）。
+- **③ 怎麼退場**（會改變既有定案的做法）：建議現在就把「跳過名單」移到送 LLM 之前（③ 今晚實際寫 0 人卻對 36 人跑約 12 分鐘 LLM；改完只替精簡版是空的人寫）。整個刪除的標準建議訂為「⑤ 連續 7 晚 failed=0，且抽查沒有新類型的嚴重問題」。刪之前要先決定三件事：新成員第一版描述從哪來、啟動補跑檢查改看什麼、手動萃取指令留不留。
+- **人工校正**：建議做一個 JSON 設定檔，列「全域不發布的詞」和「某人不發布的詞」，⑤ 發布時跳過含這些詞的條目（`read_json` 會熱載入）；「改完立刻重發」的指令先不做，急的時候手動跑 ⑤。
+
+**不反對就照做的預設**：⑤ 串接時修掉「。；」雙標點；④ prompt 加「每條都要能單獨讀懂，不寫跟舊版比較的句子」；同一人意思重複的條目在 ⑤ 用 embedding 相似度去重（之前列為刻意沒處理，但至少 8 人有這個問題）；兩位「DDLC」撞名時標籤加區分碼；回滾步驟寫成文件。⚠️ **需使用者明確同意才做**：刪除 ③ 留下的 Banana、Rie 兩份「無法分析」描述（先備份）。
 
 **M7 之後待辦**：拿掉 ③（新成員第一版描述從哪來、補跑檢查改看什麼、手動萃取指令去留）；失敗的 run 隔天重跑；
 證據反查失敗的那晚不寫入；DB 安全網（`write_version` 失敗被當成功、只剩 drop 時寫出空描述）；人工校正管道。
