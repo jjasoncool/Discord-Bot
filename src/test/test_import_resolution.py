@@ -43,6 +43,11 @@ _FILE_SUFFIXES = {
     "mp3", "mp4", "m4a", "wav", "ogg", "opus", "flac", "webm", "mkv", "mov", "avi",
     "zip", "gz", "tar", "tgz", "pdf", "ttf", "otf", "woff", "woff2",
 }
+# 每個模組天生就有、不會寫在程式碼裡的屬性（`module.__file__` 這類讀取不能當成錯誤）
+_MODULE_BUILTIN_ATTRS = {
+    "__file__", "__name__", "__doc__", "__spec__", "__loader__", "__package__",
+    "__dict__", "__path__", "__cached__", "__builtins__",
+}
 # 長得像模組路徑、但本來就不是模組的字串：{(檔案, 字串依「.」切開的各段): 理由}
 # （分段寫，這份清單本身才不會被當成模組字串檢查）
 _NOT_MODULE_STRINGS = {
@@ -157,8 +162,24 @@ class _Resolver:
                 elif isinstance(node, ast.While):
                     visit(node.body)
                     visit(node.orelse)
+                elif type(node).__name__ == "TypeAlias":  # type X = ...（3.12 起）
+                    add_target(node.name)
+                elif type(node).__name__ == "Match":
+                    for case in node.cases:
+                        visit(case.body)
 
         visit(tree.body)
+        # 頂層（含 if、while 條件式）用 := 綁定的名稱；函式與 lambda 裡的屬於它們自己的範圍
+        stack: list[ast.AST] = [
+            n for n in tree.body if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        ]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                continue
+            if isinstance(node, ast.NamedExpr):
+                add_target(node.target)
+            stack.extend(ast.iter_child_nodes(node))
         # 函式裡用 global 宣告後才賦值的，也是模組頂層名稱
         for node in ast.walk(tree):
             if isinstance(node, ast.Global):
@@ -174,6 +195,8 @@ class _Resolver:
         path = self.module_file(module)
         if path is None:
             return f"找不到模組 {module}"
+        if name in _MODULE_BUILTIN_ATTRS:
+            return None  # 沒有 __init__.py 的資料夾（commands、services…）也有 __path__、__name__
         if path.is_dir():
             return f"{module} 是沒有 __init__.py 的資料夾，裡面沒有 {name}"
         names, accept_any = self._defined(path)
@@ -435,6 +458,9 @@ class CheckerSelfTests(unittest.TestCase):
             "from typing import TYPE_CHECKING\n"
             "if TYPE_CHECKING:\n    from pkg.sub.leaf import VALUE as ONLY_FOR_TYPES\n"
             "exported = 1\n"
+            "type Alias = int\n"
+            "match exported:\n    case 1:\n        MATCHED = 1\n"
+            "if (WALRUS := 1):\n    pass\n"
             "def func():\n    pass\n"
             "class Klass:\n    def method(self):\n        pass\n",
             encoding="utf-8",
@@ -472,6 +498,7 @@ class CheckerSelfTests(unittest.TestCase):
             "pkg.sub.leaf.VALUE\n"
             "mod.Klass().method\n"
             "mod.patched_in_test = 1\n"
+            "from pkg.mod import Alias, MATCHED, WALRUS\n"
             "TARGETS = ['pkg.mod.func', 'pkg.mod.Klass', 'pkg.sub.leaf']\n"
         ), [])
 
@@ -508,6 +535,22 @@ class CheckerSelfTests(unittest.TestCase):
         self.assertEqual(len(self._problems("import pkg\npkg.gone()\n")), 1)
         self.assertEqual(len(self._problems("import pkg\npkg.sub.leaf.GONE\n")), 1)
         self.assertEqual(len(self._problems("from pkg import mod as m\nm.gone\n")), 1)
+
+    def test_module_builtin_attributes_are_accepted_only_from_the_list(self):
+        # 模組天生就有的屬性不算錯（包括沒有 __init__.py 的資料夾）；清單以外的 __ 名稱照樣要檢查
+        self.assertEqual(self._problems(
+            "import pkg\n"
+            "import nsdir\n"
+            "from pkg.sub import leaf\n"
+            "pkg.__file__\n"
+            "leaf.__name__\n"
+            "nsdir.__path__\n"
+            "nsdir.__spec__\n"
+            "PATH = 'nsdir.__path__'\n"
+        ), [])
+        self.assertEqual(len(self._problems("import pkg\npkg.__version__\n")), 1)
+        self.assertEqual(len(self._problems("from pkg.sub import leaf\nleaf.__nope__\n")), 1)
+        self.assertEqual(len(self._problems("import nsdir\nnsdir.__nope__\n")), 1)
 
     def test_rebound_names_are_not_treated_as_modules(self):
         # 函式參數、區域變數、頂層重新賦值跟模組同名時，不能拿模組去檢查

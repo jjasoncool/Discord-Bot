@@ -589,7 +589,7 @@ class RollCallCommands(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.service = RollCallService(bot)
+        self.service = RollCallService(bot, response_view_factory=RollCallResponseView)
 
     async def cog_load(self):
         # 註冊 persistent views

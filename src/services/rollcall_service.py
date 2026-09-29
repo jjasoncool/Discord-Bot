@@ -10,7 +10,7 @@ import os
 import random
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set
 
 import discord
 
@@ -125,8 +125,15 @@ class RollCallRuntime:
 class RollCallService:
     """幽靈點名核心邏輯"""
 
-    def __init__(self, bot: discord.Client):
+    def __init__(
+        self,
+        bot: discord.Client,
+        response_view_factory: Callable[["RollCallService", int], discord.ui.View],
+    ):
         self.bot = bot
+        # 「我是活人」按鈕是 Discord 介面，定義在指令層；由 Cog 建立服務時交進來，
+        # 服務層就不必 import 指令層（原本兩邊互相 import，只能靠函式內延遲 import 避開循環）
+        self._response_view_factory = response_view_factory
         self.runtime = RollCallRuntime()
         self._tasks: List[asyncio.Task] = []
 
@@ -341,8 +348,7 @@ class RollCallService:
         )
         embed.set_footer(text="逾期未回覆將被移出伺服器")
 
-        from commands.rollcall_commands import RollCallResponseView
-        view = RollCallResponseView(self, member.id)
+        view = self._response_view_factory(self, member.id)
         msg = await channel.send(
             content=member.mention,
             embed=embed,
