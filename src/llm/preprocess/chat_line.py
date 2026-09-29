@@ -1,6 +1,6 @@
 """Discord 聊天行的統一格式化層。
 
-askai（context_retriever）、ambient（ambient_reply）與日記（diary_reflection）三條路徑
+askai（context_retriever）、ambient（ambient_reply）與日記（ambient_diary）三條路徑
 共用這裡，確保「[時間] 顯示名#XXXX: 內容」的組行邏輯只有一份：名字錨點、自訂 emoji
 語意化、貼圖描述、空白壓縮、時間戳。各 caller 的差異（要不要日期、單則長度上限）以
 參數控制，不再各自維護一套。
@@ -17,9 +17,9 @@ import re
 from datetime import tzinfo
 from typing import TYPE_CHECKING, Callable, Optional
 
-from llm.emoji_text_utils import replace_custom_emoji_with_description
-from llm.sticker_cache import get_sticker_text
-from llm.vision_image import is_vision_image
+from llm.preprocess.emoji_text_utils import replace_custom_emoji_with_description
+from llm.preprocess.sticker_cache import get_sticker_text
+from llm.preprocess.vision_image import is_vision_image
 
 if TYPE_CHECKING:  # 僅型別註解用；runtime 不依賴 discord（保持 leaf 輕量）
     import discord

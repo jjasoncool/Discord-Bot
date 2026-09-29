@@ -14,10 +14,10 @@ from discord import app_commands
 from discord.ext import commands
 
 import llm
-from llm.logger_factory import get_or_create_file_logger
-from llm.lemonade_gate import imagegen_busy, note_foreground_activity
-from llm.chat_line import name_with_anchor
-from llm.vision_image import (
+from llm.logger_factory import build_askai_prompt_log, get_or_create_file_logger
+from llm.client.lemonade_gate import imagegen_busy, note_foreground_activity
+from llm.preprocess.chat_line import name_with_anchor
+from llm.preprocess.vision_image import (
     DEFAULT_MAX_FRAMES,
     VISION_IMAGE_EXTS,
     extract_key_frames,
@@ -763,7 +763,7 @@ class LLMCommands(commands.Cog):
         # askai_prompt_debug.txt：記錄檢索/融合等 debug 細節
         try:
             retrieval_debug = discord_meta.get("retrieval_debug")
-            prompt_debug_text = llm.build_askai_prompt_log(
+            prompt_debug_text = build_askai_prompt_log(
                 system_prompt=system_prompt,
                 question=question,
                 discord_context=discord_context,
@@ -947,7 +947,7 @@ class _PersonalityResultPagerView(discord.ui.View):
         # persona agent 的精簡版發布開啟時，由精簡版負責的人不寫——不然會把精簡版蓋回
         # production 的描述，直到下一晚發布才換回來（沒開啟時名單是空的）
         try:
-            from llm.persona_agent.publish import production_skip_list, split_uncovered
+            from llm.persona.agent.publish import production_skip_list, split_uncovered
 
             guild = interaction.guild
             names = {str(m.id): m.display_name for m in guild.members} if guild else None
@@ -982,7 +982,7 @@ class _PersonalityResultPagerView(discord.ui.View):
             except Exception as exc:
                 logger.warning("更新寫入 RAG 進度訊息失敗: %s", exc)
 
-        from llm.personality_extractor import save_personality_results
+        from llm.persona.personality_extractor import save_personality_results
         written = await save_personality_results(
             guild_id=self.guild_id,
             results=results,
@@ -1249,7 +1249,7 @@ class PersonalityCommands(commands.Cog):
             )
             return
 
-        from llm.personality_extractor import (
+        from llm.persona.personality_extractor import (
             PersonalityExtractionInProgressError,
             run_personality_extraction,
         )
@@ -1367,8 +1367,8 @@ class PersonalityCommands(commands.Cog):
 
         await interaction.response.defer(ephemeral=True, thinking=True)
 
-        from llm.persona_agent import agent as persona_agent
-        from llm.persona_agent import tools as persona_tools
+        from llm.persona.agent import agent as persona_agent
+        from llm.persona.agent import tools as persona_tools
 
         from sys_settings.llm_settings import (
             LLMServiceSettings,
@@ -1512,7 +1512,7 @@ class PersonalityCommands(commands.Cog):
             )
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        from llm.diary_reflection import run_daily_reflection
+        from llm.ambient.ambient_diary import run_daily_reflection
         try:
             diary = await run_daily_reflection(self.bot)
         except Exception as exc:

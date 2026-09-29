@@ -1,7 +1,7 @@
 """Custom emoji 文字替換工具：把 `<:name:id>` / `<a:name:id>` 轉成 `:描述:`。
 
 用途：
-- chat_persistence 寫入 pgvector 前做語意化，避免 embed model 把 emoji token 當雜訊
+- store_chat 寫入 pgvector 前做語意化，避免 embed model 把 emoji token 當雜訊
 - 未來其他需要語意化訊息文字的地方也可共用
 
 和 personality_extractor 內的 `_clean_text_for_extraction` 的差別：

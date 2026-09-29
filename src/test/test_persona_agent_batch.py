@@ -22,7 +22,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from llm.persona_agent import batch  # noqa: E402
+from llm.persona.agent import batch  # noqa: E402
 from sys_settings.llm_settings import PersonaAgentSettings  # noqa: E402
 
 GUILD = 1

@@ -284,15 +284,3 @@ class FBMonitor(BaseContentMonitor):
 
         except Exception as e:
             logger.error(f"[FB] 檢查 FB 貼文時發生錯誤: {e}")
-
-    async def start_fb_monitoring(self, channel_ids: List[int], check_interval: int = 600):
-        """開始監控 FB 貼文（每10分鐘檢查一次）"""
-        logger.info(f"[FB]開始監控 FB 貼文，檢查間隔: {check_interval} 秒")
-
-        while True:
-            try:
-                await self.check_and_send_fb_posts(channel_ids)
-                await asyncio.sleep(check_interval)
-            except Exception as e:
-                logger.error(f"[FB]監控循環發生錯誤: {e}")
-                await asyncio.sleep(300)

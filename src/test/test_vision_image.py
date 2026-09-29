@@ -18,7 +18,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from llm.vision_image import extract_key_frames, is_universal_image, to_png_first_frame
+from llm.preprocess.vision_image import extract_key_frames, is_universal_image, to_png_first_frame
 from services.llm_service import _convert_messages_for_openai, _downgrade_images
 
 try:

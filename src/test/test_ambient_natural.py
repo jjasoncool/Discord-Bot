@@ -30,11 +30,11 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from llm import ambient_hooks, ambient_reply
-from llm.ambient_hooks import _structural_features, _text_features
-from llm.ambient_reply import _is_silence, _parse_line_choice, _passes_content_gate
-from llm import chat_line
-from llm.chat_line import (
+from llm.ambient import ambient_hooks, ambient_reply
+from llm.ambient.ambient_hooks import _structural_features, _text_features
+from llm.ambient.ambient_reply import _is_silence, _parse_line_choice, _passes_content_gate
+from llm.preprocess import chat_line
+from llm.preprocess.chat_line import (
     fetch_recent_lines,
     format_chat_line,
     image_marker,

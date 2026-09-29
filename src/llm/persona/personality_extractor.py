@@ -11,7 +11,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Awaitable, Callable, Collection, Protocol
 
 
-from llm.emoji_text_utils import (
+from llm.preprocess.emoji_text_utils import (
     reload_descriptions as _reload_emoji_descriptions,
     replace_custom_emoji_with_description,
 )
@@ -74,7 +74,7 @@ def load_description_rules() -> str:
     讀檔失敗時回空字串而非拋錯：少了這段規則描述品質會變差，但整個 04:00 排程
     不該因為一個附加檔案不見就停擺。
     """
-    from llm import prompt_files
+    from llm.prompt import prompt_files
 
     return prompt_files.read_text(_DESCRIPTION_RULES_PATH, label="描述品質規則")
 
@@ -254,7 +254,7 @@ def refresh_emoji_dictionary(guild) -> int:
     # 清所有共用 emoji 快取（字典檔剛被改過）
     _reload_emoji_descriptions()
     try:
-        from llm.reaction_classifier import reload_custom_emoji_categories
+        from llm.persona.reaction_classifier import reload_custom_emoji_categories
         reload_custom_emoji_categories()
     except Exception as exc:
         logger.warning("重載 reaction_classifier 快取失敗: %s", exc)
@@ -270,7 +270,7 @@ def refresh_emoji_dictionary(guild) -> int:
 def _clean_text_for_extraction(text: str) -> str:
     """清理聊天文字，移除對人格分析無用的噪音。"""
     import re
-    # Discord 自訂 emoji：<:name:id> → :描述:（與 chat_persistence 共用同一替換函式）
+    # Discord 自訂 emoji：<:name:id> → :描述:（與 store_chat 共用同一替換函式）
     text = replace_custom_emoji_with_description(text)
     # 移除所有 URL（對人格分析無用，且模型容易誤判為「分享音樂/資訊」）
     text = re.sub(r"https?://\S+", "", text)
@@ -521,7 +521,7 @@ async def run_personality_extraction(
 
     guild: discord.Guild 物件，用於反查 display_name
     exclude_author_ids: 寫入 RAG 時跳過的人（由 persona agent 精簡版負責的人，
-        見 `persona_agent.publish.production_skip_list`）；萃取照做、回傳照樣包含他們，只是不寫入
+        見 `llm.persona.agent.publish.production_skip_list`）；萃取照做、回傳照樣包含他們，只是不寫入
     回傳 {author_id: {"alias": str, "personality": str}}
     """
     global _extraction_running
@@ -654,7 +654,7 @@ async def save_personality_results(
     progress_callback: 每寫完一筆（不論成功/失敗）呼叫一次，收到 (written_success, total)。
     callback 內的例外會被吞掉，避免拖累寫入主流程。
     """
-    from llm.member_profile_store import get_member_profile_store
+    from llm.storage.member_profile_store import get_member_profile_store
     rag_port = get_member_profile_store()
     written = 0
     total = len(results)

@@ -15,7 +15,7 @@
   bot 端會被誤判成 `no_choices`。
 
   解法：process 內一把 asyncio.Lock。/askai 的 chat_completion 進入時持有；
-  背景 chat_persistence flush 在跑 batch embedding 前也 await 同一把鎖。
+  背景 store_chat flush 在跑 batch embedding 前也 await 同一把鎖。
   兩端對稱 → embedding burst 一定要等 stream 結束，反之亦然。
 
   RAG 用的 embedding（/askai 內 retriever）不掛這個 gate；因為它在 chat

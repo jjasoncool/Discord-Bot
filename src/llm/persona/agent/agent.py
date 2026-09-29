@@ -25,10 +25,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from llm.lemonade_gate import foreground_recently_active, stream_busy
+from llm.client.lemonade_gate import foreground_recently_active, stream_busy
 from services.llm_service import LLMAPIError
-from llm.persona_agent import tools as agent_tools
-from llm.persona_agent.schema import build_response_format
+from llm.persona.agent import tools as agent_tools
+from llm.persona.agent.schema import build_response_format
 from sys_settings.llm_settings import AmbientChatSettings
 
 logger = logging.getLogger(__name__)
@@ -99,8 +99,8 @@ def load_prompts() -> dict[str, str]:
 
     回傳 `{"system_prompt", "user_prompt_template", "final_prompt"}`。
     """
-    from llm import prompt_files
-    from llm.personality_extractor import _load_extract_prompts
+    from llm.prompt import prompt_files
+    from llm.persona.personality_extractor import _load_extract_prompts
 
     own = prompt_files.read_json(_PROMPT_PATH, label="persona agent prompt")
     if own is None:
@@ -637,7 +637,7 @@ async def run_and_persist(
     **執行前先看連續失敗次數**：失敗越多次預算調得越保守，超過門檻就跳過並記
     `quarantined`——不然某個人可能每晚都失敗、而沒有任何地方看得出來。
     """
-    from llm.persona_agent import store, validation
+    from llm.persona.agent import store, validation
 
     failures = await run_db(store.consecutive_failures, guild_id, user_id) if save else 0
     if failures >= QUARANTINE_AFTER_FAILURES:

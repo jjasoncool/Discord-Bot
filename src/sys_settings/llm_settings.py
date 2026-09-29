@@ -112,7 +112,7 @@ class LLMServiceSettings(BaseSettings):
         `commit=True` 時把整段包進交易（psycopg2 的 `with conn` 語意：正常結束就
         commit、拋例外就 rollback）。**憑證的擁有者一併提供存取方式**——不然每個
         呼叫端都要自己寫「開連線 → try → finally close」，`ai_interactions_store` 和
-        `persona_agent.store` 就各自抄了好幾份。
+        `llm.persona.agent.store` 就各自抄了好幾份。
         """
         conn = self.pgvector_connect()
         try:
@@ -395,7 +395,7 @@ class AmbientChatSettings(BaseSettings):
     # （已移除 judge_sampling_rate 純機率減壓閥：隨機丟棄評估會丟掉好時機、留下爛時機，
     #   完全被下面有判斷依據的鉤子閘取代。要降載請調 hook_threshold，不要再加機率閥。）
 
-    # ── 鉤子閘：決定「值不值得花那 ~120s 去想」。不用 LLM，見 llm/ambient_hooks.py ──
+    # ── 鉤子閘：決定「值不值得花那 ~120s 去想」。不用 LLM，見 llm/ambient/ambient_hooks.py ──
     hook_enabled: bool = True
     # sigmoid 分數門檻；調高＝話少、調低＝話多（話多話少的**主旋鈕**）。
     # 對照現行權重的實際分數（單一鉤子命中）：
@@ -476,7 +476,7 @@ class PersonaAgentSettings(BaseSettings):
     與 production 萃取的關係：兩者序列執行（③ production → ④ agent → ⑤ 發布）。agent 的
     完整描述寫自己的表（`persona_agent_versions`），bot 讀不到；⑤ 在 `publish_mode="on"`
     時才把挑過的精簡版寫進 production 的 `auto_personality`，③ 則跳過由精簡版負責的人
-    （見 `persona_agent.publish`）。agent 失敗不影響 production，反之亦然。
+    （見 `llm.persona.agent.publish`）。agent 失敗不影響 production，反之亦然。
 
     **只吃 class 預設值，不吃環境變數**（同 `AmbientChatSettings` /
     `DiaryReflectionSettings`）。少了下面那組 `model_config` 的話，欄位名會直接變成
@@ -515,7 +515,7 @@ class PersonaAgentSettings(BaseSettings):
     deadline_hour: int = 7
 
     #: M7：把精簡版寫進 `auto_personality` 給插話／askai 讀（04:00 排程的第 ⑤ 步，見
-    #: `persona_agent.publish`）。off＝不做；dry_run＝只算、寫 log，不寫入——上線前先看
+    #: `llm.persona.agent.publish`）。off＝不做；dry_run＝只算、寫 log，不寫入——上線前先看
     #: 挑出來的東西對不對；on＝寫入。on 時 ③ 與手動萃取會跳過 ⑤ 要寫精簡版的人，不把它蓋回去。
     #: `enabled` 關掉時一律當 off（`publish.effective_publish_mode`）：沒有新版本可發布。
     publish_mode: Literal["off", "dry_run", "on"] = "on"

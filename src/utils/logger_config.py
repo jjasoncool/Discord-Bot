@@ -1,6 +1,6 @@
 """統一的日誌配置：所有 log 的去向都寫在 `settings/logging.json`（Python 標準 dictConfig 格式）。
 
-- 一般模組一律 `logger = logging.getLogger(__name__)`：名稱就是模組路徑（例：`llm.ambient_reply`），
+- 一般模組一律 `logger = logging.getLogger(__name__)`：名稱就是模組路徑（例：`llm.ambient.ambient_reply`），
   設定檔可以依前綴分類——要把某一類拆到獨立檔、調等級、靜音，改 json 重啟即可，不動程式碼。
 - 刻意獨立的「類別」logger（`article_monitor`、`llm_anomaly`）也定義在設定檔裡。
 - 測試模式（`test/__init__.py` 設 `APP_TEST_LOG_FILE`）：所有檔案 handler 改寫到同一個測試 log，

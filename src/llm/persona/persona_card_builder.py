@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from llm.tokenization import tokens_for_debug
+from llm.preprocess.tokenization import tokens_for_debug
 
 # Persona RAG 預算與關聯控制（避免 token 爆量）
 PERSONA_MAX_PARTICIPANTS = 5
@@ -14,7 +14,7 @@ PERSONA_MAX_CARDS = 3
 #: 單張卡每個欄位的字數上限（400 → 600，2026-09-07）。
 #:
 #: persona agent 的完整描述會一路長大，但 auto_personality 不放全文：M7 起寫進去的是
-#: `persona_agent.publish` 挑的精簡版，它的預算同時受這個上限與插話那一行的上限
+#: `llm.persona.agent.publish` 挑的精簡版，它的預算同時受這個上限與插話那一行的上限
 #: （`AmbientChatSettings.persona_line_max_chars`）限制，所以不會被這裡截斷。要調這個數字時，
 #: 精簡版的預算會跟著變——它在發布時讀的就是這個常數。
 PERSONA_MAX_CARD_CHARS = 600
@@ -257,7 +257,7 @@ def _clean_auto_personality_text(raw: str) -> str:
 
 
 def persona_card_label(card: dict[str, Any]) -> str:
-    """卡片那一行開頭的標籤。`persona_agent.publish` 算精簡版預算時也用這支，兩邊才不會分岔。"""
+    """卡片那一行開頭的標籤。`llm.persona.agent.publish` 算精簡版預算時也用這支，兩邊才不會分岔。"""
     alias = card.get("alias") or "未知"
     person_id = str(card.get("person_id") or "")
     # 末 4 碼當穩定身份錨點，跟 chat_history 行的 display_name#XXXX 對齊

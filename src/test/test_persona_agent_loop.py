@@ -26,7 +26,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from llm.persona_agent import agent, tools  # noqa: E402
+from llm.persona.agent import agent, tools  # noqa: E402
 from services.llm_service import ChatMessageResult  # noqa: E402
 
 ALICE = "1001"
@@ -256,7 +256,7 @@ class PromptLayeringTests(unittest.TestCase):
 
     def test_extraction_placeholder_is_substituted(self):
         """萃取那邊的 {description_rules} 必須代入——漏掉會把佔位符原樣送給模型。"""
-        from llm.personality_extractor import (
+        from llm.persona.personality_extractor import (
             MAX_PERSONALITY_CHARS,
             _load_extract_prompts,
             load_description_rules,
@@ -272,7 +272,7 @@ class PromptLayeringTests(unittest.TestCase):
         self.assertIn(f"不超過 {MAX_PERSONALITY_CHARS} 字", rendered)
 
     def test_description_rules_file_is_not_empty(self):
-        from llm.personality_extractor import load_description_rules
+        from llm.persona.personality_extractor import load_description_rules
 
         self.assertGreater(len(load_description_rules()), 50)
 
@@ -451,7 +451,7 @@ class FailureCountingTests(unittest.TestCase):
     """
 
     def test_low_confidence_is_not_a_failure(self):
-        from llm.persona_agent.store import _is_failure
+        from llm.persona.agent.store import _is_failure
 
         self.assertFalse(_is_failure("ok", None))
         self.assertFalse(
@@ -460,7 +460,7 @@ class FailureCountingTests(unittest.TestCase):
         )
 
     def test_real_problems_still_count(self):
-        from llm.persona_agent.store import _is_failure
+        from llm.persona.agent.store import _is_failure
 
         self.assertTrue(_is_failure("ok", "沒有任何一項通過驗證"))
         self.assertTrue(_is_failure("error", None))
@@ -493,7 +493,7 @@ class BlockingCallTests(unittest.TestCase):
         import ast
         import inspect
 
-        from llm.persona_agent import batch, publish
+        from llm.persona.agent import batch, publish
 
         modules = {"run_and_persist": agent, "run_batch": batch, "run_publish": publish,
                    "production_skip_list": publish}
@@ -834,7 +834,7 @@ class KeepEndToEndTests(unittest.TestCase):
             written.update(kw)
             return 4
 
-        from llm.persona_agent import store
+        from llm.persona.agent import store
         ctx = tools.ToolContext.build(
             guild_id=1, allowed_ids=[ALICE],
             fetch=lambda sql, params: [(i, "") for i in params[1] if i.isdigit()],
@@ -886,7 +886,7 @@ class KeepEndToEndTests(unittest.TestCase):
         審查後重現：10 項 keep＋1 項 add，讀取失敗時寫出了只有 1 項的版本，
         而且 ref_accounting 是 None、lost 也記不到。
         """
-        from llm.persona_agent import store
+        from llm.persona.agent import store
         changes = [{"type": "keep", "ref": n, "trait": "", "text": "", "reason": "r",
                     "evidence_msg_ids": []} for n in (1, 2)]
         changes.append({"type": "add", "ref": 0, "trait": "新", "text": "新特徵",
@@ -976,7 +976,7 @@ class DropCompositionTests(unittest.TestCase):
 
     def test_dropped_item_does_not_come_back_next_night(self):
         """drop 會跟著 changes 存進版本表；下一晚重新編號時不可以把它當一般項目。"""
-        from llm.persona_agent import tools
+        from llm.persona.agent import tools
         items = tools._persona_items([
             {"type": "keep", "trait": "a", "text": "留下的"},
             {"type": "drop", "trait": "b", "text": "應該被刪掉的"},
@@ -992,12 +992,12 @@ class PromptFileLoaderTests(unittest.TestCase):
     """共用的 prompt 載入器（收斂掉三份一字不差的 mtime 快取實作）。"""
 
     def test_missing_file_is_not_fatal_for_text(self):
-        from llm import prompt_files
+        from llm.prompt import prompt_files
 
         self.assertEqual(prompt_files.read_text("/nope/missing.txt"), "")
 
     def test_missing_file_returns_none_for_json(self):
-        from llm import prompt_files
+        from llm.prompt import prompt_files
 
         self.assertIsNone(prompt_files.read_json("/nope/missing.json"))
 
@@ -1005,7 +1005,7 @@ class PromptFileLoaderTests(unittest.TestCase):
         import os
         import tempfile
 
-        from llm import prompt_files
+        from llm.prompt import prompt_files
 
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
                                          encoding="utf-8") as fh:

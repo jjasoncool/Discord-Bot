@@ -319,7 +319,6 @@ class ForumMonitor(commands.Cog):
                     await thread.add_user(post_author)
                     await thread.add_user(reacting_user)
                     # 獲取 reacting_user 的價格資訊
-                    from commands.user_commands import UserCommands
                     user_cog = self.bot.get_cog('UserCommands')
                     if user_cog:
                         user_prices = await user_cog.get_user_item_prices(reacting_user.id)

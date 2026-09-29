@@ -236,10 +236,10 @@ RULES = [
     Rule(
         name="prompt 檔 mtime 快取",
         pattern=r'_PROMPT_CACHE\s*[:=]\s*(?:dict)?\s*[:=]?\s*\{"text"',
-        canonical="llm.prompt_files.read_text() / read_json()",
+        canonical="llm.prompt.prompt_files.read_text() / read_json()",
         # ambient_reply 是多檔疊層（identity+guardrails+行為+examples）且有自己的
         # 組裝順序，硬套單檔載入器反而更繞——形狀不同就不該硬收斂。
-        allowed={"llm/prompt_files.py", "llm/ambient_reply.py"},
+        allowed={"llm/prompt/prompt_files.py", "llm/ambient/ambient_reply.py"},
     ),
     Rule(
         name="模組 logger 一律用 __name__（分類與去向寫在 settings/logging.json）",
@@ -491,7 +491,7 @@ class CanonicalHelperTests(unittest.TestCase):
         self.assertNotIn("taipei_utc_offset_hours", AskAICommandSettings.model_fields)
 
     def test_prompt_loader_handles_missing_files(self):
-        from llm import prompt_files
+        from llm.prompt import prompt_files
 
         self.assertEqual(prompt_files.read_text("/nope/missing.txt"), "")
         self.assertIsNone(prompt_files.read_json("/nope/missing.json"))

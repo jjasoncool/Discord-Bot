@@ -53,7 +53,7 @@ def _default_fetch(sql: str, params: Sequence[Any]) -> list[tuple]:
     `psycopg2.connect(...)`，不再加第八份。延後 import 讓本模組在無 DB 驅動的
     環境也匯入得起來（單元測試注入假的 fetch，不會走到這裡）。
     """
-    from llm.personality_extractor import _get_db_conn
+    from llm.persona.personality_extractor import _get_db_conn
 
     conn = _get_db_conn()
     try:
@@ -162,7 +162,7 @@ def _clean_text_for_extraction(text: str) -> str:
     prompt 對模型說謊。URL 也一樣：萃取刻意整段移除（對人格分析無用、且模型容易
     誤判成「愛分享資訊」），一條網址還要吃掉五十幾個字元的 context。
     """
-    from llm.personality_extractor import _clean_text_for_extraction as _clean
+    from llm.persona.personality_extractor import _clean_text_for_extraction as _clean
 
     return _clean(text)
 

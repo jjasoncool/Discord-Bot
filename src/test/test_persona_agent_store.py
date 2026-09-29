@@ -1,4 +1,4 @@
-"""`persona_agent.store` 的寫入層（hermetic，不碰 DB）。
+"""`llm.persona.agent.store` 的寫入層（hermetic，不碰 DB）。
 
 **為什麼需要這個檔**：`record_run` 原本零測試覆蓋，於是一次加必填參數時，
 第二個呼叫端（`agent.run_and_persist` 的隔離路徑，連續失敗 3 次才會走）漏掉沒改，
@@ -27,7 +27,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from llm.persona_agent import store  # noqa: E402
+from llm.persona.agent import store  # noqa: E402
 
 GUILD = 1276158257576284274
 ALICE = "1001"
@@ -242,7 +242,7 @@ class CallSiteTests(unittest.TestCase):
 
     def test_quarantine_path_calls_record_run_with_every_required_kwarg(self):
         """隔離路徑：連續失敗 3 次才會走，所以不寫測試就等於沒測。"""
-        from llm.persona_agent import agent
+        from llm.persona.agent import agent
 
         seen = {}
 

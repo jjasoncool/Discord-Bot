@@ -13,9 +13,9 @@ from typing import Any
 
 import discord
 
-from llm.chat_line import format_chat_line
-from llm.tokenization import tokenize_for_retrieval, tokens_for_debug
-from llm.persona_card_builder import (
+from llm.preprocess.chat_line import format_chat_line
+from llm.preprocess.tokenization import tokenize_for_retrieval, tokens_for_debug
+from llm.persona.persona_card_builder import (
     PERSONA_MAX_PARTICIPANTS,
     PERSONA_MAX_CARDS,
     classify_persona_intent,
@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - 依賴可能在部份環境尚未安裝
 
 try:
     from llama_index.core import VectorStoreIndex
-    from llm.safe_llm_embedding import SafeLLMEmbedding
+    from llm.client.embedding_client import SafeLLMEmbedding
     from llama_index.vector_stores.postgres import PGVectorStore
 except Exception:  # pragma: no cover - 依賴可能在部份環境尚未安裝
     VectorStoreIndex = None
@@ -93,7 +93,7 @@ def _get_embed_model(logger: logging.Logger) -> Any | None:
         return None
 
     try:
-        from llm.safe_llm_embedding import make_safe_llm_embedding
+        from llm.client.embedding_client import make_safe_llm_embedding
         _EMBED_MODEL = make_safe_llm_embedding(
             settings=LLM_SETTINGS,
             runtime_config=runtime_config,
@@ -391,10 +391,10 @@ def _build_vector_rank(
     """建立向量檢索排名（message_id -> rank）— /askai 窗內重排，薄包 search_chat。
 
     設計意圖：BM25 負責字面，Vector 負責語意；兩路結果交給 RRF 融合。
-    讀取 `chat_persistence` 寫入端累積的既有 embedding，避免每次 /askai 都重跑
+    讀取 `store_chat` 寫入端累積的既有 embedding，避免每次 /askai 都重跑
     100 則訊息的 in-memory embedding（GIL 佔用 + Ollama HTTP 爆量）。
 
-    Buffer gap：`chat_persistence` 有 30 筆/5 分鐘 buffer，極新的訊息可能尚未
+    Buffer gap：`store_chat` 有 30 筆/5 分鐘 buffer，極新的訊息可能尚未
     flush 到 pgvector，會缺 vector rank。但 `min_recent_context` 會無條件把
     最近 N 則選進 context，BM25 rank 也會補，整體召回影響可接受。
 
@@ -522,7 +522,7 @@ async def retrieve_discord_context(
 
         debug["question_tokens"] = tokens_for_debug(question)
 
-        # 聊天持久化已改由 on_message buffer 機制處理（chat_persistence.py）
+        # 聊天持久化已改由 on_message buffer 機制處理（store_chat.py）
         # 不再在 /askai 流程中同步寫入，避免阻塞 event loop
 
         # BM25（純 Python CPU 運算，佔 GIL）與 vector（1 次 Ollama embed + pgvector SQL）

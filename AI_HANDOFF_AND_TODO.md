@@ -25,6 +25,14 @@
 > 4. 保留可追溯來源，避免之後重複討論同一件事
 
 最後盤點紀錄（只保留近期；過往詳見 `TODO-completed.md` 各歸檔 entry）：
+- 2026-09-29（第 10 輪，**未動 code**）：`it_comfyui_image.py` 移出暫存區；MCP R2-Q2 定案（`search`＋`fetch`，設計全部定案）；寫入點名「服務層依賴指令層」的細節與修法選項（建議先不改，改時先補測試再注入按鈕建立函式）。
+- 2026-09-29（完整驗證 `llm/` 重組的相依與關連，**未動 code**）：六個角度（測試與運行、實際執行所有 import、相依圖比對與循環、分層、程式以外的引用、git 狀態）都沒有發現這次搬家造成的問題；循環相依前後完全相同。待處理：無關的 `it_comfyui_image.py` 被一起 stage、本檔最新修改未 stage。
+- 2026-09-29（grill：MCP 第 3 輪，**未動 code**）：R2-Q3 定案關鍵字全文搜尋、R2-Q4 照建議；R2-Q2 使用者質疑「照來源命名會一直加工具」→ 查證 Anthropic 工具設計指引與 OpenAI MCP 文件後撤回原建議，改建議 `search`＋`fetch` 兩個工具、來源用參數選、來源清單由登記表自動產生，待確認。
+- 2026-09-29（grill：L4 定案，**未動 code**）：使用者同意照建議——搜尋本體 `services/search/`（服務，不只給 LLM）、MCP 殼 `llm/mcp_server.py`（給 LLM 的橋接）、網頁搜尋留在 `llm/retrievers/web/`。MCP 區塊的啟動指令、log 分檔名稱、索引檔位置同步更新；R2-Q2～Q4 待答。
+- 2026-09-29（第 1、3 項＋收尾，**已完成・643 測試全過・下次重啟生效・未 commit**）：刪 4 處死碼（FB／IT 輪詢迴圈、兩個沒用的 task 屬性、一個沒用的 import，共 32 行；FB／IT 只靠推送）；新增 `test_data_file_paths.py` 釘住 6 個資料檔位置（突變會紅）；刪除只剩快取的 `src/llm/persona_agent/`；S1～S4 結案。L4 使用者重新提出：搜尋獨立成服務、MCP 殼放 `llm/`，待 L4a／L4b 確認。
+- 2026-09-29（`llm/` 依角色分子資料夾＋prompt 組裝搬家，**15:26 套用・15:28 重啟・驗證通過・未 commit**；L4 定案 MCP 外殼放 `services/`、名稱維持 `agent`、P3 暫停）：使用者核可 L2a／L2b／L3。在獨立 git worktree 改（bot 以 `./src` 即時掛載，延遲 import 會在重啟前壞），新增 import 守衛 `test_import_resolution.py`（七種突變都會紅、搬家前後都沒有誤判）與 prompt 組裝測試 `test_prompt_builder.py`；搬家前 627 項、最終版 637 項測試全過，逐模組獨立 import 全成功，prompt 組裝 49,152 組輸入逐字相同；兩位子 agent 獨立複查沒有找到執行期問題，指出的守衛誤判與漏抓已修。新舊路徑對照見 [程式結構整理區塊](#程式結構整理2026-09-29-構想grill-中)。L4、P3、第 1／3 項、N3 未動。
+- 2026-09-29（grill：程式結構整理，**討論中・未動 code**）：使用者覺得程式很亂，想依功能分資料夾但要有整體規劃。新增 [程式結構整理區塊](#程式結構整理2026-09-29-構想grill-中)，寫入第 1 輪待決問題（痛點、整理方式、分法原則、跟 MCP 的關係）與盤點事實（一檔多功能的檔案、`discord_bot.py` 塞的東西、轉發應整組、`sent_articles.db` 路徑地雷、沒有測試的功能）。MCP 區塊的 R2-Q5 改為取決於這邊。使用者要先看架構怎麼切、以及不影響功能能先做什麼 → 寫入架構草案（`core/`＋依領域分：relay、schedule、ai、search、community、trade、music、misc）與「現在就能做」清單（資料檔路徑集中、私有 import 守衛、清死碼、更新文件、MCP 照新結構寫）。使用者否決草案 v1（拆了 `llm/` 與 Discord 服務），要求從現有架構出發、最小修改 → 改寫成架構建議 v2（P1～P5）；第 1 項縮小成只加測試釘住 6 個資料檔位置，第 3 項確認 4 處死碼（`chat_persistence` 延遲 import 不是死碼，移出）。使用者提出「檔案命名也是問題」→ 讀到 ComfyUI 區塊既有的「檔名正名」與「不做 llm/services 資料夾重組」決定並補進本區塊；寫入命名盤點與第 2 輪待決問題 N1～N4。使用者回覆：N1 同意、N2 三個都不改、N3 延後、P1 否決（services 就是服務）、P3 入口仍由 `discord_bot.py` 管；使用者定義 `llm/`＝LLM 相關的組裝、優化、橋接、RAG、MCP → 撤回搜尋獨立的修正，寫入 `llm/` 討論 L1～L4 與 P3 確認。使用者回覆 L1 同意、L2 要依 LLM 角色分子資料夾（重開不重組的決定）、L4 本地資料一律放 `localdata/` → 寫入第 4 輪：L2a 子資料夾草案、L2b 搬法（一次搬＋import 守衛）、L3 log 格式化移進 `logger_factory`、L4 MCP 殼放 `services/`。
+- 2026-09-29（grill：MCP／搜尋工具化，**討論中・未動 code**）：新增 [MCP／搜尋工具化區塊](#mcp搜尋工具化2026-09-29-構想grill-中)，寫入第 1 輪待決問題（誰呼叫工具、結果給誰看、關鍵字過濾的痛點、要回答哪類問題），以及兩個子代理的查證事實（`/askai` 與網頁查詢流程、既有 tool calling、各來源資料量與儲存方式、「寫死日期區間」其實是轉發）。定案：社群稽查（依 ID 查人）不納入工具；用途＝查情報，排除 Telegram 內鬼；改由 LLM 決定何時查；先做 MCP server，工具本體共用。補上 Lemonade 實測速度與 bot 接工具的成本估算；寫入第 2 輪待決問題（MCP 客戶端與部署、工具切法、搜尋方式、論壇索引層級）。使用者追問「一定要另開 container 嗎」→ 在 R2-Q1 補上三種放法（塞進 bot 行程／同 container 另一個行程走 stdio／新 container）的利弊。使用者說不會有別的電腦連 → R2-Q1 定案：只有這台的 Claude Code，採放法 ②（stdio、`docker exec` 啟動，bot 重啟一次裝套件）。使用者問程式放哪 → 新增 R2-Q5（建議 `src/search/` 本體＋`src/mcp_server/` 殼；不可取名 `mcp/`；log 分檔）。使用者問「MCP server 不就取代 search？」→ R2-Q5 補上說明（MCP 只是協定殼，搜尋程式一定要有，差別只在放哪），以及 A 的變體。
 - 2026-09-29（新增 repo 根目錄 `AGENTS.md`，**未 commit**）：每次工作都要遵守的規則（討論方式、使用者資料檔高嚴重性規則、Docker 限制、共用元件、程式碼與測試慣例）從本檔與本機記憶搬過去，讓所有 session、一般子代理、雲端都自動載入（Claude Code v2.1.277 以上；repo 裡不要放 `CLAUDE.md`／`CLAUDE.local.md`，否則改讀那個檔）。本檔開頭改成「本檔維護規則」，並寫明每段搬去哪。新規則：討論與 grill 的每一輪都回寫**待決問題（選項＋建議）**；問題每輪只談一個主題、約 3～5 題。依此補寫 Telegram 過濾、ComfyUI、Persona M7 三個暫停主題的待決問題與當時的建議。
 - 2026-09-29（log 統一改成 `__name__` ＋ 設定檔，**已實作・595 測試全過・已 commit・已上線**；06:22 重啟後實測：3 小時 781 行、每行帶模組名稱、httpx 逐筆請求 0 行、測試紀錄只進 `test_run.log`、handler 沒有重複（唯一的重複行是 Telegram 啟動時的相簿補圖略過訊息，見 Telegram 過濾區塊）；之後加上 `discord.player` 壓到 WARNING（每播完一首歌一行 ffmpeg 結束訊息，約 250 行／天，下次重啟生效）與「json 裡的 logger 名稱都要對得到模組」的測試）：原本只有 `discord_bot` 這個 logger 掛了輸出，其他名稱的 logger 紀錄**既不顯示也不進 log 檔**（實證：09-29 00:29 建身份組那筆不在 log）。改為：① 新增 `settings/logging.json`（dictConfig）：root 輸出到畫面＋`discord_bot.log`；類別 logger `article_monitor`／`llm_anomaly` 各寫自己的檔、不往 root 傳；httpx／httpcore／urllib3／llama_index 等壓到 WARNING；每行多印模組名稱 `[時間] [等級] [模組] 訊息`。② `utils/logger_config.py` 改成只讀設定檔（import 即套用、冪等；`LOG_LEVEL` 可覆寫 root 等級）。③ 60 個模組從 `getLogger('discord_bot')` 改 `getLogger(__name__)`；`discord_bot.py` 主程式以 script 執行，明確命名 `discord_bot`；`bot.run(..., log_handler=None)` 避免 discord.py 重複輸出。④ 測試模式：`test/__init__.py` 設 `APP_TEST_LOG_FILE`，所有檔案輸出（含 `llm.logger_factory` 的 prompt 除錯檔）改寫到 `/logs/test_run.log`，實測跑完正式 log 位元組數不變。⑤ 守衛：模組 logger 一律 `__name__`（AST 判斷，類別 logger 與 `discord_bot.py` 例外）、不准 `print`；Rule 的 allowed 支援資料夾。突變驗證都會紅。**要拆分類時**：在 json 加一個 handler＋一個以模組前綴為名的 logger（例：`services.telegram_relay_service`），重啟即可，不動程式碼。**下一批**：telegram-scraper 約 45 處 `print` 改 logger；該容器只掛 `./src/telegram_scraper`，要共用 `settings/logging.json` 得改 compose 掛載（需使用者重建容器）。
 - 2026-09-29（週期活動提醒：深塔海墟，**已實作・586 測試全過・已 commit・待部署驗證**）：深塔／海墟各 28 天、週一 04:00 重置、錯開 14 天；重置前一天 20:00 正常 @、重置當下靜音 @ 自助訂閱身份組「深塔海墟提醒」；綁「週期提醒頻道」時自動建身份組＋發面板，每次提醒後面板刪舊發新置底。詳見 [週期活動提醒區塊](#週期活動提醒深塔海墟2026-09-29-已實作待部署驗證)。
@@ -188,6 +196,8 @@ affects: 全專案
 | 點歌機器人（Music Bot） | 已上線運作 | 85% | [點歌機器人](#點歌機器人專區) |
 | Telegram relay 可靠性 | 補掃（`fbd2d3c`）與媒體防雷（`77c812d`，已上線、已歸檔）；**2026-09-28 相簿漏圖修正已部署** | 95% | [漏收補掃](#telegram-漏收事件自動補掃2026-08-02-已實作2026-08-18-補上中段缺口盲區2026-09-28-全域鎖改單則訊息鎖修相簿漏圖待部署驗證) |
 | 活動自動發布（公告 → Discord 伺服器活動） | **連結指向修正 + 重複活動修正已實作（2026-09-22）**；待重啟 discord-bot 驗證 | 85% | [活動自動發布修正](#活動自動發布連結指向錯誤--重複建活動2026-09-22-已實作待部署驗證) |
+| 程式結構整理（沿用現有架構；`llm/` 依角色分子資料夾） | **`llm/` 重組＋prompt 組裝搬家已上線（2026-09-29）**；死碼清除＋資料檔位置測試已完成（下次重啟生效）；未 commit；L4 已定案、P3 暫停 | 55% | [程式結構整理](#程式結構整理2026-09-29-構想grill-中) |
+| MCP／搜尋工具化（網頁、公告、論壇） | **構想（2026-09-29）**，grill 第 2 輪；已定先做 MCP、LLM 決定何時查、位置（`services/search/`＋`llm/mcp_server.py`）、關鍵字全文搜尋、論壇索引範圍、`search`＋`fetch` 兩個工具；**設計已全部定案**，待實作 | 15% | [MCP／搜尋工具化](#mcp搜尋工具化2026-09-29-構想grill-中) |
 | Telegram 訊息 LLM 過濾 + 隔離區 | **構想（2026-09-28）**，討論中 | 0% | [Telegram 過濾](#telegram-訊息-llm-過濾--隔離區2026-09-28-構想討論中) |
 | 週期活動提醒（深塔海墟） | **已實作並 commit（2026-09-29）**，頻道已綁定、身份組已建；待重啟驗證置底收斂 | 90% | [週期活動提醒](#週期活動提醒深塔海墟2026-09-29-已實作待部署驗證) |
 | 新成員歡迎訊息（接手 ProBot） | **已實作（2026-09-28）**，待重啟 discord-bot + 綁頻道驗證 | 90% | [新成員歡迎訊息](#新成員歡迎訊息接手-probot2026-09-28-已實作待部署驗證) |
@@ -197,6 +207,298 @@ affects: 全專案
 > 已完成 / 過往工作（Bahamut scraper + 反爬基礎設施、幽靈點名核心 + DM、社群 ID 查詢 Phase 0、Telegram Relay、Music Bot 完整實作等）詳見 `TODO-completed.md`。
 >
 > **2026-08-18 歸檔**：活動公告自動建活動（17 筆已建立）、Telegram 自訂表情 → Discord App Emoji（10 個已上傳）、Telegram 多頻道來源 + 轉發去重（Gamedataleak 205 筆），三者皆已上線運作，連同 2026-06-25 ~ 2026-07-25 的盤點紀錄一併移入 `TODO-completed.md`。
+
+---
+
+## 程式結構整理（2026-09-29 構想，grill 中）
+
+<!-- @meta
+id: code-structure-reorg
+type: TODO
+status: draft
+last_confirmed: 2026-09-29
+affects: src/ 全部資料夾、mcp-search-tools（R2-Q5 程式放哪）、test_shared_conventions、settings/logging.json
+-->
+
+**需求（使用者 2026-09-29 提出，從 MCP 討論延伸）**
+- 覺得程式很亂，想知道從哪裡開始整理。
+- 傾向「依功能分資料夾」（改一個功能只看受影響的程式），但也要有整體架構規劃，否則程式分散各處很難維護。
+
+**機制本質**：依功能分（每個功能一個資料夾，擁有自己的指令、服務、設定、prompt）與依層分（現況：`commands/`、`services/`、`llm/`、`settings/`、`sys_settings/`）不是二選一；常見做法是「功能資料夾＋一個共用核心」，並用規則限制誰可以 import 誰。
+
+**查證事實（2026-09-29，唯讀盤點）**
+- **規模**：`src/` 約 5.66 萬行 Python（含另外兩個 container 的 `scraper/` 8.7k、`telegram_scraper/` 1.9k）。bot 端依層分：`commands/` 11 檔 8.4k 行、`services/` 19 檔 10.1k、`llm/` 38 檔 12.7k、`utils/` 1.1k、`sys_settings/` 0.9k、`test/` 8.9k（29 個測試檔平放）。
+- **已經是功能資料夾、可當範本**：`music/`（9 檔，只依賴外面的 `utils.dm_notifier`）、`llm/persona_agent/`（8 檔）。
+- **一檔多功能**：
+  - `commands/llm_commands.py` 1,533 行，含 4 個功能：/askai、人格萃取、persona_agent_test、AI 日記。
+  - `commands/management_commands.py` 1,179 行：伺服器管理、自介面板、印象審核。
+  - `commands/user_commands.py`：關鍵字監看、/forget_tag、物價查詢。
+  - `commands/article_commands.py`：六個轉發來源的手動指令。
+  - `services/llm_service.py`：核心 LLM 客戶端，混著 /askai 的 prompt 組裝（`generate_reply` 約 25 個參數，給四個功能用）。
+  - `sys_settings/llm_settings.py`：7 個 settings class，屬於不同功能。
+  - `utils/utils.py`：雜物袋。
+  - `settings/channel_registry.py`：程式碼放在資料夾裡，還含三個功能的 hook。
+- **`discord_bot.py` 876 行**：`on_ready` 約 320 行，塞了 04:00 維護（①～⑤ 全部編排，171～344 行）、00:00 日記排程、3 個 flush loop、公告／PTT 自動啟動（直接改 cog 內部屬性）、Telegram 物件組裝、echo 跟風、fixupx、活動墓碑、reaction 統計 hook。背景迴圈有的在 `on_ready` 啟動，有的在 `cog_load` 啟動，不一致。
+- **功能散佈**：公告轉發 11 檔、/askai 約 20 檔、插話約 18 檔（`discord_bot.py` 裡有 6 處）、persona agent 15 檔、人格萃取 10 檔、日記 8 檔（跨 4 個資料夾）。聚在一起的只有點歌、網頁查詢、Telegram（但全塞在一個 2,099 行的檔）。
+- **轉發（公告／FB／PTT／巴哈／IT／Telegram）共用一條管線**（`base_monitor`、StateDB、`notify_server`、`post_to_channel`），適合整組放一個「轉發」資料夾＋轉發共用層，不適合每個來源各自獨立；也跟既有的「跨來源整合」規劃（`cross-source-integration`，P0 未動）方向一致。
+- **import 熱點**：被最多模組 import 的是 `sys_settings.llm_settings`（29）、`utils.utils`（18）、`services.llm_service`（13）。兩個真的循環 import（`article_monitor`↔`event_scheduler`、`rollcall_commands`↔`rollcall_service`，都靠延遲 import 繞過）。跨功能拿私有函式：日記→`ambient_reply._get_llm`、persona agent→`personality_extractor` 三個私有函式、巴哈轉發直接對 StateDB 下 SQL。`llm/` 與 `services/` 互相 import（層次兩個方向都有）。
+- **搬檔最大的地雷**：`services/state_db.py` 用 `Path(__file__).parent/"sent_articles.db"` 找資料庫，**搬這個檔會悄悄開一個空的新 DB，導致大量重發**。其他依 `__file__` 找資料的：`base_monitor`、`rollcall_service`、`event_scheduler`（`../scraper/articles.db`）、`logger_config`、`music/ytdl`。約 20 處用相對工作目錄讀 `config.json`，約 15 處寫死 `/app/settings/prompts/*`。**資料檔跟程式碼混放**（`services/sent_articles.db`、`settings/*_runtime.json`），`.gitignore` 依路徑排除，搬了沒更新會把使用者資料 commit 進去。
+- **其他會跟著搬檔變動的**：`discord_bot.py` 的 `COMMAND_MODULES` 字串、`notify_server._RELAY_SOURCES` 的模組字串、7 個 `mock.patch` 字串、`test_shared_conventions` 的 `allowed` 路徑、AGENTS.md 共用元件表約 13 個路徑、本檔約 160 處路徑。**不受影響**：持久化按鈕的 `custom_id`（不含模組路徑）、`get_cog` 用的是 class 名稱。啟動 gate 與測試 log 導向都假設測試在 `test/` 底下。
+- **沒有測試的功能**：點名、社群 ID 查詢、點歌、自介／印象、交易、關鍵字監看、PTT、巴哈、FB（只有 embed）、日記、人格萃取、記憶、聊天紀錄寫入、頻道綁定。**搬這些功能時沒有測試保護**。
+- **完整盤點補充**：① bot 程式跨 container import `telegram_scraper.tg_config`（`telegram_relay_service.py`、`channel_registry.py`），功能邊界要處理這條線；② `llm/__init__.py` 會預先載入 `context_retriever`、`persona_card_builder`、`retrievers.web`，import 任何 `llm.*` 都會連帶載入這些；③ `test_shared_conventions` 掃描時跳過 `test/`，如果測試改放進功能資料夾，守衛規則會開始掃到測試檔；④「專案 AI 架構總覽」區塊是依層寫的檔案清單，而且已過時（還寫 Ollama），結構定案後要重寫。
+- **既有規劃**：「指令收斂與 Dashboard」的 `/persona` 子指令群，正好對應一個 persona 功能資料夾（萃取＋agent＋日記＋forget_tag）；該區塊寫 28 個指令已過時，實際是 21 個斜線指令＋2 個前綴指令。「管理入口 TODO」的權限檢查統一（5 種寫法，曾寫過又撤回）屬於核心。
+
+**待決問題（grill 第 1 輪，2026-09-29；每題附建議）**
+- **S1 「亂」的痛點**（可複選）：a 找不到某功能的程式在哪／b 改一個功能要動好幾個資料夾／c 單一檔案太大、一檔塞多個功能／d 重複的輪子／e `discord_bot.py` 什麼都塞／f 不敢改，怕牽動別的功能。建議（推測）：b＋c＋e。這題決定從哪裡下手。
+- **S2 整理方式**：A 一次大搬家／B 漸進：先畫目標地圖，新功能直接照新結構，舊功能下次要改時順便搬／C 漸進但主動排程：每次挑一個功能搬。建議 B＋C：先畫地圖、以 MCP 搜尋當第一個試點，之後每次主動搬一個最痛的功能。不一次大搬的理由：搬檔會牽動 `settings/logging.json` 的 logger 名稱、`test_shared_conventions` 的 `allowed` 路徑、交接文件裡的連結，一次全搬很難檢查，出錯也難定位。
+- **S3 分法原則**：A 純依功能／B 維持依層（現況）／C 混合：功能資料夾＋共用核心（LLM 客戶端、GPU 鎖、pgvector、StateDB、`post_to_channel`、面板置底、頻道綁定、log、時區）。建議 C，並加兩條規則：功能之間不直接 import 對方內部，只透過核心或對方公開的入口；核心不 import 任何功能。這兩條寫進 `test_shared_conventions` 守衛。
+- **S4 跟 MCP 的關係**：A MCP 先暫停，等結構定完再做／B MCP 搜尋照新結構當第一個試點（R2-Q2～Q4 照常討論，R2-Q5「程式放哪」等這邊定）。建議 B。
+
+**架構草案 v1（已被使用者否決，2026-09-29）**：另起一套 `core/`＋依領域分（relay、schedule、ai、community…）。否決理由（使用者）：`llm/` 本來就是 AI 領域，草案把它拆成 `core/llm` 和 `ai/`；社群功能本來就是 Discord 服務，草案把它和 Discord 共用元件拆開。**應該從現有架構出發，指出不合理或可精簡的地方，用最小修改處理。**
+
+**架構建議 v2：沿用現有架構，只修放錯與過大的地方（待確認）**
+- 我理解的現有架構：`llm/`＝AI 領域（所有 AI 相關）；`commands/`＝Discord 指令、`services/`＝Discord 服務的業務邏輯（轉發、活動、點名、社群…）；`music/`＝點歌（獨立）；`utils/`＝共用工具；`sys_settings/`＝設定程式、`settings/`＝資料與 prompt；`scraper/`、`telegram_scraper/`＝其他 container；`discord_bot.py`＝入口。
+- 不合理或可精簡的地方（每項都是最小修改，依價值排序）：
+  - **P1 AI 的程式放在 `services/`**：`services/llm_service.py`（LLM 客戶端）、`services/memory_service.py`（AI 記憶）搬進 `llm/`。順便解掉 `llm/` 與 `services/` 互相 import。牽動約 13 個 import。
+  - **P2 一檔多功能，拆檔但留在同一個資料夾**：`commands/llm_commands.py` 拆成 /askai 與人格相關（萃取、agent 測試、日記）兩個檔；`management_commands.py` 拆出自介面板；`user_commands.py` 的 `/forget_tag` 併到人格指令、物價併到 `trade_commands.py`。cog class 名稱不變，`get_cog` 不受影響；`COMMAND_MODULES` 要加項。
+  - **P3 `discord_bot.py` 瘦身**：04:00 維護編排搬進 `llm/`、00:00 日記排程搬進 `llm/ambient/ambient_diary.py`、Telegram 組裝搬進 `telegram_relay_service`、公告／PTT 自動啟動搬回 `article_commands` 的 `cog_load`。碰到每晚的維護排程，要單獨排、先補測試。
+  - **P4 `telegram_relay_service.py`（2,099 行）拆成 `services/telegram_relay/` 子資料夾**：等做「Telegram LLM 過濾」時順便拆，那個功能本來就要改這個檔。
+  - **P5 新功能照現有架構放**：公告／論壇搜尋放 `llm/retrievers/`（網頁查詢已經在 `llm/retrievers/web/`，同層加 `official/`、`forum/`）；MCP 殼放頂層 `mcp_server/`（跟 `discord_bot.py` 一樣是入口）。這也回答了 MCP 區塊的 R2-Q5。
+  - **使用者回覆（2026-09-29）**：
+  - **P1 否決**：`services/` 就是「服務」，`llm_service.py` 是 LLM 服務，留在 `services/`。
+  - **`llm/` 的定義（使用者）**：處理 RAG、MCP 等 LLM 相關技術，也就是跟 LLM 相關的任何組裝、優化、橋接；裡面可以有子資料夾。子資料夾怎麼分要討論（見下方 L1～L4）。
+  - **P3 修正**：同意 `discord_bot.py` 太胖，但入口本來就該做入口的事；不另拆一個排程程式，入口仍由 `discord_bot.py` 管。我的理解（待確認）：`discord_bot.py` 保留「什麼時候跑什麼、步驟順序、啟動順序、事件接線」，每個步驟裡面的實作細節（例：04:00 第 ③ 步讀略過名單、把結果塞進 cog）搬到各自的模組，入口只剩一行呼叫。
+  - P5 原本打算改成獨立 `src/search/`；**照使用者對 `llm/` 的定義（RAG、MCP 屬於 `llm/`），撤回這個修正**，搜尋留在 `llm/retrievers/`。
+- 可選、不急：轉發相關 7 個檔集中到 `services/` 底下一個子資料夾（會碰到 `state_db` 路徑地雷與 `notify_server` 的模組字串）；`settings/channel_registry.py` 是程式碼放在資料夾裡；`utils/utils.py` 裡各功能專屬的頻道 getter。
+
+**既有決定（本輪才讀到，v2 必須遵守；原文在 ComfyUI 區塊「檔名正名」）**
+- 已同意的檔名正名（原約定等 ComfyUI 步驟 2～4 完成後一起改）：`llm_http_client` → `http_client`、`safe_llm_embedding` → `embedding_client`、`chat_persistence` → `store_chat`、`diary_reflection` → `ambient_diary`；`lemonade_gate` 待定（等它真的管 GPU 資源再改）。
+- **已決定不做 `llm/`、`services/` 的資料夾重組**（約 160 個 import 點，效益只有排序好看）。子資料夾判準：「≥6 檔／有封裝邊界／可預期會長」滿足其一（`persona_agent/`、`retrievers/web/` 是範例）。**ComfyUI 另開 `src/imagegen/`，不塞進 `llm/`**，避免 `llm/` 變成「AI 相關雜物間」。
+- 對 v2 的影響：P1 只搬一個放錯的檔，不算重組，可以；P4 Telegram 子資料夾符合判準（有封裝邊界、2,099 行）；**P5 搜尋放 `llm/retrievers/` 要重新考慮**：搜尋也給 MCP 用、不只給 AI 用，照 imagegen 的原則可能該獨立成 `src/search/`（下一輪問）。
+
+**命名問題（使用者 2026-09-29 提出「檔案命名也是問題」；grill 中）**
+- 盤點（唯讀）：
+  - **名字說 A、內容是 B（會誤導）**：`commands/forum_monitor.py` 實際是交易確認（論壇貼文按表情開交易 thread，`TransactionView`）；`commands/test_commands.py` 是開發用測試指令，跟 `test/` 撞名；`llm/prompt_builder.py` 只有 `build_askai_prompt_log`，組的是 /askai 的 log，不是 prompt（真正組 prompt 的在 `llm_service._build_prompt_bundle`）。
+  - **同一個詞三種意思**：「monitor」同時指轉發（`*_monitor.py`）、交易確認（`forum_monitor`）、關鍵字監看（`user_commands` 的 `StopAllMonitoringView`、`monitored_channels.json`）。
+  - **名字太籠統，看不出內容**：`utils/utils.py`（權限檢查、`ChannelConfig`、安全回覆、分頁、各功能的頻道 getter）、`commands/user_commands.py`（關鍵字監看＋`/forget_tag`＋物價）、`commands/llm_commands.py`、`commands/management_commands.py`。
+  - **不一致但不誤導**：`settings/`（資料檔）與 `sys_settings/`（設定程式）名字分不出誰是誰，且 `settings/channel_registry.py` 是程式碼放在資料夾；`personality_*` 與 `persona_*` 混用；`services/` 有的檔帶 `_service` 字尾、有的沒有。
+  - 改名的代價：import 點、`COMMAND_MODULES` 字串、`mock.patch` 字串、log 裡的模組名稱（查舊 log 要用舊名）、`AGENTS.md` 與本檔的路徑。**不受影響**：cog class 名稱（`get_cog`）、按鈕 `custom_id`。
+- 待決問題（grill 第 2 輪，每題附建議）：
+  - **N1 改名原則**：A 只改會誤導的＋既有正名表；不一致的不改舊檔，只在 `AGENTS.md` 訂命名慣例給新檔／B 全面統一／C 都不改。建議 A，延續「只改騙人的名字、不為好看搬家」的既有決定。
+  - **N2 會誤導的三個**：`forum_monitor.py` → `trade_confirm_commands.py`（不併進 845 行的 `trade_commands.py`，免得又變大檔）；`test_commands.py` → `dev_commands.py`；`prompt_builder.py` → `askai_log.py`。建議都改；純改名、行為不變。
+  - **N3 籠統的名字**：`utils/utils.py` 拆成 `permissions.py`（`check_guild`／`check_role`）、`channel_config.py`（`ChannelConfig`＋頻道 getter）、`interaction.py`（安全回覆、分頁），約 18 個 import 點；`settings/channel_registry.py` 搬到 `utils/`（它是共用元件，照 AGENTS.md 應放 `utils/`），名稱不變；`user_commands`、`llm_commands`、`management_commands` 在 P2 拆檔時一起取新名。建議都做，但排在純改名之後。
+  - **N4 什麼時候改**：A 純改名（N2＋正名表）獨立一批，跟第 1、3 項一起做；拆檔（N3、P2）另一批／B 全部等 P2 一起。建議 A。正名表原約定等 ComfyUI，但除了 `lemonade_gate` 其餘四個跟 ComfyUI 無關，建議提前；你想維持原約定也可以。
+- **使用者回覆（2026-09-29）**：
+  - N1：同意 A（只改會誤導的＋正名表；不一致的只訂慣例給新檔）。
+  - N2：**三個都不改**。`forum_monitor.py` 本來就是監控聊天室的 cog，交易是後來加的用途；`test_commands.py` 意思沒錯（啟動 gate 只掃 `test/`，技術上也不衝突）；`prompt_builder.py` 見下方 L3：名字沒錯，是內容放錯（真正的 prompt 組裝在 `services/llm_service.py`）。
+  - N3：延後，這次要改的已經夠多。
+  - N4：N2 不改後只剩正名表，**維持原約定**（等 ComfyUI 步驟 2～4）。
+
+**`llm/` 資料夾討論（grill 第 3 輪，2026-09-29；每題附建議）**
+- 現況依角色分（照使用者的定義歸類，26 個平放檔＋`persona_agent/`、`retrievers/web/`）：
+  - 橋接（接 LLM 後端）：`llm_http_client`、`safe_llm_embedding`、`lemonade_gate`、`vision_image`、`logger_factory`
+  - 組裝（把資料組成 prompt）：`prompt_builder`（目前只組 /askai 的 log）、`prompt_files`、`chat_line`、`persona_card_builder`
+  - RAG（存與找）：`context_retriever`、`tokenization`、`retrievers/web/`、`chat_persistence`、`raw_message_store`、`member_profile_store`、`ai_interactions_store`、`sticker_cache`、`emoji_text_utils`
+  - AI 功能：`ambient_reply`、`ambient_hooks`、`ambient_memory`、`diary_reflection`、`personality_extractor`、`preference_extractor`、`signature_tag_extractor`、`reaction_classifier`、`persona_agent/`
+- **L1 AI 功能本身（插話、日記、人格萃取、persona agent）也留在 `llm/` 嗎**：A 留（現況，符合「llm 就是跟 AI 相關」）／B 搬到別處。建議 A：搬走牽動最大，也沒有更合適的地方。
+- **L2 子資料夾分到什麼程度**：A 維持平放，只有新東西開子資料夾（搜尋、MCP）／B 依上面四個角色全部收進子資料夾／C 平放為主，某一群符合既有判準（≥6 檔、有封裝邊界、會長大）時，下次改到它才收成子資料夾（例：插話 `ambient_*` 加日記）。建議 A＋C：既有決定是不做 `llm/` 重組（約 160 個 import 點）。
+- **L3 真正的 prompt 組裝搬進 `llm/prompt_builder.py`**：`services/llm_service.py` 的 `_build_prompt_bundle`（約 220 行，/askai、插話、日記、印象審核共用）是「組裝」，照你的定義屬於 `llm/`。A 搬進 `prompt_builder.py`（名字剛好對，現在那個檔只組 log，一起放）；`llm_service` 留在 `services/`，只做服務（連線、載模型、呼叫、重試）／B 不動。建議 A。這也是 `prompt_builder.py`「名字沒錯、內容放錯」的解法。
+- **L4 MCP 與搜尋放哪**：搜尋放 `llm/retrievers/official/`、`llm/retrievers/forum/`（跟 `web/` 同層）；MCP 殼放 `llm/mcp/`，用 `python -m llm.mcp` 啟動（子套件不會蓋掉安裝的 `mcp` 套件，只有頂層的 `src/mcp/` 會）。**坑**：`llm/__init__.py` 會預先載入 `context_retriever` 等模組（連帶 llama_index），MCP 一啟動就全部載入，慢又吃記憶體；解法是把 `llm/__init__.py` 改成用到才載入（對外的 `from llm import …` 寫法不變）。建議照這樣做。
+- **使用者回覆（2026-09-29）**：
+  - L1：同意，AI 功能留在 `llm/`。
+  - L2：**要依「LLM 會做的事」分子資料夾**（例：還有資料整理的部分、`persona_card_builder.py` 還放在外面）。等於**重開**「不做 `llm/` 重組」的既有決定，由使用者拍板。
+  - L3：使用者問：`prompt_builder.py` 組的是 log，為什麼不放進 `logger_factory.py`？（不確定該不該，只覺得名稱讓人誤會）
+  - L4：撈本地資料庫的一律放 `localdata/`（不照來源分 official／forum）；問 MCP server 該放 `services/` 還是 `llm/`。
+- 查證：`logger_factory.py`（54 行）只有 `get_or_create_file_logger`，負責 prompt 除錯檔（askai、插話、日記）寫到哪、怎麼輪替；`build_askai_prompt_log` 只有 `commands/llm_commands.py:766` 一處使用（經 `llm/__init__.py` 轉出）。`llm` 相關 import 共 162 行、分布在 43 個檔（其中 76 行在 `llm/` 內部），`mock.patch` 字串 1 個；**`llm/` 裡沒有用檔案位置找資料的地雷**（6 個都在 `llm/` 外）。風險在函式內的延遲 import：漏改不會在啟動時報錯，要等跑到那段程式（例：04:00 維護）才壞。
+
+**`llm/` 資料夾討論（grill 第 4 輪，2026-09-29；每題附建議）**
+- **L2a 依角色分的子資料夾草案**：
+  - `client/` 橋接後端：`llm_http_client`、`safe_llm_embedding`、`lemonade_gate`
+  - `preprocess/` 資料整理：`chat_line`、`emoji_text_utils`、`sticker_cache`、`vision_image`、`tokenization`（之後抽出的共用文字清理也放這）
+  - `prompt/` 組裝：`prompt_builder`（真正的 prompt 組裝，見 L3）、`prompt_files`
+  - `storage/` 存：`chat_persistence`、`raw_message_store`、`member_profile_store`、`ai_interactions_store`
+  - `retrievers/` 找：`context_retriever`、`web/`、`localdata/`（新）
+  - `ambient/` 插話：`ambient_reply`、`ambient_hooks`、`ambient_memory`、`diary_reflection`
+  - `persona/` 人格：`personality_extractor`、`preference_extractor`、`signature_tag_extractor`、`reaction_classifier`、`persona_card_builder`、`agent/`（原 `persona_agent/`）
+  - `logger_factory.py` 留在 `llm/` 頂層（prompt 除錯 log）
+  - 既有正名表在搬家時一起做（例：`client/http_client.py`、`client/embedding_client.py`、`storage/store_chat.py`、`ambient/ambient_diary.py`），import 路徑只改一次；`lemonade_gate` 照原約定暫不改名。
+  - 建議照這份，資料夾名稱可以再改。`persona_card_builder` 放 `persona/`：它也被 /askai、插話的 prompt 組裝使用，但內容是人格卡。
+- **L2b 怎麼搬**：A 一次搬完（純搬家＋改 import，行為不變）／B 分批，每次一個子資料夾。建議 A，但先加一個守衛測試：掃所有 import（含函式內的延遲 import），每一個都要找得到模組，漏改就在啟動 gate 擋下。搬完跑完整測試，挑維護時段以外重啟。時機：在第 1、3 項之後、寫 MCP 之前（MCP 直接寫在新位置）。
+- **L3 兩件事分開放**：`build_askai_prompt_log`（組 /askai 的除錯 log 內容）移進 `logger_factory.py`，讓它成為「prompt 除錯 log」的專屬檔（寫到哪＋寫什麼）；`prompt_builder.py` 改放真正的 prompt 組裝（`services/llm_service.py` 的 `_build_prompt_bundle`），名實相符。建議兩件都做。
+- **L4 MCP server 放 `services/`**：伺服器外殼是「服務」，跟 `services/notify_server.py`（對 scraper 提供 HTTP 介面）同類；查本地資料的工具本體是 RAG，放 `llm/retrievers/localdata/`。剛好符合「`services/` 是服務、`llm/` 是 LLM 技術」兩個定義。建議 `services/mcp_server.py`，用 `python -m services.mcp_server` 啟動。不論放哪，`llm/__init__.py` 都要改成用到才載入（MCP 會 import `llm.retrievers.localdata`，會觸發它）。
+- **P3 確認**：上面對 `discord_bot.py` 的理解對嗎？另外，cog 自己啟動的迴圈（週期提醒、點名、/askai 排隊）要不要也改由 `discord_bot.py` 登記？建議不要：那些是功能內部的計時器；由入口統一編排的只限跨功能的排程（04:00 維護、00:00 日記、轉發啟動）。
+
+**使用者回覆（2026-09-29，第 4 輪）**
+- **L2a、L2b、L3 核可**；「先改核可的地方，還沒確認的先不動」→ L4、P3、第 1／3 項（含刪 FB／IT 輪詢）、N3 都不動。
+- 子 agent 要不要分派交給 Claude 判斷，**最重要的是正確性**。本輪分工：搬家與改寫由主 agent 一次做完（43 個檔案互相牽連，拆給多個 agent 會改到同一批檔案、做法也可能不一致）；子 agent 只做唯讀的獨立複查（沒參與撰寫，比較容易看出漏掉的地方）。
+- 使用者表示沒看過 S1～S4（題目在 session 重啟前發出，可能沒顯示），本輪重新列出。
+
+**`llm/` 重組＋L3 實作（2026-09-29；15:26 套用、15:28 重啟、已驗證，未 commit）**
+- **做法：先在獨立的 git worktree 改，不動 bot 正在讀的 `./src`**。理由：bot 以 `./src` 即時掛載執行，函式內的延遲 import 要到執行那段才讀檔；檔案一搬、bot 還沒重啟，跑到那段（例：00:00 日記、04:00 維護）就 ImportError。所以「套用到 `./src`」和「重啟」要一起做。
+- **新舊路徑對照（舊 → 新，都在 `src/llm/` 底下）**：
+  - `llm_http_client.py` → `client/http_client.py`；`safe_llm_embedding.py` → `client/embedding_client.py`；`lemonade_gate.py` → `client/lemonade_gate.py`
+  - `chat_line.py`、`emoji_text_utils.py`、`sticker_cache.py`、`vision_image.py`、`tokenization.py` → `preprocess/` 同名
+  - `prompt_files.py` → `prompt/prompt_files.py`；（新）`prompt/prompt_builder.py`＝真正的 prompt 組裝
+  - `chat_persistence.py` → `storage/store_chat.py`；`raw_message_store.py`、`member_profile_store.py`、`ai_interactions_store.py` → `storage/` 同名
+  - `context_retriever.py` → `retrievers/context_retriever.py`（`retrievers/web/` 不動）
+  - `ambient_reply.py`、`ambient_hooks.py`、`ambient_memory.py` → `ambient/` 同名；`diary_reflection.py` → `ambient/ambient_diary.py`
+  - `personality_extractor.py`、`preference_extractor.py`、`signature_tag_extractor.py`、`reaction_classifier.py`、`persona_card_builder.py` → `persona/` 同名；`persona_agent/` → `persona/agent/`
+  - 舊 `prompt_builder.py`（只組 /askai 除錯 log）→ 內容併入 `logger_factory.py`，檔案刪除
+  - 正名表中的 `llm_http_client`、`safe_llm_embedding`、`chat_persistence`、`diary_reflection` 四項在這次一起完成；`lemonade_gate` 照原約定不改名。
+- **L3**：
+  - `build_askai_prompt_log` 移進 `llm/logger_factory.py`，**不再從 `llm/__init__.py` 轉出**，唯一呼叫端 `commands/llm_commands.py` 改成直接 import。原因：若改由 `llm/__init__` 轉出，import `llm` 會多載入 `utils.logger_config`（載入就套用 log 設定），scripts 與之後的 MCP 行程都會多這個副作用；實測搬家前 import `llm` 不會載入它。
+  - `_build_prompt_bundle`、`PromptBundle`、`_sanitize_text` 搬到 `llm/prompt/prompt_builder.py`，成為 `build_prompt_bundle(safety_rules=…, latest_open_tag=…, latest_close_tag=…, 其餘參數不變)`；`LLMService.generate_reply` 傳入原本的 `self.context_safety_rules` 與 `self.settings.latest_*_tag`。
+- **新增守衛 `src/test/test_import_resolution.py`**：只讀原始碼（AST），不實際 import。檢查四件事：所有專案 import（含函式內的延遲 import、相對 import）都找得到模組；`from X import 名稱` 的名稱存在（只寫在 `if TYPE_CHECKING:` 裡的不算）；模組字串（`mock.patch` 目標、`notify_server` 的模組字串、`COMMAND_MODULES`）指向存在的模組與第一層名稱；模組頂層別名的屬性讀取（含多層，如 `llm.retrievers.web.x`）存在。**它跑在啟動 gate，誤判會讓 bot 起不來，所以寧可少抓、不可誤判**：同名變數被重新賦值的範圍內不檢查、結尾是常見副檔名的字串不檢查、只剩 `__pycache__` 的資料夾不算套件；真的不是模組的字串加進 `_NOT_MODULE_STRINGS`（目前 1 筆：`test_logger_config` 刻意虛構的 logger 名稱）。自測 11 項，另有「確實掃到核心檔案」的斷言。已知抓不到（目前程式裡都沒有）：函式內 import 的別名屬性、`import_module` 的相對寫法、f-string 組出的路徑、`notify_server` 裡 `cls`／`method` 欄位。
+- **新增 `src/test/test_prompt_builder.py`**：釘住 prompt 組裝的輸出約定（兩則 message、區塊順序、`from` 屬性、去 `\x00`、紀錄與送出同源、沒 context 不放開場、身份錨點）。突變驗證：開合標籤對調、不去 `\x00`、兩個區塊對調 → 都會紅。
+- **其他同步**：`test_shared_conventions` 的 canonical 與 allowed 路徑；`AGENTS.md` 共用元件表 3 列；`persona_agent_prompt.json` 的 `_comment`（程式只讀特定欄位，不影響行為）；21 處註解／docstring 裡的舊模組名；`llm_service.py` 搬走方法後多出的空行。**`docker/discord_bot/requirements.txt` 刻意不改**：它有 2 行註解提到舊路徑，但套件大多沒鎖版本，檔案一改，下次 build 就會重抓最新版；等之後因為加 `mcp` 套件而必須改它時，再一起更新註解。**刻意不改**：`ambient_diary.py` 的 `caller="diary_reflection"` 標籤、`store_chat.py` 的 log 訊息前綴 `chat_persistence:`（執行期字串，改了會改到 log 內容）。
+- **驗證**（都在容器 `/tmp` 的副本跑，不影響正在跑的 bot）：
+  - 搬家前基準：627 項測試全過；89 個模組各自在全新行程 import 全部成功；守衛通過。
+  - 守衛突變：函式內延遲 import 打錯字、`mock.patch` 字串指錯、`llm/__init__` 少轉出名稱、`notify_server` 模組字串打錯 → 四種都變紅，還原後恢復通過。
+  - 搬家後：627 項測試全過；95 個模組（多出 6 個子資料夾的 `__init__`）各自 import 全部成功，舊的 89 個全都對得到新位置；守衛通過。
+  - prompt 組裝差異比對：14 個選填參數的全部組合 × chat_context 三種狀態＝49,152 組，經 `generate_reply` 實際走一遍（模型呼叫換成假物件），比對送出的 messages 與 log 文字，**搬家前後逐字相同**；故意把開合標籤對調後 49,152 組全部不同，證明比對有效。
+  - 子 agent 獨立複查（兩位，重點不同，都是唯讀）：**沒有會在執行期出錯的殘留，搬家與 L3 沒有行為差異、沒有新的循環 import**。AST 比對 59 個改動檔，54 個除路徑外完全相同，其餘 5 個的差異正好是預期的修改；程式外的資料（config、runtime json、prompt、StateDB）沒有存模組路徑；logger 名稱會變，但只影響 log 行裡的 `[模組]` 欄，沒有程式或工具依它過濾。複查指出後已修正：守衛的四類誤判與四類漏抓（見上）、prompt 組裝缺常駐測試、9 處註解、`AGENTS.md` 一列、`requirements.txt` 還原、多餘空行。
+  - 修正後（最終版）重跑：**637 項測試全過**（多出的 10 項是守衛自測與 prompt 組裝測試）；95 個模組獨立 import 全成功；prompt 組裝 49,152 組仍逐字相同；守衛 7 種突變都會紅，搬家前與搬家後的程式都沒有誤判。
+  - patch 已產生並確認可乾淨套用：71 個檔案（新增 9、刪除 1、修改 30、搬移 31）。
+- **套用步驟**（時間由使用者決定，避開 00:00 日記與 04:00～07:30 維護）：① 套用工作副本產生的 patch（scratchpad `llm_reorg.patch`）到 `./src`；② 刪除舊的 `src/llm/persona_agent/`（套用後只剩 `__pycache__`，不是使用者資料；留著會變成一個空的套件）；③ 立刻在容器跑正式測試指令；④ 使用者執行 `docker compose restart discord-bot`（啟動 gate 會再跑一次全部測試）；⑤ 執行文件更新腳本（scratchpad `apply_doc_paths.py`），把本檔其他區塊與記憶裡現行說明的舊路徑換成新路徑（開頭盤點紀錄與本區塊不動）。③ 紅就用 `git apply -R` 還原。套用後 `git status` 會出現搬移的檔案，commit 等使用者指示。
+
+**第 1、3 項（2026-09-29 查證；第 7 輪使用者核可「做」，已完成，見第 7 輪紀錄）**
+- **第 1 項縮小成「只加測試、不改程式」**：在 v2 架構下這 6 個檔都不會搬，改路徑是多餘的變動。改成加一個測試，釘住 6 個資料檔的實際位置：`services/state_db.py:22`（`sent_articles.db`）、`services/base_monitor.py:31`（`article_runtime.json`）、`services/rollcall_service.py:21`（`rollcall_runtime.json`）、`services/event_scheduler.py:69`（`scraper/articles.db`）、`utils/logger_config.py:22`（`logging.json`）、`music/ytdl.py:12`（`music/cache`）。以後誰搬了這些檔，啟動 gate 就擋下來（bot 起不來），而不是默默開空 DB、把舊文重發一遍。
+- **第 3 項確認是死碼的 4 處**（已 grep 全 repo，含字串用法）：
+  - `services/fb_monitor.py:288` `start_fb_monitoring`：FB 輪詢迴圈，沒有任何呼叫處（FB 已改由 scraper 推送，`notify_server` 以字串呼叫的是 `check_and_send_fb_posts`，保留）。
+  - `services/it_article_monitor.py:216` `start_monitoring`：IT 輪詢迴圈，沒有呼叫處（`notify_server` 用的是 `check_and_send_new`、`ensure_seeded`，保留）。
+  - `commands/article_commands.py:108、110`：`fb_monitoring_task`、`it_article_monitoring_task` 只有設成 `None`，沒有任何地方讀（`discord_bot.py` 以字串讀的是 `monitoring_task`、`ptt_monitoring_task`，保留）。
+  - `commands/forum_monitor.py:322`：`from commands.user_commands import UserCommands` 匯入後沒用到（下一行用 `get_cog('UserCommands')`）。
+  - 原本列的 `chat_persistence` 延遲 import **不是死碼**（還在用），移出清單。
+  - 要確認：刪掉 FB／IT 的輪詢迴圈，等於確定只走推送、不留輪詢當備援。
+
+**使用者回覆（2026-09-29，第 5 輪）**：現在就套用（15:26 已套用）；**P3 先別動**；問「不是要改名成 agents？」→ 說明 `persona_agent/` 已搬成 `llm/persona/agent/`（L2a 核可的單數 `agent`），舊位置只剩 `__pycache__`；問「L4 不是討論過了？」→ 已定的是「撈本地資料庫的放 `llm/retrievers/localdata/`」與「`llm/` 處理 RAG、MCP 等 LLM 技術」，MCP server 外殼放 `services/` 還是 `llm/` 是使用者問我、我建議 `services/`，尚待使用者選。
+
+**使用者回覆（2026-09-29，第 6 輪）**：已重啟；**名稱維持 `agent`**；~~L4 定案：MCP server 外殼放 `services/`~~（第 7 輪使用者重新提出，改為討論中，見下方）。使用者問「MCP 只限定給 LLM 用嗎？」→ 協定本身是為 LLM 應用設計的（客戶端是 Claude Code 這類 AI 工具，讓模型發現並呼叫工具）；一般程式技術上也能呼叫，但那種需求用普通 HTTP API 更簡單。
+
+**重啟後驗證（15:28～15:30）**：啟動 gate 637 項全過；12 個指令模組全部載入、21 個斜線指令同步、各排程（04:00 人格萃取、00:00 日記、flush 迴圈）都已啟動；15:26 之後 `discord_bot.log` 沒有任何 ERROR 或 import 錯誤（套用到重啟的 2 分鐘空窗也沒有）。「Telegram 啟動補償 373 筆」與今天 06:22、09:58、10:34 三次重啟的數字相同，是既有問題（相簿晚到成員不寫發送紀錄，見 Telegram 過濾區塊），處理結果全是「已過時效，略過」或「略過空訊息」，**沒有重發**。文件路徑更新腳本已執行（本檔其他區塊與記憶的現行說明改成新路徑）；工作副本與容器 `/tmp` 暫存已清除。舊的 `src/llm/persona_agent/` 只剩 `__pycache__`，要不要刪等使用者決定（留著無害，守衛也不把它當套件）。
+
+**使用者回覆與實作（2026-09-29，第 7 輪）**
+- **舊資料夾 `src/llm/persona_agent/` 已刪除**（使用者核可；裡面只有 16 個 `__pycache__` 快取檔）。
+- **S1～S4 結案**（使用者同意）：S1 痛點＝一檔多功能、`discord_bot.py` 太胖、命名、`llm/` 分類；S2 `llm/` 一次搬完，其他部分等要改到時再用最小修改處理；S3 沿用使用者的架構（`services/` 放服務、`llm/` 放 LLM 技術）；S4 MCP 直接寫在新結構。
+- **第 3 項完成（刪死碼，共 32 行）**：`services/fb_monitor.py` 的 `start_fb_monitoring`、`services/it_article_monitor.py` 的 `start_monitoring`（FB／IT 從此只靠 scraper 推送，使用者核可不留輪詢備援）、`commands/article_commands.py` 兩個沒人讀的 task 屬性、`commands/forum_monitor.py` 沒用到的 `UserCommands` import。`asyncio`、`List` 在兩檔仍有其他用處，import 保留；`notify_server` 以字串呼叫的 `check_and_send_fb_posts`、`check_and_send_new`、`ensure_seeded` 都還在。
+- **第 1 項完成（只加測試）**：新增 `src/test/test_data_file_paths.py`，釘住 6 個依程式檔位置算出的資料檔路徑（`sent_articles.db`、`article_runtime.json`、`rollcall_runtime.json`、`scraper/articles.db`、`logging.json`、`music/cache`）；只比對位置、不要求檔案存在。突變驗證：改 `state_db` 或 `music/ytdl` 的路徑 → 對應測試變紅。bot 端（不含 scraper、telegram_scraper、手動 scripts）用這種寫法的就是這 6 處，已 grep 確認。
+- 正式測試 **643 項全過**。這些改動下次重啟才生效，不需要立刻重啟（刪的是沒人呼叫的程式）。
+- **L4 使用者重新提出**：「搜尋應該獨立一個資料夾？搜尋像是一種 service，不只給 LLM；MCP 的殼才放 `llm/`。」分析：同意。搜尋的使用者有三種——MCP（給 LLM）、之後 /askai 的工具呼叫（給 LLM）、給人看的搜尋指令（R2-Q2 的 B，不經 LLM）——所以搜尋本身不是 LLM 技術；MCP 是給 LLM 客戶端用的協定，屬於「橋接 LLM」，照使用者對 `llm/` 的定義放 `llm/`。給模型看的工具說明（名稱、描述、參數格式）也屬於 LLM 這一側，之後 /askai 的工具呼叫可以共用。
+  - 實測：`import llm` 在容器內約 1.5 秒、載入 1,747 個模組（`llm/__init__.py` 會預先載入 llama_index 等）；對照 `import services.base_monitor` 0.39 秒。MCP 殼放 `llm/` 會多這 1.5 秒啟動時間，每個 Claude Code session 只啟動一次，可以接受；太慢再把 `llm/__init__.py` 改成用到才載入。
+
+**待決問題（第 7 輪，L4 重新討論；每題附建議）**
+- **L4a 搜尋放哪**：A `services/search/`（搜尋是一種服務；符合子資料夾判準：有封裝邊界、會長大）／B 頂層 `src/search/`（像 `music/` 自成一包）。建議 A：它是給指令、/askai、MCP 共用的服務，不是一個自帶指令的完整功能。撈本地資料庫的程式放在裡面（使用者先前說的 `localdata`，檔案怎麼切等 R2-Q2 定）。
+- **L4b MCP 殼放哪**：`llm/mcp_server.py`（單一檔案，變大再改成資料夾；用 `python -m llm.mcp_server` 啟動）。建議叫 `mcp_server` 而不是 `llm/mcp/`：雖然放在 `llm/` 底下不會蓋掉安裝的 `mcp` 套件，但 `from llm.mcp import …` 跟 `from mcp import …` 讀起來容易混淆。
+- 順帶：網頁搜尋（`llm/retrievers/web/`）**建議留在原處**。它除了呼叫 SearXNG，還有「/askai 要不要查」的判斷和「整理成 prompt 區塊」的格式化，這兩部分是 LLM 專用的；等之後真的有非 LLM 的地方要用網頁搜尋，再把純搜尋那段抽到 `services/search/`。
+
+**使用者回覆（2026-09-29，第 8 輪）**：L4a、L4b 都照建議——**搜尋放 `services/search/`、MCP 殼放 `llm/mcp_server.py`、網頁搜尋留在 `llm/retrievers/web/`**。MCP 區塊的 R2-Q5 同步定案。
+
+**完整驗證（2026-09-29 第 9 輪，使用者要求「完整測試各套件之間的相依與關連性」）**
+- 做法：多 agent 流程從六個角度獨立檢查，每個發現再派懷疑者重現或推翻。流程在 16:11 左右因 Claude Code session 重啟中斷；「分層檢查」「循環比對」兩個 agent 寫分析腳本時被權限擋下，「舊引用」沒跑完。這三項由主 agent 改用不落檔的方式直接補做。
+- **測試與實際運行**：完整測試 643 項全過；15:28 重啟的啟動 gate 637 項通過（差的 6 項是 15:36 才加的 `test_data_file_paths.py`）；15:26 之後 `discord_bot.log` 612 行沒有任何 ERROR／Traceback／import 錯誤；指令模組 **11 個**（清單本來就是 11 個，先前回報的 12 是筆誤）、21 個斜線指令同步；raw flush、chat flush、插話（經新的 `build_prompt_bundle`）、反應事件、notify 轉發都已用新模組跑過。
+- **實際執行所有 import**：97 個模組各自在全新行程 import 全成功；138 個 bot 端檔案共 394 條專案 import（含 162 條寫在函式、類別、try、if、with 裡）逐條實際執行全成功；`COMMAND_MODULES` 11 個、`_RELAY_SOURCES` 3 組（module、cls、method、seed）、9 個 `mock.patch` 字串全部解析得到。
+- **相依圖比對**：依對照表換名後，搬家前 327 條、搬家後 335 條邊，差異只有預期的 2 條移除與 10 條新增（新測試、`llm_service` → `prompt_builder`、`prompt_builder` 的 TYPE_CHECKING 邊）。**循環相依前後完全相同**（原本就有的兩組：`music` 套件內部、`llm/__init__` 預先載入形成的一組），沒有新增。
+- **分層檢查**：違反定義的只有 `services.rollcall_service` → `commands.rollcall_commands`（延遲 import，搬家前就有）；`llm/client`、`llm/preprocess` 沒有依賴上層功能；跨模組私有名稱 import 全部是既有的，沒有新增。放置上只有 `reaction_classifier` 可討論（`storage` 與 `persona` 都用它，也可以算資料整理），不算錯誤。
+- **程式以外的引用**：`AGENTS.md` 共用元件表 8 個名稱全部解析得到；`test_shared_conventions` 的例外路徑全部存在；`logging.json` 只有類別與第三方 logger；舊路徑命中都屬歷史紀錄、刻意保留或刻意延後。本檔有 22 個 `src/` 路徑不存在，都與這次搬家無關（規劃中還沒寫的檔案，或本來就過時的 `intro_rag_port.py`、`ollama_runtime_config.json`）；**規劃中的新檔之後要照新結構放**（例：`reply_gate.py` 應放 `llm/ambient/`）。
+- **git 狀態**：31 組搬移的內容相似度都在 0.947 以上；只用暫存區版本檢查 import 也是 0 個問題。**要處理**：① 使用者 15:39 整批 stage 時，把**無關的 `src/test/integration/it_comfyui_image.py` 也 stage 了**，commit 前要移出；② 本檔最新的修改還沒 stage。
+- 其他：`src/llm/__pycache__` 還有舊檔名的 `.pyc`，Python 在沒有原始碼時不會載入它們，無害。
+
+**使用者回覆（2026-09-29，第 10 輪）**：`it_comfyui_image.py` 移出暫存區（已執行 `git restore --staged`，檔案本身未動，回到未追蹤狀態）；本檔最新修改 commit 時一起加入；要求說明點名那條分層違規的細節（見下）。
+
+**點名：服務層反過來依賴指令層（搬家前就有，未改）**
+- 位置：`services/rollcall_service.py` 的 `_send_rollcall_message`（約 327～351 行）發點名訊息時要附「✋ 我是活人」按鈕；按鈕類別 `RollCallResponseView` 定義在 `commands/rollcall_commands.py`（約 29 行），所以服務層在函式裡 `from commands.rollcall_commands import RollCallResponseView`（約 344 行）。同一段的註解寫「View 由 Cog 層提供」，實作卻是服務層自己去指令層拿。
+- 反方向：`commands/rollcall_commands.py` 頂層 import 服務層的 `RollCallService`、`RESPONSE_DEADLINE_DAYS`、`IMMUNITY_DAYS`、`_now_utc8`；「預覽範圍」按鈕還呼叫服務層的私有方法 `_get_target_role_ids`、`_get_exclude_role_ids`、`_collect_candidates_from_list`（同一功能內，不在跨功能的 7 處名單）。
+- 為什麼現在能跑：兩檔互相依賴，只能把服務層那一邊寫成函式內延遲 import；有人把第 344 行移到檔案頂端，就會因循環 import 而啟動失敗（`RollCallService` 還沒定義就被指令層要求）。
+- 影響：服務層知道 Discord 按鈕長什麼樣、放在哪個檔案，違反「services 做事、commands 管 Discord 介面」的分法；點名沒有單元測試，單測服務層會連帶載入指令層。目前功能正常，不急。
+- **待決問題（每題附建議）**：A 由指令層把「建立按鈕」的函式交給服務層（建立 `RollCallService` 時傳入），服務層只呼叫它、不 import 指令層；改 3 處（服務層建構子、發訊息處、指令層建立服務處），行為不變，順便消除延遲 import／B 把按鈕類別搬到服務層（違反 commands 管 Discord 介面的定義，不建議）／C 先不改，等下次改點名功能時再做。建議 C＋A：點名沒有測試，要改就先補一個「發點名訊息會附按鈕、按下會呼叫服務層」的測試，再用 A；目前沒有其他理由去動它。
+
+**還沒定案（下一輪）**：點名分層問題怎麼處理（A／B／C）；P3 暫停（使用者說先別動）；N3 延後。本主題其餘都已定案。
+
+**狀態**：`llm/` 重組與 L3 **已上線（2026-09-29 15:26 套用、15:28 重啟、驗證通過），未 commit**；今晚 00:00 日記與明早 04:00 維護是第一次在新路徑下跑，隔天看 log 確認。其餘都沒動 code。
+
+---
+
+## MCP／搜尋工具化（2026-09-29 構想，grill 中）
+
+<!-- @meta
+id: mcp-search-tools
+type: TODO
+status: draft
+last_confirmed: 2026-09-29
+affects: /askai、網頁查詢、官網公告、論壇（PTT／巴哈）
+-->
+
+**需求（使用者 2026-09-29 提出）**
+- 想把現有服務改成 MCP server。例子：① 網頁查詢（現在要先過固定字詞過濾，才會在 /askai 底下查）；② 官方公告搜尋（現在沒有搜尋功能）；③ 論壇搜尋（現在是寫死日期區間給 Discord，希望機器人也能自己搜）。
+
+**機制本質**：MCP 是把工具包成標準介面、讓任何 LLM 客戶端都能找到並呼叫的協定。三個例子的共同點是「讓 bot 的 LLM 自己決定要不要查、查什麼」，也就是 tool calling。MCP 值不值得做，要看 bot 以外有沒有第二個客戶端。
+
+**查證事實（2026-09-29，唯讀調查）**
+- **`/askai` 流程**：`commands/llm_commands.py` `askai_cmd`（約 291 行）→ 全域排隊、單一 worker → `_handle_askai_request` 組 prompt（固定兩則 message：system＋一則帶標籤區塊的 user，沒有多輪）→ `LLMService.generate_reply` → 自寫的 httpx 客戶端打 OpenAI 相容 API（`/v1/chat/completions`，不串流）。用主模型、開思考。每人冷卻 180 秒（管理員例外），排隊沒有上限。
+- **網頁查詢**：自架 SearXNG（compose 的 `searxng`，bing＋duckduckgo），**只用搜尋結果摘要，不抓內文**。觸發是 `llm/retrievers/web/intent.py` `should_search()` 的純 regex：先排除（短句、招呼語），再看硬關鍵字（金融、天氣、版本／更新、公告、體育、今天／最新、幫我查…），最後看軟規則（「最近…發生／新／更」）。命中後依類別決定搜新聞或一般、時間範圍、語言；結果少於 3 筆就放寬再搜一次，最多 5 筆，塞進 `<web_context>`。只有 `/askai` 用，插話、日記、persona agent 都不用。
+- **tool calling 已經有一份實作**：persona agent（04:00 維護步驟 ④）用 `LLMService.chat_with_tools` 跑自寫的多輪迴圈（最多 8 步、token 預算、工具錯誤轉成 `{"error":…}` 回給模型、最後一步用嚴格 `json_schema` 輸出）；4 個唯讀 SQL 工具（`llm/persona/agent/tools.py`）。在 Lemonade 11.5.0＋27B 實測過 tool call、`role:"tool"` 往返與 json_schema；**Lemonade 已升到 11.9.0，沒有重測**。persona agent 是關思考跑的，**開思考＋tool calling 沒驗證過**。`chat_with_tools` 不支援 `tool_choice`，也不回傳思考內容。
+- **GPU 鎖只在單一行程內有效**（`lemonade_gate` 是 `asyncio.Lock`）。獨立的 MCP 行程如果要呼叫 LLM，就不受這把鎖管；純搜尋工具（SQL、SearXNG）不碰 GPU，不受影響。
+- **吞吐量**：總共約 22～33 tok/s，並行時均分（1 個請求 33、2 個各約 11～12）。tool calling 每多一輪，就是多一次完整的 LLM 呼叫。
+- **scraper 容器已經有唯讀 HTTP API**（FastAPI，內網 8000）：`/api/{articles,fb_posts,ptt_posts,bahamut,it_articles}/recent`、依 id 查詢；只能用 `days`、`limit` 篩選，**沒有關鍵字搜尋**。bot 也會直接唯讀開 `/app/scraper/articles.db`（`services/community_lookup_service.py`）。
+- **bot 內已有 aiohttp 伺服器**（`services/notify_server.py`，內網 5000：`/health`、`/notify/{source}`）。
+- **repo 裡沒有任何 MCP 相關程式或套件**；requirements 也沒有 openai SDK。
+- **資料都已經在 `articles.db`，而且是全文、永久保留**（scraper 沒有任何清除程式；巴哈刪文是軟刪除、改文保留舊版）。都沒有做搜尋索引：
+  - 官網公告：540 篇（公告 503、新聞 37，2024-01 起）；`article_details.article_content` 是**完整內文，但存的是 HTML**（平均約 4,160 字），要先轉純文字才能搜。沒有網址欄位，網址用 id 組（`services/article_monitor.py` `OFFICIAL_ARTICLE_URL`）。
+  - FB：847 篇，`fb_posts.text` 是純文字全文（2025-11 起）。
+  - PTT：5,182 篇，**只有 C_Chat 板、用「鳴潮」搜到的文章**（2025-01 起），有全文和全部推文。
+  - 巴哈：主文 15,989 篇（含回覆共 102,958 列）、留言 693,917 則，2022-06 起，有全文。
+- **「寫死日期區間給 DC」指的是轉發**，不是 `/askai`：巴哈、PTT、公告的轉發都只看最近 3 天（FB 看 7 天），以 StateDB 去重。所以論壇搜尋是**另外新增的能力**，轉發本身不用改。
+- **現有查詢只有**：scraper API 的「最近 N 天」、社群 ID 查詢面板的「依作者查」（`services/community_lookup_service.py`，已有 bot 直接唯讀查 `articles.db`、p95 < 30ms 的前例），以及 `VersionDateResolver` 寫死的 `LIKE`。**沒有任何關鍵字或主題搜尋**。
+- **搜尋基礎設施現況**：SQLite 沒有 FTS 表；Postgres 只裝了 `vector`，沒有 pg_trgm 或中文斷詞；pgvector 只存 Discord 聊天（31 萬筆）和成員檔案，**公告、FB、論壇都沒有做 embedding**；embedding 欄位沒有向量索引（全表掃描）。可以沿用的：`llm/preprocess/tokenization.py` 自製的中文 BM25 斷詞（CJK 2-gram／3-gram）。
+- **舊規劃**：`TODO-completed.md`「Bahamut 專區」第三階段規劃過巴哈 RAG（分段、metadata、混合搜尋），沒做；`askai-vague-news-query` 決定過「新聞搜不到就放寬」，「用 LLM 依聊天紀錄改寫查詢」留作之後的升級。
+- **順便發現**：① `/askai` 回覆沒有處理 Discord 2000 字上限（沒切段，長回答可能送出失敗，未實測）；② 引用網址上限不一致：`askai_system_prompt.txt` 寫最多 3 個，`<web_context_directive>` 寫 5 個。
+
+- **效能實測（2026-09-29，唯讀查 Lemonade `/api/v1/stats`）**：最近一次請求讀入 3,924 tokens、沒命中 prompt cache，第一個字出來前等了 11.7 秒（讀 prompt 約 335 tok/s）；產生速度 33 tok/s。累計 prompt cache 命中約 55%。
+- **容器環境**：discord-bot 的 SQLite 是 3.46.1，支援 FTS5 trigram 全文索引；沒有安裝 `mcp` 套件。
+
+**已定案（2026-09-29）**
+- **社群稽查（依巴哈／PTT ID 查人）不納入工具**（使用者：「其實也能不要，主要希望查情報用」）。理由：技術上很容易包（`community_lookup_service.py` 本來就是乾淨的查詢函式），但工具一旦交給 LLM，任何成員都能在 `/askai` 叫它查某個人的發言紀錄；用途是管理稽查，繼續留在管理面板。
+- **用途＝查情報；Telegram 內鬼頻道排除**（使用者拍板）。來源：官方公告、論壇（PTT、巴哈）、網頁。每筆結果都標來源類型，回答時分開講「官方」與「玩家說法」。
+- **改由 LLM 決定要不要查、查什麼**（Q3，使用者確認痛點是「該查沒查」＋「要記觸發字」，而且關鍵字沒辦法從語意上穩定判斷）。
+- **先做 MCP server**（Q2，使用者選）。搜尋函式（工具本體）只寫一份；MCP server、bot 的 tool calling、斜線指令都是外面的殼，殊途同歸。先做 MCP 的好處：用外部的強模型當客戶端先驗證搜尋品質，不必重啟 discord-bot，也不碰 GPU。bot 之後直接 import 工具本體，不當 MCP 客戶端（同一份程式碼，多一層網路只是多一個會壞的地方）。
+- **MCP 客戶端只有這台 Linux 上的 Claude Code，採放法 ②**（R2-Q1，使用者 2026-09-29：「不會有別的電腦連接」）：MCP server 是 discord-bot container 裡的另一個行程，走 stdio，由 Claude Code 用 `docker exec -i discord-bot python -m llm.mcp_server` 啟動；不開 port、不用 token。理由：放進 bot 行程要常重啟 bot、建索引會搶 bot 的 event loop；新 container 的好處（網路常駐連線）用不到。代價：`mcp` 套件寫進 requirements、重建 image，**discord-bot 要重啟一次**（避開 04:00～07:30）；之後改 MCP 程式都不用重啟 bot。
+
+**bot 接工具的成本估算**（回答使用者 Q1「會不會拖效能」；等到 bot 階段再定案）
+- 搜尋本身不是瓶頸：查 SQLite 是毫秒級，SearXNG 最多 4 秒。慢的是 LLM 多跑一輪：第 1 輪決定查什麼，第 2 輪看結果回答。
+- 估算：第 1 輪如果**關掉思考**，只產生幾十個 token 的工具呼叫（約 1～2 秒）；第 2 輪前面的 prompt 命中 cache，只需多讀搜尋結果（約 1,500 tokens，約 5 秒）。每次搜尋大約多 5～10 秒。現在開思考的回答常常要 30～100 秒。
+- 風險：第 1 輪如果開著思考，會多 10～45 秒；兩輪中間有別的請求插隊，cache 會被洗掉，要整份重讀（多 12～15 秒）。建議：決策輪關思考、最多 2 輪搜尋，只有最後回答那一輪開思考。「開思考＋tool calling」與 Lemonade 11.9.0 都還沒實測。
+
+**待決問題（grill 第 2 輪，2026-09-29；每題附建議）**
+- **R2-Q1 MCP 客戶端是誰、跑在哪**（已回答，見已定案）：A 只有這台 Linux 上的 Claude Code／B 再加上 Windows 那台（Lemonade 所在的 192.168.56.1）的 Claude Desktop／C 連 claude.ai 網頁、手機都要能用（得對外網公開 HTTPS）。建議 A＋B：新開一個 compose 服務，走 HTTP 傳輸、資料唯讀掛載，只綁本機與內部網段、加 token；不對外網公開；部署時不必重啟 discord-bot。
+  - **使用者追問（2026-09-29）：一定要另開 container 嗎？** 關鍵是「跟 bot 同不同一個行程」，不是同不同一個 container。三種放法：
+    - ① **塞進 bot 行程**（開 HTTP port）：不多一個服務、可直接用 bot 的設定與斷詞。缺點：MCP 程式每改一次就要重啟 bot；建索引（十幾萬篇 HTML 轉文字）的 CPU 工作會跟音樂、Discord 心跳搶同一個 event loop 與 GIL；對網路開 port 的行程握有 Discord token；MCP SDK 是 ASGI（uvicorn），bot 現有的是 aiohttp，要在 bot 裡再塞一套網頁框架。
+    - ② **同一個 container、另一個行程**（stdio，由 Claude Code 用 `docker exec -i discord-bot python -m llm.mcp_server` 啟動）：不開 port、不用 token、不多服務；獨立行程，不搶 bot 的 event loop；改 MCP 程式不用重啟 bot。缺點：只有能跑 `docker exec` 的地方連得到（Windows 的 Claude Desktop 要透過 ssh 遠端執行同一行指令）；裝 `mcp` 套件要重建 image，**bot 至少要重啟一次**才會用到新 image；沒有常駐行程，索引同步要在每次啟動或每次搜尋時做增量。
+    - ③ **新 container**（HTTP）：可沿用 discord-bot 的 image，只換啟動指令、唯讀掛載 `./src`，不用新寫 Dockerfile；完全不動 bot；常駐，可以定時同步索引；網路 port 開在沒有 Discord token 的 container 上。缺點：compose 多一個服務要維護；要處理 port 與 token。
+    - 建議：①不採用。只有這台的 Claude Code 用（或 Windows 願意走 ssh）→ ②最省事；要讓其他機器透過網路常態連線 → ③。
+- **R2-Q2 工具怎麼切、回傳什麼**：A 一個 `search` 工具，用參數選來源／B 依來源分：`search_official`（公告＋FB）、`search_forum`（PTT＋巴哈），再加一個 `read_document(id)` 讀全文。建議 B：工具範圍窄，本機模型比較選得準；搜尋只回標題、日期、來源類型、網址、約 200 字摘要，要全文再呼叫 `read_document`（分頁），讓 prompt 保持短（每多 1,000 tokens 約多 3 秒）。網頁搜尋不放進 MCP（Claude Code／Desktop 自己就會上網查），只做成 bot 用的工具（沿用 SearXNG）。
+- **R2-Q3 搜尋方式**：A 關鍵字全文搜尋（SQLite FTS5 trigram，另開索引檔，從 `articles.db` 唯讀同步）／B 向量搜尋（算 embedding 存 pgvector）／C 兩者混合。建議第一版 A：角色名、活動名都是固定字串，查詢字交給 LLM 寫，搜不到它可以換詞再搜。坑：trigram 查不到少於 3 個字的詞（例如兩個字的角色名）→ 短詞改用 `LIKE`（巴哈 10 萬列要實測速度）。向量之後再加：十幾萬篇要先全部算一遍 embedding，會佔 GPU 好幾個小時。
+- **R2-Q4 論壇要搜到哪一層**：巴哈有主文、回覆樓層（共 10 萬列）、留言（69 萬則）；PTT 有內文、推文。建議索引巴哈主文＋回覆樓層、PTT 內文；推文與巴哈留言第一版不索引（短、雜、量大），但 `read_document` 會一起顯示。
+
+- **R2-Q5 程式放哪**（使用者 2026-09-29 提出：不想跟其他程式混在一起）：A 一個資料夾 `src/search_mcp/` 全放／B 分兩個：`src/search/`（搜尋本體：索引同步、各來源搜尋、讀全文；索引檔放 `src/search/data/`）＋ `src/mcp_server/`（只有 MCP 這層殼：登記工具、`python -m mcp_server` 啟動）。建議 B：之後 bot 要 import 的是搜尋本體，放在叫 mcp 的資料夾裡名稱會誤導；殼保持很薄，以後要開放別的工具也是往 `mcp_server/` 加。
+  - **定案（2026-09-29 第 8 輪，取代上面 A／B 兩案）**：搜尋本體放 `services/search/`（搜尋是給指令、/askai、MCP 共用的服務，不只給 LLM；索引檔放 `services/search/data/`）；MCP 殼放 `llm/mcp_server.py`（給 LLM 客戶端的橋接，`python -m llm.mcp_server` 啟動；不取名 `llm/mcp/` 以免跟 `mcp` 套件混淆）；網頁搜尋留在 `llm/retrievers/web/`（含 /askai 專用的觸發判斷與 prompt 格式化）。討論經過見 [程式結構整理](#程式結構整理2026-09-29-構想grill-中) 的 L4a／L4b。
+  - **使用者追問：MCP server 不就取代 search 了？** 不會。MCP server 只負責協定（告訴客戶端有哪些工具、把呼叫轉進來、把結果包回去），真正查 SQLite、同步索引、HTML 轉文字的程式一定要有；問題只是放在哪個資料夾。對照專案現有分工：`commands/`（斜線指令＝殼）呼叫 `services/`（做事）。分開的理由是 bot 之後直接 import 搜尋程式、不走 MCP；如果全放在 `mcp_server/`，功能一樣能用，只是名稱誤導，而且要注意搜尋程式不能 import `mcp` 套件（不然 bot 也被拖著載入）。A 的變體：`src/mcp_server/` 裡放一個不依賴 MCP 套件的 `search/` 子資料夾，也可接受。
+  - **不能取名 `src/mcp/`**：容器工作目錄是 `/app`，會蓋掉安裝的 `mcp` 套件，`import mcp` 會載到自己的資料夾。
+  - **照專案規則仍放在外面的**：測試放 `src/test/test_search_*.py`（啟動 gate 只掃 `test/`）；設定放 `sys_settings/search_settings.py`（AGENTS.md 規定）；`.mcp.json` 放 repo 根目錄（Claude Code 從那裡讀）。
+  - **log 要分檔**：`settings/logging.json` 加 `llm.mcp_server`、`services.search` 前綴的 logger 寫自己的檔、不往 root 傳。原因：兩個行程寫同一個輪替 log 檔，輪替時會互相蓋掉；也符合「不混在一起」。已確認 console handler 預設輸出到 stderr，不會弄壞走 stdout 的 MCP 協定。
+
+**使用者回覆（2026-09-29，第 3 輪）**
+- **R2-Q3 定案：A 關鍵字全文搜尋**（SQLite FTS5 trigram，索引檔在 `services/search/data/`，從 `articles.db` 唯讀同步；少於 3 個字的詞改用 `LIKE`；向量之後再加）。
+- **R2-Q4 定案：照建議**（索引巴哈主文＋回覆樓層、PTT 內文；PTT 推文與巴哈留言第一版不索引，讀全文時一起顯示）。
+- **R2-Q2 使用者質疑**：「照來源命名，之後每加一個來源都要加一堆工具名稱？這樣可行、符合業界用法嗎？」→ 查證後**撤回原建議 B**：
+  - Anthropic〈Writing effective tools for agents〉：工具要把相關操作合併成少數幾個（例：用 `schedule_event` 取代 `list_users`＋`list_events`＋`create_event`），減少模型選錯；依服務加前綴（`asana_search`、`jira_search`）是用在工具很多、且來自不同系統時。我們的來源查同一個索引、參數與回傳格式都一樣，應該合併。
+  - OpenAI MCP 文件：`search`（一個查詢字串 → 帶 id、標題、網址的結果）＋`fetch`（id → 全文、網址、metadata）是標準的一組，ChatGPT 深度研究要求 MCP server 提供這兩個工具。
+- **R2-Q2 定案（使用者 2026-09-29 第 10 輪確認「不是同意了嗎」）**：只開兩個工具——`search(query, sources=可選, since, until, limit)` 與 `fetch(id, page)`。`sources` 是可選的來源清單（官網公告、官方 FB、PTT、巴哈），不給就全部搜，每種來源各取前幾筆，避免論壇的量把官方公告淹掉；每筆結果標明來源。**來源清單由 `services/search/` 的登記表自動產生**：之後加來源＝寫一個來源模組並登記，工具名稱與介面都不變。在 Claude Code 裡工具會自動加上 server 名稱當前綴（例：`mcp__<server>__search`），不會跟內建的網頁工具撞名。之後 /askai 的工具呼叫也用同一組，工具少，本機模型也比較不會選錯。
+
+**不反對就照做的預設**：MCP 設定放 repo 的 `.mcp.json`（在這個 repo 開的 Claude Code 都能用這些工具）；索引檔放 `services/search/data/` 並加進 `.gitignore`，**標明是可重建的衍生資料、不算使用者資料**；R2-Q3 若選 A，索引在 MCP 啟動時與每次搜尋前做增量同步（沒有常駐行程；之後 bot 搜尋也走同一個同步函式），兩個行程同時同步時用 SQLite 寫入鎖排隊；實作時在 `AGENTS.md`「Docker 只做唯讀查詢」加註這個例外（這個 MCP server 由 `docker exec` 啟動、只寫自己的索引檔）；官方 FB 粉專算「官方」來源；所有工具唯讀；結果預設依日期新到舊，可以篩日期範圍；公告 HTML 在建索引時轉純文字；索引檔由搜尋模組自己擁有，不改 `articles.db`。
+
+**之後（bot 階段）再問**：`/askai` 決策輪要不要關思考、最多幾輪；舊的關鍵字觸發要不要留著當保底；插話能不能用搜尋；搜尋與 `/askai` 排隊、GPU 鎖怎麼配合；要不要抓網頁內文（現在只用摘要）。
+
+**狀態**：設計已全部定案（R2-Q1～Q5），未動 code；下一步是實作（先加 `mcp` 套件 → 重建 image → 重啟一次 bot）。`llm/` 重組已上線，MCP 直接寫在新位置。
 
 ---
 
@@ -548,7 +850,7 @@ id: comfyui-gpu-arbitration
 type: DECISION
 status: draft
 last_confirmed: 2026-09-02
-affects: llm/lemonade_gate, llm/llm_http_client, services/llm_service, imagegen/（新）
+affects: llm/client/lemonade_gate, llm/client/http_client, services/llm_service, imagegen/（新）
 -->
 
 > **2026-09-28 查證（本區塊部分狀態已過時）**
@@ -693,7 +995,7 @@ Lemonade 下被 `_build_chat_extra_body` 丟進 ignored，但**那正是可攜�
 5. **最後**做檔名正名（見下）
 
 **刻意重用既有輪子，不新造**
-- workflow JSON 用 `llm.prompt_files.read_json()`（已有 mtime 快取，與 `settings/prompts/` 慣例一致）
+- workflow JSON 用 `llm.prompt.prompt_files.read_json()`（已有 mtime 快取，與 `settings/prompts/` 慣例一致）
 - 發圖走 `utils.discord_content.post_to_channel`，不自己組 `channel.send`
 - ~~實作完成後在「共用元件索引」補一行~~：GPU 獨佔（`lemonade_gate.gpu_exclusive`）已寫進 `AGENTS.md`「共用元件」（2026-09-29）
 
@@ -710,17 +1012,17 @@ Lemonade 下被 `_build_chat_extra_body` 丟進 ignored，但**那正是可攜�
       **驗證方式**：暫時還原成舊寫法 → 守衛確實紅在 `discord_bot.py:339` → 復原。
       全專案掃過，這是唯一一處別名繞過（`extract_fingerprint` / `event_time_parser` 是既有合法例外）
 
-### 檔名正名（已同意，等步驟 2~4 完成後一起改）
+### 檔名正名（2026-09-29 隨 `llm/` 依角色分子資料夾完成四項；`lemonade_gate` 仍待定）
 
 | 現在 | 改成 | import 點 |
 |---|---|---|
-| `llm/llm_http_client.py` | `llm/http_client.py`（套件名複述兩次） | 3 |
-| `llm/safe_llm_embedding.py` | `llm/embedding_client.py`（"safe" 是形容詞不是分類） | 6 |
-| `llm/chat_persistence.py` | `llm/store_chat.py`（它就是 store，卻跟另外 3 個 `*_store` 分家） | 12 |
-| `llm/diary_reflection.py` | `llm/ambient_diary.py`（它 import `ambient_reply`，是 ambient 家族） | 4 |
-| `llm/lemonade_gate.py` | 待定（`gpu_gate` / `resource_gate`）——**等它真的管到 GPU 資源再改**，否則名字更騙人 | 10 |
+| `llm/llm_http_client.py` | ✅ 已改為 `llm/client/http_client.py`（套件名複述兩次） | 3 |
+| `llm/safe_llm_embedding.py` | ✅ 已改為 `llm/client/embedding_client.py`（"safe" 是形容詞不是分類） | 6 |
+| `llm/chat_persistence.py` | ✅ 已改為 `llm/storage/store_chat.py`（它就是 store，卻跟另外 3 個 `*_store` 分家） | 12 |
+| `llm/diary_reflection.py` | ✅ 已改為 `llm/ambient/ambient_diary.py`（它 import `ambient_reply`，是 ambient 家族） | 4 |
+| `llm/lemonade_gate.py`（現在位於 `llm/client/`） | 待定（`gpu_gate` / `resource_gate`）——**等它真的管到 GPU 資源再改**，否則名字更騙人 | 10 |
 
-**已決定不做**：`llm/`、`services/` 的資料夾重組（成本 ~160 個 import 點，效益只有排序好看）。
+**已決定不做**：`llm/`、`services/` 的資料夾重組（成本 ~160 個 import 點，效益只有排序好看）。**2026-09-29 更新**：`llm/` 部分已由使用者推翻，改依角色分子資料夾（見[程式結構整理](#程式結構整理2026-09-29-構想grill-中)）；`services/` 仍不重組。
 子資料夾的判準是「≥6 檔／有封裝邊界／可預期會長」滿足其一——`persona_agent/`、`retrievers/web/`
 是對的示範，其餘各群目前都不達標。**ComfyUI 另開 `src/imagegen/`，不塞進 `llm/`**（塞了 `llm/`
 就變成「AI 相關雜物間」，重蹈 `services/` 覆轍）。
@@ -744,7 +1046,7 @@ affects: auto_personality、插話／askai 人物卡、discord_bot 04:00 排程
 **架構（2026-09-28 定案）**：04:00 維護五步（`discord_bot._run_daily_maintenance_once`）
 ① emoji 字典 → ② 招牌梗衰減 → ③ production 人格萃取（過渡期備援，只寫 ④ 沒涵蓋的人）
 → ④ persona agent（每晚主力；完整描述寫 `persona_agent_versions`，bot 讀不到；只重跑上次跑完後有新發言的人）
-→ ⑤ 發布精簡版（`llm/persona_agent/publish.py`；**不經 LLM、整條原文照抄**，寫進 `auto_personality`；插話與 /askai 只讀這裡）。
+→ ⑤ 發布精簡版（`llm/persona/agent/publish.py`；**不經 LLM、整條原文照抄**，寫進 `auto_personality`；插話與 /askai 只讀這裡）。
 
 **狀態**
 - commit：`c544036`、`b3dad1c`、`aafdc85`、`948ab96`、`2a0d0cf`（`publish_mode="on"`）。
@@ -920,12 +1222,12 @@ last_confirmed: 2026-03-31
 - Bot 入口：`src/discord_bot.py`
 - LLM 指令：`src/commands/llm_commands.py`（`/askai`）
 - LLM 服務：`src/services/llm_service.py`（Ollama chat API 封裝）
-- 檢索核心：`src/llm/context_retriever.py`
-- Persona 卡片：`src/llm/persona_card_builder.py`
-- Prompt 與 log 組裝：`src/llm/prompt_builder.py`
+- 檢索核心：`src/llm/retrievers/context_retriever.py`
+- Persona 卡片：`src/llm/persona/persona_card_builder.py`
+- Prompt 組裝：`src/llm/prompt/prompt_builder.py`；/askai 除錯 log 組裝：`src/llm/logger_factory.py`
 - Profile/Impression 寫入 RAG：
   - 服務層：`src/services/intro_profile_service.py`
-  - pgvector 介接層：`src/llm/intro_rag_port.py`
+  - pgvector 介接層：`src/llm/storage/member_profile_store.py`（原 `intro_rag_port.py`，`b80c509` 改名）
 - Impression 審核：`src/services/impression_moderation_service.py`
 - 設定：
   - `src/sys_settings/llm_settings.py`
@@ -1093,13 +1395,13 @@ last_confirmed: 2026-04-19
 
 | 檔案 | 角色 |
 |---|---|
-| `src/services/llm_service.py` | prompt bundle、`asker_profile` 參數、generate_reply |
+| `src/services/llm_service.py` | generate_reply（prompt bundle 組裝已移到 `src/llm/prompt/prompt_builder.py`） |
 | `src/commands/llm_commands.py` | context 分離、asker_profile 組裝、撞名偵測 |
-| `src/llm/persona_card_builder.py` | 自然語言化、`person_id` 保留 |
-| `src/llm/context_retriever.py` | discord_context item（含 `display_name`）、vector index cache |
-| `src/llm/chat_persistence.py` | buffer 批次寫入、SafeOllamaEmbedding |
-| `src/llm/personality_extractor.py` | 人格萃取 pipeline |
-| `src/llm/intro_rag_port.py` | `index_auto_personality`、`_ainsert`、singleton |
+| `src/llm/persona/persona_card_builder.py` | 自然語言化、`person_id` 保留 |
+| `src/llm/retrievers/context_retriever.py` | discord_context item（含 `display_name`）、vector index cache |
+| `src/llm/storage/store_chat.py` | buffer 批次寫入、SafeOllamaEmbedding |
+| `src/llm/persona/personality_extractor.py` | 人格萃取 pipeline |
+| `src/llm/storage/member_profile_store.py`（原 `intro_rag_port.py`） | `index_auto_personality`、`_ainsert`、singleton |
 | `src/settings/prompts/askai_system_prompt.txt` | 人設 prompt（規則）|
 | `src/settings/prompts/persona_identity.txt` | 人設身份核心（琇紫） |
 | `src/settings/prompts/persona_examples.txt` | few-shot 風格示範對照 |
@@ -1172,7 +1474,7 @@ Phase 1 三個玩法**共用同一張 DB**，不要拆開做。
 | `src/services/reaction_stats_service.py`（新增） | 聚合查詢、排程邏輯 |
 | `src/commands/reaction_commands.py`（新增） | `/my_emoji`、每週金句公告 |
 | `src/commands/llm_commands.py` | Phase 2：組 `asker_recent_highlights` |
-| `src/llm/personality_extractor.py` | Phase 3：萃取時加權 reaction 訊號 |
+| `src/llm/persona/personality_extractor.py` | Phase 3：萃取時加權 reaction 訊號 |
 
 ---
 
@@ -1190,7 +1492,7 @@ Phase 1 三個玩法**共用同一張 DB**，不要拆開做。
 - **寫入**：`ambient_reply._record_ambient_interaction`（送出後 `asyncio.to_thread` 寫，best-effort）。
 - **反應＝群眾的隱式標籤**：`on_raw_reaction_add/remove` → 若被按的是 bot 插話（`ai_interactions_store.is_tracked_reply` 記憶體集合命中）→ `note_reaction` 用既有 `reaction_classifier`（讀 `emoji_dictionary.txt`，認得自訂 emoji）分類：agree/laugh=正向、negative=負向 → 更新該筆。
 - **日記讀**：`diary_reflection` 撈當天 `ai_interactions` 結構化餵入（自發/被問各幾次、當時在聊什麼、回了什麼、哪句有正向反應）。
-- 檔案：`src/llm/ai_interactions_store.py`(新)、`ambient_reply.py`、`diary_reflection.py`、`discord_bot.py`(on_ready 建表 + 反應 hook)。
+- 檔案：`src/llm/storage/ai_interactions_store.py`(新)、`ambient_reply.py`、`ambient_diary.py`、`discord_bot.py`(on_ready 建表 + 反應 hook)。
 
 ### Phase 2 — 自我蒸餾學習（**計畫，未實作**）
 核心：**蒸餾不堆疊**。定期把累積的正/負向插話歸納成一小段固定大小的「學到的風格」，**覆寫**不追加。
@@ -1212,7 +1514,7 @@ Phase 1 三個玩法**共用同一張 DB**，不要拆開做。
 |---|---|
 | `src/settings/prompts/learned_style.txt`（新） | 蒸餾出的固定大小「學到的風格」 |
 | `src/llm/self_distill.py`（新，暫名） | 撈 `ai_interactions` 正/負向 → LLM 蒸餾 → 覆寫 learned_style |
-| `src/llm/ambient_reply.py` `_load_ambient_prompt` | 多組 learned_style 一層 |
+| `src/llm/ambient/ambient_reply.py` `_load_ambient_prompt` | 多組 learned_style 一層 |
 | `src/discord_bot.py` | 蒸餾排程（每 3~7 天） |
 
 ---
@@ -1390,14 +1692,14 @@ last_confirmed: 2026-04-27
 
 #### P4 — 使用者偏好事實 + 抽取道德守門
 
-- [ ] 新檔 `src/llm/preference_extractor.py`：批次掃 AI 私聊訊息（含圖片描述）抽原子事實
+- [ ] 新檔 `src/llm/persona/preference_extractor.py`：批次掃 AI 私聊訊息（含圖片描述）抽原子事實
 - [ ] 抽取 prompt（`src/settings/prompts/preference_extractor_prompt.json`）內嵌**道德分類**規則（紅線丟 / 中風險標 sensitivity / 低風險正常記）
 - [ ] pgvector 新 `profile_kind = "preference_fact"`，metadata：`{author_id, fact_text, category, source_msg_id, confidence, captured_at, source_kind, sensitivity, ephemeral}`
 - [ ] confidence < 0.6 不進 persona card
 - [ ] 衝突處理：保留歷史 + 召回偏新（讓「之前說 X 現在改口啦」這種接話成立）
 - [ ] `src/llm/intro_rag_port.py` 新增 `index_preference_fact()`
-- [ ] `src/llm/persona_card_builder.py` 新增「我（柔喵）記得的偏好」段
-- [ ] `src/llm/context_retriever.py` SQL 多撈 `profile_kind='preference_fact'`，召回 top-K = 3
+- [ ] `src/llm/persona/persona_card_builder.py` 新增「我（柔喵）記得的偏好」段
+- [ ] `src/llm/retrievers/context_retriever.py` SQL 多撈 `profile_kind='preference_fact'`，召回 top-K = 3
 - **驗收：** 講過愛吃鮭魚，幾天後問晚餐被自然帶出；測試誣陷/隱私/紅線輸入確認被丟棄。
 
 #### P5 — AI 自我記憶（第二層）+ 抽取道德守門
@@ -1481,11 +1783,11 @@ last_confirmed: 2026-04-27
 | `src/discord_bot.py` | on_message 分支 + reply gate 接入 | P1, P2 |
 | `src/llm/reply_gate.py`（新） | gating 邏輯 | P2 |
 | `src/llm/vision_describer.py`（新） | vision pipeline | P3 |
-| `src/llm/preference_extractor.py`（新） | 偏好事實抽取 | P4 |
+| `src/llm/persona/preference_extractor.py`（新） | 偏好事實抽取 | P4 |
 | `src/llm/self_memory_summarizer.py`（新） | AI 自我記憶 summarizer | P5 |
 | `src/llm/intro_rag_port.py` | 新增 `index_preference_fact()`、`index_ai_self_memory()` | P4, P5 |
-| `src/llm/persona_card_builder.py` | 新增「偏好」+「柔喵記憶」段 | P4, P5 |
-| `src/llm/context_retriever.py` | SQL 多撈兩種 profile_kind + sensitivity 過濾 | P4, P5, P6 |
+| `src/llm/persona/persona_card_builder.py` | 新增「偏好」+「柔喵記憶」段 | P4, P5 |
+| `src/llm/retrievers/context_retriever.py` | SQL 多撈兩種 profile_kind + sensitivity 過濾 | P4, P5, P6 |
 | `src/services/llm_service.py` | 整合 reply_gate + vision describer 到主流程 | P2, P3 |
 | `src/sys_settings/llm_settings.py` | 新增 gating model + vision model 設定 | P2, P3 |
 
@@ -1569,8 +1871,8 @@ last_confirmed: 2026-08-09
 - [x] `channel_registry` 加 `register_channel("AI 插話頻道", text, "ambient_chat_channel_id", …)`（magenta）。
 - [x] `llm_settings.py` 新增 `AmbientChatSettings`（min/max 字數、cooldown 90s、hourly_cap 6、askai_grace 90s、silence_sentinel `[PASS]`、history_limit 12、`judge_sampling_rate=1.0` 減壓閥預設關閉）。**插不插由 12B 判斷，不用機率**；「偶爾」感靠冷卻+上限（冷卻期內連判斷都不跑）。
 - [x] `bot.ambient_tracker = {}`（[discord_bot.py](src/discord_bot.py)）。
-- [x] 模型協調（取代「優先序佇列」的最小落地）：[lemonade_gate.py](src/llm/lemonade_gate.py) 加 `stream_busy()` + `note_foreground_activity()` / `foreground_recently_active(grace)`；/askai 在 `_handle_askai_request` 起點與 worker `finally` 兩處標 foreground → 背景插話於 grace 窗口內讓位。**注意：尚未做真正的優先序佇列**，只做「foreground 活躍時背景讓位 + 共用 `stream_exclusive` 序列化」；directed(@) 仍會在 /askai 窗口觸發 swap（罕見、可接受）。
-- [x] 新檔 [src/llm/ambient_reply.py](src/llm/ambient_reply.py)：硬過濾 + 冷卻/上限 + foreground 讓位 + 機率 + @/reply 必回 + 12B 生成（`generate_reply(model=ambient_model)`，沉默 sentinel 不發送）。**Phase A 範圍調整**：(a) 判斷與生成**合為一次 12B 呼叫**（prompt 允許回 `[PASS]`＝沉默），未做獨立 judge；(b) **react 檔次延後**（Phase A 只有 回/沉默）；(c) **檔1 persona card 改到 Phase B**，Phase A 記憶＝近期 `channel.history` 短期脈絡（零 pgvector）。
+- [x] 模型協調（取代「優先序佇列」的最小落地）：[lemonade_gate.py](src/llm/client/lemonade_gate.py) 加 `stream_busy()` + `note_foreground_activity()` / `foreground_recently_active(grace)`；/askai 在 `_handle_askai_request` 起點與 worker `finally` 兩處標 foreground → 背景插話於 grace 窗口內讓位。**注意：尚未做真正的優先序佇列**，只做「foreground 活躍時背景讓位 + 共用 `stream_exclusive` 序列化」；directed(@) 仍會在 /askai 窗口觸發 swap（罕見、可接受）。
+- [x] 新檔 [src/llm/ambient/ambient_reply.py](src/llm/ambient/ambient_reply.py)：硬過濾 + 冷卻/上限 + foreground 讓位 + 機率 + @/reply 必回 + 12B 生成（`generate_reply(model=ambient_model)`，沉默 sentinel 不發送）。**Phase A 範圍調整**：(a) 判斷與生成**合為一次 12B 呼叫**（prompt 允許回 `[PASS]`＝沉默），未做獨立 judge；(b) **react 檔次延後**（Phase A 只有 回/沉默）；(c) **檔1 persona card 改到 Phase B**，Phase A 記憶＝近期 `channel.history` 短期脈絡（零 pgvector）。
 - [x] [discord_bot.py](src/discord_bot.py) `on_message` 加 `asyncio.create_task(maybe_ambient_reply(bot, message))`。
 - [x] 新 prompt [ambient_reply_prompt.txt](src/settings/prompts/ambient_reply_prompt.txt)（純「插話行為」規則、`[PASS]` 沉默）；**system 疊用共用身份 `persona_identity.txt`（琇紫）→ 插話與 /askai 同一角色**。注意：這是 bot 自己的「身份 prompt」；「認得別人是誰」的 per-user persona card 仍在 Phase B。
 - **靜態檢查**：全檔 py_compile PASS；JSON valid；lemonade_gate 協調函式 standalone 測試 PASS（本機無 discord 套件，完整載入須在 docker）。
@@ -1588,13 +1890,13 @@ last_confirmed: 2026-08-09
 **共享接口（2026-06-21 建）**：[`MemoryService`](src/services/memory_service.py)（門面，單例）——任何功能只呼叫它、不碰底層：`recall / list_facts / extract / remember / observe / forget / format_recall`。底層委派 `intro_rag_port`(儲存) + `preference_extractor`(抽取/升等)。未來 /askai、功能一、/remember、管理面板都走這個。
 
 - [x] **C-1 儲存層**：`PgVectorIntroRAGPort.index_preference_fact / list_preference_facts / delete_preference_fact`；`profile_kind="preference_fact"`，metadata：`{author_id, fact, fact_key, category, confidence, status, mention_count, first_seen, last_seen}`。doc_id 含 fact_key 雜湊 → 同事實 replace 不重複。**隔離已驗證**：persona 讀取器 SQL 白名單只撈 intro/auto/impression，preference_fact 不會混進 /askai/Phase B。
-- [x] **C-2 抽取+守門**：[preference_extractor.py](src/llm/preference_extractor.py) `extract_preferences`（12B、[守門 prompt](src/settings/prompts/preference_extractor_prompt.txt)：自他分流/敏感丟/紅線丟、輸出 JSON）+ `_parse_facts`（容錯）。
+- [x] **C-2 抽取+守門**：[preference_extractor.py](src/llm/persona/preference_extractor.py) `extract_preferences`（12B、[守門 prompt](src/settings/prompts/preference_extractor_prompt.txt)：自他分流/敏感丟/紅線丟、輸出 JSON）+ `_parse_facts`（容錯）。
 - [x] **C-2 corroboration**：`ingest_preferences`——confidence 濾（<0.6 丟）→ 批內去重 → 依作者讀既有 → 命中 `mention_count++`（≥2 升 trusted）否則新建 tentative。
-- [x] **C-3 串接**：[ambient_memory.py](src/llm/ambient_memory.py)——`enqueue_for_memory`(插話頻道每則收緩衝) + `maybe_flush`(背景排程、**閒置才跑 12B**) + `recall_lines`(召回 trusted 注入 persona_context)；`ambient_reply` 與 `discord_bot` on_ready(每 180s 檢查) 已接。
+- [x] **C-3 串接**：[ambient_memory.py](src/llm/ambient/ambient_memory.py)——`enqueue_for_memory`(插話頻道每則收緩衝) + `maybe_flush`(背景排程、**閒置才跑 12B**) + `recall_lines`(召回 trusted 注入 persona_context)；`ambient_reply` 與 `discord_bot` on_ready(每 180s 檢查) 已接。
 - [ ] **C-4 自我進化迴圈**（閒置批次）：consolidation（合併重複、衝突取新記「以前X現在Y」）、decay（久未重提降權/封存）。**未做**。
 - [ ] **C-4 隱私公告**：綁定插話頻道時自動置頂 + 改 channel topic。**未做**。
 - [ ] **C-4 選配監督面板**（不擋流程）：查/改/刪/禁記；複用 `/personality_extract` UI 模式。**未做**（接口 `MemoryService.list_facts/forget` 已備好）。
-- [ ] **觀測 / Debug 面板（使用者要求 2026-06-21，重要）**：使用者**不想用 CLI/log debug**，未來要一個 **Discord 面板** 能看：每次插話的**完整 prompt（含三層 context）**、決策狀態（reply/pass/error）、三層 context 數量（chat/persona/memory）、記憶 flush 狀態、某人記得的偏好。**取代** `ambient_prompt.txt` + grep。可與「記憶監督面板」合併成一個「AI 狀態/觀測面板」。**現況暫用**：`discord_bot.log` 的 `ambient 生成 …chat/persona/memory` 摘要 + [`/logs/ambient_prompt.txt`](src/llm/ambient_reply.py)（`AmbientChatSettings.debug_log`）；面板做好後轉成資料來源。
+- [ ] **觀測 / Debug 面板（使用者要求 2026-06-21，重要）**：使用者**不想用 CLI/log debug**，未來要一個 **Discord 面板** 能看：每次插話的**完整 prompt（含三層 context）**、決策狀態（reply/pass/error）、三層 context 數量（chat/persona/memory）、記憶 flush 狀態、某人記得的偏好。**取代** `ambient_prompt.txt` + grep。可與「記憶監督面板」合併成一個「AI 狀態/觀測面板」。**現況暫用**：`discord_bot.log` 的 `ambient 生成 …chat/persona/memory` 摘要 + [`/logs/ambient_prompt.txt`](src/llm/ambient/ambient_reply.py)（`AmbientChatSettings.debug_log`）；面板做好後轉成資料來源。
 - **驗收**：本人講過愛吃鮭魚且被提 ≥2 次 → 之後相關話題自然帶出；敏感/他人/紅線輸入確認不入庫；衝突取新；久未提的淡出。
 
 ### 預設決策（還可改）
@@ -1629,11 +1931,11 @@ last_confirmed: 2026-08-09
 | `src/sys_settings/llm_settings.py` | `LLMRuntimeConfig` 加 `ambient_model` 欄位 + `AmbientChatSettings` | A |
 | `src/settings/channel_registry.py` | 加「AI 插話頻道」綁定 | A |
 | `src/services/llm_service.py` | 優先序佇列 + 背景不 swap 規則 + ambient_model 解析 | A |
-| `src/llm/ambient_reply.py`（新） | 硬過濾 + 12B 判斷 + 背景生成 | A |
+| `src/llm/ambient/ambient_reply.py`（新） | 硬過濾 + 12B 判斷 + 背景生成 | A |
 | `src/discord_bot.py` | `on_message` 加 ambient 分支 | A |
 | `src/settings/prompts/ambient_reply_prompt.txt`（新） | 輕量插話人設 | A |
-| `src/llm/context_retriever.py` | `retrieve_discord_context` 泛化吃 channel | B |
-| `src/llm/preference_extractor.py`（與功能一共用） | 12B 傾聽 → 偏好事實抽取（共享層） | C |
+| `src/llm/retrievers/context_retriever.py` | `retrieve_discord_context` 泛化吃 channel | B |
+| `src/llm/persona/preference_extractor.py`（與功能一共用） | 12B 傾聽 → 偏好事實抽取（共享層） | C |
 
 ---
 
@@ -1663,11 +1965,11 @@ last_confirmed: 2026-08-09
 #### 診斷（六個「不自然」的來源）
 
 1. **節奏由計時器決定，不由對話內容決定**：冷卻 300s 一到期，下一則就喚起生成，而 PASS 率僅 15% → 等於「每 5 分鐘準時報到講一句」。
-2. **120s 後裸送、無指向**（[ambient_reply.py:1032](src/llm/ambient_reply.py#L1032) `channel.send`）→ 多人多主題頻道必然像亂入。**這才是「不知道加入哪個主題」的真正成因**：它選的時候那條線還在，講出來時已經沒了。
+2. **120s 後裸送、無指向**（[ambient_reply.py:1032](src/llm/ambient/ambient_reply.py#L1032) `channel.send`）→ 多人多主題頻道必然像亂入。**這才是「不知道加入哪個主題」的真正成因**：它選的時候那條線還在，講出來時已經沒了。
 3. 第一則就開跑 → 上下文半截；`max_passes_per_burst=3` → 一段 burst 最壞燒 6 分鐘。
 4. **A↔B 對線**這種零成本可判的，現在花 120s 讓模型判（prompt 第一關 gate #3）。
 5. **講完就跑**：除非被 @，否則不理會別人對它的回應 → 沒有來回感。
-6. 等鎖排隊不計入 `pass_timeout_seconds`（[ambient_reply.py:988](src/llm/ambient_reply.py#L988) 註解已載明）→ 實測 max 901s。
+6. 等鎖排隊不計入 `pass_timeout_seconds`（[ambient_reply.py:988](src/llm/ambient/ambient_reply.py#L988) 註解已載明）→ 實測 max 901s。
 
 #### 四層方案（優先序＝對「自然」的貢獻，非改動大小）
 
@@ -1692,7 +1994,7 @@ last_confirmed: 2026-08-09
 
 - **結構鉤子（零 I/O，只看 `author_id`/`created_at`/`reference_id`）**：正＝懸空問句（有人問、30s+ 沒人回）、獨白（最近 3 則同一人）、冷場後新起頭（隔 >10 分鐘）、熱聊後停頓（近 10 則跨度 <5min 且最後一則已過 60s）；**負＝A↔B 對線（近 6 則只有 2 人且平均間隔 <45s）→ 直接否決**。
 - **regex**：只放最高把握兩三條（沒 @ 但叫名字、明確徵詢）。刻意克制，避免膨脹成關鍵詞地獄。
-- **k-NN（非 LLM 推理）**：`get_text_embedding(近 3 則)` → `ai_interactions` 最近鄰 20 筆 → 「過去語意相近情境下插話被接的比率」當一個特徵。基礎設施（embedding 欄位 + hnsw + [fetch_similar_positive](src/llm/ai_interactions_store.py#L289)）已存在。
+- **k-NN（非 LLM 推理）**：`get_text_embedding(近 3 則)` → `ai_interactions` 最近鄰 20 筆 → 「過去語意相近情境下插話被接的比率」當一個特徵。基礎設施（embedding 欄位 + hnsw + [fetch_similar_positive](src/llm/storage/ai_interactions_store.py#L289)）已存在。
 - **組合**：負鉤子否決 → `sigmoid(w·features) >= threshold`。**threshold 是唯一旋鈕**（調高＝話少）。
 - **權重來源**：logistic regression，樣本＝5602 筆，特徵 <10 個。**係數可讀**＝看得出它為什麼開口，可定期重訓。
 
@@ -1704,7 +2006,7 @@ last_confirmed: 2026-08-09
 
 | 迴路 | 狀態 | 防護 |
 |---|---|---|
-| **回音迴圈**（回 bot／自己） | 既有，**不動** | 入口 `message.author.bot` 一律排除（[ambient_reply.py:644](src/llm/ambient_reply.py#L644)）；chat_history 裡自己的行標「(你自己)」 |
+| **回音迴圈**（回 bot／自己） | 既有，**不動** | 入口 `message.author.bot` 一律排除（[ambient_reply.py:644](src/llm/ambient/ambient_reply.py#L644)）；chat_history 裡自己的行標「(你自己)」 |
 | **style_refs 風格自我模仿**（插話→reaction→embedding→召回當靈感） | 既有，**不動** | 已有距離地板 + 抽樣 + `_RECENT_STYLE_REFS` 近期壓制；決策是「召回真句子不重寫」以免蒸笨 |
 | **AI 日記** | 既有，不構成迴路 | v1 定位「純表達、不改行為」 |
 | **★鉤子權重學習迴路**（本輪新引入，**最需注意**） | 新增 | 見下 |
@@ -1726,9 +2028,9 @@ last_confirmed: 2026-08-09
 
 | 檔案 | 改動 |
 |---|---|
-| `src/llm/ambient_reply.py` | debounce 迴圈、鉤子閘接入、`#N` 解析、reply 錨定送出、新鮮度檢查、L4-b |
-| `src/llm/ambient_hooks.py`（新） | 結構鉤子 + regex + k-NN + 迴歸打分 |
-| `src/llm/chat_line.py` | `#N` 從「僅被回覆過的行」改為每行都給（[chat_line.py:107](src/llm/chat_line.py#L107)） |
+| `src/llm/ambient/ambient_reply.py` | debounce 迴圈、鉤子閘接入、`#N` 解析、reply 錨定送出、新鮮度檢查、L4-b |
+| `src/llm/ambient/ambient_hooks.py`（新） | 結構鉤子 + regex + k-NN + 迴歸打分 |
+| `src/llm/preprocess/chat_line.py` | `#N` 從「僅被回覆過的行」改為每行都給（[chat_line.py:107](src/llm/preprocess/chat_line.py#L107)） |
 | `src/settings/prompts/ambient_reply_prompt.txt` | 輸出契約加 `#N` 選線；「分不清接誰 → PASS」 |
 | `src/discord_bot.py` | 新增 `on_typing` handler |
 | `src/sys_settings/llm_settings.py` | 上表設定項 |
@@ -1752,10 +2054,10 @@ L4-b 接續、`max_passes` 3→1（另 `cooldown` 300→180）。
 **改動檔案**：
 | 檔案 | 內容 |
 |---|---|
-| `src/llm/ambient_hooks.py`（新） | 結構鉤子 + regex + k-NN + sigmoid 計分 + ε-greedy；失敗一律 fall-open（交給模型 `[PASS]` 把關，不讓鉤子壞掉就整個功能啞掉） |
-| `src/llm/ambient_reply.py` | `note_typing` / `_wait_for_quiet` / `_is_followup_to_bot` / `_parse_line_choice` / `_passes_content_gate`；入口加靜默期與 followup 分派；pass 接鉤子閘、reply 錨定送出 |
-| `src/llm/chat_line.py` | `_thread_render` 每行給編號 + 回 `{編號: 訊息}`；`fetch_recent_lines` 加 `thread_map` out-param（不改回傳簽章＝不動既有 caller） |
-| `src/llm/ai_interactions_store.py` | 加三欄（見下）；`mark_got_reply()`；`fetch_reply_rate_stats()` k-NN |
+| `src/llm/ambient/ambient_hooks.py`（新） | 結構鉤子 + regex + k-NN + sigmoid 計分 + ε-greedy；失敗一律 fall-open（交給模型 `[PASS]` 把關，不讓鉤子壞掉就整個功能啞掉） |
+| `src/llm/ambient/ambient_reply.py` | `note_typing` / `_wait_for_quiet` / `_is_followup_to_bot` / `_parse_line_choice` / `_passes_content_gate`；入口加靜默期與 followup 分派；pass 接鉤子閘、reply 錨定送出 |
+| `src/llm/preprocess/chat_line.py` | `_thread_render` 每行給編號 + 回 `{編號: 訊息}`；`fetch_recent_lines` 加 `thread_map` out-param（不改回傳簽章＝不動既有 caller） |
+| `src/llm/storage/ai_interactions_store.py` | 加三欄（見下）；`mark_got_reply()`；`fetch_reply_rate_stats()` k-NN |
 | `src/settings/prompts/ambient_reply_prompt.txt` | 編號說明改「每行都有」；輸出契約加「第一行寫 `#N`」＋範例 |
 | `src/discord_bot.py` | `on_typing` handler |
 | `src/sys_settings/llm_settings.py` | 上節設定項 |
@@ -1989,11 +2291,11 @@ k-NN 只吃**純自發**（`directed = FALSE AND followup = FALSE`）——被 @
 裡推導誰回了誰、隔多久——**那正是它最容易算錯的地方**。所以把事實卸給它。
 
 **模組化切法（使用者要求維持模組化，三選一後拍板）**：
-- **資料**（動態、每次不同）→ 只能在 bundle 層：`llm_service._build_prompt_bundle` 新增
+- **資料**（動態、每次不同）→ 只能在 bundle 層：`llm.prompt.prompt_builder.build_prompt_bundle`（原 `llm_service._build_prompt_bundle`）新增
   `situation_signals` 參數與 `<situation_signals>` 區塊 + 一句中性 header。/askai 不傳就不出現
   （與 `style_refs` 同模式）。
 - **使用規則**（靜態、要能熱改）→ 放 `ambient_reply_prompt.txt`。**理由是「誰在用」**：
-  `recalled_context`/`style_refs` 是 askai+ambient 共用 → 說明放共用的 llm_service 合理；
+  `recalled_context`/`style_refs` 是 askai+ambient 共用 → 說明放共用的 prompt 組裝（`llm/prompt/prompt_builder.py`）合理；
   `situation_signals` **只有插話用** → 放插話專屬的行為檔才符合模組邊界。不另開新檔（粒度太細）。
 
 **訊號契約**：自然語言、**只陳述事實、不下結論、絕不含分數**。給分數或「建議你接話」
@@ -2028,7 +2330,7 @@ member cache 常駐），改名當下就更新，比每天同步的表更即時�
 
 **唯一被證實的破口＝裸 mention**：`<@436506192047636490>` 沒有任何錨點，模型只看到一串數字。
 實測 **chat_history 53%（10/19）、recalled_context 29%（5/17）** 的區塊含有它
-（[emoji_text_utils.py:8](src/llm/emoji_text_utils.py#L8) 的註解早就寫明「不動 mention」，一直沒人補）。
+（[emoji_text_utils.py:8](src/llm/preprocess/emoji_text_utils.py#L8) 的註解早就寫明「不動 mention」，一直沒人補）。
 
 **修法**（`chat_line.resolve_user_mentions`，接在 `semantic_message_text` 管線裡 →
 chat_history / recalled_context / 日記 / askai **一次全部受益**）：

@@ -25,7 +25,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from llm.persona_agent import tools  # noqa: E402
+from llm.persona.agent import tools  # noqa: E402
 
 GUILD = 1276158257576284274
 ALICE = "1001"
@@ -436,7 +436,7 @@ class SchemaTests(unittest.TestCase):
     """diff schema 的形狀（strict 模式要求 required 齊全 + 禁止額外欄位）。"""
 
     def test_response_format_is_strict(self):
-        from llm.persona_agent.schema import build_response_format
+        from llm.persona.agent.schema import build_response_format
 
         fmt = build_response_format()
         self.assertEqual(fmt["type"], "json_schema")
@@ -464,11 +464,11 @@ class MaskOtherAuthorsTests(unittest.TestCase):
     """
 
     def _ctx(self):
-        from llm.persona_agent.tools import ToolContext
+        from llm.persona.agent.tools import ToolContext
         return ToolContext.build(guild_id=1, allowed_ids=["SELF"])
 
     def test_self_keeps_id_and_drops_redundant_author(self):
-        from llm.persona_agent.tools import _mask_other_authors
+        from llm.persona.agent.tools import _mask_other_authors
         out = _mask_other_authors(self._ctx(), [
             {"id": "m1", "ts": "10:00", "text": "我說的", "author_id": "SELF"},
         ])
@@ -476,7 +476,7 @@ class MaskOtherAuthorsTests(unittest.TestCase):
         self.assertNotIn("author_id", out[0], "單人查詢時作者恆定，留著只是燒 context")
 
     def test_other_loses_id(self):
-        from llm.persona_agent.tools import _mask_other_authors
+        from llm.persona.agent.tools import _mask_other_authors
         out = _mask_other_authors(self._ctx(), [
             {"id": "m2", "ts": "10:01", "text": "別人說的", "author_id": "OTHER"},
         ])
@@ -486,7 +486,7 @@ class MaskOtherAuthorsTests(unittest.TestCase):
 
     def test_same_other_keeps_the_same_label(self):
         """互動判讀要分得出「A 講完 B 接話」與「同一人自言自語」。"""
-        from llm.persona_agent.tools import _mask_other_authors
+        from llm.persona.agent.tools import _mask_other_authors
         out = _mask_other_authors(self._ctx(), [
             {"id": "a", "ts": "1", "text": "x", "author_id": "B"},
             {"id": "b", "ts": "2", "text": "y", "author_id": "C"},
@@ -495,7 +495,7 @@ class MaskOtherAuthorsTests(unittest.TestCase):
         self.assertEqual([m["by"] for m in out], ["他人1", "他人2", "他人1"])
 
     def test_anchor_flag_survives(self):
-        from llm.persona_agent.tools import _mask_other_authors
+        from llm.persona.agent.tools import _mask_other_authors
         out = _mask_other_authors(self._ctx(), [
             {"id": "m", "ts": "1", "text": "t", "author_id": "SELF", "is_anchor": True},
         ])

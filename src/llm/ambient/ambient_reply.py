@@ -43,23 +43,23 @@ from typing import Optional
 
 import discord
 
-from llm.ai_interactions_store import (
+from llm.storage.ai_interactions_store import (
     fetch_similar_positive,
     mark_got_reply,
     record_interaction,
 )
-from llm.ambient_hooks import evaluate as evaluate_hook
-from llm.ambient_memory import enqueue_for_memory, recall_lines, recall_signature_tags
-from llm.chat_line import (
+from llm.ambient.ambient_hooks import evaluate as evaluate_hook
+from llm.ambient.ambient_memory import enqueue_for_memory, recall_lines, recall_signature_tags
+from llm.preprocess.chat_line import (
     fetch_recent_lines,
     format_chat_line,
     name_with_anchor,
     semantic_message_text,
 )
-from llm.emoji_text_utils import is_emoji_or_symbol_only
-from llm.lemonade_gate import foreground_recently_active, stream_busy
+from llm.preprocess.emoji_text_utils import is_emoji_or_symbol_only
+from llm.client.lemonade_gate import foreground_recently_active, stream_busy
 from sys_settings.time_settings import APP_TZ
-from llm.vision_image import DEFAULT_MAX_FRAMES, extract_key_frames, is_vision_image
+from llm.preprocess.vision_image import DEFAULT_MAX_FRAMES, extract_key_frames, is_vision_image
 from llm.logger_factory import get_or_create_file_logger
 from services.llm_service import LLMService
 from sys_settings.llm_settings import AmbientChatSettings
@@ -250,7 +250,7 @@ def _cut_at_boundary(text: str, max_chars: int) -> str:
 
     persona 卡這一行是「自介：…。印象：…。AI觀察：條目；條目；…」。硬切會把最後一條切成
     半句，意思可能整個變掉（「不再是主力」切成「不再」）。退到分隔符最多少一條，比留半句好。
-    精簡版在發布時就照這一行的上限算好預算（`persona_agent.publish`）；這裡是白天新增
+    精簡版在發布時就照這一行的上限算好預算（`llm.persona.agent.publish`）；這裡是白天新增
     自介／印象、或還沒改用精簡版的人描述太長時的安全網。
     """
     cut = text[:max_chars]
@@ -296,7 +296,7 @@ async def _build_persona_context(
 
     persona_context: Optional[list[str]] = None
     try:
-        from llm.context_retriever import retrieve_rag_context_sync
+        from llm.retrievers.context_retriever import retrieve_rag_context_sync
 
         loop = asyncio.get_running_loop()
         rag_context, _meta = await loop.run_in_executor(
@@ -424,7 +424,7 @@ async def _resolve_callback_target(message: discord.Message, query: str) -> Opti
     """
     if message.guild is None:
         return None
-    from llm.persona_card_builder import expand_alias_candidates, extract_mentioned_user_ids
+    from llm.persona.persona_card_builder import expand_alias_candidates, extract_mentioned_user_ids
 
     bot_id = str(message.guild.me.id) if message.guild.me else None
     uniq_mentions = list(dict.fromkeys(m for m in extract_mentioned_user_ids(query) if m != bot_id))
@@ -436,7 +436,7 @@ async def _resolve_callback_target(message: discord.Message, query: str) -> Opti
     aliases = expand_alias_candidates(query)
     if not aliases:
         return None
-    from llm.member_profile_store import get_member_profile_store
+    from llm.storage.member_profile_store import get_member_profile_store
     try:
         loop = asyncio.get_running_loop()
         uids = await loop.run_in_executor(
@@ -467,8 +467,8 @@ async def _build_chat_callback_context(
     if not _SETTINGS.callback_enabled or not query or message.guild is None:
         return None
 
-    from llm.context_retriever import search_chat
-    from llm.raw_message_store import get_reaction_salience
+    from llm.retrievers.context_retriever import search_chat
+    from llm.storage.raw_message_store import get_reaction_salience
 
     # target 解析：在講某人 → B 模式（撈「目標本人」原話，author_id 過濾）；
     # 解析不出唯一目標 → topic 模式（不分作者，現狀）。impression 層另在 Phase B 提供「集體印象」。

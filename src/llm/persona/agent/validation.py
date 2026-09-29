@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional, Sequence
 
-from llm.persona_agent import tools
+from llm.persona.agent import tools
 from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
 
 logger = logging.getLogger(__name__)

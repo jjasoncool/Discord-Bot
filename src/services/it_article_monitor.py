@@ -212,20 +212,3 @@ class ItArticleMonitor(BaseContentMonitor):
                 await asyncio.sleep(self.SEND_INTERVAL)
         except Exception as e:
             logger.error("[IT 文章排程] 檢查新文章時發生錯誤: %s", e, exc_info=True)
-
-    async def start_monitoring(self, channel_ids: List[int], check_interval: int = 600):
-        """開始監控（首次先 seed 防洗版，再進迴圈）。"""
-        seeded = await self.ensure_seeded()
-        if seeded >= 0:
-            logger.info("[IT 文章排程] 首次啟動，已 seed %s 篇為已發（不洗版）", seeded)
-        logger.info("[IT 文章排程] 開始監控，間隔 %s 秒", check_interval)
-        while True:
-            try:
-                await self.check_and_send_new(channel_ids)
-                await asyncio.sleep(check_interval)
-            except asyncio.CancelledError:
-                logger.info("[IT 文章排程] 監控已停止")
-                raise
-            except Exception as e:
-                logger.error("[IT 文章排程] 監控循環發生錯誤: %s", e)
-                await asyncio.sleep(60)

@@ -19,9 +19,9 @@ from typing import Optional
 
 import discord
 
-from llm.ai_interactions_store import fetch_recent
-from llm.ambient_reply import _get_llm
-from llm.chat_line import fetch_recent_lines
+from llm.storage.ai_interactions_store import fetch_recent
+from llm.ambient.ambient_reply import _get_llm
+from llm.preprocess.chat_line import fetch_recent_lines
 from llm.logger_factory import get_or_create_file_logger
 from sys_settings.llm_settings import DiaryReflectionSettings
 from sys_settings.time_settings import APP_TZ

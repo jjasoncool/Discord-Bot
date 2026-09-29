@@ -16,8 +16,8 @@ from typing import Optional
 
 import discord
 
-from llm.member_profile_store import get_member_profile_store
-from llm.lemonade_gate import foreground_recently_active, stream_busy
+from llm.storage.member_profile_store import get_member_profile_store
+from llm.client.lemonade_gate import foreground_recently_active, stream_busy
 from services.llm_service import LLMService
 from services.memory_service import get_memory_service
 from sys_settings.llm_settings import AmbientChatSettings

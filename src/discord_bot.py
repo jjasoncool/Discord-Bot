@@ -120,11 +120,11 @@ async def on_ready():
     logger.info("如果斜線命令未顯示，請使用上面的連結重新邀請機器人，確保包含應用程序命令權限")
 
     # 預載貼圖描述快取
-    from llm.sticker_cache import load_guild_stickers
+    from llm.preprocess.sticker_cache import load_guild_stickers
     await load_guild_stickers(bot)
 
     # 啟動聊天訊息定期持久化 flush
-    from llm.chat_persistence import flush_buffer, FLUSH_INTERVAL_SECONDS
+    from llm.storage.store_chat import flush_buffer, FLUSH_INTERVAL_SECONDS
     if not getattr(bot, '_chat_persist_task_started', False):
         async def _periodic_flush():
             while True:
@@ -138,7 +138,7 @@ async def on_ready():
         logger.info("聊天訊息定期持久化已啟動（每 %d 秒）", FLUSH_INTERVAL_SECONDS)
 
     # 啟動 raw 訊息備份表定期 flush（含 reaction 事件）
-    from llm.raw_message_store import flush_raw_buffer, RAW_FLUSH_INTERVAL_SECONDS
+    from llm.storage.raw_message_store import flush_raw_buffer, RAW_FLUSH_INTERVAL_SECONDS
     if not getattr(bot, '_raw_persist_task_started', False):
         async def _periodic_raw_flush():
             while True:
@@ -152,7 +152,7 @@ async def on_ready():
         logger.info("raw 訊息備份定期 flush 已啟動（每 %d 秒）", RAW_FLUSH_INTERVAL_SECONDS)
 
     # 啟動功能二記憶（偏好事實）定期批次抽取（閒置才真的呼叫模型）
-    from llm.ambient_memory import maybe_flush as _ambient_memory_flush
+    from llm.ambient.ambient_memory import maybe_flush as _ambient_memory_flush
     from sys_settings.llm_settings import AmbientChatSettings as _AmbientSettings
     if not getattr(bot, '_ambient_memory_task_started', False):
         _ambient_flush_interval = _AmbientSettings().memory_flush_interval_seconds
@@ -203,20 +203,20 @@ async def on_ready():
 
             # ① emoji 字典
             try:
-                from llm.personality_extractor import refresh_emoji_dictionary
+                from llm.persona.personality_extractor import refresh_emoji_dictionary
                 refresh_emoji_dictionary(guild)
             except Exception as exc:
                 logger.warning("emoji 字典自動更新失敗: %s", exc)
 
             # ② 招牌梗衰減 sweep（不佔 GPU，失敗不影響 ③）
             try:
-                from llm.signature_tag_extractor import run_signature_tag_sweep
+                from llm.persona.signature_tag_extractor import run_signature_tag_sweep
                 await run_signature_tag_sweep(guild)
             except Exception as exc:
                 logger.warning("招牌梗 sweep 失敗: %s", exc)
 
             # ③ 人格萃取
-            from llm.personality_extractor import (
+            from llm.persona.personality_extractor import (
                 PersonalityExtractionInProgressError,
                 run_personality_extraction,
             )
@@ -228,7 +228,7 @@ async def on_ready():
 
             skip: set[str] = set()
             try:
-                from llm.persona_agent.publish import production_skip_list
+                from llm.persona.agent.publish import production_skip_list
 
                 skip = await production_skip_list(guild.id, display_names=_display_names())
             except Exception as exc:
@@ -257,7 +257,7 @@ async def on_ready():
             #    刻意排在 ③ 之後：兩者都吃 GPU，序列執行才不會互搶；而且 agent 的
             #    diff 要拿 production 剛寫好的描述當第一次的基準。
             try:
-                from llm.persona_agent.batch import run_batch
+                from llm.persona.agent.batch import run_batch
                 from sys_settings.llm_settings import PersonaAgentSettings
 
                 agent_settings = PersonaAgentSettings()
@@ -275,9 +275,9 @@ async def on_ready():
                 logger.error("persona agent 批次失敗（不影響 production）: %s", exc, exc_info=True)
 
             # ⑤ 發布精簡版：每個人 agent **最新**版本挑出來的精簡版（當晚 ④ 沒輪到的人也算），
-            #    見 `persona_agent.publish`。失敗時 ③ 跳過的人維持原本的描述，下一晚再寫。
+            #    見 `llm.persona.agent.publish`。失敗時 ③ 跳過的人維持原本的描述，下一晚再寫。
             try:
-                from llm.persona_agent.publish import effective_publish_mode, run_publish
+                from llm.persona.agent.publish import effective_publish_mode, run_publish
 
                 await run_publish(
                     guild_id=guild.id,
@@ -293,7 +293,7 @@ async def on_ready():
 
             # 啟動補跑檢查：若上次排程被錯過（容器重啟 / 中斷），立即補一次
             try:
-                from llm.personality_extractor import get_last_extraction_time
+                from llm.persona.personality_extractor import get_last_extraction_time
                 guild_for_check = bot.guilds[0] if bot.guilds else None
                 if guild_for_check:
                     now = datetime.now(APP_TZ)
@@ -345,7 +345,7 @@ async def on_ready():
 
     # 確保 ai_interactions 互動紀錄表存在（插話寫入 + 日記讀取都靠它）
     try:
-        from llm.ai_interactions_store import ensure_table as _ensure_ai_interactions
+        from llm.storage.ai_interactions_store import ensure_table as _ensure_ai_interactions
         await asyncio.to_thread(_ensure_ai_interactions)
     except Exception as _exc:
         logger.error("ai_interactions 建表啟動失敗: %s", _exc, exc_info=True)
@@ -353,7 +353,7 @@ async def on_ready():
     # persona agent 的兩張表（比照上面的 ai_interactions；建表 idempotent、
     # 失敗只 log 不 raise——agent 不該拖垮 bot 啟動）
     try:
-        from llm.persona_agent.store import ensure_table as _ensure_persona_agent
+        from llm.persona.agent.store import ensure_table as _ensure_persona_agent
         await asyncio.to_thread(_ensure_persona_agent)
     except Exception as exc:
         logger.warning("persona agent 資料表初始化失敗（agent 將無法寫入）: %s", exc)
@@ -363,7 +363,7 @@ async def on_ready():
     if not getattr(bot, "_ai_emb_backfill_started", False):
         bot._ai_emb_backfill_started = True
         try:
-            from llm.ai_interactions_store import backfill_embeddings as _backfill_emb
+            from llm.storage.ai_interactions_store import backfill_embeddings as _backfill_emb
             asyncio.create_task(asyncio.to_thread(_backfill_emb))
             logger.info("ai_interactions embedding 背景回填已排程")
         except Exception as _exc:
@@ -376,7 +376,7 @@ async def on_ready():
 
         async def _diary_schedule():
             await asyncio.sleep(90)  # 等其他服務就緒
-            from llm.diary_reflection import run_daily_reflection
+            from llm.ambient.ambient_diary import run_daily_reflection
             from sys_settings.llm_settings import DiaryReflectionSettings
             ds = DiaryReflectionSettings()
             while True:
@@ -505,14 +505,14 @@ async def on_message(message):
 
     # 將訊息加入持久化 buffer（非 bot 訊息、有內容或貼圖）
     if not message.author.bot and (message.content or message.stickers):
-        from llm.chat_persistence import enqueue_message, flush_buffer, buffer_size, FLUSH_THRESHOLD
+        from llm.storage.store_chat import enqueue_message, flush_buffer, buffer_size, FLUSH_THRESHOLD
         enqueue_message(message)
         if buffer_size() >= FLUSH_THRESHOLD:
             asyncio.create_task(flush_buffer())
 
     # 同步寫入 raw 備份表（獨立於 pgvector，包含純附件/純 embed 訊息）
     if not message.author.bot:
-        from llm.raw_message_store import (
+        from llm.storage.raw_message_store import (
             enqueue_raw_message,
             flush_raw_buffer,
             should_trigger_flush,
@@ -523,7 +523,7 @@ async def on_message(message):
 
     # 功能二：AI 偶爾插話 / 閒聊（背景判斷，不阻塞訊息處理；自身過濾白名單頻道與 bot 訊息）
     if not message.author.bot and message.guild is not None:
-        from llm.ambient_reply import maybe_ambient_reply
+        from llm.ambient.ambient_reply import maybe_ambient_reply
         asyncio.create_task(maybe_ambient_reply(bot, message))
 
     # 繼續處理命令
@@ -539,7 +539,7 @@ async def on_typing(channel, user, when):
     if getattr(user, "bot", False):
         return
     try:
-        from llm.ambient_reply import note_typing
+        from llm.ambient.ambient_reply import note_typing
         note_typing(channel.id, user.id)
     except Exception:
         pass  # 純訊號，壞掉不該影響任何事（收不到就退化成純時間靜默期）
@@ -548,8 +548,8 @@ async def on_typing(channel, user, when):
 async def on_message_edit(before, after):
     if after.author.bot:
         return
-    from llm.chat_persistence import enqueue_message_edit
-    from llm.raw_message_store import enqueue_raw_edit
+    from llm.storage.store_chat import enqueue_message_edit
+    from llm.storage.raw_message_store import enqueue_raw_edit
     content_changed = before.content != after.content
     embeds_added = not before.embeds and after.embeds
 
@@ -569,7 +569,7 @@ async def on_message_edit(before, after):
 async def on_raw_message_delete(payload):
     """使用者刪除訊息 → raw 表軟刪標記。
     用 raw 版本因為訊息可能不在 bot cache 裡（例如啟動前發的舊訊息）。"""
-    from llm.raw_message_store import enqueue_raw_delete
+    from llm.storage.raw_message_store import enqueue_raw_delete
     enqueue_raw_delete(payload.message_id)
 
 
@@ -611,7 +611,7 @@ async def on_raw_reaction_add(payload):
     # 跳過 bot 自己點的 reaction
     if bot.user and payload.user_id == bot.user.id:
         return
-    from llm.raw_message_store import enqueue_reaction_change
+    from llm.storage.raw_message_store import enqueue_reaction_change
     enqueue_reaction_change(
         message_id=payload.message_id,
         emoji_name=payload.emoji.name,
@@ -621,7 +621,7 @@ async def on_raw_reaction_add(payload):
     )
     # 若被按的是 bot 自己的插話 → 記成正向/負向證據（先查記憶體集合，命中才打 DB）
     try:
-        from llm.ai_interactions_store import is_tracked_reply, note_reaction
+        from llm.storage.ai_interactions_store import is_tracked_reply, note_reaction
         mid = str(payload.message_id)
         if is_tracked_reply(mid):
             await asyncio.to_thread(
@@ -636,7 +636,7 @@ async def on_raw_reaction_remove(payload):
     """Reaction 移除 → 反向更新 raw 表。"""
     if bot.user and payload.user_id == bot.user.id:
         return
-    from llm.raw_message_store import enqueue_reaction_change
+    from llm.storage.raw_message_store import enqueue_reaction_change
     enqueue_reaction_change(
         message_id=payload.message_id,
         emoji_name=payload.emoji.name,
@@ -645,7 +645,7 @@ async def on_raw_reaction_remove(payload):
         action="remove",
     )
     try:
-        from llm.ai_interactions_store import is_tracked_reply, note_reaction
+        from llm.storage.ai_interactions_store import is_tracked_reply, note_reaction
         mid = str(payload.message_id)
         if is_tracked_reply(mid):
             await asyncio.to_thread(

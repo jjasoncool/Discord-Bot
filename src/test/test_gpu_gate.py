@@ -23,7 +23,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from llm import lemonade_gate as gate  # noqa: E402
+from llm.client import lemonade_gate as gate  # noqa: E402
 from services.llm_service import LLMService  # noqa: E402
 from sys_settings.llm_settings import LLMRuntimeConfig  # noqa: E402
 

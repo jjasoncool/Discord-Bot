@@ -13,7 +13,7 @@
   - `batch`      ：每晚的挑人與批次執行
   - `publish`    ：M7 精簡版——挑條目、算預算、寫進 `auto_personality`
 
-**刻意不在這裡 re-export**：所有呼叫端都走子模組（`from llm.persona_agent import agent,
+**刻意不在這裡 re-export**：所有呼叫端都走子模組（`from llm.persona.agent import agent,
 tools`），re-export 一份只會是死程式碼，而且會讓「碰到套件」就 eager import `agent`
 （連帶拉進 lemonade_gate、llm_settings）。要用什麼就 import 那個子模組。
 """

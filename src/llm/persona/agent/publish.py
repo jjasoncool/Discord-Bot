@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Iterable, Literal, Mapping, Optional
 
-from llm.persona_agent import tools as agent_tools
+from llm.persona.agent import tools as agent_tools
 from sys_settings.time_settings import APP_TZ
 
 logger = logging.getLogger(__name__)
@@ -189,7 +189,7 @@ def line_budget(
     `person_docs` 放自介與印象，順序就是 bot 讀到的順序；最壞情況由呼叫端列舉（`plan_for`）。
     `label_max_chars`：標籤可能的最長長度；這一行的標籤比它短時，照它算。
     """
-    from llm.persona_card_builder import (
+    from llm.persona.persona_card_builder import (
         build_persona_cards,
         format_persona_cards_for_context,
         persona_card_label,
@@ -293,7 +293,7 @@ def plan_for(
     now: Optional[datetime] = None,
 ) -> PublishPlan:
     """一個人要發布什麼（純函式，不碰 DB）。"""
-    from llm.persona_card_builder import _clean_impression_text, persona_card_label
+    from llm.persona.persona_card_builder import _clean_impression_text, persona_card_label
 
     person = person or {}
     autos = person.get("auto_personality", [])
@@ -341,7 +341,7 @@ def build_plans(
 
     同步（讀 DB），呼叫端丟 executor。⑤ 與 `production_skip_list` 共用這一份，兩邊才會一致。
     """
-    from llm.persona_card_builder import PERSONA_MAX_CARD_CHARS
+    from llm.persona.persona_card_builder import PERSONA_MAX_CARD_CHARS
     from sys_settings.llm_settings import AmbientChatSettings
 
     line_max = AmbientChatSettings().persona_line_max_chars
@@ -382,7 +382,7 @@ async def production_skip_list(
     """
     if effective_publish_mode() != "on":
         return set()
-    from llm.persona_agent.agent import run_db
+    from llm.persona.agent.agent import run_db
 
     plans, _ = await run_db(build_plans, guild_id, display_names=display_names)
     return {author_id for author_id, plan in plans.items() if plan.lite.text}
@@ -407,7 +407,7 @@ async def run_publish(
     """
     if mode == "off":
         return {"skipped": 1}
-    from llm.persona_agent.agent import run_db
+    from llm.persona.agent.agent import run_db
 
     plans, failed = await run_db(build_plans, guild_id, display_names=display_names)
     stats = {"people": len(plans) + len(failed), "written": 0, "dry_run": 0, "empty": 0,
@@ -415,7 +415,7 @@ async def run_publish(
     for author_id, exc in failed.items():
         logger.error("persona 精簡版計算失敗 author=%s：%s", author_id, exc, exc_info=exc)
     if mode == "on" and profile_store is None:
-        from llm.member_profile_store import get_member_profile_store
+        from llm.storage.member_profile_store import get_member_profile_store
         profile_store = get_member_profile_store()
 
     for author_id, plan in plans.items():

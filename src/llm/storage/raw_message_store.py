@@ -6,7 +6,7 @@
 - on_raw_message_delete  → 軟刪標記（is_deleted=TRUE）
 - on_raw_reaction_add/remove → 即時更新 reaction 結構化資料
 
-和 chat_persistence（寫 LlamaIndex pgvector）並列，兩者互不依賴。
+和 store_chat（寫 LlamaIndex pgvector）並列，兩者互不依賴。
 raw 表是「備份層 + 互動真相來源」，pgvector 表是「篩選後的語意索引」。
 
 Buffer 策略：
@@ -30,7 +30,7 @@ import discord
 import psycopg2
 from psycopg2.pool import ThreadedConnectionPool
 
-from llm.sticker_cache import get_sticker_text
+from llm.preprocess.sticker_cache import get_sticker_text
 from sys_settings.llm_settings import LLMServiceSettings
 
 logger = logging.getLogger(__name__)
@@ -504,7 +504,7 @@ def _build_emoji_key(emoji_name: str, emoji_id: str | None) -> str:
 def _classify_emoji_category(emoji_name: str, emoji_id: str | None) -> str:
     """呼叫 reaction_classifier 做分類。若 P2 還沒實作，fallback 為 neutral。"""
     try:
-        from llm.reaction_classifier import classify_reaction
+        from llm.persona.reaction_classifier import classify_reaction
         return classify_reaction(emoji_name, emoji_id)
     except ImportError:
         return "neutral"

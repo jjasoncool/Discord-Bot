@@ -22,7 +22,7 @@ from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
 try:
     from llama_index.core import Document, VectorStoreIndex
     from llama_index.vector_stores.postgres import PGVectorStore
-    from llm.safe_llm_embedding import SafeLLMEmbedding, make_safe_llm_embedding
+    from llm.client.embedding_client import SafeLLMEmbedding, make_safe_llm_embedding
 except Exception:  # pragma: no cover - 依賴可能在部份環境尚未安裝
     Document = None
     VectorStoreIndex = None

@@ -19,7 +19,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from llm.persona_agent import validation  # noqa: E402
+from llm.persona.agent import validation  # noqa: E402
 
 ALICE = "1001"
 REAL = ["m1", "m2", "m3"]

@@ -25,7 +25,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from llm.persona_agent import publish  # noqa: E402
+from llm.persona.agent import publish  # noqa: E402
 
 NOW = datetime(2026, 9, 25, 12, tzinfo=timezone.utc)
 _EPOCH_MS = 1420070400000
@@ -150,7 +150,7 @@ class LineBudgetTests(unittest.TestCase):
     """預算要讓插話那一行剛好不超過上限——用 bot 讀取時的同一套函式組出來驗。"""
 
     def _line(self, docs, alias, lite):
-        from llm.persona_card_builder import build_persona_cards, format_persona_cards_for_context
+        from llm.persona.persona_card_builder import build_persona_cards, format_persona_cards_for_context
         cards = build_persona_cards(docs=[*docs, publish._auto_doc(alias, lite, {"author_id": "1"})],
                                     requester_user_id=None, participant_user_ids=[],
                                     intent="general", alias_hints=[], max_cards=1)
@@ -187,7 +187,7 @@ class LineBudgetTests(unittest.TestCase):
 
     def test_askai_card_keeps_the_whole_lite(self):
         """用真的欄位上限：預算內的最後一個字留得住，多一個字就被 /askai 的卡片切掉。"""
-        from llm.persona_card_builder import PERSONA_MAX_CARD_CHARS, build_persona_cards
+        from llm.persona.persona_card_builder import PERSONA_MAX_CARD_CHARS, build_persona_cards
         md = {"author_id": "1"}
         budget = publish.line_budget(person_docs=[], alias="米拉", auto_metadata=md,
                                      line_max_chars=5000, card_field_chars=PERSONA_MAX_CARD_CHARS)
@@ -240,7 +240,7 @@ class PlanForTests(unittest.TestCase):
         用滿的是**扣掉 BUDGET_MARGIN 之前**的預算：那份餘裕是留給列舉不到的情況的，
         這裡列舉得到的組合與順序要靠計算算準，不能靠它蓋過去。
         """
-        from llm.persona_card_builder import build_persona_cards, format_persona_cards_for_context
+        from llm.persona.persona_card_builder import build_persona_cards, format_persona_cards_for_context
         fill = "字" * (plan.budget + publish.BUDGET_MARGIN)
         # 真的寫入時 metadata 帶著別名（`index_auto_personality`），標籤會把它算進去
         auto = publish._auto_doc(plan.alias, fill, {"author_id": "1", "alias": plan.alias})
@@ -428,7 +428,7 @@ class AutoPersonalityMetadataTests(unittest.TestCase):
     """寫入函式：extra_metadata 蓋在預設值上；回傳是否真的寫進去。"""
 
     def _write(self, extra, *, ready=True, fail=False):
-        from llm.member_profile_store import PgVectorMemberProfileStore
+        from llm.storage.member_profile_store import PgVectorMemberProfileStore
         store = object.__new__(PgVectorMemberProfileStore)
         captured = {}
 
@@ -465,7 +465,7 @@ class ProductionExtractionTests(unittest.TestCase):
     """③／手動萃取這一側：跳過 ⑤ 要寫的人、只把真的寫進去的算成功。"""
 
     def test_excluded_people_are_extracted_but_not_written(self):
-        from llm import personality_extractor as pe
+        from llm.persona import personality_extractor as pe
         results = {"1": {"alias": "米拉", "personality": "p"}, "2": {"alias": "克羅", "personality": "p"}}
         guild = mock.MagicMock()
         guild.id = 9
@@ -481,11 +481,11 @@ class ProductionExtractionTests(unittest.TestCase):
         self.assertEqual(list(save.call_args.kwargs["results"]), ["2"])
 
     def test_only_successful_writes_are_counted(self):
-        from llm import personality_extractor as pe
+        from llm.persona import personality_extractor as pe
         store = mock.MagicMock()
         store.index_auto_personality = mock.AsyncMock(side_effect=[True, False, RuntimeError("x")])
         results = {str(i): {"alias": "a", "personality": "p"} for i in (1, 2, 3)}
-        with mock.patch("llm.member_profile_store.get_member_profile_store", return_value=store):
+        with mock.patch("llm.storage.member_profile_store.get_member_profile_store", return_value=store):
             written = asyncio.run(pe.save_personality_results(guild_id=9, results=results))
         self.assertEqual(written, 1)
 

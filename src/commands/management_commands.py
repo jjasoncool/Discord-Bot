@@ -20,7 +20,7 @@ from services.intro_profile_service import (
     IntroProfileService,
 )
 from services.impression_moderation_service import ImpressionModerationService
-from llm.member_profile_store import get_member_profile_store
+from llm.storage.member_profile_store import get_member_profile_store
 from settings.channel_registry import all_settings, get_setting, ChannelSetContext
 
 # 獲取 logger

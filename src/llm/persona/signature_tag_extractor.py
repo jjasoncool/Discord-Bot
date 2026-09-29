@@ -16,8 +16,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from llm import prompt_files
-from llm.member_profile_store import get_member_profile_store
+from llm.prompt import prompt_files
+from llm.storage.member_profile_store import get_member_profile_store
 from services.llm_service import LLMService
 from sys_settings.llm_settings import AmbientChatSettings
 

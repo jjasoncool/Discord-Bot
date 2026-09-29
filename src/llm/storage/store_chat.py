@@ -12,9 +12,9 @@ from typing import Optional
 
 import discord
 
-from llm.emoji_text_utils import replace_custom_emoji_with_description
-from llm.lemonade_gate import stream_exclusive
-from llm.sticker_cache import get_sticker_text
+from llm.preprocess.emoji_text_utils import replace_custom_emoji_with_description
+from llm.client.lemonade_gate import stream_exclusive
+from llm.preprocess.sticker_cache import get_sticker_text
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ _chat_index_lock = threading.Lock()
 # 去重集合：與 context_retriever._PERSISTED_MESSAGE_IDS 共用，避免重複寫入
 def _get_persisted_ids() -> set[str]:
     """延遲取得共用去重集合，避免循環 import。"""
-    from llm.context_retriever import _PERSISTED_MESSAGE_IDS
+    from llm.retrievers.context_retriever import _PERSISTED_MESSAGE_IDS
     return _PERSISTED_MESSAGE_IDS
 
 # 延遲 import 避免循環依賴
@@ -188,7 +188,7 @@ def _get_chat_index():
 
     from llama_index.core import VectorStoreIndex
     from llama_index.vector_stores.postgres import PGVectorStore
-    from llm.safe_llm_embedding import make_safe_llm_embedding
+    from llm.client.embedding_client import make_safe_llm_embedding
     from sys_settings.llm_settings import LLMServiceSettings, load_llm_runtime_config
     from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
 

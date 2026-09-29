@@ -560,7 +560,7 @@ class UserCommands(commands.Cog):
             return
         import asyncio
         import functools
-        from llm.member_profile_store import get_member_profile_store
+        from llm.storage.member_profile_store import get_member_profile_store
         port = get_member_profile_store()
         loop = asyncio.get_running_loop()
         try:
@@ -604,7 +604,7 @@ class UserCommands(commands.Cog):
         await interaction.response.defer()
         import asyncio
         import functools
-        from llm.member_profile_store import get_member_profile_store
+        from llm.storage.member_profile_store import get_member_profile_store
         port = get_member_profile_store()
         loop = asyncio.get_running_loop()
         ok = await loop.run_in_executor(None, functools.partial(

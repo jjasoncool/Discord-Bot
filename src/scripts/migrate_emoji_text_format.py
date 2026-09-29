@@ -1,7 +1,7 @@
 """把 pgvector 內舊的 `<:name:id>` 格式 text 換成 `:描述:` 格式。
 
 背景：
-chat_persistence 以前直接把 msg.content 原文送去 embed，emoji token 變亂碼。
+chat_persistence（現 llm/storage/store_chat.py）以前直接把 msg.content 原文送去 embed，emoji token 變亂碼。
 後來改成先做語意替換 `<:name:id>` → `:描述:`，但舊資料仍是亂碼。
 此 script 把舊資料的 text 欄位跑一次語意替換，順便 NULL 掉 embedding，
 讓 reembed_pgvector.py 重建向量。
@@ -37,7 +37,7 @@ sys.path.insert(0, "/app")
 import psycopg2
 import psycopg2.extras
 
-from llm.emoji_text_utils import replace_custom_emoji_with_description
+from llm.preprocess.emoji_text_utils import replace_custom_emoji_with_description
 from sys_settings.llm_settings import LLMServiceSettings
 
 logger = logging.getLogger("migrate_emoji")

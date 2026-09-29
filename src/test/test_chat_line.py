@@ -20,7 +20,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from llm.chat_line import (
+from llm.preprocess.chat_line import (
     fetch_recent_lines,
     format_chat_line,
     name_with_anchor,

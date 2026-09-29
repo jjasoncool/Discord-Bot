@@ -22,7 +22,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from llm.llm_http_client import LlmConnectionError, LlmTimeoutError
+from llm.client.http_client import LlmConnectionError, LlmTimeoutError
 from services import llm_service as llm_service_module
 
 

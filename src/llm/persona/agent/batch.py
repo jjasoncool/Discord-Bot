@@ -22,9 +22,9 @@ import time
 from datetime import datetime
 from typing import Any, Optional
 
-from llm.persona_agent import agent as persona_agent
-from llm.persona_agent import store
-from llm.persona_agent import tools as persona_tools
+from llm.persona.agent import agent as persona_agent
+from llm.persona.agent import store
+from llm.persona.agent import tools as persona_tools
 from sys_settings.llm_settings import LLMServiceSettings, PersonaAgentSettings
 from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
 from sys_settings.time_settings import APP_TZ

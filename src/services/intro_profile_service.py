@@ -2,14 +2,14 @@
 
 說明：
 - 這裡放「流程邏輯」（何時呼叫、如何整理資料）。
-- 不放向量庫細節；向量串接由 llm.member_profile_store 負責。
+- 不放向量庫細節；向量串接由 llm.storage.member_profile_store 負責。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from llm.member_profile_store import MemberProfileStore, NullMemberProfileStore
+from llm.storage.member_profile_store import MemberProfileStore, NullMemberProfileStore
 
 
 @dataclass(frozen=True)

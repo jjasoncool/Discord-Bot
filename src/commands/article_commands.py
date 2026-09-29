@@ -105,9 +105,7 @@ class ArticleCommands(commands.Cog):
         self.ptt_monitor = None
         self.it_article_monitor = None
         self.monitoring_task = None
-        self.fb_monitoring_task = None
         self.ptt_monitoring_task = None
-        self.it_article_monitoring_task = None
         self._bahamut_sync_started_at = None  # 批次同步開始時間
         self.monitored_channels = []
 

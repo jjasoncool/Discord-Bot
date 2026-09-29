@@ -113,7 +113,7 @@ def _get_embed_model():
         return _embed_model
     with _embed_init_lock:
         if _embed_model is None:
-            from llm.safe_llm_embedding import make_safe_llm_embedding
+            from llm.client.embedding_client import make_safe_llm_embedding
             from sys_settings.llm_settings import load_llm_runtime_config
             s = _get_settings()
             rc = load_llm_runtime_config(s.llm_runtime_model_path)
@@ -324,7 +324,7 @@ def note_reaction(message_id: str, emoji_name: str, emoji_id: Any, action: str) 
     正向＝agree/laugh、負向＝negative、其餘只計入 reaction_count。sync；async caller 用 to_thread。
     """
     try:
-        from llm.reaction_classifier import classify_reaction
+        from llm.persona.reaction_classifier import classify_reaction
         cat = classify_reaction(emoji_name, str(emoji_id) if emoji_id else None)
     except Exception:
         cat = "neutral"

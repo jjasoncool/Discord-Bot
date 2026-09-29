@@ -46,7 +46,7 @@ sys.path.insert(0, "/app")
 
 import requests
 
-from llm.safe_llm_embedding import embed_with_perturbation_retry
+from llm.client.embedding_client import embed_with_perturbation_retry
 from sys_settings.llm_settings import LLMServiceSettings, load_llm_runtime_config
 
 logger = logging.getLogger("reembed")

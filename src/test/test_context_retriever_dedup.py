@@ -21,7 +21,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from llm import context_retriever as cr  # noqa: E402
+from llm.retrievers import context_retriever as cr  # noqa: E402
 
 DOC_ID = "impression:9:2:1"
 MD = {"doc_type": "member_profile", "profile_kind": "impression", "guild_id": "9",

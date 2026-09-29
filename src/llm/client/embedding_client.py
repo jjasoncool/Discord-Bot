@@ -22,7 +22,7 @@ from typing import Any, Callable, TypeVar
 from llama_index.core.embeddings import BaseEmbedding
 from pydantic import PrivateAttr
 
-from llm.llm_http_client import LlmHttpClient
+from llm.client.http_client import LlmHttpClient
 
 from sys_settings.llm_settings import LLMRuntimeConfig, LLMServiceSettings
 
@@ -220,7 +220,7 @@ def make_safe_llm_embedding(
 
     自動帶入後端類型 + 該 embedding model 在 `model_load_options` 裡的設定，
     讓 caller 不用重複組裝這些後端不可知的 wiring（context_retriever /
-    chat_persistence / member_profile_store 三處共用）。
+    store_chat / member_profile_store 三處共用）。
     """
     backend = runtime_config.backend
     profile = runtime_config.backends.get(backend)

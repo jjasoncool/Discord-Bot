@@ -211,7 +211,7 @@ def describe_signals(obs: dict) -> list[str]:
     這樣分工才乾淨：**容易算錯的事實推導（誰回了誰、隔多久、連講幾則）交給 code，
     需要理解的判斷（他是想要回應還是不想被打擾、這時候插話得不得體）留給模型。**
     """
-    from llm.chat_line import name_with_anchor  # leaf 模組，避免頂層循環 import
+    from llm.preprocess.chat_line import name_with_anchor  # leaf 模組，避免頂層循環 import
 
     lines: list[str] = []
     if "question" in obs:
@@ -270,7 +270,7 @@ async def _knn_feature(situation: str) -> tuple[float, int]:
     try:
         import asyncio
 
-        from llm.ai_interactions_store import fetch_reply_rate_stats
+        from llm.storage.ai_interactions_store import fetch_reply_rate_stats
 
         n, rate = await asyncio.to_thread(
             fetch_reply_rate_stats,

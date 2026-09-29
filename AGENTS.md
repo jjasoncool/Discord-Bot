@@ -59,15 +59,15 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 遊戲公告的時間 | `services.event_time_parser.SERVER_TZ`（值同為 UTC+8，但語意不同，兩者不可合併） |
 | 連 pgvector | `LLMServiceSettings().pgvector_connect()` |
 | 實體表名 | `HYBRID_RETRIEVAL_SETTINGS.chat_table()`／`.source_table(key)`／`.physical_table(name)`（含 identifier 消毒） |
-| 讀 prompt 檔 | `llm.prompt_files.read_text()`／`read_json()`（mtime 快取） |
-| 清理聊天文字 | `personality_extractor._clean_text_for_extraction()` |
+| 讀 prompt 檔 | `llm.prompt.prompt_files.read_text()`／`read_json()`（mtime 快取） |
+| 清理聊天文字 | `llm.persona.personality_extractor._clean_text_for_extraction()` |
 | 描述品質規則 | `persona_description_rules.txt`（各處讀同一個檔） |
 | 人格素描的角色設定 | 疊在 `personality_extraction_prompt.json` 的 `system_prompt` 之上 |
 | 發文到頻道 | `utils.discord_content.post_to_channel`（論壇／文字頻道自動分流、附件分批、失敗退純文字） |
 | 面板置底 | `utils.panel_bump.PanelBumper`（`bump`／`bump_safe`；有人講話就置底用 `request_bump`） |
 | 已發送去重 | StateDB `sent_content`（`is_content_sent`／`mark_content_as_sent`） |
 | 版本更新時刻 | `services.event_scheduler.VersionDateResolver`（`refresh()`、`update_starts()`；只看時間，不看版本號） |
-| GPU 獨佔（產圖時卸載 LLM） | `llm.lemonade_gate.gpu_exclusive(owner, lease_seconds)` |
+| GPU 獨佔（產圖時卸載 LLM） | `llm.client.lemonade_gate.gpu_exclusive(owner, lease_seconds)` |
 | 綁頻道 | `settings/channel_registry.py` 的 `register_channel` |
 
 ## 程式碼
