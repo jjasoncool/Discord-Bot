@@ -226,6 +226,9 @@ class FakeStateDB:
 
 
 class _StubResolver:
+    def refresh(self):
+        pass
+
     def ensure_loaded(self):
         pass
 

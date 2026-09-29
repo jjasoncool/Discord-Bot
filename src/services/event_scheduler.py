@@ -76,7 +76,10 @@ class VersionDateResolver:
 
     來源：標題含『X.Y版本…』且內文含『更新維護時間：…日期…』的帖。
     取維護時間範圍的**最後一個日期**（維護結束＝版本上線）當該版本起點。
-    一次掃描快取；查不到的版本回 None（上層據此 SKIP，寧可漏不可錯）。
+    查不到的版本回 None（上層據此 SKIP，寧可漏不可錯）。
+
+    **bot 會長時間不重啟**：`refresh()` 每次排活動前重讀（在執行緒裡跑），啟動後才發的新版本
+    公告也看得到；規劃過程中的 `update_time()` 只查記憶體，不在 event loop 裡碰 DB。
     """
 
     _VER_IN_TITLE = re.compile(r'(\d+\.\d+)\s*版本')
@@ -89,10 +92,16 @@ class VersionDateResolver:
         self.db_path = db_path
         self._map: Optional[dict] = None
 
-    def _load(self) -> dict:
+    def _connect(self) -> sqlite3.Connection:
+        # 一般唯讀、**不用 immutable**：articles.db 是 WAL 模式、爬蟲一直在寫。immutable 會讓 SQLite
+        # 忽略還沒合併回主檔的 WAL（看不到剛發的公告），爬蟲合併時還可能讀到錯誤結果
+        return sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+
+    def _load(self) -> Optional[dict]:
+        """讀一次 DB；讀取失敗回 None（呼叫端保留上一次的結果）。"""
         result: dict = {}
         try:
-            con = sqlite3.connect(f"file:{self.db_path}?mode=ro&immutable=1", uri=True)
+            con = self._connect()
             try:
                 rows = con.execute(
                     "SELECT article_title, article_content FROM article_details "
@@ -102,7 +111,7 @@ class VersionDateResolver:
                 con.close()
         except Exception as e:
             logger.warning("[event] 版本日回填載入失敗（articles.db 不可讀？）: %s", e)
-            return result
+            return None
 
         for title, content in rows:
             vm = self._VER_IN_TITLE.search(title or "")
@@ -126,19 +135,97 @@ class VersionDateResolver:
             # 同版本取最早一筆（最初公告）
             if version not in result or dt < result[version]:
                 result[version] = dt
-        logger.info("[event] 版本日回填載入 %s 個版本：%s", len(result),
-                    ", ".join(f"{k}={v:%Y/%m/%d}" for k, v in sorted(result.items())))
         return result
 
+    def refresh(self) -> None:
+        """重讀 DB（排活動前呼叫）。讀取失敗時保留上一次的結果；版本有增減才寫 log。"""
+        new = self._load()
+        if new is None:
+            return
+        old, self._map = self._map, new
+        if old is None:
+            logger.info("[event] 版本日回填載入 %s 個版本：%s", len(new),
+                        ", ".join(f"{k}={v:%Y/%m/%d}" for k, v in sorted(new.items())))
+        elif set(old) != set(new):
+            added = ", ".join(f"{k}={new[k]:%Y/%m/%d}" for k in sorted(set(new) - set(old)))
+            logger.info("[event] 版本日回填更新為 %s 個版本（新增：%s）", len(new), added or "無")
+
     def ensure_loaded(self) -> None:
+        """還沒讀過才讀（`update_time()` 的後備）；讀取失敗就先當成沒有資料，不在同一輪重試。"""
         if self._map is None:
-            self._map = self._load()
+            self.refresh()
+            if self._map is None:
+                self._map = {}
 
     def update_time(self, version: Optional[str]) -> Optional[datetime]:
         if not version:
             return None
         self.ensure_loaded()
         return (self._map or {}).get(version)
+
+    # ── 版本更新「開始」時刻（週期提醒的終焉矩陣用）──
+    _BANNER_TIME = re.compile(r'活動時間\s*[✦：:]*\s*([^✦]{0,80})')
+
+    def update_starts(self) -> list:
+        """所有已知版本更新維護的**開始**時刻，依時間排序；每次呼叫都重讀 DB（排程要看最新公告）。
+
+        - 來源一：標題含「X.Y版本」且內文有「更新維護時間」的公告，取時間範圍的第一個日期。
+        - 來源二：下半卡池公告（標題含「喚取」「第二期」）的結束日**隔天 04:00**——每版最後一個卡池
+          都在更新前一天 11:59 結束（2.0～3.7 共 18 版一致），約提前三週就能知道下一版何時更新。
+          前後 7 天內已有來源一時，以官方維護時間為準。
+        版本號只用來認出公告，排序與推算都只看時間（下一版可能直接跳號）。
+        """
+        import html as _html
+        try:
+            con = self._connect()
+            try:
+                maint_rows = con.execute(
+                    "SELECT article_title, article_content FROM article_details "
+                    "WHERE article_content LIKE '%更新維護時間%'"
+                ).fetchall()
+                banner_rows = con.execute(
+                    "SELECT article_content FROM article_details WHERE article_title LIKE '%喚取%第二期%'"
+                ).fetchall()
+            finally:
+                con.close()
+        except Exception as e:
+            logger.warning("[event] 讀取版本更新時刻失敗（articles.db 不可讀？）: %s", e)
+            return []
+
+        def plain(content: str) -> str:
+            return _html.unescape(re.sub(r'<[^>]+>', '', content or ''))
+
+        def to_dt(parts) -> Optional[datetime]:
+            try:
+                return datetime(*(int(x) for x in parts), tzinfo=SERVER_TZ)
+            except ValueError:
+                return None
+
+        official = set()
+        for title, content in maint_rows:
+            if not self._VER_IN_TITLE.search(title or ""):
+                continue
+            line = self._MAINT_LINE.search(plain(content))
+            dates = self._DATE.findall(line.group(1)) if line else []
+            start = to_dt(dates[0]) if dates else None
+            if start:
+                official.add(start)
+
+        derived = set()
+        for (content,) in banner_rows:
+            ends = []
+            for m in self._BANNER_TIME.finditer(plain(content)):
+                dates = self._DATE.findall(m.group(1))
+                end = to_dt(dates[1]) if len(dates) >= 2 else None
+                if end:
+                    ends.append(end)
+            if ends:
+                last = max(ends)
+                derived.add((last + timedelta(days=1)).replace(hour=4, minute=0, second=0, microsecond=0))
+
+        window = timedelta(days=7)
+        derived = {d for d in derived if not any(abs(d - o) <= window for o in official)}
+        return sorted(official | derived)
 
 
 _version_resolver = VersionDateResolver()
@@ -401,7 +488,8 @@ async def maybe_schedule_events(
             logger.warning("[event] 找不到 guild（channel_id=%s）", channel_id)
             return
 
-        await asyncio.to_thread(_version_resolver.ensure_loaded)
+        # bot 會長時間不重啟：每次排活動前重讀，才看得到啟動後才發的版本公告
+        await asyncio.to_thread(_version_resolver.refresh)
         now = datetime.now(timezone.utc)
         planned = plan_events(
             events, title=title or "", source=source, source_id=source_id,
