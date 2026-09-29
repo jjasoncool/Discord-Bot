@@ -33,7 +33,7 @@ from sys_settings.periodic_reminder_settings import PeriodicReminderSettings
 from utils.panel_bump import PanelBumper, load_runtime, update_runtime
 from utils.utils import ChannelConfig
 
-logger = logging.getLogger('discord_bot')
+logger = logging.getLogger(__name__)
 
 CUSTOM_ID_SUBSCRIBE = "periodic_reminder:subscribe"
 CUSTOM_ID_UNSUBSCRIBE = "periodic_reminder:unsubscribe"

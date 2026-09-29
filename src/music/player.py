@@ -6,7 +6,7 @@ import logging
 import discord
 from discord.ext import commands
 
-logger = logging.getLogger('discord_bot')
+logger = logging.getLogger(__name__)
 from .queue import MusicQueue
 from .ytdl import YTDLSource
 from .config import MusicConfig, MUSIC_RUNTIME_PATH, playlist_key

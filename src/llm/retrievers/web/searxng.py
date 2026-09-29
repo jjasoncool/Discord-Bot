@@ -14,7 +14,7 @@ from typing import Any
 
 import aiohttp
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)

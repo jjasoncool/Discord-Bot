@@ -23,7 +23,7 @@ from typing import Any, Iterable, Optional, Sequence
 from llm.persona_agent import tools
 from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 VALID_TYPES = {"add", "revise", "keep", "drop"}
 VALID_CONFIDENCE = {"low", "medium", "high"}

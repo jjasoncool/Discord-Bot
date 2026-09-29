@@ -390,7 +390,7 @@ class EstimateCalibrationTests(unittest.TestCase):
         直接驗係數本身，不去推測步數——步數受預算、search 保留額度、假資料長度
         多個門檻交互影響，斷言步數只會測到我自己的算術。
         """
-        with self.assertLogs("discord_bot", level="INFO") as logs:
+        with self.assertLogs(level="INFO") as logs:
             run(self._svc([1000, 3000]), ctx=self._ctx(200), token_budget=99999)
         calib = [m for m in logs.output if "估算校正" in m]
         self.assertTrue(calib, "校正分支必須真的被執行到")

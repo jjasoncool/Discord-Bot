@@ -65,7 +65,7 @@ from services.llm_service import LLMService
 from sys_settings.llm_settings import AmbientChatSettings
 from utils.utils import ChannelConfig
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 _SETTINGS = AmbientChatSettings()
 

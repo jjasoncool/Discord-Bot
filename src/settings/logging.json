@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "disable_existing_loggers": false,
+  "formatters": {
+    "default": {
+      "format": "[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
+      "datefmt": "%Y-%m-%d %H:%M:%S"
+    }
+  },
+  "handlers": {
+    "console": {
+      "class": "logging.StreamHandler",
+      "formatter": "default"
+    },
+    "main_file": {
+      "class": "logging.handlers.RotatingFileHandler",
+      "filename": "discord_bot.log",
+      "maxBytes": 20971520,
+      "backupCount": 50,
+      "encoding": "utf-8",
+      "formatter": "default"
+    },
+    "article_file": {
+      "class": "logging.handlers.RotatingFileHandler",
+      "filename": "article_monitor.log",
+      "maxBytes": 20971520,
+      "backupCount": 20,
+      "encoding": "utf-8",
+      "formatter": "default"
+    },
+    "anomaly_file": {
+      "class": "logging.handlers.RotatingFileHandler",
+      "filename": "llm_anomaly.log",
+      "maxBytes": 52428800,
+      "backupCount": 10,
+      "encoding": "utf-8",
+      "formatter": "default"
+    }
+  },
+  "loggers": {
+    "article_monitor": {"handlers": ["console", "article_file"], "propagate": false},
+    "llm_anomaly": {"handlers": ["anomaly_file"], "propagate": false},
+    "discord": {"level": "INFO"},
+    "discord.player": {"level": "WARNING"},
+    "httpx": {"level": "WARNING"},
+    "httpcore": {"level": "WARNING"},
+    "urllib3": {"level": "WARNING"},
+    "llama_index": {"level": "WARNING"},
+    "websockets": {"level": "WARNING"},
+    "aiosqlite": {"level": "WARNING"},
+    "asyncio": {"level": "WARNING"},
+    "PIL": {"level": "WARNING"}
+  },
+  "root": {
+    "level": "INFO",
+    "handlers": ["console", "main_file"]
+  }
+}

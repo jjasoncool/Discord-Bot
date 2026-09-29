@@ -61,8 +61,13 @@ class Rule:
         self.finder = finder
         self.canonical = canonical
         #: 合法的例外。scraper 是獨立容器（掛載 ./src/scraper → /app），
-        #: 根目錄看不到 sys_settings，只能自己保留一份。
+        #: 根目錄看不到 sys_settings，只能自己保留一份。以 `/` 結尾的是整個資料夾。
         self.allowed = allowed
+
+    def allows(self, rel: str) -> bool:
+        return rel in self.allowed or any(
+            a.endswith("/") and rel.startswith(a) for a in self.allowed
+        )
 
 
 @functools.cache
@@ -175,6 +180,27 @@ def _find_hardcoded_article_urls(path: Path) -> list[int]:
     return hits
 
 
+def _find_named_module_loggers(path: Path) -> list[int]:
+    """找 `getLogger("寫死的名稱")`；設定檔裡定義的類別 logger 除外。
+
+    模組 logger 一律 `getLogger(__name__)`：名稱＝模組路徑，`settings/logging.json` 才能依前綴
+    分類。寫死名稱會讓所有紀錄叫同一個名字，分不出來源，也沒辦法用設定檔拆分。
+    走 AST：`_code_lines` 會把字串內容遮掉，regex 看不到括號裡寫了什麼名稱。
+    """
+    from utils.logger_config import ARTICLE_MONITOR_LOGGER, LLM_ANOMALY_LOGGER
+    category_loggers = {ARTICLE_MONITOR_LOGGER, LLM_ANOMALY_LOGGER}
+    hits = []
+    for node in ast.walk(_parse(path)):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        func_name = getattr(node.func, "attr", getattr(node.func, "id", None))
+        arg = node.args[0]
+        if (func_name == "getLogger" and isinstance(arg, ast.Constant)
+                and isinstance(arg.value, str) and arg.value not in category_loggers):
+            hits.append(node.lineno)
+    return hits
+
+
 RULES = [
     Rule(
         name="全站時區",
@@ -214,6 +240,21 @@ RULES = [
         # ambient_reply 是多檔疊層（identity+guardrails+行為+examples）且有自己的
         # 組裝順序，硬套單檔載入器反而更繞——形狀不同就不該硬收斂。
         allowed={"llm/prompt_files.py", "llm/ambient_reply.py"},
+    ),
+    Rule(
+        name="模組 logger 一律用 __name__（分類與去向寫在 settings/logging.json）",
+        finder=_find_named_module_loggers,
+        canonical="logging.getLogger(__name__)",
+        # discord_bot.py 以 script 執行（__name__ 是 __main__），明確命名成 discord_bot；
+        # scraper／telegram_scraper 是獨立容器；scripts 是手動執行的 CLI 工具
+        allowed={"discord_bot.py", "scraper/", "telegram_scraper/", "scripts/"},
+    ),
+    Rule(
+        name="不用 print 記錄（只會出現在 docker logs，不會進 log 檔）",
+        pattern=r"(?<![\w.])print\(",
+        canonical="logging.getLogger(__name__)",
+        # 獨立容器與手動執行的 CLI 工具；telegram_scraper 改用 logger 後要從這裡拿掉
+        allowed={"scraper/", "telegram_scraper/", "scripts/"},
     ),
     Rule(
         name="官方公告原文網址",
@@ -274,7 +315,7 @@ class NoReinventedWheelsTests(unittest.TestCase):
             with self.subTest(rule=rule.name):
                 offenders = []
                 for rel, path in _source_files():
-                    if rel in rule.allowed:
+                    if rule.allows(rel):
                         continue
                     if rule.finder is not None:
                         offenders.extend(f"{rel}:{i}" for i in rule.finder(path))

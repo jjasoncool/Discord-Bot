@@ -41,7 +41,7 @@ from utils.panel_bump import PanelBumper
 from utils.utils import ChannelConfig, safe_send_interaction_message
 
 
-logger = logging.getLogger('discord_bot')
+logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════
 # 常數

@@ -24,7 +24,7 @@ from llm.member_profile_store import get_member_profile_store
 from settings.channel_registry import all_settings, get_setting, ChannelSetContext
 
 # 獲取 logger
-logger = logging.getLogger('discord_bot')
+logger = logging.getLogger(__name__)
 INTRO_PANEL_RUNTIME_FILE = "settings/intro_panel_runtime.json"
 # 面板按鈕 custom_id：persistent view 與置底翻找殘留面板共用
 INTRO_CUSTOM_ID_OPEN = "intro_open_modal"

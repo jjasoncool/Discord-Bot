@@ -7,7 +7,7 @@ import asyncio
 from .exceptions import YTDLError
 from .models import Song
 
-logger = logging.getLogger('discord_bot')
+logger = logging.getLogger(__name__)
 
 CACHE_DIR = os.path.join(os.path.dirname(__file__), 'cache')
 

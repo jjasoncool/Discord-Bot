@@ -17,7 +17,7 @@ from services.rollcall_service import (
     _now_utc8,
 )
 
-logger = logging.getLogger('discord_bot')
+logger = logging.getLogger(__name__)
 
 CONFIG_FILE = "config.json"
 

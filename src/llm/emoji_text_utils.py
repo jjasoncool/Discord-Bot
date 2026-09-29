@@ -18,7 +18,7 @@ import re
 import threading
 from pathlib import Path
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 _EMOJI_DICT_PATH = "/app/settings/emoji_dictionary.txt"
 

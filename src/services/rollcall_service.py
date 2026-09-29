@@ -16,7 +16,7 @@ import discord
 
 from utils.dm_notifier import send_dm
 
-logger = logging.getLogger('discord_bot')
+logger = logging.getLogger(__name__)
 
 RUNTIME_FILE = Path(__file__).parent.parent / "settings" / "rollcall_runtime.json"
 # 點名回覆期限（天）

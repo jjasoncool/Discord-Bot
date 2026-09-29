@@ -18,7 +18,7 @@ from llm.emoji_text_utils import (
 from sys_settings.llm_settings import LLMServiceSettings, load_llm_runtime_config
 from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 
 class PersonalityExtractionInProgressError(RuntimeError):

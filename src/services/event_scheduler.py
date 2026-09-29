@@ -26,7 +26,7 @@ from services.event_time_parser import (
     ParsedEvent, parse_events, event_fingerprint, normalize_title, SERVER_TZ,
 )
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 # external 活動固定地點（多遊戲後續再抽）
 LOCATION = "鳴潮"

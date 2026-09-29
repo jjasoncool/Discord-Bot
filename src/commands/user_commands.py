@@ -8,7 +8,7 @@ from discord.ext import commands
 from constants import ITEMS
 
 # 獲取 logger
-logger = logging.getLogger('discord_bot')
+logger = logging.getLogger(__name__)
 
 # 監控頻道的字典，格式: {guild_id: {channel_id: [{關鍵字列表, 使用者ID, 通知設定}]}}
 monitored_channels = {}

@@ -19,7 +19,7 @@ from typing import Awaitable, Callable, Iterable, Optional
 
 import discord
 
-logger = logging.getLogger('discord_bot')
+logger = logging.getLogger(__name__)
 
 SendPanel = Callable[[discord.abc.Messageable], Awaitable[discord.Message]]
 

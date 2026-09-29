@@ -22,7 +22,7 @@ from services.llm_service import LLMService
 from services.memory_service import get_memory_service
 from sys_settings.llm_settings import AmbientChatSettings
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 _SETTINGS = AmbientChatSettings()
 

@@ -15,7 +15,7 @@ from sys_settings.llm_settings import (
     load_llm_runtime_config,
 )
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 
 def _clamp_score(value: Any, default: float = 1.0) -> float:

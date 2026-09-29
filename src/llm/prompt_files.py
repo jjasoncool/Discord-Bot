@@ -18,7 +18,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 # path -> (mtime_ns, 內容)。多 thread 讀同一份 prompt 時避免重複讀檔。
 _cache: dict[str, tuple[int, Any]] = {}

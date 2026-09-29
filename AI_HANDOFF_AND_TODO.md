@@ -25,6 +25,7 @@
 > 4. 保留可追溯來源，避免之後重複討論同一件事
 
 最後盤點紀錄（只保留近期；過往詳見 `TODO-completed.md` 各歸檔 entry）：
+- 2026-09-29（log 統一改成 `__name__` ＋ 設定檔，**已實作・594 測試全過・未 commit・待重啟**）：原本只有 `discord_bot` 這個 logger 掛了輸出，其他名稱的 logger 紀錄**既不顯示也不進 log 檔**（實證：09-29 00:29 建身份組那筆不在 log）。改為：① 新增 `settings/logging.json`（dictConfig）：root 輸出到畫面＋`discord_bot.log`；類別 logger `article_monitor`／`llm_anomaly` 各寫自己的檔、不往 root 傳；httpx／httpcore／urllib3／llama_index 等壓到 WARNING；每行多印模組名稱 `[時間] [等級] [模組] 訊息`。② `utils/logger_config.py` 改成只讀設定檔（import 即套用、冪等；`LOG_LEVEL` 可覆寫 root 等級）。③ 60 個模組從 `getLogger('discord_bot')` 改 `getLogger(__name__)`；`discord_bot.py` 主程式以 script 執行，明確命名 `discord_bot`；`bot.run(..., log_handler=None)` 避免 discord.py 重複輸出。④ 測試模式：`test/__init__.py` 設 `APP_TEST_LOG_FILE`，所有檔案輸出（含 `llm.logger_factory` 的 prompt 除錯檔）改寫到 `/logs/test_run.log`，實測跑完正式 log 位元組數不變。⑤ 守衛：模組 logger 一律 `__name__`（AST 判斷，類別 logger 與 `discord_bot.py` 例外）、不准 `print`；Rule 的 allowed 支援資料夾。突變驗證都會紅。**要拆分類時**：在 json 加一個 handler＋一個以模組前綴為名的 logger（例：`services.telegram_relay_service`），重啟即可，不動程式碼。**下一批**：telegram-scraper 約 45 處 `print` 改 logger；該容器只掛 `./src/telegram_scraper`，要共用 `settings/logging.json` 得改 compose 掛載（需使用者重建容器）。
 - 2026-09-29（週期活動提醒：深塔海墟，**已實作・586 測試全過・已 commit・待部署驗證**）：深塔／海墟各 28 天、週一 04:00 重置、錯開 14 天；重置前一天 20:00 正常 @、重置當下靜音 @ 自助訂閱身份組「深塔海墟提醒」；綁「週期提醒頻道」時自動建身份組＋發面板，每次提醒後面板刪舊發新置底。詳見 [週期活動提醒區塊](#週期活動提醒深塔海墟2026-09-29-已實作待部署驗證)。
 - 2026-09-28（grill：Persona M7 後續／ComfyUI 產圖／Telegram LLM 過濾／深塔海墟提醒，**討論中・未動 code**）：新增 Telegram 過濾與週期提醒兩個草稿區塊並寫入查證事實；ComfyUI 區塊開頭補過時狀態修正（步驟 2 已完成、鎖有漏洞）；過時項目歸檔到 `TODO-completed.md`（Persona 影子模式規劃、Telegram 媒體防雷、ComfyUI 步驟 2 與 `keep_alive` 註解、插話 Phase B 三項、Ollama 時代觀察項），Persona 區塊改成 M7 現況。
 - 2026-09-28（Telegram 相簿漏圖，**scraper＋relay 兩端已實作・545 測試全過・已 commit・已部署；今天缺的 87 張已於 15:58~16:07 補發完成**）：使用者回報 GameData #3223 相簿 8 張只發 1 張。**觸發點＝8/02 補掃 commit `fbd2d3c` 加的全域 `process_lock`**：本意是防「同一則」被三條路徑並行處理，卻把 Telethon 本來並行派發的相簿各張變成逐張排隊（組員寫入間隔 p90 0.03s → 2s），relay 0.5 秒到齊判斷等不到整組就先發、晚到的被丟棄。8/02 起 191 組相簿 77 組缺圖、共 237 張。**改法**：全域鎖 → 單則訊息鎖 `(chat_id, message_id)`（新 [message_lock.py](src/telegram_scraper/message_lock.py)）。**relay 端同輪修掉**（使用者拍板）：改成「哪個組員先到就收整組、等媒體到齊＋3 秒安靜才發、晚到的以（補圖）再發、補圖時效 12 小時」。**補今天缺圖**：先校正 delivery_state（補記實送沒標、撤記標了沒送）再重啟，由 reconcile 走正式路徑補發；唯讀預演＝23 則、87 張。詳見 [補掃區塊 2026-09-28 追加段](#telegram-漏收事件自動補掃2026-08-02-已實作2026-08-18-補上中段缺口盲區2026-09-28-全域鎖改單則訊息鎖修相簿漏圖待部署驗證)。
@@ -191,6 +192,7 @@ affects: 全專案
 | 清理聊天文字（表情轉語意／去 URL／mention） | `personality_extractor._clean_text_for_extraction()` | 自己 regex |
 | 描述品質規則（嚴禁廢話那套） | `persona_description_rules.txt`，兩邊各自讀同一個檔 | 在新 prompt 裡重抄一份 |
 | 人格素描的角色設定／繁中／表情規則 | 疊在 `personality_extraction_prompt.json` 的 `system_prompt` 之上 | 重寫一份 system prompt |
+| 寫 log | `logger = logging.getLogger(__name__)`；去向／等級／分類全寫在 `settings/logging.json`（dictConfig）；類別 logger 用 `get_article_monitor_logger()`／`get_llm_anomaly_logger()`；測試模式自動改寫到 `/logs/test_run.log` | `getLogger("寫死名稱")`、`print`（守衛會擋）、自己加 handler |
 | 面板置底（刪舊面板、發新面板、記住位置） | `utils.panel_bump.PanelBumper`（`bump` / `bump_safe` / 有人講話就置底用 `request_bump`） | 自己寫 `_load_*_runtime` + `fetch_message().delete()` + `send` + 鎖 |
 
 **合法的例外（形狀不同，硬收斂反而更糟，已寫進守衛的 allowlist）**
@@ -759,7 +761,7 @@ affects: auto_personality、插話／askai 人物卡、discord_bot 04:00 排程
 **刻意不做**：revise 沿用舊證據（會灌高對話次數）；keep「今晚附的證據一律保留」（會擠掉最新名額）。
 
 **坑**
-- log 會混入啟動測試的假紀錄（author=1/2、mode=on），別用 log 判斷寫入；⑤ 的 log 只印前 200 字。
+- ~~log 會混入啟動測試的假紀錄~~（2026-09-29 已修：測試一律改寫到 `/logs/test_run.log`；**09-29 以前**的 `discord_bot.log` 仍混有假紀錄，例如 author=1/2、mode=on、`(901)`、`chat_id=-1009990000001`）；⑤ 的 log 只印前 200 字。
 - 04:00～約 07:30 不要重啟。
 - 突變測試複製到容器 `/tmp`，只複製需要的目錄（`/app/telegram_scraper` 有 30 GB）。
 - `docker logs` 從容器建立起累積，查近期要加 `--since`。

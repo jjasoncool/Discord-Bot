@@ -25,7 +25,7 @@ from typing import Any
 
 import httpx
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 # 跨 LlmHttpClient instance 共用：(host, model, options_json) → True
 # Lemonade 的「已載入此 model + 此 options」狀態是 server 端全域屬性，

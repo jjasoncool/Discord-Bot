@@ -21,7 +21,7 @@ from typing import Optional
 
 from llm.member_profile_store import get_member_profile_store
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 
 class MemoryService:

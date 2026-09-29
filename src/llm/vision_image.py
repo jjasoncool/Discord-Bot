@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from io import BytesIO
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 # 送得進 vision 的副檔名——**全專案唯一一份**。ambient 插話、/askai、chat_history 的
 # `(圖)` 標記都讀這裡：三邊各留一份的話，哪天加格式就會有人漏改，變成「標了看得到、

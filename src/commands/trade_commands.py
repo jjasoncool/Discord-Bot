@@ -9,7 +9,7 @@ from constants import ITEMS
 from utils.utils import safe_send_interaction_message
 
 # 獲取 logger
-logger = logging.getLogger('discord_bot')
+logger = logging.getLogger(__name__)
 
 
 class SelectItemFinalConfirmView(discord.ui.View):

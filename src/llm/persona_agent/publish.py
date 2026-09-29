@@ -47,7 +47,7 @@ from typing import Any, Iterable, Literal, Mapping, Optional
 from llm.persona_agent import tools as agent_tools
 from sys_settings.time_settings import APP_TZ
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 #: 至少跨幾次對話才有資格被挑。1→2 是「一次當習慣」與「重複出現」的分界。
 MIN_EPISODES = 2

@@ -10,7 +10,7 @@ from typing import Optional
 
 import discord
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 # 模組級快取：sticker_id → "名稱｜描述"
 _sticker_cache: dict[int, str] = {}

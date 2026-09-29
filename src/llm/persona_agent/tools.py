@@ -29,7 +29,7 @@ from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
 from sys_settings.time_settings import APP_TZ
 
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 # ── 程式碼端硬上限（handoff 第 4 節）──────────────────────────────────────
 MAX_DAYS = 90

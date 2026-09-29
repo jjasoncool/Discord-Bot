@@ -7,7 +7,7 @@ DM 通知共用模組：封裝向指定使用者發送私訊的共通邏輯。
 import logging
 import discord
 
-logger = logging.getLogger('discord_bot')
+logger = logging.getLogger(__name__)
 
 
 async def resolve_user(bot, user_id: int, *, guild: discord.Guild = None):

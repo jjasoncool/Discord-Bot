@@ -29,7 +29,7 @@ from sys_settings.time_settings import APP_TZ
 from utils.dm_notifier import send_dm
 from utils.utils import safe_send_interaction_message, check_guild
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 ASKAI_SETTINGS = AskAICommandSettings()
 WEB_SETTINGS = AskAIWebSettings()

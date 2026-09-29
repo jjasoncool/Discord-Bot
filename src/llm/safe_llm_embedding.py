@@ -26,7 +26,7 @@ from llm.llm_http_client import LlmHttpClient
 
 from sys_settings.llm_settings import LLMRuntimeConfig, LLMServiceSettings
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 # 繞過順序：先試尾空格（多數狀況能救），再試前空格
 _PERTURBATION_SUFFIXES: tuple[str, ...] = (" ",)

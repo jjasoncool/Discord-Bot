@@ -9,13 +9,13 @@ import discord
 from datetime import datetime
 from typing import List, Dict, Optional
 from bs4 import BeautifulSoup
-from utils.logger_config import get_discord_bot_logger, get_article_monitor_logger
+from utils.logger_config import get_article_monitor_logger
 from utils.discord_content import post_to_channel
 
 from .base_monitor import BaseContentMonitor
 
 # 設置日誌器（使用統一配置）
-logger = get_discord_bot_logger()
+logger = logging.getLogger(__name__)
 article_logger = get_article_monitor_logger()
 
 # 官方公告原文網址（**唯一來源**：轉發 embed 與自動建活動的描述都用這個，勿再各寫一份）

@@ -24,7 +24,7 @@ import threading
 from pathlib import Path
 from typing import Literal
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 Category = Literal["agree", "laugh", "think", "negative", "neutral"]
 

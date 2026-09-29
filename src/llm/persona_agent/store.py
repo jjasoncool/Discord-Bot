@@ -21,7 +21,7 @@ from typing import Any, Optional
 
 from sys_settings.llm_settings import LLMServiceSettings
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 VERSIONS_TABLE = "persona_agent_versions"
 RUNS_TABLE = "persona_agent_runs"

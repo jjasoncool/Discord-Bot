@@ -1,148 +1,71 @@
+"""統一的日誌配置：所有 log 的去向都寫在 `settings/logging.json`（Python 標準 dictConfig 格式）。
+
+- 一般模組一律 `logger = logging.getLogger(__name__)`：名稱就是模組路徑（例：`llm.ambient_reply`），
+  設定檔可以依前綴分類——要把某一類拆到獨立檔、調等級、靜音，改 json 重啟即可，不動程式碼。
+- 刻意獨立的「類別」logger（`article_monitor`、`llm_anomaly`）也定義在設定檔裡。
+- 測試模式（`test/__init__.py` 設 `APP_TEST_LOG_FILE`）：所有檔案 handler 改寫到同一個測試 log，
+  不把假紀錄混進正式 log。
+- import 本模組就會套用設定（重複呼叫不會重複加 handler），任何入口都不會漏掉。
 """
-統一的日誌配置模組
-提供集中化的日誌器配置和管理
-"""
-import os
+import copy
+import json
 import logging
-from logging.handlers import RotatingFileHandler
+import logging.config
+import os
+from pathlib import Path
+
 from dotenv import load_dotenv
 
-# 載入環境變數
 load_dotenv()
-LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
 
-# 全域日誌配置
-LOG_DIR = '/logs'
-DEFAULT_MAX_BYTES = 20 * 1024 * 1024  # 20MB
-DEFAULT_BACKUP_COUNT = 20
+LOG_DIR = "/logs"
+CONFIG_PATH = Path(__file__).resolve().parent.parent / "settings" / "logging.json"
 
-# 解析日誌級別
-def get_log_level():
-    """取得日誌級別"""
-    return getattr(logging, LOG_LEVEL, logging.INFO)
+#: 測試執行時（由 `test/__init__.py` 設定）所有 log 檔改寫到這一個檔，不把假紀錄混進正式 log
+TEST_LOG_ENV = "APP_TEST_LOG_FILE"
 
-def create_console_handler(log_level=None):
-    """創建控制台處理器"""
-    if log_level is None:
-        log_level = get_log_level()
+#: 刻意獨立的類別 logger（去向定義在 settings/logging.json）
+ARTICLE_MONITOR_LOGGER = "article_monitor"
+LLM_ANOMALY_LOGGER = "llm_anomaly"
 
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(log_level)
-    console_format = logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s', '%Y-%m-%d %H:%M:%S')
-    console_handler.setFormatter(console_format)
-    return console_handler
+_configured = False
 
-def create_file_handler(filename, log_level=None, max_bytes=None, backup_count=None):
-    """創建文件處理器"""
-    if log_level is None:
-        log_level = get_log_level()
-    if max_bytes is None:
-        max_bytes = DEFAULT_MAX_BYTES
-    if backup_count is None:
-        backup_count = DEFAULT_BACKUP_COUNT
 
-    filepath = os.path.join(LOG_DIR, filename)
-    file_handler = RotatingFileHandler(
-        filepath,
-        maxBytes=max_bytes,
-        backupCount=backup_count,
-        encoding='utf-8'
-    )
-    file_handler.setLevel(log_level)
-    file_format = logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s', '%Y-%m-%d %H:%M:%S')
-    file_handler.setFormatter(file_format)
-    return file_handler
+def redirected_log_name():
+    """測試模式下要改寫到的檔名；正式執行回 None。"""
+    return os.getenv(TEST_LOG_ENV) or None
 
-def setup_logger(name, filename, include_console=True, log_level=None, max_bytes=None, backup_count=None):
-    """
-    設定日誌器
 
-    Args:
-        name: 日誌器名稱
-        filename: 日誌檔案名稱
-        include_console: 是否包含控制台輸出
-        log_level: 日誌級別
-        max_bytes: 檔案最大大小
-        backup_count: 備份檔案數量
+def build_config(raw: dict, *, log_dir: str = LOG_DIR, test_log_name=None, level=None) -> dict:
+    """把設定檔內容轉成可直接交給 dictConfig 的 dict（不碰全域狀態，方便測試）。"""
+    config = copy.deepcopy(raw)
+    for handler in config.get("handlers", {}).values():
+        if "filename" in handler:
+            handler["filename"] = os.path.join(log_dir, test_log_name or handler["filename"])
+    if level:
+        config.setdefault("root", {})["level"] = level
+    return config
 
-    Returns:
-        配置好的日誌器實例
-    """
-    logger = logging.getLogger(name)
 
-    # 如果已經有處理器，跳過設定
-    if logger.handlers:
-        return logger
+def configure_logging(force: bool = False) -> None:
+    """套用 settings/logging.json；環境變數 LOG_LEVEL 可覆寫 root 等級。"""
+    global _configured
+    if _configured and not force:
+        return
+    raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    level = os.getenv("LOG_LEVEL", "").upper() or None
+    logging.config.dictConfig(build_config(raw, test_log_name=redirected_log_name(), level=level))
+    _configured = True
 
-    if log_level is None:
-        log_level = get_log_level()
 
-    logger.setLevel(log_level)
+def get_article_monitor_logger() -> logging.Logger:
+    """文章／爬蟲監控類別 logger（獨立寫 article_monitor.log，也輸出到畫面）。"""
+    return logging.getLogger(ARTICLE_MONITOR_LOGGER)
 
-    # 添加文件處理器
-    file_handler = create_file_handler(filename, log_level, max_bytes, backup_count)
-    logger.addHandler(file_handler)
 
-    # 添加控制台處理器（可選）
-    if include_console:
-        console_handler = create_console_handler(log_level)
-        logger.addHandler(console_handler)
+def get_llm_anomaly_logger() -> logging.Logger:
+    """LLM 異常回應的完整 raw dump（獨立寫 llm_anomaly.log，不輸出到畫面、不混進主 log）。"""
+    return logging.getLogger(LLM_ANOMALY_LOGGER)
 
-    return logger
 
-# 預定義的日誌器實例
-def get_discord_bot_logger():
-    """取得 Discord Bot 主日誌器"""
-    return setup_logger(
-        'discord_bot',
-        'discord_bot.log',
-        include_console=True,
-        max_bytes=20*1024*1024,  # 20MB
-        backup_count=50
-    )
-
-def get_article_monitor_logger():
-    """取得文章監控日誌器"""
-    return setup_logger(
-        'article_monitor',
-        'article_monitor.log',
-        include_console=True,
-        max_bytes=20*1024*1024,  # 20MB
-        backup_count=20
-    )
-
-def get_scraper_logger():
-    """取得爬蟲日誌器"""
-    return setup_logger(
-        'scraper',
-        'scraper.log',
-        include_console=True
-    )
-
-def get_api_logger():
-    """取得 API 日誌器"""
-    return setup_logger(
-        'api',
-        'api.log',
-        include_console=True
-    )
-
-def get_llm_anomaly_logger():
-    """Ollama 空 content / 異常回應的完整 raw dump 專用日誌。
-
-    用於診斷 thinking 全填、content 為空等 Ollama 回應異常。
-    寫入完整 JSON raw response（含 done_reason / eval_count / 完整 thinking），
-    不輸出到 console，避免污染主 log。
-    """
-    return setup_logger(
-        'llm_anomaly',
-        'llm_anomaly.log',
-        include_console=False,
-        max_bytes=50*1024*1024,  # 50MB（單筆可達數 KB）
-        backup_count=10,
-    )
-
-# 初始化主要日誌器
-discord_bot_logger = get_discord_bot_logger()
-article_monitor_logger = get_article_monitor_logger()
-llm_anomaly_logger = get_llm_anomaly_logger()
+configure_logging()

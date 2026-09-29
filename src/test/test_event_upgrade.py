@@ -549,7 +549,7 @@ class TransientFailureTests(SchedulerCaseBase):
         await self.run_post(POST_WITH_BODY, source="article", source_id="5340")
         self.guild.events.clear()          # 逼 _fetch_event 走 API
         self.guild.flaky_fetch = True      # API 回 503（不是 404）
-        with self.assertLogs("discord_bot", level="WARNING") as caught:
+        with self.assertLogs(level="WARNING") as caught:
             await self.run_post(POST_LONG_BODY, source="fb", source_id="807", image=b"cover")
         joined = "\n".join(caught.output)
         self.assertNotIn("已不存在", joined, "暫時性失敗不可宣稱活動被刪除")
@@ -562,7 +562,7 @@ class FailureIsolationTests(SchedulerCaseBase):
 
     async def test_record_failure_keeps_created_event_and_logs_error(self):
         self.db.record_fails = True
-        with self.assertLogs("discord_bot", level="ERROR") as caught:
+        with self.assertLogs(level="ERROR") as caught:
             await self.run_post(POST_WITH_BODY)
         self.assertEqual(len(self.guild.created), 1)
         joined = "\n".join(caught.output)
@@ -605,7 +605,7 @@ class FingerprintMigrationTests(unittest.IsolatedAsyncioTestCase):
         self._add("活動預告<群聲共振模擬域>戰鬥活動即將開啟|202608221000|202609291159",
                   "活動預告 | <群聲共振模擬域> 戰鬥活動即將開啟！",
                   "2026-08-22 10:00", "2026-09-29 11:59", 222)
-        with self.assertLogs("discord_bot", level="ERROR") as caught:
+        with self.assertLogs(level="ERROR") as caught:
             await ES._migrate_fingerprints_once(self.db)
         self.assertEqual(len(self.db.rows), 2, "碰撞時不可默默砍掉任何一列")
         self.assertIn("指紋遷移發現重複活動", "\n".join(caught.output))

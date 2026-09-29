@@ -33,7 +33,7 @@ from psycopg2.pool import ThreadedConnectionPool
 from llm.sticker_cache import get_sticker_text
 from sys_settings.llm_settings import LLMServiceSettings
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 # ========== 設定 ==========
 

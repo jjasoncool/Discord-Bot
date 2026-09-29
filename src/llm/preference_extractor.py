@@ -23,7 +23,7 @@ from llm.member_profile_store import get_member_profile_store
 from services.llm_service import LLMService
 from sys_settings.llm_settings import AmbientChatSettings
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 _SETTINGS = AmbientChatSettings()
 _LLM_SERVICE: Optional[LLMService] = None

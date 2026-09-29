@@ -6,7 +6,7 @@ from .models import Song
 from .ytdl import YTDLSource
 from utils.dm_notifier import notify_song_liked
 
-logger = logging.getLogger('discord_bot')
+logger = logging.getLogger(__name__)
 
 MUSIC_RUNTIME_PATH = "settings/music_runtime.json"
 

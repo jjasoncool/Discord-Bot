@@ -30,7 +30,7 @@ from sys_settings.llm_settings import (
     load_llm_runtime_config,
 )
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 anomaly_logger = logging.getLogger("llm_anomaly")
 
 LLM_SERVICE_SETTINGS = LLMServiceSettings()

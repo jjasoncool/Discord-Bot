@@ -13,7 +13,7 @@ from typing import List, Dict, Optional
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 
-from utils.logger_config import get_discord_bot_logger, get_article_monitor_logger
+from utils.logger_config import get_article_monitor_logger
 from utils.discord_content import (
     sanitize_forum_thread_title,
     get_forum_tags,
@@ -21,7 +21,7 @@ from utils.discord_content import (
 )
 from .base_monitor import BaseContentMonitor
 
-logger = get_discord_bot_logger()
+logger = logging.getLogger(__name__)
 article_logger = get_article_monitor_logger()
 
 

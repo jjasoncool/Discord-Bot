@@ -12,11 +12,10 @@ from datetime import datetime
 from typing import List, Dict, Optional
 from urllib.parse import urlparse, urlunparse
 
-from utils.logger_config import get_discord_bot_logger
 from utils.discord_content import post_to_channel
 from .base_monitor import BaseContentMonitor
 
-logger = get_discord_bot_logger()
+logger = logging.getLogger(__name__)
 
 
 class FBMonitor(BaseContentMonitor):

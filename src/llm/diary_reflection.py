@@ -27,7 +27,7 @@ from sys_settings.llm_settings import DiaryReflectionSettings
 from sys_settings.time_settings import APP_TZ
 from utils.utils import ChannelConfig
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 _SETTINGS = DiaryReflectionSettings()
 

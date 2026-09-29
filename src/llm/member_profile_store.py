@@ -31,7 +31,7 @@ except Exception:  # pragma: no cover - 依賴可能在部份環境尚未安裝
     PGVectorStore = None
 
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable

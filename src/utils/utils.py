@@ -5,7 +5,7 @@ import asyncio
 import discord
 
 # 獲取 logger
-logger = logging.getLogger('discord_bot')
+logger = logging.getLogger(__name__)
 
 
 async def safe_send_interaction_message(

@@ -27,7 +27,7 @@ import asyncpg
 import discord
 from telegram_scraper.tg_config import normalize_channel_identifier
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 # 觸發 scraper 端 on-demand 重抓的 pg NOTIFY channel（須與 telegram_scraper/runner.py 一致）
 EMOJI_REFETCH_CHANNEL = "telegram_emoji_refetch"

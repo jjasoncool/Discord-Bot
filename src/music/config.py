@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional, Callable, Awaitable
 
-logger = logging.getLogger('discord_bot')
+logger = logging.getLogger(__name__)
 
 # 頻道設定來源（與其他頻道設定一致）
 CONFIG_JSON_PATH = "config.json"

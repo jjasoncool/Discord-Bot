@@ -17,9 +17,8 @@ import discord
 
 from services.base_monitor import BaseContentMonitor
 from utils.discord_content import post_to_channel
-from utils.logger_config import get_discord_bot_logger
 
-logger = get_discord_bot_logger()
+logger = logging.getLogger(__name__)
 
 # state 的 content_type（主題層）
 _CONTENT_TYPE = "it_article"

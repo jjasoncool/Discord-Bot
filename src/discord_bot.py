@@ -9,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 from sys_settings.llm_settings import LLMServiceSettings, load_llm_runtime_config
-from utils.logger_config import get_discord_bot_logger
+from utils.logger_config import configure_logging  # import 即套用 settings/logging.json
 from utils.utils import safe_send_interaction_message
 from services.telegram_relay_service import (
     DiscordMessagePublisher,
@@ -25,7 +25,9 @@ load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 
 # 設置日誌系統（使用統一配置）
-logger = get_discord_bot_logger()
+configure_logging()
+# 主程式以 `python discord_bot.py` 執行，__name__ 會是 __main__，所以這裡明確命名
+logger = logging.getLogger("discord_bot")
 LLM_SETTINGS = LLMServiceSettings()
 
 # 記錄環境變數和系統信息（安全方式）
@@ -846,14 +848,14 @@ def main():
             if new_token and new_token != 'your_discord_token_here':
                 logger.info("檢測到新的令牌，嘗試啟動機器人...")
                 try:
-                    bot.run(new_token)
+                    bot.run(new_token, log_handler=None)
                     break  # 如果成功啟動，跳出循環
                 except Exception as e:
                     logger.error(f"啟動失敗: {str(e)}")
     else:
         try:
             logger.info("嘗試啟動 Discord 機器人...")
-            bot.run(TOKEN)
+            bot.run(TOKEN, log_handler=None)
         except discord.errors.LoginFailure as e:
             logger.error(f"登錄失敗: {str(e)}")
             logger.error("請確保您提供了正確的 Discord 令牌")

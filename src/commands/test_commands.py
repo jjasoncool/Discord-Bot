@@ -8,7 +8,7 @@ from discord.ext import commands
 from utils.utils import safe_send_interaction_message
 
 # 獲取 logger
-logger = logging.getLogger('discord_bot')
+logger = logging.getLogger(__name__)
 
 
 class TestSessionRecoveryView(discord.ui.View):

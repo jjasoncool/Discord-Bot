@@ -12,7 +12,7 @@ from urllib.parse import quote_plus
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 
 class LLMServiceSettings(BaseSettings):

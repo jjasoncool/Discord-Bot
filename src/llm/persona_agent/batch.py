@@ -29,7 +29,7 @@ from sys_settings.llm_settings import LLMServiceSettings, PersonaAgentSettings
 from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
 from sys_settings.time_settings import APP_TZ
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 
 def select_targets(

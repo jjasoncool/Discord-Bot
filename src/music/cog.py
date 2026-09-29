@@ -6,7 +6,7 @@ from .config import RuntimeMusicConfig, MusicConfig
 from .player import MusicPlayer
 from .announcer import Announcer, MusicControlView
 
-logger = logging.getLogger('discord_bot')
+logger = logging.getLogger(__name__)
 
 # 點歌者離開音樂頻道後，砍歌前的寬限秒數（避免短暫閃斷/重連誤砍）
 LEAVE_GRACE_SECONDS = 5

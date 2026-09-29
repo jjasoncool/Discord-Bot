@@ -31,7 +31,7 @@ from llm.persona_agent import tools as agent_tools
 from llm.persona_agent.schema import build_response_format
 from sys_settings.llm_settings import AmbientChatSettings
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 MAX_STEPS = 8
 

@@ -16,7 +16,7 @@ from llm.emoji_text_utils import replace_custom_emoji_with_description
 from llm.lemonade_gate import stream_exclusive
 from llm.sticker_cache import get_sticker_text
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 # Buffer 設定
 FLUSH_THRESHOLD = 30

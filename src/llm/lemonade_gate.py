@@ -49,7 +49,7 @@ import logging
 import time
 
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 _GPU_LOCK = asyncio.Lock()
 

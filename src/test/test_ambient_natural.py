@@ -209,7 +209,7 @@ class AnchorCollisionTests(unittest.TestCase):
     def test_collision_warns(self):
         msgs = [_msg("a", author_id=111111111111116490),
                 _msg("b", author_id=999999999999996490)]
-        with self.assertLogs("discord_bot", level="WARNING") as cm:
+        with self.assertLogs(level="WARNING") as cm:
             chat_line._check_anchor_collision(msgs)
         self.assertIn("6490", "".join(cm.output))
 
@@ -222,7 +222,7 @@ class AnchorCollisionTests(unittest.TestCase):
     def test_warns_only_once_per_pair(self):
         msgs = [_msg("a", author_id=111111111111116490),
                 _msg("b", author_id=999999999999996490)]
-        with self.assertLogs("discord_bot", level="WARNING"):
+        with self.assertLogs(level="WARNING"):
             chat_line._check_anchor_collision(msgs)
         self.assertEqual(1, len(chat_line._WARNED_ANCHOR_COLLISIONS))
         chat_line._check_anchor_collision(msgs)   # 第二次不再洗 log

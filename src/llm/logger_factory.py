@@ -7,6 +7,8 @@ from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from pathlib import Path
 from typing import Literal
 
+from utils.logger_config import redirected_log_name
+
 def get_or_create_file_logger(
     *,
     name: str,
@@ -19,6 +21,10 @@ def get_or_create_file_logger(
     interval: int = 1,
 ) -> logging.Logger:
     """依 rotation 模式建立/回傳 file logger（避免重複 handler）。"""
+    override = redirected_log_name()
+    if override:
+        # 測試模式：prompt 除錯檔也改寫到測試 log，不動正式的除錯檔
+        log_path = log_path.with_name(override)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     logger = logging.getLogger(name)

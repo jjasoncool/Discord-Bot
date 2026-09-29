@@ -24,7 +24,7 @@ from llm.vision_image import is_vision_image
 if TYPE_CHECKING:  # 僅型別註解用；runtime 不依賴 discord（保持 leaf 輕量）
     import discord
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 # Discord 原始 mention：<@123>、<@!123>（舊版帶暱稱的寫法）
 _MENTION_RE = re.compile(r"<@!?(\d+)>")

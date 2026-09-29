@@ -32,7 +32,7 @@ from typing import Optional
 
 from sys_settings.llm_settings import AmbientChatSettings
 
-logger = logging.getLogger("discord_bot")
+logger = logging.getLogger(__name__)
 
 _SETTINGS = AmbientChatSettings()
 
