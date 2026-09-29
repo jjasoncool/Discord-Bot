@@ -1,4 +1,4 @@
-"""週期活動提醒（深塔／海墟）：排程發提醒、面板置底、自助訂閱身份組。
+"""週期活動提醒（深塔／海墟／終焉矩陣）：排程發提醒、面板置底、自助訂閱身份組。
 
 - 提醒頻道由 /server_manager 綁定（channel_registry「週期提醒頻道」），綁定當下自動
   建立身份組並發出訂閱面板；未綁定時整個功能靜默。
@@ -6,6 +6,8 @@
   「刪舊發新」頂到最下面；提醒本身不附按鈕。
 - 何時該發、文案怎麼寫在 `services/periodic_reminder.py`；已發過的記在 StateDB
   `sent_content`（source=periodic_reminder），重啟或補發都不會重複。
+- 矩陣的時刻跟著版本走：每輪排程都重讀官方公告（`VersionDateResolver.update_starts()`），
+  版本延期或提前公告一出來，提醒與面板日期就跟著變；面板內容一有變化就自動重發。
 """
 from __future__ import annotations
 
@@ -18,9 +20,11 @@ import discord
 from discord.ext import commands
 
 from services.base_monitor import get_shared_state_db
+from services.event_scheduler import VersionDateResolver
 from services.event_time_parser import SERVER_TZ
 from services.periodic_reminder import (
     SENT_SOURCE,
+    KIND_ENDING,
     Reminder,
     build_panel_description,
     build_panel_title,
@@ -29,7 +33,7 @@ from services.periodic_reminder import (
     format_moment,
     upcoming_reminders,
 )
-from sys_settings.periodic_reminder_settings import PeriodicReminderSettings
+from sys_settings.periodic_reminder_settings import PeriodicReminderSettings, VersionStageItem
 from utils.panel_bump import PanelBumper, load_runtime, update_runtime
 from utils.utils import ChannelConfig
 
@@ -68,6 +72,8 @@ class PeriodicReminderCommands(commands.Cog):
         self.settings = settings or PeriodicReminderSettings()
         self._role_lock = asyncio.Lock()
         self._task: Optional[asyncio.Task] = None
+        #: 已知的版本更新維護開始時刻（每輪排程從官方公告重讀）
+        self._update_starts: list[datetime] = []
         self.panel = PanelBumper(self.settings.runtime_path, self._send_panel,
                                  custom_ids=(CUSTOM_ID_SUBSCRIBE, CUSTOM_ID_UNSUBSCRIBE))
 
@@ -83,14 +89,27 @@ class PeriodicReminderCommands(commands.Cog):
 
     # ── 排程 ──
 
+    async def _refresh_update_starts(self) -> None:
+        if self.settings.version_stages:
+            # 讀 articles.db 是同步的全文比對，丟到執行緒，不卡 event loop
+            self._update_starts = await asyncio.to_thread(VersionDateResolver().update_starts)
+
     async def _schedule_loop(self):
         await self.bot.wait_until_ready()
+        await self._refresh_update_starts()
         self._log_upcoming(datetime.now(SERVER_TZ))
+        channel = self.reminder_channel()
+        if channel is not None:
+            await self.ensure_role(channel.guild)  # 啟動時把身份組名稱同步成設定值
         while True:
             try:
+                await self._refresh_update_starts()
                 now = datetime.now(SERVER_TZ)
                 await self.run_due(now)
-                upcoming = upcoming_reminders(datetime.now(SERVER_TZ), self.settings)
+                channel = self.reminder_channel()
+                if channel is not None:
+                    await self.refresh_panel_if_changed(channel)
+                upcoming = upcoming_reminders(datetime.now(SERVER_TZ), self.settings, self._update_starts)
                 delay = _MAX_SLEEP_SECONDS
                 if upcoming:
                     # +1 秒：避免醒得稍早、還沒到 send_at 又空轉一輪
@@ -103,9 +122,12 @@ class PeriodicReminderCommands(commands.Cog):
                 await asyncio.sleep(300)
 
     def _log_upcoming(self, now: datetime) -> None:
-        labels = {"ending": "結束前提醒", "reset": "重置提醒"}
-        parts = [f"{r.cycle.emoji}{r.cycle.name}{labels[r.kind]} {format_moment(r.send_at)}"
-                 for r in upcoming_reminders(now, self.settings)[:4]]
+        def label(r: Reminder) -> str:
+            if isinstance(r.item, VersionStageItem):
+                return "本階段結束前提醒" if r.kind == KIND_ENDING else "新階段開放提醒"
+            return "結束前提醒" if r.kind == KIND_ENDING else "重置提醒"
+        parts = [f"{r.item.emoji}{r.item.name}{label(r)} {format_moment(r.send_at)}"
+                 for r in upcoming_reminders(now, self.settings, self._update_starts)[:5]]
         logger.info("週期提醒：接下來 → %s", "；".join(parts) or "（無）")
 
     def _configured_channel_id(self) -> Optional[int]:
@@ -127,7 +149,7 @@ class PeriodicReminderCommands(commands.Cog):
 
     async def run_due(self, now: datetime) -> int:
         """發出現在該發、還沒發過的提醒；有發就把面板置底。回傳發了幾則。"""
-        due = due_reminders(now, self.settings)
+        due = due_reminders(now, self.settings, self._update_starts)
         if not due:
             return 0
         channel = self.reminder_channel()
@@ -179,17 +201,36 @@ class PeriodicReminderCommands(commands.Cog):
                     reason="週期活動提醒：自助訂閱用身份組",
                 )
                 logger.info("已建立週期提醒身份組 %s (%s)", role.name, role.id)
+            if role.name != self.settings.role_name:
+                # 名稱以設定為準（改名只要改設定）；在 Discord 手動改的名字會在這裡被改回來
+                try:
+                    old_name = role.name
+                    await role.edit(name=self.settings.role_name, reason="週期活動提醒：依設定同步名稱")
+                    logger.info("週期提醒身份組改名：%s → %s", old_name, self.settings.role_name)
+                except discord.HTTPException as e:
+                    logger.warning("週期提醒身份組改名失敗: %s", e)
             if role.id != role_id:
                 update_runtime(path, role_id=role.id)
             return role
 
+    def _panel_content(self) -> tuple[str, str]:
+        title = build_panel_title(self.settings)
+        return title, build_panel_description(datetime.now(SERVER_TZ), self.settings, self._update_starts)
+
     async def _send_panel(self, channel: discord.TextChannel) -> discord.Message:
-        embed = discord.Embed(
-            title=build_panel_title(self.settings),
-            description=build_panel_description(datetime.now(SERVER_TZ), self.settings),
-            color=discord.Color.gold(),
-        )
-        return await channel.send(embed=embed, view=ReminderPanelView(self))
+        title, description = self._panel_content()
+        embed = discord.Embed(title=title, description=description, color=discord.Color.gold())
+        message = await channel.send(embed=embed, view=ReminderPanelView(self))
+        # 記住面板目前顯示的內容：日期因新公告或重置而改變、或改了名稱時，排程才知道要重發
+        update_runtime(self.settings.runtime_path, panel_content="\n".join((title, description)))
+        return message
+
+    async def refresh_panel_if_changed(self, channel: discord.TextChannel) -> bool:
+        """面板該顯示的內容跟上次發出的不同就重發；回傳有沒有重發。"""
+        shown = load_runtime(self.settings.runtime_path).get("panel_content")
+        if shown == "\n".join(self._panel_content()):
+            return False
+        return await self.panel.bump_safe(channel) is not None
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):

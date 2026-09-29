@@ -1,4 +1,4 @@
-"""週期活動提醒（深塔／海墟）的設定。
+"""週期活動提醒（深塔／海墟／終焉矩陣）的設定。
 
 **起算日為什麼寫在程式裡**：官方從未公告這兩個週期，錨點是從聊天紀錄與管理員手記推出來的
 （海墟另有 FB 貼文 273 佐證 2026-02-16 04:00）。週期幾乎不會變，真的改制時改這裡並重啟；
@@ -30,14 +30,28 @@ class ReminderCycle(BaseModel):
     model_config = ConfigDict(frozen=True)
 
 
+class VersionStageItem(BaseModel):
+    """跟著版本走的項目（終焉矩陣）：每次版本更新維護開始後 `open_delay_days` 天的 04:00 開放新階段，
+    下一次版本更新時結束。版本更新時刻由 `VersionDateResolver.update_starts()` 從官方公告推得。"""
+
+    #: 英文代號：去重 key 用，定了就不要改
+    key: str
+    name: str
+    emoji: str
+    open_delay_days: int = 7
+
+    model_config = ConfigDict(frozen=True)
+
+
 class PeriodicReminderSettings(BaseSettings):
-    """週期活動提醒：重置前一天提醒還沒打的人、重置當下靜音提醒，成員自助訂閱身份組。"""
+    """週期活動提醒：結束前一天提醒還沒打的人、重置／開放當下靜音提醒，成員自助訂閱身份組。"""
 
     enabled: bool = True
     #: channel_registry「週期提醒頻道」寫入 config.json 的 key
     channel_config_key: str = "periodic_reminder_channel_id"
-    #: bot 自動建立的訂閱身份組名稱（找不到記錄的 id 時，也會先用這個名稱找既有身份組）
-    role_name: str = "深塔海墟提醒"
+    #: 訂閱身份組名稱：bot 會把記錄的身份組同步成這個名字（改名只要改這裡）；
+    #: 找不到記錄的 id 時，也會先用這個名稱找既有身份組
+    role_name: str = "週期活動提醒"
     #: 身份組 id 與面板訊息 id（不進版控，與自介面板的 runtime 檔同一套做法）
     runtime_path: str = "settings/periodic_reminder_runtime.json"
 
@@ -49,6 +63,9 @@ class PeriodicReminderSettings(BaseSettings):
     cycles: tuple[ReminderCycle, ...] = (
         ReminderCycle(key="tower", name="逆境深塔", emoji="🗼", anchor=datetime(2026, 3, 2, 4, 0)),
         ReminderCycle(key="sea", name="冥歌海墟", emoji="🌊", anchor=datetime(2026, 2, 16, 4, 0)),
+    )
+    version_stages: tuple[VersionStageItem, ...] = (
+        VersionStageItem(key="matrix", name="終焉矩陣", emoji="🧩"),
     )
 
     model_config = SettingsConfigDict(env_prefix="PERIODIC_REMINDER_", extra="ignore", frozen=True)

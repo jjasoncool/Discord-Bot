@@ -4,7 +4,8 @@
 - 推算出的重置日要對得上使用者的手記（標準答案，見 ManualNotesTests）
 - 結束前提醒正常 @、重置提醒靜音 @；只允許 @ 訂閱身份組
 - 錯過的提醒只在補發時限內補，已發過的不重發
-- 身份組建立時不可被一般成員 @、沒有任何權限
+- 身份組建立時不可被一般成員 @、沒有任何權限，名稱以設定為準
+- 終焉矩陣跟著版本走：開放日要對得上巴哈各階段隊伍分享串的時程；不知道下一次更新時不發結束提醒
 
 執行：
     cd src && python -m unittest test.test_periodic_reminder -v
@@ -35,6 +36,8 @@ from services.periodic_reminder import (
     last_reset,
     next_reset,
     reminders_for,
+    stage_open_at,
+    stage_panel_line,
     upcoming_reminders,
 )
 from sys_settings.periodic_reminder_settings import PeriodicReminderSettings
@@ -42,6 +45,7 @@ from sys_settings.periodic_reminder_settings import PeriodicReminderSettings
 SETTINGS = PeriodicReminderSettings()
 TOWER = next(c for c in SETTINGS.cycles if c.key == "tower")
 SEA = next(c for c in SETTINGS.cycles if c.key == "sea")
+MATRIX = next(s for s in SETTINGS.version_stages if s.key == "matrix")
 
 
 def T(month, day, hour=0, minute=0, year=2026):
@@ -87,7 +91,7 @@ class ResetMathTests(unittest.TestCase):
         # 10/11 12:00 UTC ＝ 10/11 20:00 伺服器時間
         now = datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc)
         due = due_reminders(now, SETTINGS)
-        self.assertEqual([(r.cycle.key, r.kind) for r in due], [("tower", KIND_ENDING)])
+        self.assertEqual([(r.item.key, r.kind) for r in due], [("tower", KIND_ENDING)])
 
 
 class ReminderScheduleTests(unittest.TestCase):
@@ -101,7 +105,7 @@ class ReminderScheduleTests(unittest.TestCase):
         self.assertEqual(reset.dedup_key, "tower:2026-10-12:reset")
 
     def due_at(self, moment):
-        return [(r.cycle.key, r.kind) for r in due_reminders(moment, SETTINGS)]
+        return [(r.item.key, r.kind) for r in due_reminders(moment, SETTINGS)]
 
     def test_due_boundaries(self):
         self.assertEqual(self.due_at(T(10, 11, 19, 59)), [])
@@ -120,7 +124,7 @@ class ReminderScheduleTests(unittest.TestCase):
     def test_upcoming_order_from_today(self):
         upcoming = upcoming_reminders(T(9, 29, 1), SETTINGS)
         self.assertEqual(
-            [(r.cycle.key, r.kind, r.send_at) for r in upcoming[:4]],
+            [(r.item.key, r.kind, r.send_at) for r in upcoming[:4]],
             [
                 ("tower", KIND_ENDING, T(10, 11, 20)),
                 ("tower", KIND_RESET, T(10, 12, 4)),
@@ -171,15 +175,94 @@ class TextTests(unittest.TestCase):
         self.assertLess(tower_line, sea_line)
 
 
+# ── 終焉矩陣（跟著版本走）──
+
+#: 3.2～3.7 版本更新維護開始時刻（官網「更新維護時間」）
+UPDATES = [T(3, 19, 4), T(4, 30, 4), T(6, 8, 4), T(7, 10, 4), T(8, 20, 4), T(9, 30, 4)]
+
+
+class MatrixScheduleTests(unittest.TestCase):
+    def keys(self, reminders):
+        return [(r.item.key, r.kind) for r in reminders if r.item.key == "matrix"]
+
+    def test_stage_opens_match_bahamut_threads(self):
+        # 巴哈「終焉矩陣」各階段隊伍分享串主文寫的開放時間（S1-1～S2-2）
+        opens = [stage_open_at(MATRIX, u) for u in UPDATES[:5]]
+        self.assertEqual(opens, [T(3, 26, 4), T(5, 7, 4), T(6, 15, 4), T(7, 17, 4), T(8, 27, 4)])
+
+    def test_ending_reminder_the_night_before_update(self):
+        due = [r for r in due_reminders(T(9, 29, 20), SETTINGS, UPDATES) if r.item.key == "matrix"]
+        self.assertEqual(self.keys(due), [("matrix", KIND_ENDING)])
+        self.assertEqual(due[0].reset_at, T(9, 30, 4))
+        self.assertFalse(due[0].silent)
+        self.assertEqual(due[0].dedup_key, "matrix:2026-09-30:ending")
+
+    def test_open_reminder_is_silent(self):
+        due = [r for r in due_reminders(T(10, 7, 4), SETTINGS, UPDATES) if r.item.key == "matrix"]
+        self.assertEqual(self.keys(due), [("matrix", KIND_RESET)])
+        self.assertTrue(due[0].silent)
+        self.assertEqual(due[0].dedup_key, "matrix:2026-10-07:reset")
+
+    def test_gap_week_has_nothing_due(self):
+        self.assertEqual(self.keys(due_reminders(T(10, 3, 12), SETTINGS, UPDATES)), [])
+
+    def test_unknown_next_update_sends_no_ending_reminder(self):
+        upcoming = upcoming_reminders(T(10, 8), SETTINGS, UPDATES)
+        self.assertEqual(self.keys(upcoming), [])
+        self.assertTrue(any(r.item.key == "tower" for r in upcoming), "深塔海墟照常排程")
+
+    def test_known_next_update_schedules_ending(self):
+        upcoming = [r for r in upcoming_reminders(T(10, 8), SETTINGS, UPDATES + [T(11, 12, 4)])
+                    if r.item.key == "matrix"]
+        self.assertEqual([(r.kind, r.send_at) for r in upcoming][:1], [(KIND_ENDING, T(11, 11, 20))])
+
+    def test_no_version_data_means_no_matrix(self):
+        self.assertEqual(self.keys(upcoming_reminders(T(10, 8), SETTINGS, ())), [])
+
+
+class MatrixTextAndPanelTests(unittest.TestCase):
+    def test_ending_text(self):
+        ending, _ = reminders_for(MATRIX, T(11, 12, 4), SETTINGS)
+        text = build_reminder_text(ending, "<@&9>", T(11, 11, 20))
+        for part in ("<@&9>", "終焉矩陣", "明天", format_moment(T(11, 12, 4)), "版本更新"):
+            self.assertIn(part, text)
+
+    def test_open_text_has_no_end_date(self):
+        _, opening = reminders_for(MATRIX, T(10, 7, 4), SETTINGS)
+        text = build_reminder_text(opening, "<@&9>", T(10, 7, 4))
+        self.assertIn("新階段開放", text)
+        self.assertIn("下次版本更新前", text)
+        self.assertNotIn("/", text, "開放時還不知道結束日，不寫日期")
+
+    def test_panel_line_gap_week(self):
+        line = stage_panel_line(MATRIX, T(10, 1), UPDATES)
+        self.assertIn("新階段", line)
+        self.assertIn(format_moment(T(10, 7, 4)), line)
+
+    def test_panel_line_open_unknown_end(self):
+        self.assertEqual(stage_panel_line(MATRIX, T(10, 8), UPDATES), "🧩 終焉矩陣：本階段開放中，於版本末結束")
+
+    def test_panel_line_open_known_end(self):
+        line = stage_panel_line(MATRIX, T(10, 8), UPDATES + [T(11, 12, 4)])
+        self.assertIn("本階段開放中", line)
+        self.assertIn(format_moment(T(11, 12, 4)), line)
+
+    def test_panel_includes_all_items(self):
+        desc = build_panel_description(T(10, 1), SETTINGS, UPDATES)
+        for part in ("逆境深塔", "冥歌海墟", "終焉矩陣", format_moment(T(10, 7, 4))):
+            self.assertIn(part, desc)
+
+
 # ── Cog 行為（Discord 物件全用 mock）──
 
 from commands.periodic_reminder_commands import PeriodicReminderCommands  # noqa: E402
 
 
-def _role(role_id=900, name="深塔海墟提醒"):
+def _role(role_id=900, name=None):
     role = MagicMock(spec=discord.Role)
     role.id = role_id
-    role.name = name
+    role.name = name or SETTINGS.role_name
+    role.edit = AsyncMock()
     role.mention = f"<@&{role_id}>"
     return role
 
@@ -283,7 +366,7 @@ class EnsureRoleTests(CogTestBase):
         guild = _guild()
         role = await self.cog.ensure_role(guild)
         kwargs = guild.create_role.await_args.kwargs
-        self.assertEqual(kwargs["name"], "深塔海墟提醒")
+        self.assertEqual(kwargs["name"], "週期活動提醒")
         self.assertFalse(kwargs["mentionable"])
         self.assertEqual(kwargs["permissions"].value, 0)
         # 記住 id，下次直接用
@@ -303,7 +386,7 @@ class PanelTests(CogTestBase):
         channel = _channel(_guild())
         await self.cog._send_panel(channel)
         kwargs = channel.send.await_args.kwargs
-        self.assertEqual(kwargs["embed"].title, "🔔 深塔海墟提醒")
+        self.assertEqual(kwargs["embed"].title, "🔔 週期活動提醒")
         self.assertEqual({c.custom_id for c in kwargs["view"].children},
                          {"periodic_reminder:subscribe", "periodic_reminder:unsubscribe"})
 
@@ -375,6 +458,36 @@ class SubscriptionTests(CogTestBase):
         await self.cog.handle_subscription(interaction, subscribe=False)
         member.remove_roles.assert_awaited_once()
         self.assertIn("已取消訂閱", interaction.followup.send.await_args.args[0])
+
+
+class RoleNameSyncTests(CogTestBase):
+    async def test_recorded_role_is_renamed_to_setting(self):
+        from utils.panel_bump import update_runtime
+        update_runtime(self.runtime, role_id=900)
+        old = _role(900, name="深塔海墟提醒")
+        await self.cog.ensure_role(_guild(old))
+        old.edit.assert_awaited_once()
+        self.assertEqual(old.edit.await_args.kwargs["name"], "週期活動提醒")
+
+    async def test_same_name_is_left_alone(self):
+        from utils.panel_bump import update_runtime
+        update_runtime(self.runtime, role_id=900)
+        role = _role(900)
+        await self.cog.ensure_role(_guild(role))
+        role.edit.assert_not_awaited()
+
+
+class PanelRefreshTests(CogTestBase):
+    async def test_refresh_only_when_content_changes(self):
+        channel = _channel(_guild())
+        await self.cog._send_panel(channel)  # 記下目前顯示的內容
+        self.cog.panel.bump_safe = AsyncMock(return_value=MagicMock())
+        self.assertFalse(await self.cog.refresh_panel_if_changed(channel))
+        self.cog.panel.bump_safe.assert_not_awaited()
+        # 新公告帶來下一次版本更新時刻 → 矩陣那一行改變 → 重發
+        self.cog._update_starts = [datetime(2099, 1, 1, 4, 0, tzinfo=SERVER_TZ)]
+        self.assertTrue(await self.cog.refresh_panel_if_changed(channel))
+        self.cog.panel.bump_safe.assert_awaited_once_with(channel)
 
 
 if __name__ == "__main__":
