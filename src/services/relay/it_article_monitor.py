@@ -5,11 +5,15 @@
 排版：單一 embed（標題 + 內文 + 圖 + 參考連結）；圖片暫存下載當附件，交給 Discord CDN。
 
 防洗版：首次啟動以 ensure_seeded() 把目前 API 裡的文章全部標記已發，只發之後新增的。
+
+內頁晚到：HKEPC 內頁偶爾被擋（403），當下只有列表頁的摘要，照樣先發；
+之後 scraper 補到內文，由 refresh_intro_only_messages() 把那則訊息就地更新成完整內文。
 """
 import asyncio
 import io
 import logging
-from datetime import datetime, timedelta
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 import aiohttp
@@ -33,6 +37,10 @@ class ItArticleMonitor(BaseContentMonitor):
     SEND_INTERVAL = 2.0    # 每篇之間的固定間隔（秒），避免 rate limit
     SEND_MAX_ATTEMPTS = 3  # 單篇發送的最大嘗試次數（含首次）
     SEND_RETRY_BACKOFF = 3.0  # 重試退避基數（秒），第 n 次等 backoff*n
+    # 回頭補內文時往前看多遠：跟 check_and_send_new 取的 API 範圍（3 天）一致，
+    # 再舊的文章 API 也不會回，內文不會再來。
+    REFRESH_LOOKBACK_DAYS = 3
+    REFRESH_HISTORY_LIMIT = 200  # 3 天約 30 篇＋附圖補送訊息，200 則足夠
 
     async def fetch_recent_it_articles(self, days: int = 3, limit: int = 50, tag: Optional[str] = None) -> List[Dict]:
         """從 scraper API 取最近的 IT 文章（舊→新，同日再依 hkepc_id 遞增穩定排序）。"""
@@ -195,20 +203,129 @@ class ItArticleMonitor(BaseContentMonitor):
         logger.info("IT 文章首次 seed 完成：%s 篇舊文(>3天)標記已發，3 天內的將實際發送", seeded)
         return seeded
 
+    @staticmethod
+    def _article_key(url: Optional[str]) -> str:
+        # 用網址裡的文章編號比對：HKEPC 網址帶標題（可能是 %E5... 編碼、也可能是中文），
+        # 站方改標題時 scraper 會跟著更新 url，整串網址比就對不上舊訊息。抓不到編號才退回整串網址。
+        text = (url or "").strip()
+        m = re.search(r"hkepc\.com/(\d+)(?:/|$)", text)
+        return m.group(1) if m else text
+
+    async def refresh_intro_only_messages(self, channel_ids: List[int], items: List[Dict]) -> int:
+        """把先前「只帶摘要」發出的訊息，就地更新成完整內文。回傳更新了幾則。
+
+        為什麼掃頻道比對、不另存訊息 id：IT 頻道綁定限定文字頻道，讀一次最近 3 天的訊息就夠
+        （每次通知 1～2 次 API），不必在 sent_articles.db 加表，已經發出去的舊訊息也能一併補上。
+        認定「只帶摘要」：訊息 embed 的描述，等於這篇在「沒有內文」時會排出的描述。
+        排版以後若改了，舊訊息就對不上而不動——寧可漏補，也不誤改別的訊息。
+        """
+        by_key = {
+            self._article_key(it.get("url")): it
+            for it in items
+            if (it.get("content") or "").strip() and it.get("url")
+        }
+        if not by_key or self.bot.user is None:
+            return 0
+
+        updated = 0
+        after = datetime.now(timezone.utc) - timedelta(days=self.REFRESH_LOOKBACK_DAYS)
+        for channel_id in channel_ids:
+            channel = self.bot.get_channel(channel_id)
+            if channel is None or not hasattr(channel, "history"):
+                continue
+            try:
+                # 從最新的讀起：給了 after 時 discord.py 預設由舊到新，limit 會先吃掉最舊的，
+                # 剛發出、最需要補的那幾則反而讀不到
+                async for msg in channel.history(limit=self.REFRESH_HISTORY_LIMIT, after=after, oldest_first=False):
+                    if msg.author.id != self.bot.user.id or not msg.embeds:
+                        continue
+                    old = msg.embeds[0]
+                    item = by_key.get(self._article_key(old.url))
+                    if item is None:
+                        continue
+                    old_desc = (old.description or "").strip()
+                    intro_desc = (self.format_embed({**item, "content": None, "reference_url": None}).description or "").strip()
+                    if old_desc != intro_desc:
+                        continue  # 已經是完整內文，或不是這個版本排出來的訊息
+                    new_embed = self.format_embed(item)
+                    if (new_embed.description or "").strip() == old_desc:
+                        continue
+                    try:
+                        await self._edit_with_full_content(msg, old, new_embed, item)
+                        updated += 1
+                        logger.info("已把 IT 文章 %s 的摘要訊息就地更新成完整內文（訊息 %s）", item.get("hkepc_id"), msg.id)
+                    except Exception as e:
+                        logger.warning("更新 IT 文章 %s 的訊息 %s 失敗（下次通知再試）: %s", item.get("hkepc_id"), msg.id, e)
+                    await asyncio.sleep(self.SEND_INTERVAL)
+            except Exception as e:
+                logger.warning("讀取 IT 頻道 %s 的近期訊息失敗，本次不補內文: %s", channel_id, e)
+        return updated
+
+    async def _edit_with_full_content(self, msg, old_embed, new_embed: discord.Embed, item: Dict) -> None:
+        """換成完整內文；原本有圖就沿用，沒有而內文帶圖時補上第一張（其餘圖片不另發，免得插到後面的訊息之間）。
+
+        帶圖的那次編輯若失敗（多半是新圖太大），退回只換文字：內文比圖重要，
+        而且不退的話，之後每次通知都會重新下載、重試、再失敗。
+        """
+        old_image = getattr(getattr(old_embed, "image", None), "url", None)
+        if old_image:
+            att = self._matching_attachment(msg, old_image)
+            if att is None:
+                new_embed.set_image(url=old_image)
+                await msg.edit(embed=new_embed)
+                return
+            # 讀回來的圖片網址帶簽章、會過期；原圖是這則訊息的附件時，改用 attachment:// 引用它
+            new_embed.set_image(url=f"attachment://{att.filename}")
+            attachments = list(msg.attachments)
+        else:
+            file = await self._first_image_file(item) if item.get("images") else None
+            if file is None:
+                await msg.edit(embed=new_embed)
+                return
+            new_embed.set_image(url=f"attachment://{file.filename}")
+            attachments = [*msg.attachments, file]  # 列出的舊附件會保留，沒列的會被刪掉
+        try:
+            await msg.edit(embed=new_embed, attachments=attachments)
+        except discord.HTTPException as e:
+            logger.warning("IT 文章 %s 帶圖更新失敗，改成只更新文字: %s", item.get("hkepc_id"), e)
+            new_embed.set_image(url=old_image)  # 原本沒圖時是 None＝拿掉圖
+            await msg.edit(embed=new_embed)
+
+    @staticmethod
+    def _matching_attachment(msg, image_url: str):
+        path = image_url.split("?", 1)[0]
+        for att in msg.attachments:
+            if path.endswith("/" + att.filename):
+                return att
+        return None
+
+    async def _first_image_file(self, item: Dict) -> Optional[discord.File]:
+        img_url = item["images"][0]
+        async with aiohttp.ClientSession() as session:
+            result = await self._download_image_as_file(img_url, session, max_retries=2)
+        if not result:
+            logger.warning("IT 文章補內文時圖片下載失敗，只更新文字: %s", img_url)
+            return None
+        image_data, detected_ext = result
+        raw = image_data.getvalue() if hasattr(image_data, "getvalue") else image_data
+        filename = self._get_image_filename_with_ext(img_url, 1, detected_ext)
+        return discord.File(io.BytesIO(raw), filename=filename)
+
     async def check_and_send_new(self, channel_ids: List[int]):
-        """檢查並發送新文章（舊→新依序）。"""
+        """檢查並發送新文章（舊→新依序），再把先前只帶摘要的訊息補成完整內文。"""
         try:
             items = await self.fetch_recent_it_articles(days=3, limit=50)
             if not items:
                 return
             new_items = [it for it in items if not await self.is_content_sent(_CONTENT_TYPE, it["hkepc_id"])]
-            if not new_items:
-                return
-            logger.info("[IT 文章排程] 找到 %s 篇待發文章", len(new_items))
-            for it in new_items:
-                for channel_id in channel_ids:
-                    await self.send_to_channel(channel_id, it)
-                # 每篇之間固定間隔（不論成敗），避免 rate limit
-                await asyncio.sleep(self.SEND_INTERVAL)
+            if new_items:
+                logger.info("[IT 文章排程] 找到 %s 篇待發文章", len(new_items))
+                for it in new_items:
+                    for channel_id in channel_ids:
+                        await self.send_to_channel(channel_id, it)
+                    # 每篇之間固定間隔（不論成敗），避免 rate limit
+                    await asyncio.sleep(self.SEND_INTERVAL)
+            # 新文先發：補內文要讀頻道、下載圖片、逐則編輯，放前面會拖慢新文
+            await self.refresh_intro_only_messages(channel_ids, items)
         except Exception as e:
             logger.error("[IT 文章排程] 檢查新文章時發生錯誤: %s", e, exc_info=True)
