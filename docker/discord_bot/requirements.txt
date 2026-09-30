@@ -19,7 +19,7 @@ asyncpg
 pgvector
 
 # === LLM client（OpenAI dialect；對 Ollama / LM Studio / Lemonade / vLLM 等相容後端通用）===
-# 自寫 wire 薄殼（src/llm/llm_http_client.py），用 httpx 直接打 /v1/chat/completions、
+# 自寫 wire 薄殼（src/llm/client/http_client.py），用 httpx 直接打 /v1/chat/completions、
 # /v1/embeddings 與 /v1/models。不依賴任何 LLM 廠商 SDK（openai 早期 v0→v1 大改、
 # Pydantic v1→v2 等都炸過 caller），也避開 LlamaIndex provider 子套件硬塞驗證
 # （如 llama-index-embeddings-openai 的 OpenAIEmbeddingModelType enum 白名單地雷）。
@@ -29,7 +29,7 @@ httpx
 # === LlamaIndex ===
 # LlamaIndex 核心框架（BaseEmbedding 抽象介面、VectorStoreIndex、QueryEngine）。
 # 故意不用 llama-index-embeddings-* 系列：provider 子套件品質不齊、常硬塞驗證；
-# 改在 src/llm/safe_llm_embedding.py 直接 subclass BaseEmbedding 自己呼叫 wire。
+# 改在 src/llm/client/embedding_client.py 直接 subclass BaseEmbedding 自己呼叫 wire。
 llama-index-core
 # 讓 LlamaIndex 能夠讀寫 pgvector 資料庫
 llama-index-vector-stores-postgres
@@ -43,3 +43,7 @@ yt-dlp[default]
 PyNaCl>=1.5.0
 # DAVE 加密協定（2026-03 Discord 強制要求，解決 4017）
 davey>=0.1.0
+
+# === MCP（Model Context Protocol）===
+# llm/mcp_server.py：讓 Claude Code 查本地資料（官網公告、論壇）。2.x 起主類別改名為 MCPServer。
+mcp>=2.2,<3
