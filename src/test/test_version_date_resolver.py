@@ -1,4 +1,4 @@
-"""版本時間解析（services/event_scheduler.VersionDateResolver）。
+"""版本時間解析（services.events.event_scheduler.VersionDateResolver）。
 
 守的底線：
 - bot 長時間不重啟：啟動後才發的版本公告，`refresh()` 之後就看得到（活動自動發布、週期提醒都靠它）
@@ -24,8 +24,8 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from services.event_scheduler import VersionDateResolver  # noqa: E402
-from services.event_time_parser import SERVER_TZ  # noqa: E402
+from services.events.event_scheduler import VersionDateResolver  # noqa: E402
+from services.events.event_time_parser import SERVER_TZ  # noqa: E402
 
 
 def T(month, day, hour=0, minute=0, year=2026):

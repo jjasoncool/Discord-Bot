@@ -25,7 +25,7 @@ from utils.discord_content import (
     content_hash,
     get_forum_tags,
 )
-from services.base_monitor import BaseContentMonitor, get_article_runtime_config
+from services.relay.base_monitor import BaseContentMonitor, get_article_runtime_config
 
 logger = get_article_monitor_logger()
 

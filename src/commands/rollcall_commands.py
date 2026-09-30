@@ -10,7 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils.utils import ChannelConfig, ITEMS_PER_PAGE, check_guild
-from services.rollcall_service import (
+from services.community.rollcall_service import (
     RollCallService,
     RESPONSE_DEADLINE_DAYS,
     IMMUNITY_DAYS,

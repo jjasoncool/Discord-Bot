@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Tuple
 import aiohttp
 import discord
 
-from services.base_monitor import BaseContentMonitor
+from services.relay.base_monitor import BaseContentMonitor
 from utils.discord_content import post_to_channel
 
 logger = logging.getLogger(__name__)

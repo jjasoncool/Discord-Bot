@@ -21,7 +21,7 @@ if SRC_DIR not in sys.path:
 
 import discord
 
-from services.member_welcome import build_welcome_text, send_welcome
+from services.community.member_welcome import build_welcome_text, send_welcome
 from utils.utils import ChannelConfig
 
 WELCOME_ID = 111

@@ -18,7 +18,7 @@ from utils.dm_notifier import send_dm
 
 logger = logging.getLogger(__name__)
 
-RUNTIME_FILE = Path(__file__).parent.parent / "settings" / "rollcall_runtime.json"
+RUNTIME_FILE = Path(__file__).parents[2] / "settings" / "rollcall_runtime.json"  # services/community/ 往上兩層是 src/
 # 點名回覆期限（天）
 RESPONSE_DEADLINE_DAYS = 7
 # 通過點名後的豁免期（天）

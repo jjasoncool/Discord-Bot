@@ -239,7 +239,7 @@ class FBMonitor(BaseContentMonitor):
             await self.mark_content_as_sent('fbpost', fb_post['id'])
 
             # 偵測活動公告 → 自動建 Discord 伺服器活動（欄位對應/best-effort 收在 event_scheduler）
-            from services.event_scheduler import schedule_from_fb
+            from services.events.event_scheduler import schedule_from_fb
             await schedule_from_fb(
                 self.bot, fb_post, channel_id,
                 message_url=getattr(sent_message, "jump_url", None),

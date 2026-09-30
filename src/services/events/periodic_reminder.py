@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional, Sequence, Union
 
-from services.event_time_parser import SERVER_TZ
+from services.events.event_time_parser import SERVER_TZ
 from sys_settings.periodic_reminder_settings import (
     PeriodicReminderSettings,
     ReminderCycle,

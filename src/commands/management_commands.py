@@ -13,13 +13,13 @@ from typing import Optional
 from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, ChannelConfig, check_guild
 from utils.panel_bump import PanelBumper
 # 注意：需確保 services 資料夾下的 intro_profile_service.py 包含 IntroProfilePayload, ImpressionPayload, IntroProfileServiceProtocol, IntroProfileService 等定義
-from services.intro_profile_service import (
+from services.community.intro_profile_service import (
     IntroProfilePayload,
     ImpressionPayload,
     IntroProfileServiceProtocol,
     IntroProfileService,
 )
-from services.impression_moderation_service import ImpressionModerationService
+from services.community.impression_moderation_service import ImpressionModerationService
 from llm.storage.member_profile_store import get_member_profile_store
 from settings.channel_registry import all_settings, get_setting, ChannelSetContext
 

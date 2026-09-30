@@ -22,7 +22,7 @@ from typing import List, Optional
 
 # 注意：discord / ChannelConfig / StateDB 等相依只在 maybe_schedule_events 內 lazy import，
 # 讓本模組的純邏輯（VersionDateResolver / plan_events）可在無 discord 環境被單測。
-from services.event_time_parser import (
+from services.events.event_time_parser import (
     ParsedEvent, parse_events, event_fingerprint, normalize_title, SERVER_TZ,
 )
 
@@ -66,7 +66,7 @@ def is_umbrella_title(name: str) -> bool:
     return bool(_UMBRELLA_TITLE.search(name or ""))
 
 # articles.db 路徑（discord-bot 容器掛 ./src → /app；版本日回填用，RO）
-_ARTICLES_DB = Path(__file__).resolve().parent.parent / "scraper" / "articles.db"
+_ARTICLES_DB = Path(__file__).resolve().parents[2] / "scraper" / "articles.db"  # services/events/ 往上兩層是 src/
 
 
 # ── 版本更新日回填（相對起點「X版本更新後」→ 版本真實上線時間） ──
@@ -468,7 +468,7 @@ async def maybe_schedule_events(
     try:
         import discord
         from utils.utils import ChannelConfig
-        from services.base_monitor import get_shared_state_db
+        from services.relay.base_monitor import get_shared_state_db
 
         config = ChannelConfig.load_config(caller="event_scheduler")
         # 閘門：只處理發進「活動公告頻道」(= article_monitor_channel_id) 的內容，即時讀、自動同步
@@ -883,7 +883,7 @@ async def schedule_from_article(bot, article: dict, channel_id: int,
     """從官方文章 dict 觸發活動偵測。欄位對應集中於此，article_monitor 只需一行呼叫。"""
     try:
         # 官方原文網址的唯一來源在 article_monitor（article 領域的家），這裡不另寫一份
-        from services.article_monitor import official_article_url
+        from services.relay.article_monitor import official_article_url
 
         text = (article.get("article_content_full") or article.get("article_content")
                 or article.get("article_desc") or "")

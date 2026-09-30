@@ -26,17 +26,17 @@ NOTIFY_SERVER_PORT = 5000
 _RELAY_SOURCES: Dict[str, dict] = {
     "fb": {
         "config_key": "article_monitor_channel_id",
-        "module": "services.fb_monitor", "cls": "FBMonitor",
+        "module": "services.relay.fb_monitor", "cls": "FBMonitor",
         "method": "check_and_send_fb_posts",
     },
     "article": {
         "config_key": "article_monitor_channel_id",
-        "module": "services.article_monitor", "cls": "ArticleMonitor",
+        "module": "services.relay.article_monitor", "cls": "ArticleMonitor",
         "method": "check_and_send_new_articles",
     },
     "it_article": {
         "config_key": "hardware_news_channel_id",
-        "module": "services.it_article_monitor", "cls": "ItArticleMonitor",
+        "module": "services.relay.it_article_monitor", "cls": "ItArticleMonitor",
         "method": "check_and_send_new", "seed": "ensure_seeded",
     },
 }
@@ -128,7 +128,7 @@ class NotifyServer:
         payload 帶 post_id 時只處理單篇，不帶則批次處理最近 3 天。
         """
         try:
-            from services.bahamut_monitor import BahamutMonitor
+            from services.relay.bahamut_monitor import BahamutMonitor
 
             board_id = payload.get("board_id", "74934")
             post_id = payload.get("post_id")

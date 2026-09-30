@@ -111,10 +111,10 @@ class ArticleCommands(commands.Cog):
 
     async def cog_load(self):
         """Cog 載入時初始化各來源監控器"""
-        from services.article_monitor import ArticleMonitor
-        from services.fb_monitor import FBMonitor
-        from services.ptt_monitor import PTTMonitor
-        from services.it_article_monitor import ItArticleMonitor
+        from services.relay.article_monitor import ArticleMonitor
+        from services.relay.fb_monitor import FBMonitor
+        from services.relay.ptt_monitor import PTTMonitor
+        from services.relay.it_article_monitor import ItArticleMonitor
         self.article_monitor = ArticleMonitor(self.bot)
         self.fb_monitor = FBMonitor(self.bot)
         self.ptt_monitor = PTTMonitor(self.bot)
@@ -718,7 +718,7 @@ class ArticleCommands(commands.Cog):
             await interaction.followup.send("❌ config.json 中沒有設定 forum_article_channel_id", ephemeral=True)
             return
 
-        from services.bahamut_monitor import BahamutMonitor
+        from services.relay.bahamut_monitor import BahamutMonitor
         monitor = BahamutMonitor(self.bot)
 
         if post_id:

@@ -24,7 +24,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from services.community_lookup_service import (
+from services.community.community_lookup_service import (
     BahamutCandidate,
     CommunityActivity,
     CommunityLookupService,
@@ -1409,7 +1409,7 @@ class CommunityLookupCommands(commands.Cog):
     async def cog_load(self):
         # Lazy init：沿用 base_monitor 的全域 StateDB，避免多實例
         if self.state_db is None:
-            from services.base_monitor import get_shared_state_db
+            from services.relay.base_monitor import get_shared_state_db
             self.state_db = await get_shared_state_db()
         if self.service is None:
             self.service = CommunityLookupService(state_db=self.state_db)

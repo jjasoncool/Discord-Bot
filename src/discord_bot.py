@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from sys_settings.llm_settings import LLMServiceSettings, load_llm_runtime_config
 from utils.logger_config import configure_logging  # import 即套用 settings/logging.json
 from utils.utils import safe_send_interaction_message
-from services.telegram_relay_service import (
+from services.relay.telegram_relay_service import (
     DiscordMessagePublisher,
     MessageRelayWorker,
     MessageRouteResolver,
@@ -581,7 +581,7 @@ async def _cleanup_created_event(discord_event_id: int, reason: str) -> None:
     原地復活。改成標記後，兩條比對路徑都還查得到，查到就什麼都不做。
     """
     try:
-        from services.base_monitor import get_shared_state_db
+        from services.relay.base_monitor import get_shared_state_db
         db = await get_shared_state_db()
         n = await db.mark_created_event_deleted(discord_event_id)
         if n:
@@ -658,7 +658,7 @@ async def on_raw_reaction_remove(payload):
 @bot.event
 async def on_member_join(member):
     """新成員加入 → 在歡迎頻道發歡迎訊息（未綁歡迎頻道則靜默）。"""
-    from services.member_welcome import send_welcome
+    from services.community.member_welcome import send_welcome
     await send_welcome(member)
 
 async def auto_start_article_monitor(bot):

@@ -4,7 +4,7 @@
   建立身份組並發出訂閱面板；未綁定時整個功能靜默。
 - 面板置底走共用的 `utils.panel_bump.PanelBumper`：發完提醒、或頻道裡有人講話，就立即
   「刪舊發新」頂到最下面；提醒本身不附按鈕。
-- 何時該發、文案怎麼寫在 `services/periodic_reminder.py`；已發過的記在 StateDB
+- 何時該發、文案怎麼寫在 `services/events/periodic_reminder.py`；已發過的記在 StateDB
   `sent_content`（source=periodic_reminder），重啟或補發都不會重複。
 - 矩陣的時刻跟著版本走：每輪排程都重讀官方公告（`VersionDateResolver.update_starts()`），
   版本延期或提前公告一出來，提醒與面板日期就跟著變；面板內容一有變化就自動重發。
@@ -19,10 +19,10 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
-from services.base_monitor import get_shared_state_db
-from services.event_scheduler import VersionDateResolver
-from services.event_time_parser import SERVER_TZ
-from services.periodic_reminder import (
+from services.relay.base_monitor import get_shared_state_db
+from services.events.event_scheduler import VersionDateResolver
+from services.events.event_time_parser import SERVER_TZ
+from services.events.periodic_reminder import (
     SENT_SOURCE,
     KIND_ENDING,
     Reminder,

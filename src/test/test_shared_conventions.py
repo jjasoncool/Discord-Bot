@@ -212,7 +212,7 @@ RULES = [
             "scraper/tools/extract_fingerprint.py",
             # event_time_parser.SERVER_TZ 是「公告宣告的時區」，不是「本機時區」。
             # 值相同但語意不同，**收斂會出事**——見 AnnouncementTimezoneTests。
-            "services/event_time_parser.py",
+            "services/events/event_time_parser.py",
         },
     ),
     Rule(
@@ -259,8 +259,8 @@ RULES = [
     Rule(
         name="官方公告原文網址",
         finder=_find_hardcoded_article_urls,
-        canonical="services.article_monitor.official_article_url()",
-        allowed={"services/article_monitor.py"},
+        canonical="services.relay.article_monitor.official_article_url()",
+        allowed={"services/relay/article_monitor.py"},
     ),
 ]
 
@@ -380,7 +380,7 @@ class AnnouncementTimezoneTests(unittest.TestCase):
     """
 
     def test_server_tz_is_independent_of_app_tz(self):
-        from services.event_time_parser import SERVER_TZ
+        from services.events.event_time_parser import SERVER_TZ
         from sys_settings.time_settings import APP_TZ
 
         self.assertIsNot(
@@ -390,7 +390,7 @@ class AnnouncementTimezoneTests(unittest.TestCase):
 
     def test_server_tz_is_pinned_to_utc8(self):
         """公告的閘門只認 UTC+8／GMT+8，所以這個常數必須釘死。"""
-        from services.event_time_parser import SERVER_TZ
+        from services.events.event_time_parser import SERVER_TZ
 
         self.assertEqual(SERVER_TZ.utcoffset(None).total_seconds() / 3600, 8)
 
@@ -398,7 +398,7 @@ class AnnouncementTimezoneTests(unittest.TestCase):
         """指紋若跟著本機時區跑，去重表會整批失效。"""
         from datetime import datetime, timedelta, timezone
 
-        from services.event_time_parser import SERVER_TZ, event_fingerprint
+        from services.events.event_time_parser import SERVER_TZ, event_fingerprint
 
         start = datetime(2026, 8, 20, 10, 0, tzinfo=SERVER_TZ)
         end = datetime(2026, 9, 3, 23, 59, tzinfo=SERVER_TZ)

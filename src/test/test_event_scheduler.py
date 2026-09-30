@@ -18,8 +18,8 @@ if SRC_DIR not in sys.path:
 
 from datetime import datetime, timezone
 
-from services.event_time_parser import parse_events, SERVER_TZ
-from services.event_scheduler import plan_events, is_umbrella_title
+from services.events.event_time_parser import parse_events, SERVER_TZ
+from services.events.event_scheduler import plan_events, is_umbrella_title
 
 NOW = datetime(2026, 7, 29, 3, 0, tzinfo=timezone.utc)
 POST = datetime(2026, 7, 29, 11, 10, tzinfo=SERVER_TZ)

@@ -17,7 +17,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from services.article_monitor import ArticleMonitor, EMBED_DESC_LIMIT, official_article_url
+from services.relay.article_monitor import ArticleMonitor, EMBED_DESC_LIMIT, official_article_url
 
 LONG_BODY = "鳴潮公告內文測試段落。" * 400        # 遠超過上限
 SHORT_BODY = "本次維護於 04:00 開始。"

@@ -1,4 +1,4 @@
-"""點名服務（services.rollcall_service）與指令層（commands.rollcall_commands）的分工。
+"""點名服務（services.community.rollcall_service）與指令層（commands.rollcall_commands）的分工。
 
 守的底線：
   1. 點名訊息會 @ 被點名的人，並附上「我是活人」按鈕；按鈕由指令層交進來的建立函式產生，
@@ -27,7 +27,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from services import rollcall_service  # noqa: E402
+from services.community import rollcall_service  # noqa: E402
 from sys_settings.time_settings import APP_TZ  # noqa: E402
 
 

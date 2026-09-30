@@ -19,7 +19,7 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from datetime import datetime
-from services.event_time_parser import (
+from services.events.event_time_parser import (
     parse_events, passes_gate, strip_html, normalize_title,
     event_fingerprint, SERVER_TZ,
 )

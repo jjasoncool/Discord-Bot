@@ -56,7 +56,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 |---|---|
 | 寫 log | `logging.getLogger(__name__)`；去向、等級、分類改 `src/settings/logging.json`；類別 logger 用 `get_article_monitor_logger()`／`get_llm_anomaly_logger()` |
 | 本機時區 | `sys_settings.time_settings.APP_TZ` |
-| 遊戲公告的時間 | `services.event_time_parser.SERVER_TZ`（值同為 UTC+8，但語意不同，兩者不可合併） |
+| 遊戲公告的時間 | `services.events.event_time_parser.SERVER_TZ`（值同為 UTC+8，但語意不同，兩者不可合併） |
 | 連 pgvector | `LLMServiceSettings().pgvector_connect()` |
 | 實體表名 | `HYBRID_RETRIEVAL_SETTINGS.chat_table()`／`.source_table(key)`／`.physical_table(name)`（含 identifier 消毒） |
 | 讀 prompt 檔 | `llm.prompt.prompt_files.read_text()`／`read_json()`（mtime 快取） |
@@ -66,7 +66,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 發文到頻道 | `utils.discord_content.post_to_channel`（論壇／文字頻道自動分流、附件分批、失敗退純文字） |
 | 面板置底 | `utils.panel_bump.PanelBumper`（`bump`／`bump_safe`；有人講話就置底用 `request_bump`） |
 | 已發送去重 | StateDB `sent_content`（`is_content_sent`／`mark_content_as_sent`） |
-| 版本更新時刻 | `services.event_scheduler.VersionDateResolver`（`refresh()`、`update_starts()`；只看時間，不看版本號） |
+| 版本更新時刻 | `services.events.event_scheduler.VersionDateResolver`（`refresh()`、`update_starts()`；只看時間，不看版本號） |
 | GPU 獨佔（產圖時卸載 LLM） | `llm.client.lemonade_gate.gpu_exclusive(owner, lease_seconds)` |
 | 綁頻道 | `settings/channel_registry.py` 的 `register_channel` |
 

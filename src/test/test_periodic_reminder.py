@@ -25,8 +25,8 @@ if SRC_DIR not in sys.path:
 
 import discord
 
-from services.event_time_parser import SERVER_TZ
-from services.periodic_reminder import (
+from services.events.event_time_parser import SERVER_TZ
+from services.events.periodic_reminder import (
     KIND_ENDING,
     KIND_RESET,
     build_panel_description,

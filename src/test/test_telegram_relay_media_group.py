@@ -18,7 +18,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from services.telegram_relay_service import (
+from services.relay.telegram_relay_service import (
     MessageRelayWorker,
     TelegramMediaRecord,
     TelegramMessageRecord,

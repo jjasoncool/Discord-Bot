@@ -4,8 +4,8 @@
 （海墟另有 FB 貼文 273 佐證 2026-02-16 04:00）。週期幾乎不會變，真的改制時改這裡並重啟；
 `config.json` 是使用者設定檔，不放這種資料。
 
-時間一律是**伺服器時間**（`services.event_time_parser.SERVER_TZ`，遊戲決定、固定 UTC+8），
-這裡的 datetime 不帶時區，由 `services.periodic_reminder` 補上。
+時間一律是**伺服器時間**（`services.events.event_time_parser.SERVER_TZ`，遊戲決定、固定 UTC+8），
+這裡的 datetime 不帶時區，由 `services.events.periodic_reminder` 補上。
 """
 from __future__ import annotations
 

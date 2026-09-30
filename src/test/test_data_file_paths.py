@@ -30,15 +30,15 @@ class DataFileLocationTests(unittest.TestCase):
         self.assertLocation(state_db.DEFAULT_DB_PATH, "services", "sent_articles.db")
 
     def test_article_runtime_config(self):
-        from services import base_monitor
+        from services.relay import base_monitor
         self.assertLocation(base_monitor._ARTICLE_RUNTIME_PATH, "settings", "article_runtime.json")
 
     def test_rollcall_runtime(self):
-        from services import rollcall_service
+        from services.community import rollcall_service
         self.assertLocation(rollcall_service.RUNTIME_FILE, "settings", "rollcall_runtime.json")
 
     def test_scraper_articles_db(self):
-        from services import event_scheduler
+        from services.events import event_scheduler
         self.assertLocation(event_scheduler._ARTICLES_DB, "scraper", "articles.db")
 
     def test_logging_config(self):

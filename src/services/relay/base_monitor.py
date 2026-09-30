@@ -28,7 +28,7 @@ _shared_state_db_lock = asyncio.Lock()
 # article_runtime.json 共用快取（TTL 5 分鐘）
 _article_runtime_cache: Dict = {}
 _article_runtime_cache_time: float = 0
-_ARTICLE_RUNTIME_PATH = Path(__file__).parent.parent / "settings" / "article_runtime.json"
+_ARTICLE_RUNTIME_PATH = Path(__file__).parents[2] / "settings" / "article_runtime.json"  # services/relay/ 往上兩層是 src/
 _ARTICLE_RUNTIME_TTL = 300
 
 

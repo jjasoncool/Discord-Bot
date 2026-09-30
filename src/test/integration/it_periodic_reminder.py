@@ -11,7 +11,7 @@
 - `reset`：講「最近一次」重置（例：9/28 海墟已重置、到 10/26），**靜音 @**
 - `ending`：講「下一次」重置的結束前提醒，**正常 @**（會跳通知）
 
-文案與發送參數跟正式排程共用 `services.periodic_reminder`；這支不寫 StateDB、不置底面板，
+文案與發送參數跟正式排程共用 `services.events.periodic_reminder`；這支不寫 StateDB、不置底面板，
 所以不會影響正式排程的去重。身份組 id 取自 runtime 檔，要先在 /server_manager 綁定
 「週期提醒頻道」（綁定時會自動建立身份組）。
 """
@@ -30,8 +30,8 @@ SRC_DIR = HERE.parent.parent
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from services.event_time_parser import SERVER_TZ  # noqa: E402
-from services.periodic_reminder import (  # noqa: E402
+from services.events.event_time_parser import SERVER_TZ  # noqa: E402
+from services.events.periodic_reminder import (  # noqa: E402
     KIND_ENDING,
     KIND_RESET,
     build_reminder_text,
