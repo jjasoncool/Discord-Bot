@@ -85,11 +85,10 @@ class BahamutScraperService(BaseScraperClient):
         for attempt in range(1, 4):
             try:
                 self.logger.info(
-                    "Bahamut request start: url=%s referer=%s ua=%s mobile_hint=%s cookies=%s",
+                    "Bahamut request start: url=%s referer=%s ua=%s cookies=%s",
                     url,
                     referer,
                     self._current_impersonate,
-                    self._build_headers(referer=referer).get("Sec-CH-UA", "N/A"),
                     {k: v for k, v in session.cookies.items()},
                 )
 

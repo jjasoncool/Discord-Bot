@@ -337,7 +337,11 @@ class PTTScraperService(BaseScraperClient):
         }
 
     def fetch_ptt_articles_with_content(self) -> Dict[str, Any]:
-        """抓設定頁數的列表，並逐篇抓內文（先不入庫）"""
+        """抓設定頁數的列表，並逐篇抓內文（先不入庫）；整輪共用一個 session（run_session）。"""
+        with self.run_session():
+            return self._fetch_articles_with_content()
+
+    def _fetch_articles_with_content(self) -> Dict[str, Any]:
         base_result = self.fetch_multi_page_articles()
         articles = base_result.get("articles", [])
 

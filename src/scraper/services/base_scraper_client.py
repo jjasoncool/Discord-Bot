@@ -5,17 +5,20 @@
 子類別（BahamutScraperService、PTTScraperService 等）繼承後可直接使用，
 或覆寫個別方法做來源專屬調整。
 
-指紋來源（兩層，自動輪換）：
-1. curl_cffi 內建 impersonate 池（Chrome/Firefox/Safari/Edge）— 70% 機率
+指紋來源（兩層，每建一個 session 隨機選一次；都是 Firefox 系，理由見下方輪換池）：
+1. curl_cffi 內建 impersonate 池（Firefox）— 70% 機率
 2. 本地指紋庫 tools/fingerprints.json — 30% 機率
    由 extract_fingerprint.py 手動從容器內 Firefox ESR 抓取，
    用法：docker exec scraper python tools/extract_fingerprint.py
+
+一輪抓取請包在 run_session() 裡：整輪同一個瀏覽器、cookie 延續。
 
 依賴：curl_cffi（TLS 指紋模擬，取代 cloudscraper + requests）
 """
 import json
 import logging
 import random
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -25,26 +28,45 @@ from utils.request_utils import human_sleep
 logger = logging.getLogger(__name__)
 
 # ── impersonate 輪換池 ──
-# 每個 impersonate 目標 = 一致的 TLS 指紋 + User-Agent + HTTP/2 行為
-# curl_cffi 會自動設定對應的 User-Agent，不需手動指定
+# 每個 impersonate 目標 = 一致的 TLS 指紋 + User-Agent + HTTP/2 行為 + Sec-CH-UA 系列標頭，
+# 全部由 curl_cffi 依目標自動送出。我們刻意不自己寫 Sec-CH-UA／Platform／Mobile：
+# 以前手寫的版本平台一律報 "Linux"，但 Chrome 目標的 UA 是 macOS、Edge 是 Windows，
+# 送出去就是「UA 說 Mac、平台說 Linux」這種真瀏覽器不會有的矛盾，還蓋掉了 curl_cffi 內建的正確值。
 #
-# 注意：Sec-CH-UA 只有 Chromium 系瀏覽器會送（Chrome/Edge），
-#       Firefox / Safari 不送 Sec-CH-UA headers。
-#       _build_page_headers / _build_xhr_headers 會根據當前 impersonate 自動判斷。
+# 只用 Firefox 系：2026-10-01 逐站實測，HKEPC 的 Cloudflare 對 curl_cffi 模擬的 Chrome（124～150）
+# 與 Safari（18／26）一律給挑戰頁（403「Just a moment...」，跟我們送什麼標頭無關），
+# Firefox（133／144／147）與本機抓的 Firefox ESR 指紋全部通過；巴哈、PTT、官網 JSON 則每一種都通過。
+# 所有網站都過的只有 Firefox 系；一個 IP 固定用同一種瀏覽器，也比每次換一種更像真人。
+# 以前 HKEPC 的 403 時有時無，就是隨機抽到 Chrome／Safari 的那幾頁被擋。
+# 要加回其他瀏覽器或換版本，先用同樣方式逐站實測（見 AI_HANDOFF「scraper 抓網頁機制檢查」）。
+FIREFOX_TARGETS = ["firefox144", "firefox147"]
 
-CHROMIUM_TARGETS = [
-    "chrome124", "chrome131", "chrome136",
-    "edge99", "edge101",
-]
-FIREFOX_TARGETS = [
-    "firefox133", "firefox135", "firefox144",
-]
-SAFARI_TARGETS = [
-    "safari17_0", "safari18_0",
-]
+try:
+    # curl_cffi 原始碼把 BrowserType 標成「1.x 會移除」，而 requirements 沒鎖版本：拿不到清單就不過濾，
+    # 不能讓這道防呆本身變成 import 失敗、整個 scraper（含給 bot 用的 API）起不來。
+    from curl_cffi.requests import BrowserType
+    _SUPPORTED_TARGETS: Optional[set] = {b.value for b in BrowserType}
+except Exception:
+    _SUPPORTED_TARGETS = None
 
-# 預設池：Chrome 為主（最常見），混入 Firefox 和 Safari 增加多樣性
-DEFAULT_IMPERSONATE_POOL: List[str] = CHROMIUM_TARGETS + FIREFOX_TARGETS + SAFARI_TARGETS
+
+def _supported_only(targets: List[str], supported: Optional[set] = _SUPPORTED_TARGETS) -> List[str]:
+    """剔除目前安裝的 curl_cffi 不認得的目標。
+
+    requirements 沒鎖版本，重建映像可能換成不認得某個目標的版本；照樣拿去建 session，
+    每個請求都會失敗。寧可少幾個選擇、記一筆警告；全都不認得時退回 curl_cffi 的 "firefox"
+    別名（它永遠指向該版本支援的最新 Firefox）。拿不到支援清單時原樣回傳。
+    """
+    if supported is None:
+        return list(targets)
+    kept = [t for t in targets if t in supported]
+    dropped = [t for t in targets if t not in supported]
+    if dropped:
+        logger.warning("目前的 curl_cffi 不支援這些 impersonate 目標，已略過: %s", dropped)
+    return kept or ["firefox"]
+
+
+DEFAULT_IMPERSONATE_POOL: List[str] = _supported_only(FIREFOX_TARGETS)
 
 # ── 本地指紋庫 ──
 # 由 tools/extract_fingerprint.py 從容器內真實瀏覽器抓取
@@ -68,20 +90,6 @@ def _load_local_fingerprints() -> List[dict]:
 
 LOCAL_FINGERPRINTS: List[dict] = _load_local_fingerprints()
 
-# Sec-CH-UA 對照表（只有 Chromium 系需要）
-_SEC_CH_UA_MAP = {
-    "chrome124": '"Chromium";v="124", "Not;A=Brand";v="24", "Google Chrome";v="124"',
-    "chrome131": '"Chromium";v="131", "Not;A=Brand";v="24", "Google Chrome";v="131"',
-    "chrome136": '"Chromium";v="136", "Not;A=Brand";v="24", "Google Chrome";v="136"',
-    "edge99":    '"Chromium";v="99", "Not;A=Brand";v="24", "Microsoft Edge";v="99"',
-    "edge101":   '"Chromium";v="101", "Not;A=Brand";v="24", "Microsoft Edge";v="101"',
-}
-
-
-def _is_chromium(target: str) -> bool:
-    """判斷 impersonate 目標是否為 Chromium 系（Chrome/Edge）"""
-    return target.startswith("chrome") or target.startswith("edge")
-
 
 class BaseScraperClient:
     """
@@ -95,7 +103,7 @@ class BaseScraperClient:
 
     子類別用法：
         class MyScraperService(BaseScraperClient):
-            IMPERSONATE_POOL = ["chrome136"]  # 可選覆寫，限定特定瀏覽器
+            IMPERSONATE_POOL = ["firefox147"]  # 可選覆寫，限定特定瀏覽器（先逐站實測）
             TIMEOUT = 20                      # 可選覆寫
 
             def __init__(self, ...):
@@ -111,6 +119,7 @@ class BaseScraperClient:
         # 當前選中的指紋（impersonate 名稱或本地指紋 dict）
         self._current_impersonate: str = ""
         self._current_local_fp: Optional[dict] = None
+        self._run_session: Optional[Session] = None
         self._rotate_impersonate()
 
     @property
@@ -137,10 +146,38 @@ class BaseScraperClient:
 
     # ── Session 建立 ──
 
-    def _build_session(self) -> Session:
+    @contextmanager
+    def run_session(self):
+        """整輪共用一個 session：同一個瀏覽器指紋、cookie 一路延續，離開區塊才關。
+
+        以前多數爬蟲每個請求都開新 session（每次重選瀏覽器、cookie 從零開始），
+        同一個 IP 幾秒內就換一種瀏覽器，真的讀者不會這樣。區塊裡的 _build_session()
+        都回傳這一個，而且呼叫端的 `with` 不會把它關掉；巢狀呼叫沿用外層那一個。
         """
-        建立 curl_cffi Session（含 TLS 指紋模擬）。
-        每次建立新 session 時自動輪換 impersonate 目標。
+        if self._run_session is not None:
+            yield self._run_session
+            return
+        session = self._new_session()
+        self._run_session = session
+        try:
+            yield session
+        finally:
+            self._run_session = None
+            session.close()
+
+    def _build_session(self):
+        """給 `with self._build_session() as session:` 用。
+
+        在 run_session() 區塊裡：回傳本輪共用的 session（包成離開 with 也不關閉）；
+        區塊外：建一個新的（沿用舊行為，with 結束就關）。
+        """
+        if self._run_session is not None:
+            return nullcontext(self._run_session)
+        return self._new_session()
+
+    def _new_session(self) -> Session:
+        """
+        建立 curl_cffi Session（含 TLS 指紋模擬），每次都重新隨機選一個指紋。
 
         如果選到本地指紋，使用 ja3 + akamai 自訂指紋；
         否則使用 curl_cffi 內建 impersonate。
@@ -166,9 +203,8 @@ class BaseScraperClient:
         """
         一般頁面請求 headers（模擬瀏覽器直接導航）。
 
-        Sec-CH-UA headers 只在 Chromium 系瀏覽器加入；
-        Firefox / Safari 不送這些 headers（符合真實瀏覽器行為）。
-        User-Agent 不手動設定，由 curl_cffi impersonate 自動處理。
+        User-Agent 與 Sec-CH-UA 系列不在這裡設定，由 curl_cffi impersonate 依目標送出
+        （Firefox / Safari 目標本來就不送 Sec-CH-UA，符合真實瀏覽器行為）。
         """
         headers = {
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -182,14 +218,6 @@ class BaseScraperClient:
             "Sec-Fetch-User": "?1",
         }
 
-        # Chromium 系加入 Sec-CH-UA headers
-        if _is_chromium(self._current_impersonate):
-            sec_ch_ua = _SEC_CH_UA_MAP.get(self._current_impersonate)
-            if sec_ch_ua:
-                headers["Sec-CH-UA"] = sec_ch_ua
-            headers["Sec-CH-UA-Mobile"] = "?0"
-            headers["Sec-CH-UA-Platform"] = '"Linux"'
-
         if referer:
             headers["Referer"] = referer
             # 有 referer 代表是從站內連結跳轉，Sec-Fetch-Site 改為 same-origin
@@ -201,7 +229,7 @@ class BaseScraperClient:
         AJAX/XHR 請求 headers（模擬 JavaScript fetch/XMLHttpRequest）。
 
         對應瀏覽器行為：頁面上的 JS 發出 AJAX 請求載入更多內容。
-        User-Agent 不手動設定，由 curl_cffi impersonate 自動處理。
+        User-Agent 與 Sec-CH-UA 系列不在這裡設定，由 curl_cffi impersonate 依目標送出。
         """
         # 自動從 referer 推斷 origin
         if origin is None:
@@ -219,14 +247,6 @@ class BaseScraperClient:
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-origin",
         }
-
-        # Chromium 系加入 Sec-CH-UA headers
-        if _is_chromium(self._current_impersonate):
-            sec_ch_ua = _SEC_CH_UA_MAP.get(self._current_impersonate)
-            if sec_ch_ua:
-                headers["Sec-CH-UA"] = sec_ch_ua
-            headers["Sec-CH-UA-Mobile"] = "?0"
-            headers["Sec-CH-UA-Platform"] = '"Linux"'
 
         return headers
 

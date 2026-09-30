@@ -24,11 +24,15 @@ class ScraperService:
 
     def scrape_articles(self) -> bool:
         """
-        執行完整的文章抓取流程
+        執行完整的文章抓取流程（選單＋各篇內文共用一個 session，見 BaseScraperClient.run_session）
 
         Returns:
             執行是否成功
         """
+        with self.api_service.run_session():
+            return self._scrape_articles()
+
+    def _scrape_articles(self) -> bool:
         try:
             self.logger.info(f"[{datetime.now()}] 開始抓取文章資料...")
 

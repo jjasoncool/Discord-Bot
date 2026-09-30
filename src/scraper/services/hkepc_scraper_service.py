@@ -168,7 +168,15 @@ class HkepcScraperService(BaseScraperClient):
 
     # ── 主流程 ──
     def fetch_hkepc_articles(self, first_run: bool = False) -> List[Dict]:
-        """抓列表 → 三層去重 → 抓內頁 → 回傳要寫入 DB 的 item 清單。"""
+        """抓列表 → 三層去重 → 抓內頁 → 回傳要寫入 DB 的 item 清單。
+
+        整輪共用一個 session（run_session）：以前每頁開新 session、每頁重選瀏覽器，
+        抽到 HKEPC 會擋的瀏覽器的那幾頁就 403，是內文時有時無、IT快訊只剩摘要的原因之一。
+        """
+        with self.run_session():
+            return self._fetch_articles(first_run)
+
+    def _fetch_articles(self, first_run: bool) -> List[Dict]:
         limit = self.first_run_limit if first_run else None
         seen: Dict[int, Dict] = {}  # L1：跑批內依 hkepc_id 去重，並聯集 tag
 
