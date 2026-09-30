@@ -804,7 +804,7 @@ def _compact_stamp(stamp: Optional[str]) -> str:
     return re.sub(r'\D', '', stamp or '')
 
 
-async def _migrate_fingerprints_once(db) -> None:
+async def _migrate_fingerprints_once(db, *, now: Optional[datetime] = None) -> None:
     """一次性：用現行 normalize_title 重算既有列的指紋，並回填 core_name。
 
     為什麼非做不可：normalize_title 一改，既有指紋全部失配 → 去重表等同失效 →
@@ -812,6 +812,7 @@ async def _migrate_fingerprints_once(db) -> None:
     重算基準用列裡存的 title：現行 code 的「活動顯示名」與「指紋基準」已經一致
     （全庫 217 個活動實測 0 筆不一致），所以從 title 重算會得到正確的新指紋。
     冪等：跑過一次之後不會再有列變動；只在程序生命週期內做一次。
+    `now` 只給測試固定時間用（判斷分身所屬的活動是否已結束）。
     """
     global _fp_migration_done
     if _fp_migration_done:
@@ -824,13 +825,25 @@ async def _migrate_fingerprints_once(db) -> None:
         logger.warning("[event] 指紋遷移讀取失敗（下次再試；本次跳過去重升級）：%s", e)
         raise
 
+    now = now or datetime.now(SERVER_TZ)
     taken = {r["event_fingerprint"] for r in rows}
-    changed = collided = failed = 0
+    changed = collided = known = failed = 0
     for row in rows:
         core = normalize_title(row.get("title") or "")
         new_fp = f"{core}|{_compact_stamp(row.get('start_utc8'))}|{_compact_stamp(row.get('end_utc8'))}"
         old_fp = row["event_fingerprint"]
         if new_fp == old_fp:
+            if (row.get("core_name") or "") != core:
+                try:
+                    await db.update_created_event(old_fp, core_name=core)
+                except Exception as e:
+                    failed += 1
+                    logger.warning("[event] 指紋遷移回填 core_name 失敗：%s | %s", old_fp, e)
+            continue
+        if new_fp in taken and row.get("superseded_by") == new_fp:
+            # 先前的遷移已經發現並標成分身：提醒過一次、也已經擋得住重複，
+            # 每次啟動都再報 ERROR 只會把真正的錯誤淹沒，也不必每次重寫這一列。
+            known += 1
             if (row.get("core_name") or "") != core:
                 try:
                     await db.update_created_event(old_fp, core_name=core)
@@ -850,9 +863,15 @@ async def _migrate_fingerprints_once(db) -> None:
             except Exception as e:
                 failed += 1
                 logger.warning("[event] 指紋遷移標記分身失敗：%s | %s", old_fp, e)
-            logger.error("[event] ⚠️ 指紋遷移發現重複活動：《%s》(event_id=%s) 與既有 fp=%s 相撞。"
-                         "本列維持舊指紋不動；Discord 上有兩個同一活動，請手動刪掉其中一個。",
-                         row.get("title"), row.get("discord_event_id"), new_fp)
+            end = parse_source_time(row.get("end_utc8"))
+            if end is not None and end <= now:
+                # 活動已經結束，Discord 上多半已不顯示，不必再請人手動刪
+                logger.info("[event] 指紋遷移發現重複活動，但活動已結束（%s），只標記分身、不需處理：《%s》(event_id=%s) 與既有 fp=%s",
+                            row.get("end_utc8"), row.get("title"), row.get("discord_event_id"), new_fp)
+            else:
+                logger.error("[event] ⚠️ 指紋遷移發現重複活動：《%s》(event_id=%s) 與既有 fp=%s 相撞。"
+                             "本列維持舊指紋不動；Discord 上有兩個同一活動，請手動刪掉其中一個。",
+                             row.get("title"), row.get("discord_event_id"), new_fp)
             continue
         try:
             await db.update_created_event(old_fp, new_fingerprint=new_fp, core_name=core)
@@ -868,9 +887,9 @@ async def _migrate_fingerprints_once(db) -> None:
     # 留著等於一筆「知道活動存在、卻完全沒有去重能力」的列。下一篇公告進來時再試一次。
     if failed == 0:
         _fp_migration_done = True
-    logger.info("[event] 指紋遷移%s：共 %s 列，更新 %s 列，重複活動 %s 組，失敗 %s 列",
+    logger.info("[event] 指紋遷移%s：共 %s 列，更新 %s 列，新發現重複活動 %s 組，先前已標記 %s 組，失敗 %s 列",
                 "完成" if failed == 0 else "未完成（下次重試）",
-                len(rows), changed, collided, failed)
+                len(rows), changed, collided, known, failed)
     if failed:
         raise RuntimeError(f"指紋遷移有 {failed} 列未寫入")
 

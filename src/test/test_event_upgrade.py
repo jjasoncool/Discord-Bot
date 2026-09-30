@@ -577,6 +577,11 @@ class FailureIsolationTests(SchedulerCaseBase):
         await self.run_post(POST_WITH_BODY, guild=guild)   # 不可往上拋，否則會拖垮轉發
 
 
+# 活動 2026-08-22 10:00 ～ 2026-09-29 11:59：遷移時的「現在」固定住，測試才不會隨日期過去而改變結果
+BEFORE_END = datetime(2026, 9, 1, 12, 0, tzinfo=ES.SERVER_TZ)
+AFTER_END = datetime(2026, 9, 30, 12, 0, tzinfo=ES.SERVER_TZ)
+
+
 class FingerprintMigrationTests(unittest.IsolatedAsyncioTestCase):
     """normalize_title 改動後，既有指紋必須被遷移，否則舊活動會整批重建。"""
 
@@ -609,9 +614,47 @@ class FingerprintMigrationTests(unittest.IsolatedAsyncioTestCase):
                   "活動預告 | <群聲共振模擬域> 戰鬥活動即將開啟！",
                   "2026-08-22 10:00", "2026-09-29 11:59", 222)
         with self.assertLogs(level="ERROR") as caught:
-            await ES._migrate_fingerprints_once(self.db)
+            await ES._migrate_fingerprints_once(self.db, now=BEFORE_END)
         self.assertEqual(len(self.db.rows), 2, "碰撞時不可默默砍掉任何一列")
         self.assertIn("指紋遷移發現重複活動", "\n".join(caught.output))
+
+    def _add_collided_pair(self):
+        self._add("群聲共振模擬域|202608221000|202609291159", "[群聲共振模擬域]戰鬥活動",
+                  "2026-08-22 10:00", "2026-09-29 11:59", 111)
+        self._add("活動預告<群聲共振模擬域>戰鬥活動即將開啟|202608221000|202609291159",
+                  "活動預告 | <群聲共振模擬域> 戰鬥活動即將開啟！",
+                  "2026-08-22 10:00", "2026-09-29 11:59", 222)
+        return "活動預告<群聲共振模擬域>戰鬥活動即將開啟|202608221000|202609291159"
+
+    async def test_known_duplicate_is_reported_only_the_first_time(self):
+        """同一組分身第一次發現時報 ERROR 並標記；之後每次遷移都不再報、也不再重寫那一列。"""
+        dup_fp = self._add_collided_pair()
+        with self.assertLogs(level="ERROR"):
+            await ES._migrate_fingerprints_once(self.db, now=BEFORE_END)
+        self.assertEqual(self.db.rows[dup_fp]["superseded_by"], "群聲共振模擬域|202608221000|202609291159")
+
+        writes = []
+        original = self.db.update_created_event
+
+        async def counting(fingerprint, **kw):
+            writes.append(fingerprint)
+            return await original(fingerprint, **kw)
+
+        self.db.update_created_event = counting
+        ES._fp_migration_done = False
+        with self.assertNoLogs(level="ERROR"):
+            await ES._migrate_fingerprints_once(self.db, now=BEFORE_END)
+        self.assertEqual(writes, [], "已標記過的分身不必每次重寫")
+        self.assertEqual(len(self.db.rows), 2)
+
+    async def test_new_duplicate_of_ended_event_is_marked_without_error(self):
+        """新發現的分身若活動已經結束，照樣標記，但不必再叫人去 Discord 刪（只記 INFO）。"""
+        dup_fp = self._add_collided_pair()
+        with self.assertNoLogs(level="ERROR"):
+            with self.assertLogs(level="INFO") as caught:
+                await ES._migrate_fingerprints_once(self.db, now=AFTER_END)
+        self.assertEqual(self.db.rows[dup_fp]["superseded_by"], "群聲共振模擬域|202608221000|202609291159")
+        self.assertIn("已結束", "\n".join(caught.output))
 
     async def test_failed_migration_is_retried_and_blocks_creation(self):
         """遷移沒跑成功就不可以往下建活動 —— 拿新指紋去比對未遷移的舊列 = 舊活動整批重建。"""
