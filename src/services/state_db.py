@@ -677,3 +677,20 @@ class StateDB:
         except Exception as e:
             logger.error("JSON 匯入失敗: %s", e, exc_info=True)
             return False
+
+
+# ── 全程式共用的單一連線 ──
+# 轉發、活動、社群 ID 查詢、週期提醒都用同一個 StateDB 連線（避免各開各的）。
+# 放在這裡而不是某個功能底下：其他功能才不必為了拿資料庫去依賴那個功能。
+_shared_state_db: Optional[StateDB] = None
+_shared_state_db_lock = asyncio.Lock()
+
+
+async def get_shared_state_db() -> StateDB:
+    """取得全域共用的 StateDB 實例（併發安全）。"""
+    global _shared_state_db
+    async with _shared_state_db_lock:
+        if _shared_state_db is None:
+            _shared_state_db = StateDB()
+            await _shared_state_db.connect()
+    return _shared_state_db

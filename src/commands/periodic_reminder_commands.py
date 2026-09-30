@@ -19,7 +19,7 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
-from services.relay.base_monitor import get_shared_state_db
+from services.state_db import get_shared_state_db
 from services.events.event_scheduler import VersionDateResolver
 from services.events.event_time_parser import SERVER_TZ
 from services.events.periodic_reminder import (

@@ -581,7 +581,7 @@ async def _cleanup_created_event(discord_event_id: int, reason: str) -> None:
     原地復活。改成標記後，兩條比對路徑都還查得到，查到就什麼都不做。
     """
     try:
-        from services.relay.base_monitor import get_shared_state_db
+        from services.state_db import get_shared_state_db
         db = await get_shared_state_db()
         n = await db.mark_created_event_deleted(discord_event_id)
         if n:

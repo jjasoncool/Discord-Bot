@@ -468,7 +468,7 @@ async def maybe_schedule_events(
     try:
         import discord
         from utils.utils import ChannelConfig
-        from services.relay.base_monitor import get_shared_state_db
+        from services.state_db import get_shared_state_db
 
         config = ChannelConfig.load_config(caller="event_scheduler")
         # 閘門：只處理發進「活動公告頻道」(= article_monitor_channel_id) 的內容，即時讀、自動同步

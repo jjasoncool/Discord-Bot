@@ -17,13 +17,9 @@ from typing import List, Dict, Optional
 from urllib.parse import urlparse
 
 from utils.logger_config import get_article_monitor_logger
-from services.state_db import StateDB
+from services.state_db import StateDB, get_shared_state_db
 
 logger = get_article_monitor_logger()
-
-# 全域共用 StateDB 實例（避免多個 monitor 各開各的連線）
-_shared_state_db: Optional[StateDB] = None
-_shared_state_db_lock = asyncio.Lock()
 
 # article_runtime.json 共用快取（TTL 5 分鐘）
 _article_runtime_cache: Dict = {}
@@ -45,16 +41,6 @@ def get_article_runtime_config() -> Dict:
     except Exception:
         pass
     return _article_runtime_cache
-
-
-async def get_shared_state_db() -> StateDB:
-    """取得全域共用的 StateDB 實例（併發安全）。"""
-    global _shared_state_db
-    async with _shared_state_db_lock:
-        if _shared_state_db is None:
-            _shared_state_db = StateDB()
-            await _shared_state_db.connect()
-    return _shared_state_db
 
 
 class BaseContentMonitor:

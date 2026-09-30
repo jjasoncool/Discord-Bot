@@ -251,7 +251,7 @@ class SchedulerCaseBase(unittest.IsolatedAsyncioTestCase):
         config = {"article_monitor_channel_id": CHANNEL_ID,
                   "event_schedule_enabled": True, "event_schedule_dry_run": False}
         with patch("utils.utils.ChannelConfig.load_config", return_value=config), \
-             patch("services.relay.base_monitor.get_shared_state_db", return_value=self.db), \
+             patch("services.state_db.get_shared_state_db", return_value=self.db), \
              patch.object(ES, "_version_resolver", _StubResolver()), \
              patch.object(ES, "_download_image_bytes", side_effect=self._fake_download(image)):
             await ES.maybe_schedule_events(
