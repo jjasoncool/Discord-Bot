@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
@@ -53,6 +54,20 @@ class BahamutScraperService(BaseScraperClient):
         self.human_delay_range = BAHAMUT_CONFIG.get("human_delay_min", (0.35, 0.9))
         self.page_delay_range = BAHAMUT_CONFIG.get("page_delay_range", (2, 5))
         self.sample_output_dir = BAHAMUT_CONFIG.get("sample_output_dir", "data/bahamut_samples")
+        self._stats = self._new_stats()
+        self.last_stats: Optional[Dict[str, Any]] = None
+
+    # ── 每輪統計 ──
+    # 逐筆請求的 log 在 WARNING 等級下看不到；一輪要跑多久、時間花在等待還是請求，
+    # 只能靠這份計數寫進「任務完成」那行（main.py）。
+    @staticmethod
+    def _new_stats() -> Dict[str, Any]:
+        return {"requests": 0, "xhr_requests": 0, "pages": 0, "sleep_seconds": 0.0}
+
+    def _sleep(self, a: float, b: float) -> None:
+        started = time.monotonic()
+        human_sleep(a, b)
+        self._stats["sleep_seconds"] += time.monotonic() - started
 
     def _build_headers(self, referer: Optional[str] = None) -> Dict[str, str]:
         """巴哈頁面請求 headers（delegate 給 BaseScraperClient）"""
@@ -92,6 +107,7 @@ class BahamutScraperService(BaseScraperClient):
                     {k: v for k, v in session.cookies.items()},
                 )
 
+                self._stats["requests"] += 1
                 resp = session.get(
                     url,
                     headers=self._build_headers(referer=referer),
@@ -145,6 +161,7 @@ class BahamutScraperService(BaseScraperClient):
                             resp.url,
                             desktop_url,
                         )
+                    self._stats["requests"] += 1
                     resp = session.get(
                         desktop_url,
                         headers=self._build_headers(referer=referer or url),
@@ -177,6 +194,7 @@ class BahamutScraperService(BaseScraperClient):
                 status = resp.status_code
                 if status >= 400:
                     resp.raise_for_status()
+                self._stats["pages"] += 1
                 return resp.text, resp.url, status
             except Exception as e:
                 last_error = e
@@ -187,7 +205,7 @@ class BahamutScraperService(BaseScraperClient):
                     e,
                 )
                 if attempt < 3:
-                    human_sleep(1.0 * attempt, 1.5 * attempt)
+                    self._sleep(1.0 * attempt, 1.5 * attempt)
 
         raise RuntimeError(f"Bahamut 抓取失敗（重試耗盡）: {url} err={last_error}")
 
@@ -611,7 +629,7 @@ class BahamutScraperService(BaseScraperClient):
         for page in range(self.board_start_page, self.board_end_page + 1):
             # 頁與頁之間加延遲（第一頁不用等）
             if page > self.board_start_page:
-                human_sleep(*self.page_delay_range)
+                self._sleep(*self.page_delay_range)
             page_url = self._build_board_page_url(self.target_board_url, page)
             html, final_url, status = self._fetch_html(session, page_url, referer=preheat.get("final_url"))
             is_gate = self._is_gate_page(final_url, html)
@@ -970,6 +988,8 @@ class BahamutScraperService(BaseScraperClient):
                 params["snC"] = str(snc)
 
             try:
+                self._stats["requests"] += 1
+                self._stats["xhr_requests"] += 1
                 resp = session.get(
                     endpoint,
                     params=params,
@@ -1032,7 +1052,7 @@ class BahamutScraperService(BaseScraperClient):
             except Exception:
                 break
 
-            human_sleep(0.15, 0.35)
+            self._sleep(0.15, 0.35)
 
         return fetched
 
@@ -1086,7 +1106,7 @@ class BahamutScraperService(BaseScraperClient):
 
         # 後續頁面（第 2 頁起）
         for page in range(2, total_pages + 1):
-            human_sleep(*self.page_delay_range)
+            self._sleep(*self.page_delay_range)
             page_url = self._build_article_page_url(final_url or article_url, page)
             try:
                 page_html, page_final_url, page_status = self._fetch_html(session, page_url, referer=final_url)
@@ -1171,6 +1191,20 @@ class BahamutScraperService(BaseScraperClient):
         }
 
     def fetch_bahamut_articles_with_content(self) -> Dict[str, Any]:
+        """抓一輪（看板＋每篇全部分頁＋留言），結果附上本輪統計 stats（成功或未完成都有）。
+
+        中途拋例外時沒有結果可附，統計另外留在 self.last_stats，由 main.py 記在「中斷」那行。
+        """
+        self._stats = self._new_stats()
+        started = time.monotonic()
+        try:
+            result = self._fetch_articles_with_content()
+        finally:
+            self.last_stats = {**self._stats, "elapsed_seconds": time.monotonic() - started}
+        result["stats"] = self.last_stats
+        return result
+
+    def _fetch_articles_with_content(self) -> Dict[str, Any]:
         with self._build_session() as session:
             base = self.fetch_board_articles(session)
             if not base.get("ok"):
@@ -1182,7 +1216,7 @@ class BahamutScraperService(BaseScraperClient):
                 if not url:
                     continue
                 try:
-                    human_sleep(*self.human_delay_range)
+                    self._sleep(*self.human_delay_range)
                     detail = self.fetch_article_detail(session, url)
                     if not detail.get("ok"):
                         continue

@@ -165,12 +165,30 @@ def _notify_discord_bot(source: str, payload: dict = None):
         logger.warning("通知 Discord Bot 失敗（不影響排程）: %s", e)
 
 
+def _format_bahamut_stats(stats: dict, save_seconds: float = 0.0) -> str:
+    """一輪的耗時與請求量（逐筆請求 log 在 WARNING 等級下看不到，靠這行知道時間花在哪）。"""
+    if not stats:
+        return "（無統計）"
+    return (
+        f"抓取 {stats.get('elapsed_seconds', 0):.0f} 秒（其中等待 {stats.get('sleep_seconds', 0):.0f} 秒）、"
+        f"寫入 {save_seconds:.0f} 秒｜請求 {stats.get('requests', 0)} 次"
+        f"（留言 XHR {stats.get('xhr_requests', 0)} 次）、頁面 {stats.get('pages', 0)} 頁"
+    )
+
+
 def _run_bahamut_scrape(service, label: str, notify: bool = True):
     """執行一輪巴哈抓取 + 寫 DB + 通知（notify=False 只存不通知）。"""
-    result = service.fetch_bahamut_articles_with_content()
+    try:
+        result = service.fetch_bahamut_articles_with_content()
+    except Exception:
+        # 例外本身（含 traceback）由呼叫端記；這裡補一行這一輪做到哪、花了多久
+        logger.warning("Bahamut 爬蟲任務中斷 [%s]｜%s", label, _format_bahamut_stats(getattr(service, "last_stats", None)))
+        raise
     if result.get("ok"):
+        save_started = time.monotonic()
         saved_count = service.save_articles_to_db(result.get("articles", []))
         service.db_manager.commit()
+        save_seconds = time.monotonic() - save_started
 
         from config import BAHAMUT_CONFIG
         output_path = None
@@ -178,22 +196,24 @@ def _run_bahamut_scrape(service, label: str, notify: bool = True):
             output_path = service.export_sample_json(result)
 
         logger.info(
-            "Bahamut 爬蟲任務完成 [%s]: article_count=%s, detailed_count=%s, saved_count=%s, output=%s",
+            "Bahamut 爬蟲任務完成 [%s]: article_count=%s, detailed_count=%s, saved_count=%s, output=%s｜%s",
             label,
             result.get("article_count", 0),
             result.get("detailed_count", 0),
             saved_count,
             output_path,
+            _format_bahamut_stats(result.get("stats"), save_seconds),
         )
 
         if notify:
             _notify_discord_bot("bahamut", {"board_id": "74934", "count": saved_count})
     else:
         logger.warning(
-            "Bahamut 爬蟲任務未完成 [%s]: error=%s gate=%s",
+            "Bahamut 爬蟲任務未完成 [%s]: error=%s gate=%s｜%s",
             label,
             result.get("error"),
             result.get("gate", {}),
+            _format_bahamut_stats(result.get("stats")),
         )
 
 

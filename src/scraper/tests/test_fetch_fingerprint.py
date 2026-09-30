@@ -1,4 +1,4 @@
-"""scraper 抓網頁的瀏覽器特徵（services.base_scraper_client 共用層＋各爬蟲）。
+"""scraper 抓網頁的瀏覽器特徵與每輪統計（services.base_scraper_client 共用層＋各爬蟲）。
 
 守的底線：
   1. 不自己送 Sec-CH-UA／Platform／Mobile，交給 curl_cffi 依瀏覽器目標送出與 UA 一致的值。
@@ -7,18 +7,23 @@
      認不得的會被剔除，全都認不得時退回 "firefox"；curl_cffi 將來拿掉 BrowserType 時照樣 import（不過濾）。
   3. 一輪共用一個 session（run_session）：區塊內每次拿到的都是同一個、呼叫端的 with 不會把它關掉、
      離開區塊才關；巢狀沿用外層；區塊外照舊每次新建。HKEPC、PTT、官網一輪都只建一個 session。
+  4. 巴哈每輪回報統計（請求次數含留言 XHR、成功頁數、等待秒數、耗時），每輪重新計、不累加，
+     每一處等待都算進去，並寫進「任務完成」那行 log；中途拋例外時也記一行「中斷」與做到哪。
 
 不連網、不碰資料庫：請求與 session 都以假物件取代。
 """
 
+import ast
 import importlib
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 from curl_cffi.requests import BrowserType
 
 from services import api_service as api_module
+from services import bahamut_scraper_service as bahamut_module
 from services import base_scraper_client as base_module
 from services import hkepc_scraper_service as hkepc_module
 from services import ptt_scraper_service as ptt_module
@@ -218,6 +223,91 @@ class OneSessionPerRunTests(unittest.TestCase):
         self.assertEqual(len(made), 1)
         self.assertEqual(made[0].get.call_count, 2)
         self.assertTrue(made[0].closed)
+
+
+class BahamutStatsTests(unittest.TestCase):
+
+    def setUp(self):
+        self.clock = [0.0]
+        self.svc = bahamut_module.BahamutScraperService()
+        page = SimpleNamespace(status_code=200, url="https://forum.gamer.com.tw/B.php?bsn=74934",
+                               text="<html></html>", history=[], headers={})
+        self.session = SimpleNamespace(get=mock.MagicMock(return_value=page), cookies={})
+        self.broken_session = SimpleNamespace(get=mock.MagicMock(side_effect=RuntimeError("boom")), cookies={})
+
+    def _fake_run(self):
+        svc = self.svc
+        svc._fetch_html(self.session, "https://forum.gamer.com.tw/B.php?bsn=74934")
+        svc._sleep(2, 5)
+        svc._fetch_html(self.session, "https://forum.gamer.com.tw/C.php?bsn=74934&snA=1")
+        svc._fetch_comments_via_xhr(self.broken_session, "74934", "123", "https://forum.gamer.com.tw/")
+        self.clock[0] += 1.5  # 請求本身花的時間
+        return {"ok": True, "articles": []}
+
+    def _run_once(self):
+        def fake_sleep(a, b):
+            self.clock[0] += a
+        with mock.patch.object(bahamut_module, "human_sleep", side_effect=fake_sleep), \
+             mock.patch.object(bahamut_module.time, "monotonic", side_effect=lambda: self.clock[0]), \
+             mock.patch.object(self.svc, "_fetch_articles_with_content", side_effect=self._fake_run):
+            return self.svc.fetch_bahamut_articles_with_content()
+
+    def test_run_reports_requests_pages_sleep_and_elapsed(self):
+        stats = self._run_once()["stats"]
+        self.assertEqual(stats["requests"], 3)       # 2 頁＋1 次留言 XHR（失敗也算一次請求）
+        self.assertEqual(stats["xhr_requests"], 1)
+        self.assertEqual(stats["pages"], 2)
+        self.assertAlmostEqual(stats["sleep_seconds"], 2.0)
+        self.assertAlmostEqual(stats["elapsed_seconds"], 3.5)
+
+    def test_every_wait_goes_through_the_counter(self):
+        # 等待只准經過 _sleep，否則那段時間不會算進「等待」；新增等待時直接呼叫 human_sleep 會被擋
+        tree = ast.parse(Path(bahamut_module.__file__).read_text(encoding="utf-8"))
+        offenders = [
+            f"{fn.name}:{node.lineno}"
+            for fn in ast.walk(tree) if isinstance(fn, ast.FunctionDef) and fn.name != "_sleep"
+            for node in ast.walk(fn)
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "human_sleep"
+        ]
+        self.assertEqual(offenders, [])
+
+    def test_interrupted_run_keeps_its_stats(self):
+        def broken_run():
+            self.svc._fetch_html(self.session, "https://forum.gamer.com.tw/B.php?bsn=74934")
+            raise RuntimeError("Bahamut 抓取失敗（重試耗盡）")
+        with mock.patch.object(self.svc, "_fetch_articles_with_content", side_effect=broken_run):
+            with self.assertRaises(RuntimeError):
+                self.svc.fetch_bahamut_articles_with_content()
+        self.assertEqual(self.svc.last_stats["requests"], 1)
+
+    def test_each_run_starts_from_zero(self):
+        self._run_once()
+        stats = self._run_once()["stats"]
+        self.assertEqual(stats["requests"], 3)
+        self.assertEqual(stats["pages"], 2)
+
+    def test_completion_log_line_shows_the_stats(self):
+        import main
+        line = main._format_bahamut_stats(
+            {"elapsed_seconds": 4440, "sleep_seconds": 3100, "requests": 950, "xhr_requests": 120, "pages": 830},
+            save_seconds=240,
+        )
+        for part in ("抓取 4440 秒", "等待 3100 秒", "寫入 240 秒", "請求 950 次", "XHR 120 次", "頁面 830 頁"):
+            self.assertIn(part, line)
+        self.assertEqual(main._format_bahamut_stats(None), "（無統計）")
+
+    def test_interrupted_run_is_logged_with_its_stats(self):
+        import main
+        def boom():
+            raise RuntimeError("boom")
+        service = SimpleNamespace(fetch_bahamut_articles_with_content=boom,
+                                  last_stats={"elapsed_seconds": 60, "sleep_seconds": 40, "requests": 25, "xhr_requests": 0, "pages": 24})
+        with mock.patch.object(main, "logger") as log:
+            with self.assertRaises(RuntimeError):
+                main._run_bahamut_scrape(service, "公開看板")
+        line = log.warning.call_args.args[0] % log.warning.call_args.args[1:]
+        self.assertIn("中斷", line)
+        self.assertIn("請求 25 次", line)
 
 
 if __name__ == "__main__":
