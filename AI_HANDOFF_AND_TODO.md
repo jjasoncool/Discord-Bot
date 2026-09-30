@@ -25,6 +25,16 @@
 > 4. 保留可追溯來源，避免之後重複討論同一件事
 
 最後盤點紀錄（只保留近期；過往詳見 `TODO-completed.md` 各歸檔 entry）：
+- 2026-09-30 16:4x（`services/` 分群＋S6-1＋重複活動雜訊修正 **已套用・已重啟・驗證通過・已 commit**）：16:17:41 套用 `services_reorg_v2.patch`（43 檔，與工作副本逐位元組相同），使用者 16:38 重啟；啟動 gate 652 項全過，11 個指令模組、21 個斜線指令、各排程、轉發、Telegram worker、Notify Server 都從新路徑啟動；重啟後沒有任何 ERROR，套用到重啟之間也沒有。指紋遷移在第一篇含活動的公告進來時才跑，新摘要（預期「新發現 0 組，先前已標記 1 組」、不再報 ERROR）要等那時才看得到。S6-2 改定案：使用者認為 dockerfile 的鎖版本沒必要 → dockerfile 還原成只裝 `requirements.txt`；`constraints.txt` 留作紀錄（與容器內 `pip freeze` 102 項逐一相同），檔頭改成「建置不讀、用來對照與暫時退回」。文件路徑更新腳本已跑（交接文件 16 處、記憶 1 處；剩下的舊路徑都在「程式結構整理」的新舊對照裡）。S7-1 使用者選 A 拆五個：`5e10611` 搬家（648 項）、`2b31828` S6-1（650 項）、`f7d4a14` 重複活動只報一次（652 項＝上線版）、`f6e4830` 加 mcp＋版本紀錄、交接文件另一個 `docs` commit；中間兩個狀態都先在容器 `/tmp` 跑過完整測試才 commit，`it_comfyui_image.py` 沒進。
+- 2026-09-30 16:0x（新 image 上線、重複活動查證，**未動 code**）：使用者 13:09 用新 image 重建容器（**`services/` 搬家 patch 尚未套用**，程式仍是 `9b0b916`）；啟動 gate 648 項全過，套件版本與 constraints 一致（mcp 2.2.0、yt-dlp 2026.8.19、numpy 2.5.3、pgvector 0.5.0、llama-index-core 0.14.25、davey 0.1.6、websockets 17.1）；15:56、16:02 正常播歌（語音加密新版 OK）；13:09 後唯一的 ERROR 是 15:56 語音斷線重連（Discord 端切換，升級前也有）。
+  - 重複的「群聲共振模擬域」活動查證：兩筆都建於 8/19、8/20（9/22 修正前，當時 `normalize_title` 不認半形 `<>`）；第二筆 `1539937681176272916` 在資料庫已標 `superseded_by` 指向正本 `1539556072082112604`；兩者都在 9/29 11:59 結束。9/22 修正後的每次指紋遷移都只報這同一組、沒有新增重複 → **去重（有重複就更新）正常**。但遷移每跑一次就再報一次 ERROR（累計 26 次），已處理過又已結束的重複變成雜訊。待決：要不要讓遷移略過已標 `superseded_by`／已結束的組合（見活動區塊）。
+- 2026-09-30 12:2x（重建完成，準備套用）：使用者 11:39 建好新 image（依 constraints 安裝，含 mcp）。**04:00 維護第一次在新路徑下完整跑完**：③ 人格萃取 37/37、④ persona agent 26 人、⑤ 精簡版發布 64 人（寫入 63、空 1、失敗 0）。04:00 後 6 行錯誤都與整理無關：語音斷線 2 次（都在 2 秒內重連到新的語音伺服器，屬 Discord 端切換）、活動指紋遷移提醒 Discord 上有一組重複的「群聲共振模擬域」活動（event_id=1539937681176272916，需手動刪一個，既有資料狀況）、插話模型回空內容 1 次（已略過）。`services_reorg.patch` 仍可乾淨套用。
+- 2026-09-30（S6-2 升級影響研究完成，**未動 code**）：52 個升級都不影響我們、不需改程式（隔離 venv 實測 648 測試全過、SQL 與影像輸出相同）；S6-2 建議改為「升到最新＋用 constraints 鎖住測過的版本」。04:00 維護第一次在新路徑下跑：③ 完成、④ 進行中、無錯誤。
+- 2026-09-30（`services/` 分類複查）：兩個角度都確認 patch 正確；調整套用流程為「先重建 image → 套用 patch 後立刻重新建立容器」，避免歡迎訊息在空窗期出錯；備好文件路徑更新腳本。
+- 2026-09-30（S6-2 套件升級影響清查，**未動 code**）：從零重建會改 52 個套件版本（主版號 3：deprecated、setuptools、websockets），新增 18 個；breaking changes 研究與隔離環境實測進行中。
+- 2026-09-30（`services/` 分類，**已在工作副本完成・648 測試全過・未套用・未 commit**）：分成 relay／events／community，共用留頂層；相依圖前後相同、資料路徑不變；獨立複查進行中。待決：`get_shared_state_db` 搬到 `state_db.py`（S6-1）、重建 image 時用 constraints 鎖版本（S6-2）、套用時機（S6-3）。
+- 2026-09-30（grill：`services/` 分類，**未動 code**）：盤點 19 檔分成轉發／遊戲時程／社群管理／共用四群，寫入搬檔會碰到的地方與待決問題 S5-1～S5-4。
+- 2026-09-30（重啟驗證，**未動 code**）：使用者 02:10 重啟；啟動 gate 648 項全過、點名新程式上線；00:00 日記在新路徑成功發布；唯一 ERROR 是既有的模型逾時。背景 agent 狀態：只有 9/29 第一個驗證流程因 session 重啟停下（其未完成部分已由主 agent 補做），之後的流程 9/9 完成。待辦：07:30 後確認 04:00 維護。
 - 2026-09-29（第 11 輪續）：點名修改的獨立複查確認行為不變；依複查補上點名端到端測試、修正守衛三處誤判與自測漏洞；9 種突變全紅、648 測試全過；第二個 commit。
 - 2026-09-29（第 11 輪）：第一個 commit `97d7595`（`llm/` 重組）；點名改由 Cog 交按鈕建立函式給服務層，服務層不再 import 指令層（新測試 3 項、突變 3 種都紅）；修正 import 守衛把 `__file__` 等模組內建屬性誤判為不存在的問題；646 測試全過，等第二個 commit。
 - 2026-09-29（第 10 輪，**未動 code**）：`it_comfyui_image.py` 移出暫存區；MCP R2-Q2 定案（`search`＋`fetch`，設計全部定案）；寫入點名「服務層依賴指令層」的細節與修法選項（建議先不改，改時先補測試再注入按鈕建立函式）。
@@ -36,7 +46,7 @@
 - 2026-09-29（grill：程式結構整理，**討論中・未動 code**）：使用者覺得程式很亂，想依功能分資料夾但要有整體規劃。新增 [程式結構整理區塊](#程式結構整理2026-09-29-構想grill-中)，寫入第 1 輪待決問題（痛點、整理方式、分法原則、跟 MCP 的關係）與盤點事實（一檔多功能的檔案、`discord_bot.py` 塞的東西、轉發應整組、`sent_articles.db` 路徑地雷、沒有測試的功能）。MCP 區塊的 R2-Q5 改為取決於這邊。使用者要先看架構怎麼切、以及不影響功能能先做什麼 → 寫入架構草案（`core/`＋依領域分：relay、schedule、ai、search、community、trade、music、misc）與「現在就能做」清單（資料檔路徑集中、私有 import 守衛、清死碼、更新文件、MCP 照新結構寫）。使用者否決草案 v1（拆了 `llm/` 與 Discord 服務），要求從現有架構出發、最小修改 → 改寫成架構建議 v2（P1～P5）；第 1 項縮小成只加測試釘住 6 個資料檔位置，第 3 項確認 4 處死碼（`chat_persistence` 延遲 import 不是死碼，移出）。使用者提出「檔案命名也是問題」→ 讀到 ComfyUI 區塊既有的「檔名正名」與「不做 llm/services 資料夾重組」決定並補進本區塊；寫入命名盤點與第 2 輪待決問題 N1～N4。使用者回覆：N1 同意、N2 三個都不改、N3 延後、P1 否決（services 就是服務）、P3 入口仍由 `discord_bot.py` 管；使用者定義 `llm/`＝LLM 相關的組裝、優化、橋接、RAG、MCP → 撤回搜尋獨立的修正，寫入 `llm/` 討論 L1～L4 與 P3 確認。使用者回覆 L1 同意、L2 要依 LLM 角色分子資料夾（重開不重組的決定）、L4 本地資料一律放 `localdata/` → 寫入第 4 輪：L2a 子資料夾草案、L2b 搬法（一次搬＋import 守衛）、L3 log 格式化移進 `logger_factory`、L4 MCP 殼放 `services/`。
 - 2026-09-29（grill：MCP／搜尋工具化，**討論中・未動 code**）：新增 [MCP／搜尋工具化區塊](#mcp搜尋工具化2026-09-29-構想grill-中)，寫入第 1 輪待決問題（誰呼叫工具、結果給誰看、關鍵字過濾的痛點、要回答哪類問題），以及兩個子代理的查證事實（`/askai` 與網頁查詢流程、既有 tool calling、各來源資料量與儲存方式、「寫死日期區間」其實是轉發）。定案：社群稽查（依 ID 查人）不納入工具；用途＝查情報，排除 Telegram 內鬼；改由 LLM 決定何時查；先做 MCP server，工具本體共用。補上 Lemonade 實測速度與 bot 接工具的成本估算；寫入第 2 輪待決問題（MCP 客戶端與部署、工具切法、搜尋方式、論壇索引層級）。使用者追問「一定要另開 container 嗎」→ 在 R2-Q1 補上三種放法（塞進 bot 行程／同 container 另一個行程走 stdio／新 container）的利弊。使用者說不會有別的電腦連 → R2-Q1 定案：只有這台的 Claude Code，採放法 ②（stdio、`docker exec` 啟動，bot 重啟一次裝套件）。使用者問程式放哪 → 新增 R2-Q5（建議 `src/search/` 本體＋`src/mcp_server/` 殼；不可取名 `mcp/`；log 分檔）。使用者問「MCP server 不就取代 search？」→ R2-Q5 補上說明（MCP 只是協定殼，搜尋程式一定要有，差別只在放哪），以及 A 的變體。
 - 2026-09-29（新增 repo 根目錄 `AGENTS.md`，**未 commit**）：每次工作都要遵守的規則（討論方式、使用者資料檔高嚴重性規則、Docker 限制、共用元件、程式碼與測試慣例）從本檔與本機記憶搬過去，讓所有 session、一般子代理、雲端都自動載入（Claude Code v2.1.277 以上；repo 裡不要放 `CLAUDE.md`／`CLAUDE.local.md`，否則改讀那個檔）。本檔開頭改成「本檔維護規則」，並寫明每段搬去哪。新規則：討論與 grill 的每一輪都回寫**待決問題（選項＋建議）**；問題每輪只談一個主題、約 3～5 題。依此補寫 Telegram 過濾、ComfyUI、Persona M7 三個暫停主題的待決問題與當時的建議。
-- 2026-09-29（log 統一改成 `__name__` ＋ 設定檔，**已實作・595 測試全過・已 commit・已上線**；06:22 重啟後實測：3 小時 781 行、每行帶模組名稱、httpx 逐筆請求 0 行、測試紀錄只進 `test_run.log`、handler 沒有重複（唯一的重複行是 Telegram 啟動時的相簿補圖略過訊息，見 Telegram 過濾區塊）；之後加上 `discord.player` 壓到 WARNING（每播完一首歌一行 ffmpeg 結束訊息，約 250 行／天，下次重啟生效）與「json 裡的 logger 名稱都要對得到模組」的測試）：原本只有 `discord_bot` 這個 logger 掛了輸出，其他名稱的 logger 紀錄**既不顯示也不進 log 檔**（實證：09-29 00:29 建身份組那筆不在 log）。改為：① 新增 `settings/logging.json`（dictConfig）：root 輸出到畫面＋`discord_bot.log`；類別 logger `article_monitor`／`llm_anomaly` 各寫自己的檔、不往 root 傳；httpx／httpcore／urllib3／llama_index 等壓到 WARNING；每行多印模組名稱 `[時間] [等級] [模組] 訊息`。② `utils/logger_config.py` 改成只讀設定檔（import 即套用、冪等；`LOG_LEVEL` 可覆寫 root 等級）。③ 60 個模組從 `getLogger('discord_bot')` 改 `getLogger(__name__)`；`discord_bot.py` 主程式以 script 執行，明確命名 `discord_bot`；`bot.run(..., log_handler=None)` 避免 discord.py 重複輸出。④ 測試模式：`test/__init__.py` 設 `APP_TEST_LOG_FILE`，所有檔案輸出（含 `llm.logger_factory` 的 prompt 除錯檔）改寫到 `/logs/test_run.log`，實測跑完正式 log 位元組數不變。⑤ 守衛：模組 logger 一律 `__name__`（AST 判斷，類別 logger 與 `discord_bot.py` 例外）、不准 `print`；Rule 的 allowed 支援資料夾。突變驗證都會紅。**要拆分類時**：在 json 加一個 handler＋一個以模組前綴為名的 logger（例：`services.telegram_relay_service`），重啟即可，不動程式碼。**下一批**：telegram-scraper 約 45 處 `print` 改 logger；該容器只掛 `./src/telegram_scraper`，要共用 `settings/logging.json` 得改 compose 掛載（需使用者重建容器）。
+- 2026-09-29（log 統一改成 `__name__` ＋ 設定檔，**已實作・595 測試全過・已 commit・已上線**；06:22 重啟後實測：3 小時 781 行、每行帶模組名稱、httpx 逐筆請求 0 行、測試紀錄只進 `test_run.log`、handler 沒有重複（唯一的重複行是 Telegram 啟動時的相簿補圖略過訊息，見 Telegram 過濾區塊）；之後加上 `discord.player` 壓到 WARNING（每播完一首歌一行 ffmpeg 結束訊息，約 250 行／天，下次重啟生效）與「json 裡的 logger 名稱都要對得到模組」的測試）：原本只有 `discord_bot` 這個 logger 掛了輸出，其他名稱的 logger 紀錄**既不顯示也不進 log 檔**（實證：09-29 00:29 建身份組那筆不在 log）。改為：① 新增 `settings/logging.json`（dictConfig）：root 輸出到畫面＋`discord_bot.log`；類別 logger `article_monitor`／`llm_anomaly` 各寫自己的檔、不往 root 傳；httpx／httpcore／urllib3／llama_index 等壓到 WARNING；每行多印模組名稱 `[時間] [等級] [模組] 訊息`。② `utils/logger_config.py` 改成只讀設定檔（import 即套用、冪等；`LOG_LEVEL` 可覆寫 root 等級）。③ 60 個模組從 `getLogger('discord_bot')` 改 `getLogger(__name__)`；`discord_bot.py` 主程式以 script 執行，明確命名 `discord_bot`；`bot.run(..., log_handler=None)` 避免 discord.py 重複輸出。④ 測試模式：`test/__init__.py` 設 `APP_TEST_LOG_FILE`，所有檔案輸出（含 `llm.logger_factory` 的 prompt 除錯檔）改寫到 `/logs/test_run.log`，實測跑完正式 log 位元組數不變。⑤ 守衛：模組 logger 一律 `__name__`（AST 判斷，類別 logger 與 `discord_bot.py` 例外）、不准 `print`；Rule 的 allowed 支援資料夾。突變驗證都會紅。**要拆分類時**：在 json 加一個 handler＋一個以模組前綴為名的 logger（例：`services.relay.telegram_relay_service`；2026-09-30 起 services 分群，模組名稱跟著變），重啟即可，不動程式碼。**下一批**：telegram-scraper 約 45 處 `print` 改 logger；該容器只掛 `./src/telegram_scraper`，要共用 `settings/logging.json` 得改 compose 掛載（需使用者重建容器）。
 - 2026-09-29（週期活動提醒：深塔海墟，**已實作・586 測試全過・已 commit・待部署驗證**）：深塔／海墟各 28 天、週一 04:00 重置、錯開 14 天；重置前一天 20:00 正常 @、重置當下靜音 @ 自助訂閱身份組「深塔海墟提醒」；綁「週期提醒頻道」時自動建身份組＋發面板，每次提醒後面板刪舊發新置底。詳見 [週期活動提醒區塊](#週期活動提醒深塔海墟2026-09-29-已實作待部署驗證)。
 - 2026-09-28（grill：Persona M7 後續／ComfyUI 產圖／Telegram LLM 過濾／深塔海墟提醒，**討論中・未動 code**）：新增 Telegram 過濾與週期提醒兩個草稿區塊並寫入查證事實；ComfyUI 區塊開頭補過時狀態修正（步驟 2 已完成、鎖有漏洞）；過時項目歸檔到 `TODO-completed.md`（Persona 影子模式規劃、Telegram 媒體防雷、ComfyUI 步驟 2 與 `keep_alive` 註解、插話 Phase B 三項、Ollama 時代觀察項），Persona 區塊改成 M7 現況。
 - 2026-09-28（Telegram 相簿漏圖，**scraper＋relay 兩端已實作・545 測試全過・已 commit・已部署；今天缺的 87 張已於 15:58~16:07 補發完成**）：使用者回報 GameData #3223 相簿 8 張只發 1 張。**觸發點＝8/02 補掃 commit `fbd2d3c` 加的全域 `process_lock`**：本意是防「同一則」被三條路徑並行處理，卻把 Telethon 本來並行派發的相簿各張變成逐張排隊（組員寫入間隔 p90 0.03s → 2s），relay 0.5 秒到齊判斷等不到整組就先發、晚到的被丟棄。8/02 起 191 組相簿 77 組缺圖、共 237 張。**改法**：全域鎖 → 單則訊息鎖 `(chat_id, message_id)`（新 [message_lock.py](src/telegram_scraper/message_lock.py)）。**relay 端同輪修掉**（使用者拍板）：改成「哪個組員先到就收整組、等媒體到齊＋3 秒安靜才發、晚到的以（補圖）再發、補圖時效 12 小時」。**補今天缺圖**：先校正 delivery_state（補記實送沒標、撤記標了沒送）再重啟，由 reconcile 走正式路徑補發；唯讀預演＝23 則、87 張。詳見 [補掃區塊 2026-09-28 追加段](#telegram-漏收事件自動補掃2026-08-02-已實作2026-08-18-補上中段缺口盲區2026-09-28-全域鎖改單則訊息鎖修相簿漏圖待部署驗證)。
@@ -197,8 +207,8 @@ affects: 全專案
 | Reaction 統計 / 社群互動玩法 | 規劃中 | 5% | [Reaction TODO](#reaction-統計與社群互動玩法) |
 | 點歌機器人（Music Bot） | 已上線運作 | 85% | [點歌機器人](#點歌機器人專區) |
 | Telegram relay 可靠性 | 補掃（`fbd2d3c`）與媒體防雷（`77c812d`，已上線、已歸檔）；**2026-09-28 相簿漏圖修正已部署** | 95% | [漏收補掃](#telegram-漏收事件自動補掃2026-08-02-已實作2026-08-18-補上中段缺口盲區2026-09-28-全域鎖改單則訊息鎖修相簿漏圖待部署驗證) |
-| 活動自動發布（公告 → Discord 伺服器活動） | **連結指向修正 + 重複活動修正已實作（2026-09-22）**；待重啟 discord-bot 驗證 | 85% | [活動自動發布修正](#活動自動發布連結指向錯誤--重複建活動2026-09-22-已實作待部署驗證) |
-| 程式結構整理（沿用現有架構；`llm/` 依角色分子資料夾） | **`llm/` 重組已上線並 commit（`97d7595`）**；點名服務不再依賴指令層（已實作，待第二個 commit）；P3 暫停 | 70% | [程式結構整理](#程式結構整理2026-09-29-構想grill-中) |
+| 活動自動發布（公告 → Discord 伺服器活動） | **連結指向修正 + 重複活動修正已上線**（9/22 後沒有新的重複、後到的來源會就地升級既有活動）；2026-09-30 遷移不再重複報已處理的重複（`f7d4a14`） | 95% | [活動自動發布修正](#活動自動發布連結指向錯誤--重複建活動2026-09-22-已實作待部署驗證) |
+| 程式結構整理（沿用現有架構；`llm/` 依角色分子資料夾） | **`llm/` 重組（`97d7595`）與點名去除反向依賴（`9b0b916`）已 commit 並上線**；**`services/` 分成 relay／events／community（`5e10611`）＋共用 StateDB 連線搬到 `state_db.py`（`2b31828`），9/30 16:38 重啟上線**；P2 未決、P3 暫停、N3 延後 | 90% | [程式結構整理](#程式結構整理2026-09-29-構想grill-中) |
 | MCP／搜尋工具化（網頁、公告、論壇） | **構想（2026-09-29）**，grill 第 2 輪；已定先做 MCP、LLM 決定何時查、位置（`services/search/`＋`llm/mcp_server.py`）、關鍵字全文搜尋、論壇索引範圍、`search`＋`fetch` 兩個工具；**設計已全部定案**，待實作 | 15% | [MCP／搜尋工具化](#mcp搜尋工具化2026-09-29-構想grill-中) |
 | Telegram 訊息 LLM 過濾 + 隔離區 | **構想（2026-09-28）**，討論中 | 0% | [Telegram 過濾](#telegram-訊息-llm-過濾--隔離區2026-09-28-構想討論中) |
 | 週期活動提醒（深塔海墟） | **已實作並 commit（2026-09-29）**，頻道已綁定、身份組已建；待重啟驗證置底收斂 | 90% | [週期活動提醒](#週期活動提醒深塔海墟2026-09-29-已實作待部署驗證) |
@@ -218,7 +228,7 @@ affects: 全專案
 id: code-structure-reorg
 type: TODO
 status: draft
-last_confirmed: 2026-09-29
+last_confirmed: 2026-09-30
 affects: src/ 全部資料夾、mcp-search-tools（R2-Q5 程式放哪）、test_shared_conventions、settings/logging.json
 -->
 
@@ -264,7 +274,7 @@ affects: src/ 全部資料夾、mcp-search-tools（R2-Q5 程式放哪）、test_
   - **P1 AI 的程式放在 `services/`**：`services/llm_service.py`（LLM 客戶端）、`services/memory_service.py`（AI 記憶）搬進 `llm/`。順便解掉 `llm/` 與 `services/` 互相 import。牽動約 13 個 import。
   - **P2 一檔多功能，拆檔但留在同一個資料夾**：`commands/llm_commands.py` 拆成 /askai 與人格相關（萃取、agent 測試、日記）兩個檔；`management_commands.py` 拆出自介面板；`user_commands.py` 的 `/forget_tag` 併到人格指令、物價併到 `trade_commands.py`。cog class 名稱不變，`get_cog` 不受影響；`COMMAND_MODULES` 要加項。
   - **P3 `discord_bot.py` 瘦身**：04:00 維護編排搬進 `llm/`、00:00 日記排程搬進 `llm/ambient/ambient_diary.py`、Telegram 組裝搬進 `telegram_relay_service`、公告／PTT 自動啟動搬回 `article_commands` 的 `cog_load`。碰到每晚的維護排程，要單獨排、先補測試。
-  - **P4 `telegram_relay_service.py`（2,099 行）拆成 `services/telegram_relay/` 子資料夾**：等做「Telegram LLM 過濾」時順便拆，那個功能本來就要改這個檔。
+  - **P4 `telegram_relay_service.py`（2,099 行）拆成 `services/relay/telegram_relay/` 子資料夾**：等做「Telegram LLM 過濾」時順便拆，那個功能本來就要改這個檔。
   - **P5 新功能照現有架構放**：公告／論壇搜尋放 `llm/retrievers/`（網頁查詢已經在 `llm/retrievers/web/`，同層加 `official/`、`forum/`）；MCP 殼放頂層 `mcp_server/`（跟 `discord_bot.py` 一樣是入口）。這也回答了 MCP 區塊的 R2-Q5。
   - **使用者回覆（2026-09-29）**：
   - **P1 否決**：`services/` 就是「服務」，`llm_service.py` 是 LLM 服務，留在 `services/`。
@@ -432,7 +442,81 @@ affects: src/ 全部資料夾、mcp-search-tools（R2-Q5 程式放哪）、test_
 
 **還沒定案（下一輪）**：P3 暫停（使用者說先別動）；N3 延後。本主題其餘都已定案。
 
-**狀態**：`llm/` 重組已上線並 commit（`97d7595`）；點名改由 Cog 交入按鈕建立函式，已實作並 commit（第二個 commit），**下次重啟生效**。今晚 00:00 日記與明早 04:00 維護是第一次在新路徑下跑，隔天看 log 確認。P3 暫停、N3 延後。
+**`services/` 要不要也分類（2026-09-30 第 12 輪，使用者提出；grill 中）**
+- 背景：ComfyUI 區塊的舊決定是「`llm/`、`services/` 都不做資料夾重組」，`llm/` 部分已推翻，`services/` 還維持原決定；這輪等於重新檢討。
+- 盤點（19 檔、約 1 萬行，依「這個服務在做什麼」自然分成四群）：
+  - 轉發（8 檔、約 5,100 行）：`article_monitor`、`fb_monitor`、`ptt_monitor`、`bahamut_monitor`、`it_article_monitor`、`telegram_relay_service`、`base_monitor`（轉發共用，被 7 檔引用）、`notify_server`（接 scraper 通知的 HTTP 入口，用字串指定 3 個轉發模組）。
+  - 遊戲時程（3 檔、約 1,500 行）：`event_scheduler`、`event_time_parser`（被 9 檔引用）、`periodic_reminder`。
+  - 社群管理（5 檔、約 1,500 行）：`rollcall_service`、`community_lookup_service`、`member_welcome`、`intro_profile_service`、`impression_moderation_service`。
+  - 共用（3 檔、約 1,700 行）：`llm_service`（被 13 檔引用）、`memory_service`、`state_db`（被 5 檔引用）。
+- 搬檔會碰到的地方：
+  - **用程式檔位置找資料的 4 個**：`state_db`（`sent_articles.db` 就放在 `services/` 裡）、`base_monitor`（`settings/article_runtime.json`）、`event_scheduler`（`scraper/articles.db`）、`rollcall_service`（`settings/rollcall_runtime.json`）。搬到子資料夾後「上一層」會變，路徑那一行要跟著改；`test_data_file_paths.py` 會確認改完的實際位置跟現在完全一樣。
+  - 字串路徑：`notify_server` 的 3 個轉發模組、`test_event_upgrade` 的 1 個 `mock.patch`；`AGENTS.md` 共用元件表 2 列（`event_time_parser.SERVER_TZ`、`event_scheduler.VersionDateResolver`）；`test_shared_conventions` 的例外路徑 2 個。import 守衛會擋下漏改的。
+  - bot 即時掛載 `./src`：跟 `llm/` 一樣要在工作副本改好、驗證完，套用和重啟一起做。
+- 待決問題（每題附建議）：
+  - **S5-1 分到什麼程度**：A 依四群全分——`relay/`、`events/`、`community/`，共用的留在 `services/` 頂層／B 只收最明顯的轉發 `relay/`，其他平放／C 維持平放。建議 A：三群都有清楚的邊界（符合既有子資料夾判準），分完 `services/` 頂層只剩共用的東西與之後的 `search/`，要改哪一塊就只看那個資料夾；轉發那群之後還會長（Telegram 過濾、跨來源整合都在這裡）。
+  - **S5-2 `notify_server` 放哪**：A 放 `relay/`（它目前只轉發通知）／B 留頂層。建議 B：它是 bot 對外的 HTTP 入口，「管理入口 TODO」規劃的網頁 dashboard 也要掛在它上面，不只給轉發用。
+  - **S5-3 `state_db` 放哪**：建議留頂層、不搬：它被轉發、活動、社群 ID 查詢、週期提醒共用，而且 `sent_articles.db` 就在它旁邊，不搬就不必動資料路徑。**資料檔一律不搬。**
+  - **S5-4 時機**：A 現在做（MCP 之前）／B MCP 之後。建議 A，並把「套用搬家」和 MCP 需要的「重建 image（加 `mcp` 套件）」排在同一次重啟，只重啟一次；搜尋服務 `services/search/` 也直接寫進整理好的結構。
+- 不另外問、照慣例的預設：檔名不改（照 N1，`*_monitor` 不算誤導）；子資料夾名稱 `relay`、`events`、`community` 可以再換；做法同 `llm/`（工作副本、守衛、一次搬完、逐檔比對、獨立複查）。
+
+**`services/` 分類：使用者核可與實作（2026-09-30 第 13 輪）**
+- 使用者：S5-1～S5-4 都照建議（分 `relay/`、`events/`、`community/`；`notify_server`、`state_db` 留頂層；現在做、跟 MCP 重建 image 排同一次重啟）。
+- **已在工作副本完成**（scratchpad `wt2`，patch `services_reorg.patch`，41 個檔案：搬移 15、新增 3 個 `__init__`、修改 23）：
+  - `relay/`：`article_monitor`、`fb_monitor`、`ptt_monitor`、`bahamut_monitor`、`it_article_monitor`、`telegram_relay_service`、`base_monitor`
+  - `events/`：`event_scheduler`、`event_time_parser`、`periodic_reminder`
+  - `community/`：`rollcall_service`、`community_lookup_service`、`member_welcome`、`intro_profile_service`、`impression_moderation_service`
+  - 頂層不動：`llm_service`、`memory_service`、`state_db`（`sent_articles.db` 在它旁邊）、`notify_server`
+  - 改寫 62 處引用（含 `notify_server` 的模組字串、測試的 `mock.patch` 字串、`AGENTS.md` 表格 2 列、`test_shared_conventions` 例外路徑）；3 個資料路徑改成 `parents[2]`（搬進子資料夾多一層）。`src/scraper/` 自己的 `services` 套件沒動。
+- 驗證（容器 `/tmp` 副本）：完整測試 648 項全過；import 守衛與資料檔位置測試通過（3 個路徑算出的實際位置與搬家前相同）；98 個模組各自單獨 import 全成功；依對照表換名後相依圖前後都是 336 條、完全相同，沒有循環。
+- **獨立複查完成（兩個角度，發現都由另一個 agent 重現）**：patch 本身沒有問題——bot 端 141 檔共 396 條專案 import（函式內 160 條）逐條實際執行全成功，15 個舊名稱都已 import 不到；`notify_server` 三組轉發來源（模組、類別、方法、seed）動態解析正確；9 個 `mock.patch` 目標都解析得到；3 個資料路徑與 HEAD 相對位置完全相同（改成 `parents[1]` 則測試變紅）；15 個搬移檔除了 import 路徑與那 3 行外內容相同；`services/` 維持命名空間套件、子資料夾是一般套件，import 正常；scraper 與 telegram_scraper 沒被動到；4 種故意改壞都會被啟動 gate 擋下。確認的兩點：
+  - **套用到重啟之間的空窗**：執行中的 bot 還沒載入 `services.member_welcome`（有人加入才載），套用後、重啟前若有新成員加入，歡迎訊息會 ImportError 而且不補發。→ 套用與重啟要接著做；**image 不含程式碼（`./src` 是掛載的），所以先重建 image（bot 照常運作），重建完再「套用 patch → 立刻重新建立容器」**，空窗縮到幾秒。
+  - **交接文件與記憶裡仍在指引後續工作的舊路徑**（例：拆 log 分類的範例 `services.telegram_relay_service`，照做會被 log 設定測試擋在啟動 gate）→ 已備好套用時執行的 `apply_doc_paths_services.py`（試跑：交接文件 16 處、記憶 `project_telegram_relay.md` 1 處；開頭盤點紀錄與「程式結構整理」區塊不動）。
+- **分群後浮現的放錯位置**：`get_shared_state_db`（取得全域共用 StateDB 連線）寫在轉發的 `relay/base_monitor.py`，但 `events/event_scheduler`、`commands/community_lookup_commands`、`commands/periodic_reminder_commands`、`discord_bot.py` 都用它 → 分群後這些都要去依賴 `relay/`。沒有動，待決。
+- **重建 image 的版本風險（查證）**：`requirements.txt` 除 pydantic 等少數外都沒鎖版本，dockerfile 是 `pip install -r requirements.txt`，重建會把 discord.py、llama-index、yt-dlp 等全部升到最新。容器內模擬：把目前 84 個套件鎖在現有版本再加 `mcp==2.2.0`，可以解析，不動任何既有套件，只新增 MCP 自己的依賴（starlette、uvicorn、jsonschema 等）。
+- **待決問題（第 13 輪，每題附建議）**：
+  - **S6-1 `get_shared_state_db` 搬到 `state_db.py`**：A 搬（它和它的全域變數、鎖一起搬；4 個呼叫端＋1 個 `mock.patch` 改成 `services.state_db`；`base_monitor` 自己也改從那裡拿）／B 不搬。建議 A：它是共用基礎，搬完 `events/`、`commands` 就不必為了拿資料庫去依賴轉發。
+  - **S6-2 重建時的套件版本**：A 新增 `docker/discord_bot/constraints.txt`（容器內目前版本的完整清單），dockerfile 改成 `pip install -c constraints.txt -r requirements.txt`，`requirements.txt` 加 `mcp==2.2.0`（順便更新那兩行舊路徑註解）／B 直接在 `requirements.txt` 逐一釘版本／C 接受全部升到最新。建議 A：重建結果跟現在一模一樣、只多 MCP；以後要升級某個套件，改 constraints 那一行就好。
+  - **使用者追問 S6-2（2026-09-30）**：通常認為升到最新版 OK，要先清查「目前版本 vs 最新版本、有沒有 breaking changes、哪些行為會變」。
+    - 清查（容器內模擬從零重建的實際解析結果，不是各套件各自的最新版）：重建後安裝 102 個；**版本改變 52 個**（主版號 3、次版號 37、修補 12）、新增 18 個（MCP 與其依賴）、移除 0 個。`discord.py` 2.7.1 已是最新、不會變。
+    - 主版號：`deprecated` 1.3.1→3.0.0、`setuptools` 82.0.1→84.0.0、`websockets` 16.0→17.1。
+    - 次版號中較需注意：`llama-index-vector-stores-postgres` 0.8.1→0.9.0（碰 pgvector 資料表）、`pgvector` 0.4.2→0.5.0、`numpy` 2.4.6→2.5.3、`pydantic-settings` 2.14.1→2.15.0、`pillow` 12.2.0→12.3.0、`yt-dlp` 2026.6.9→2026.8.19、`llama-index-workflows`、`llama-index-instrumentation`、`tiktoken`、`nltk`、`anyio`、`urllib3`、`multidict`（解析結果是 6.9.1，不是 7.0）。
+    - 各套件自己的最新版與實際解析結果不同的例子：`marshmallow` 最新 4.x 但被上游限制在 3.x、`SQLAlchemy` 最新 2.1 但解析為 2.0.54、`PyNaCl` 維持 1.5.0。
+    - 研究進行中：四組 agent 讀官方更新紀錄並對照我們的程式用法，一個 agent 在容器 `/tmp` 的獨立 venv 裝最新版、跑完整測試與逐模組 import；標為「會影響我們」的再由另一個 agent 複查。
+  - **升級影響研究完成（2026-09-30，四組 agent 讀官方更新紀錄並對照程式，外加隔離 venv 實測；標「會影響」的再複查）**：**52 個升級都不會弄壞我們，也不需要改程式。**
+    - 實測：容器 `/tmp` 的獨立 venv 從零安裝（requirements＋`mcp==2.2.0`），`pip check` 無衝突、版本與清查表逐一相符；完整測試 648 項全過（與現行環境跑的結果去掉時間後完全相同，沒有新警告）；95 個模組各自 import 成功；額外煙霧測試：`PGVectorStore` 以我們的參數建構成功、建表與查詢的 SQL 逐字相同；語音（opus、PyNaCl、davey）正常；yt-dlp 用我們 4 組選項建立成功；Pillow 動圖拆幀與 JPEG 壓縮的輸出像素雜湊相同；`deprecated` 3.0 行為正常；`setuptools` 84 對我們沒差（`pkg_resources` 在舊版就已經沒有）。
+    - 有行為改變、但碰不到我們的：
+      - `pgvector` 0.5：SQLAlchemy 讀回的向量從 numpy 陣列改成 list、維度檢查改由資料庫做（錯誤類型會變）；我們沒從 SQLAlchemy 讀向量、沒用 MMR，自己的 SQL 用 `%s::vector` 字串。
+      - `llama-index-core` 0.14.25：instrumentation 事件內容變少（我們沒掛）；切段器極端情況的例外類型改變（碰不到）。`llama-index-vector-stores-postgres` 0.9.0 程式碼與 0.8.1 逐位元組相同。
+      - `nltk` 3.10：超過 1024 token 的新訊息，若英文句號後緊接彎引號或 « »，切段邊界會和舊版略有不同；舊資料不受影響。它新增必要相依 `defusedxml`（`cloudpickle` 則是 `joblib` 1.6 要的，兩者都不是 mcp 帶的）。
+      - `pydantic-settings` 2.15：用關鍵字參數建構設定時欄位名改成不分大小寫；我們正式程式建構時不帶參數。
+      - `yt-dlp`：預設 YouTube client 改了；我們在 `music/ytdl.py` 明確指定 `android`、`web`，新版仍有。
+      - `websockets` 17.1：只有 yt-dlp 在 ws:// 網址才用；新增一條 DeprecationWarning，代表 18 版可能不相容（將來的風險）。
+      - `davey` 0.1.6：語音加密（DAVE）的修正，API 不變；建議重建後點一首歌確認能出聲、log 沒有 4017 或 encryption failed。
+    - **給之後寫 MCP 的提醒**：`mcp` 2.x 把 `FastMCP` 改名為 `MCPServer`（`from mcp.server.mcpserver import MCPServer`）；它帶進來的 `httpx2` 不會蓋掉我們用的 `httpx` 0.28.1。
+    - **S6-2 建議改成「升到最新＋鎖住測過的版本」**：這次直接升到最新（上面已實測）；同時把這次解析出來、測過的 102 個版本寫進 `docker/discord_bot/constraints.txt`，dockerfile 改成 `-c constraints.txt`，以後重建結果跟這次完全相同，想升級時再刻意更新 constraints 並重跑這套檢查。比「鎖在舊版」好，因為 yt-dlp 這類套件本來就要跟著更新；比「每次重建都升到最新」穩，因為每次重建都可能拿到沒測過的新版。
+  - **S6-2 已準備（2026-09-30，使用者要重建指令，照建議 A「升到最新＋鎖住測過的版本」）**：新增 `docker/discord_bot/constraints.txt`（102 個版本，就是隔離環境實測過的那一組）；`requirements.txt` 加 `mcp>=2.2,<3`，兩行舊路徑註解改成 `src/llm/client/…`；dockerfile 改為一起複製 constraints 並用 `pip install -c constraints.txt -r requirements.txt`。容器內用新設定模擬從零安裝：pip 結束碼 0，裝出的 102 個與鎖定檔逐一相同，沒有漏鎖。重建只產生新 image，不影響執行中的 bot；不要加 `--no-cache`／`--pull`，作業系統那幾層（apt、ffmpeg）才會沿用快取、維持不變。
+  - **S6-3 套用時機**：07:30 維護結束之後、你方便時（9/30 05:03 查：③ 人格萃取在新路徑下 37/37 完成，④ persona agent 進行中 14/26，04:00 起沒有任何錯誤）。流程：我套用 patch（搬家＋S6-1＋S6-2）→ 跑正式測試 → 你執行 `docker compose build discord-bot && docker compose up -d discord-bot`（重建 image 並重新建立容器）→ 我看啟動 gate 與 log → 跑文件路徑更新腳本 → 第三個 commit。
+
+**`services/` 分類：套用與上線（2026-09-30 第 14 輪）**
+- 實際順序：使用者先用新 image 重建容器（13:09，程式仍是 `9b0b916`）→ S6-1 使用者核可、併進 patch → 重複活動雜訊修正（A，見[活動自動發布修正區塊](#活動自動發布連結指向錯誤--重複建活動2026-09-22-已實作待部署驗證)）也併進 patch → 使用者要我代為套用，避免手動失誤。
+- **S6-1 已做**：`get_shared_state_db`（連同全域變數與鎖）從 `relay/base_monitor.py` 搬到 `services/state_db.py` 檔尾；4 個呼叫端（`discord_bot.py`、`events/event_scheduler.py`、`commands/community_lookup_commands.py`、`commands/periodic_reminder_commands.py`）與 1 個 `mock.patch` 字串改成 `services.state_db`；`base_monitor` 自己也改從那裡拿。新增 `test_shared_state_db.py`：同時呼叫 5 次拿到同一個實例、只連線一次；這個函式只定義在 `services/state_db.py`（在別處另寫一份就會變成兩個連線）。兩種故意改壞都會紅。
+- **套用**：16:17:41 套用 `services_reorg_v2.patch`（43 檔＝原本 41 檔＋`state_db.py`＋`test_shared_state_db.py`），套用後與工作副本逐位元組相同；套用前在新 image 容器 `/tmp` 副本跑過：652 項全過、98 個模組各自 import 成功。
+- **上線驗證（使用者 16:38 重啟）**：啟動 gate 652 項全過；11 個指令模組、21 個斜線指令、人格萃取與日記排程、官網與 PTT 轉發、Telegram relay worker、Notify Server 全部從新路徑啟動（log 的模組名稱已是 `services.relay.*`、`services.community.*`）；重啟後沒有任何 ERROR；16:17～16:38 空窗期也沒有 ERROR，沒有新成員加入造成歡迎訊息失敗。
+- **S6-2 改定案（使用者 2026-09-30）**：使用者認為 dockerfile 改成鎖版本沒必要（通常升到最新就好）→ **dockerfile 還原成原版**（只 `pip install -r requirements.txt`，每次重建都拿當下最新版）；**`constraints.txt` 留作紀錄**：內容與容器內 `pip freeze` 102 項逐一相同，檔頭改成「建置不讀這個檔」，用途是之後重建出問題時對照哪個套件變了，必要時用 `pip install --user -c constraints.txt -r requirements.txt` 暫時裝回；映像重建後就不代表現況，要更新請重新 `pip freeze`。`requirements.txt` 保留 `mcp>=2.2,<3` 與兩行註解路徑更新。接受的取捨：下次重建會拿到沒測過的新版，第一道防線是啟動 gate（測試不過 bot 起不來、舊容器照跑）。
+- **文件路徑已更新**：`apply_doc_paths_services.py` 已執行，交接文件 16 處（明確替換 2 處＋通用規則 14 處）、記憶 `project_telegram_relay.md` 1 處；剩下的舊路徑都在本區塊的新舊對照裡（刻意保留）。
+- **S7-1 commit 怎麼拆（已定案：A）**（`it_comfyui_image.py` 一律不進）：
+  - 結果：`5e10611` `refactor(services)`（v1 patch 41 檔，容器 `/tmp` 648 項全過）→ `2b31828` `refactor(state-db)`（8 檔；`event_scheduler` 與 `test_event_upgrade` 只放 S6-1 那一行，650 項全過）→ `f7d4a14` `fix(events)`（2 檔，commit 後 `src/` 與上線程式相同，啟動 gate 652 項）→ `f6e4830` `build(discord-bot)`（`requirements.txt`＋`constraints.txt`）→ 交接文件 `docs` commit。
+  - 當時的選項：
+    - A 拆五個：① `refactor(services)` 分成 relay／events／community（就是 v1 patch 那 41 檔＋`AGENTS.md` 兩列路徑，已測過 648 項）② `refactor(state-db)` S6-1 ③ `fix(events)` 已處理過的重複活動只報一次 ④ `build(discord-bot)` 加 mcp、留版本紀錄 ⑤ `docs` 交接文件。
+    - B 拆三個：搬家含 S6-1／A 修正／套件＋交接文件。
+    - C 一個 commit。
+    - 建議 A：v1 與 v2 的差別剛好只在 S6-1 與 A 牽動的 8 個檔，可以乾淨切開；每個 commit 只做一件事，之後要退回某一項（例如 A）不會連帶退掉搬家。中間兩個狀態（只有搬家、搬家＋S6-1）我會先在容器 `/tmp` 各跑一次完整測試再 commit。
+- 收尾：scratchpad 的 worktree `wt2` 在 commit 後移除（`git worktree remove --force`＋`git worktree prune`）。
+
+**重啟驗證（2026-09-30 02:10 使用者重啟）**：啟動 gate 648 項全過；11 個指令模組載入、21 個斜線指令同步、各排程啟動；點名服務用新程式啟動（下次檢查 09-30 14:00）。**00:00 日記第一次在新路徑（`llm.ambient.ambient_diary`）執行，成功發布**（446 字、來源 173 則）。9/29 15:28～9/30 02:10 舊行程期間唯一的 ERROR 是 00:21 插話呼叫模型逾時（隨後 embedding 回 HTTP 500、改逐筆重試成功）；這類逾時 9/16 起約每天一次，與搬家無關。其餘是 Discord 429 限流、PTT 附件分批、Telegram 大檔壓縮等既有訊息。
+
+**狀態**：`llm/` 重組（`97d7595`）與點名去除反向依賴（`9b0b916`）**都已 commit 並上線**；9/30 04:00 維護在新路徑下完整跑完。**`services/` 分群（`5e10611`）＋S6-1（`2b31828`）已 commit、9/30 16:38 重啟上線**。P2 未決、P3 暫停、N3 延後。
 
 ---
 
@@ -457,16 +541,16 @@ affects: /askai、網頁查詢、官網公告、論壇（PTT／巴哈）
 - **tool calling 已經有一份實作**：persona agent（04:00 維護步驟 ④）用 `LLMService.chat_with_tools` 跑自寫的多輪迴圈（最多 8 步、token 預算、工具錯誤轉成 `{"error":…}` 回給模型、最後一步用嚴格 `json_schema` 輸出）；4 個唯讀 SQL 工具（`llm/persona/agent/tools.py`）。在 Lemonade 11.5.0＋27B 實測過 tool call、`role:"tool"` 往返與 json_schema；**Lemonade 已升到 11.9.0，沒有重測**。persona agent 是關思考跑的，**開思考＋tool calling 沒驗證過**。`chat_with_tools` 不支援 `tool_choice`，也不回傳思考內容。
 - **GPU 鎖只在單一行程內有效**（`lemonade_gate` 是 `asyncio.Lock`）。獨立的 MCP 行程如果要呼叫 LLM，就不受這把鎖管；純搜尋工具（SQL、SearXNG）不碰 GPU，不受影響。
 - **吞吐量**：總共約 22～33 tok/s，並行時均分（1 個請求 33、2 個各約 11～12）。tool calling 每多一輪，就是多一次完整的 LLM 呼叫。
-- **scraper 容器已經有唯讀 HTTP API**（FastAPI，內網 8000）：`/api/{articles,fb_posts,ptt_posts,bahamut,it_articles}/recent`、依 id 查詢；只能用 `days`、`limit` 篩選，**沒有關鍵字搜尋**。bot 也會直接唯讀開 `/app/scraper/articles.db`（`services/community_lookup_service.py`）。
+- **scraper 容器已經有唯讀 HTTP API**（FastAPI，內網 8000）：`/api/{articles,fb_posts,ptt_posts,bahamut,it_articles}/recent`、依 id 查詢；只能用 `days`、`limit` 篩選，**沒有關鍵字搜尋**。bot 也會直接唯讀開 `/app/scraper/articles.db`（`services/community/community_lookup_service.py`）。
 - **bot 內已有 aiohttp 伺服器**（`services/notify_server.py`，內網 5000：`/health`、`/notify/{source}`）。
 - **repo 裡沒有任何 MCP 相關程式或套件**；requirements 也沒有 openai SDK。
 - **資料都已經在 `articles.db`，而且是全文、永久保留**（scraper 沒有任何清除程式；巴哈刪文是軟刪除、改文保留舊版）。都沒有做搜尋索引：
-  - 官網公告：540 篇（公告 503、新聞 37，2024-01 起）；`article_details.article_content` 是**完整內文，但存的是 HTML**（平均約 4,160 字），要先轉純文字才能搜。沒有網址欄位，網址用 id 組（`services/article_monitor.py` `OFFICIAL_ARTICLE_URL`）。
+  - 官網公告：540 篇（公告 503、新聞 37，2024-01 起）；`article_details.article_content` 是**完整內文，但存的是 HTML**（平均約 4,160 字），要先轉純文字才能搜。沒有網址欄位，網址用 id 組（`services/relay/article_monitor.py` `OFFICIAL_ARTICLE_URL`）。
   - FB：847 篇，`fb_posts.text` 是純文字全文（2025-11 起）。
   - PTT：5,182 篇，**只有 C_Chat 板、用「鳴潮」搜到的文章**（2025-01 起），有全文和全部推文。
   - 巴哈：主文 15,989 篇（含回覆共 102,958 列）、留言 693,917 則，2022-06 起，有全文。
 - **「寫死日期區間給 DC」指的是轉發**，不是 `/askai`：巴哈、PTT、公告的轉發都只看最近 3 天（FB 看 7 天），以 StateDB 去重。所以論壇搜尋是**另外新增的能力**，轉發本身不用改。
-- **現有查詢只有**：scraper API 的「最近 N 天」、社群 ID 查詢面板的「依作者查」（`services/community_lookup_service.py`，已有 bot 直接唯讀查 `articles.db`、p95 < 30ms 的前例），以及 `VersionDateResolver` 寫死的 `LIKE`。**沒有任何關鍵字或主題搜尋**。
+- **現有查詢只有**：scraper API 的「最近 N 天」、社群 ID 查詢面板的「依作者查」（`services/community/community_lookup_service.py`，已有 bot 直接唯讀查 `articles.db`、p95 < 30ms 的前例），以及 `VersionDateResolver` 寫死的 `LIKE`。**沒有任何關鍵字或主題搜尋**。
 - **搜尋基礎設施現況**：SQLite 沒有 FTS 表；Postgres 只裝了 `vector`，沒有 pg_trgm 或中文斷詞；pgvector 只存 Discord 聊天（31 萬筆）和成員檔案，**公告、FB、論壇都沒有做 embedding**；embedding 欄位沒有向量索引（全表掃描）。可以沿用的：`llm/preprocess/tokenization.py` 自製的中文 BM25 斷詞（CJK 2-gram／3-gram）。
 - **舊規劃**：`TODO-completed.md`「Bahamut 專區」第三階段規劃過巴哈 RAG（分段、metadata、混合搜尋），沒做；`askai-vague-news-query` 決定過「新聞搜不到就放寬」，「用 LLM 依聊天紀錄改寫查詢」留作之後的升級。
 - **順便發現**：① `/askai` 回覆沒有處理 Discord 2000 字上限（沒切段，長回答可能送出失敗，未實測）；② 引用網址上限不一致：`askai_system_prompt.txt` 寫最多 3 個，`<web_context_directive>` 寫 5 個。
@@ -540,7 +624,7 @@ affects: Telegram relay、config.json
 - **來源是兩個 Telegram 廣播頻道**（`Seele_WW_leak` 8.4 萬訂閱、`Gamedataleak` 1.2 萬），沒有網友留言 → 「垃圾發言」是**頻道管理員自己發的**（Seele 管理員 09-09 起的「今日首水」習慣、跟人互嗆）。目的頻道只有 #🌘角色內鬼情報（`1276423699851116544`）；GD 沒有自己的路由，靠「查不到就用第一個來源的路由」送到同一處。
 - **量**：近 14 天有文字的只有 120 則（約 8.6 則／天，尖峰 22 則／小時）；灌水約 5%、罵人約 3%，連同閒聊約一成。純媒體佔發送單位的一半。
 - **關鍵字不可行**：含「水」的 85 則裡只有約 10 則是灌水（水匣、汽水、山水…）；≤5 字多是有情報的圖說（「亚服」「预下载已开启」「V2来了」）；emoji 可能是角色代號（13653「🦊😭🥛…」對照 13664 是在爆主線角色）。
-- **插入點**：discord-bot 的 `services/telegram_relay_service.py` `_process_one`，相簿合併（`_collect_media_group`）之後、`resolve_telegram_routes` 之前（約 1773~1775 行）。scraper 容器沒有 LLM 設定也沒有 http 套件。
+- **插入點**：discord-bot 的 `services/relay/telegram_relay_service.py` `_process_one`，相簿合併（`_collect_media_group`）之後、`resolve_telegram_routes` 之前（約 1773~1775 行）。scraper 容器沒有 LLM 設定也沒有 http 套件。
 - **判決必須持久化**：現在被「略過」的訊息不寫 `delivery_state`，每次重啟都會被 reconcile 重排重跑；不存判決就會每次重啟重判、重貼隔離區。
 - **放回主頻道**要走 relay 原本的發送流程；`resend_telegram_by_id`（`/resend_article`）不合併相簿、也不寫 `delivery_state`。
 - **順便發現的既有問題**：① 相簿晚到的成員不寫 `delivery_state`（DB 有 460 則），每次重啟空跑一次（09-29 起可見：每次重啟約 65 個舊相簿各印兩行「相簿補圖已過時效，略過」）；② 發送失敗也推進游標，要等重啟才重試；③ `/server_manager` 的 Telegram 路由用來源**名稱**當 key 寫入，但只有 chat_id 當 key 才查得到（第一個來源除外）。
@@ -626,7 +710,7 @@ affects: 排程、身份組、config.json
 - 深塔／海墟期數：使用者覺得可有可無；可由「深塔第 33 期＝2026-03-02、海墟第 14 期＝2026-02-16、每 28 天 +1」直接推算。
 
 **矩陣接入實作（2026-09-29，618 測試全過，未 commit）**
-- `VersionDateResolver.update_starts()`（`services/event_scheduler.py`）：**不快取、每次重讀**官方公告，回傳所有版本更新維護的開始時刻；來源一＝「X.Y版本」標題＋「更新維護時間」的第一個日期，來源二＝標題含「喚取」「第二期」的下半卡池結束日隔天 04:00（前後 7 天內有官方時間就以官方為準）。版本號只用來認公告。實測：真實 DB 每次約 6 ms、不需要 index（`LIKE '%…%'` 本來就用不到 index）；卡池推算的 7 筆與官方時間全數一致。原本的 `_load()`／`update_time()` 不動。
+- `VersionDateResolver.update_starts()`（`services/events/event_scheduler.py`）：**不快取、每次重讀**官方公告，回傳所有版本更新維護的開始時刻；來源一＝「X.Y版本」標題＋「更新維護時間」的第一個日期，來源二＝標題含「喚取」「第二期」的下半卡池結束日隔天 04:00（前後 7 天內有官方時間就以官方為準）。版本號只用來認公告。實測：真實 DB 每次約 6 ms、不需要 index（`LIKE '%…%'` 本來就用不到 index）；卡池推算的 7 筆與官方時間全數一致。原本的 `_load()`／`update_time()` 不動。
 - 設定：`VersionStageItem`（key=matrix、🧩、開放延遲 7 天）；`role_name` 改「週期活動提醒」，bot 啟動與每次取身份組時**依設定同步名稱**。
 - 純邏輯：`Reminder.cycle` 改名 `item`；矩陣結束前提醒＝下一次更新前一天 20:00（正常 @），開放提醒＝更新 +7 天 04:00（靜音 @）；**不知道下一次更新就不發結束前提醒**（不用 +42 天硬猜）。
 - 面板：「**時程**」下深塔／海墟之外多一行矩陣：空窗週「新階段 10/7（週三）04:00 開放」、已知結束「本階段開放中，9/30（週三）04:00 結束」、未知「本階段開放中，於版本末結束」。排程每輪比對面板標題＋內文（存在 runtime 的 `panel_content`），**一變就自動重發**。
@@ -636,7 +720,7 @@ affects: 排程、身份組、config.json
 
 **實作（2026-09-29，已 commit）**
 - `sys_settings/periodic_reminder_settings.py`：起算日、週期、提醒時刻、身份組名稱、runtime 路徑
-- `services/periodic_reminder.py`：純邏輯（推算重置、到期／補發判斷、文案、面板內容）
+- `services/events/periodic_reminder.py`：純邏輯（推算重置、到期／補發判斷、文案、面板內容）
 - `commands/periodic_reminder_commands.py`：排程迴圈（最多睡 1 小時就重算）、訂閱按鈕（persistent view）、`ensure_role`（id → 同名既有身份組 → 建立）、`on_message` 有人講話就置底
 - `settings/channel_registry.py`：登記「週期提醒頻道」，綁定時自動建身份組＋發面板；`discord_bot.py` 的 `COMMAND_MODULES` 加入；`.gitignore` 加 runtime 檔
 - `test/test_periodic_reminder.py` 33 項（突變驗證過：靜音顛倒、提醒晚一小時、週期改 27 天、拿掉今天／明天判斷都會紅）；文案只比對關鍵資訊（誰、項目、日期、今天／明天），不逐字比對
@@ -671,7 +755,7 @@ id: member-welcome-message
 type: STATE
 status: confirmed
 last_confirmed: 2026-09-28
-affects: settings/channel_registry.py, services/member_welcome.py（新）, discord_bot.py, test/test_member_welcome.py（新）
+affects: settings/channel_registry.py, services/community/member_welcome.py（新）, discord_bot.py, test/test_member_welcome.py（新）
 -->
 
 **需求**：ProBot 的加入歡迎訊息疑似失效，改由自家 bot 在歡迎頻道發同樣內容（@新成員 + 伺服器名 + 引導去規範頻道）。
@@ -680,7 +764,7 @@ affects: settings/channel_registry.py, services/member_welcome.py（新）, disc
 
 **改動清單（全部 additive，不動既有流程）**
 1. `channel_registry.py`：`register_channel("歡迎頻道", text, "welcome_channel_id")`，沿用 `/server_manager` 綁頻道 UI，未設定＝功能靜默
-2. 新檔 `services/member_welcome.py`：文案純函式 + 讀頻道發送；略過 bot 帳號
+2. 新檔 `services/community/member_welcome.py`：文案純函式 + 讀頻道發送；略過 bot 帳號
 3. `discord_bot.py` 加 `@bot.event on_member_join`，只委派給上面的 service（沿用本專案「gateway 事件集中在 discord_bot.py、邏輯放 services」慣例；全專案原本無人監聽此事件，不會覆蓋）
 4. 規範頻道連結優先用 Discord 內建 `guild.rules_channel`（社群伺服器設定），不另開 config key
 5. 文案純函式補單元測試
@@ -708,9 +792,9 @@ affects: settings/channel_registry.py, services/member_welcome.py（新）, disc
 id: event-announce-link-and-dedup-fix
 type: STATE
 status: confirmed
-last_confirmed: 2026-09-22
+last_confirmed: 2026-09-30
 depends_on: event-announce-auto-schedule
-affects: services/event_scheduler.py, services/event_time_parser.py, services/article_monitor.py, services/state_db.py
+affects: services/events/event_scheduler.py, services/events/event_time_parser.py, services/relay/article_monitor.py, services/state_db.py
 -->
 
 > 原始功能區塊已於 2026-08-18 歸檔至 `TODO-completed.md`（id: `event-announce-auto-schedule`）。
@@ -841,14 +925,26 @@ core_name 全數回填；再跑一次完全冪等
 **驗證**：397 測試全過（新增 40 條，含副作用層原本零覆蓋的部分）；以 `sent_articles.db`
 副本演練遷移：32 列不掉、`core_name` 空列 0、分身正確標記、重疊查詢回正本、墓碑擋得住復活。
 
+### 2026-09-30 追加：已處理過的重複不再每次報 ERROR（已上線・`f7d4a14`）
+
+**機制（一句話）**：指紋遷移看到「這一列先前已經標成分身」就只計數、不再報 ERROR；第一次發現的分身若活動已結束，降成 INFO。
+
+- **為什麼**：9/22 修正前留下的那一組「群聲共振模擬域」（`…604` 正本、`…681` 分身），9/22 之後每次重啟的遷移都再報一次 ERROR（累計 26 次）。它早就標好 `superseded_by`、擋得住重複，兩個活動也都在 9/29 11:59 結束——重複報只會把真正的錯誤淹沒。
+- **改了什麼**（[event_scheduler.py](src/services/events/event_scheduler.py) `_migrate_fingerprints_once`）：
+  - 分身列 `superseded_by` 已指向新指紋 → 算「先前已標記」，不寫 ERROR，也不重寫這一列（只在 `core_name` 不對時回填）。
+  - 新發現的分身照樣標記；活動已結束（`end_utc8` 早於現在）→ INFO「只標記分身、不需處理」；還沒結束 → 照舊 ERROR 請人手動刪。
+  - 摘要改成「新發現重複活動 N 組，先前已標記 M 組」。`now` 參數只給測試固定時間用。
+- **測試**（[test_event_upgrade.py](src/test/test_event_upgrade.py)）：已知分身只在第一次報 ERROR、第二次不報也不重寫；已結束活動的新分身有標記但不報 ERROR；原本的相撞測試固定在活動結束前（仍報 ERROR）。三種故意改壞都會紅。
+- **驗證時機**：遷移不在開機時跑，是第一篇含活動的公告進來、建立活動前才跑一次；預期 log「新發現重複活動 0 組，先前已標記 1 組」、沒有 ERROR。
+
 ### 待辦 / 下一步
 
 - [ ] 對抗性複查還有 2 個面向（embed／parser）與驗證階段未跑完，結果出來要再過一次
-- [ ] `docker compose restart discord-bot`（AI 不執行，由使用者操作）
-- [ ] 看 log 的「指紋遷移完成」與「⚠️ 指紋遷移發現重複活動」兩行
-- [ ] **人工刪掉重複活動**：`1539556072082112604` 與 `1539937681176272916` 是同一個活動
-      （前者來自匯總帖無封面、後者來自專屬公告有封面）。自動刪 Discord 活動是破壞性動作，不做
-- [ ] 下一篇含活動的公告進來時，確認 log 出現「♻️ 已升級既有活動」而非又建一個
+- [x] `docker compose restart discord-bot`（9/22 之後已多次重啟）
+- [x] 看 log 的「指紋遷移完成」與「⚠️ 指紋遷移發現重複活動」兩行（9/30 10:08 查：共 36 列、更新 0 列、重複 1 組、失敗 0 列；重複的就是修正前留下的那一組）
+- [x] ~~人工刪掉重複活動~~ 不需要：`1539556072082112604` 與 `1539937681176272916` 都已在 9/29 11:59 結束，第二筆資料庫已標 `superseded_by`；遷移重複報 ERROR 的問題由上面的追加修正處理
+- [x] 後到的來源就地升級、不另建（9/30 10:08 log：「♻️ 已升級既有活動：團團勇者大亂鬥」；9/22 之後遷移沒有發現新的重複）
+- [ ] 下一篇含活動的公告進來時，確認遷移摘要是「新發現 0 組，先前已標記 1 組」、沒有 ERROR
 
 ### 殘留風險（已知未做）
 
@@ -1197,7 +1293,7 @@ last_confirmed: 2026-09-28
 **已驗證**：容器內 `unittest discover` **534 測試全過**（新增 [test_telegram_message_lock.py](src/test/test_telegram_message_lock.py) 8 條：同 key 互斥、相簿 8 張可同時進入、例外／取消後不漏回收、跨頻道同 id 不撞 key）；**反向驗證**：把 `hold` 換成全域鎖 → 相簿測試逾時失敗。`py_compile`（scraper 容器 py3.12）PASS。
 
 **relay 端同輪一起修（使用者拍板「一起修正」）**——加鎖前 7 月仍約 1 成相簿缺圖，relay 自己有三個洞：只數訊息列不管媒體列寫入沒、晚到組員走「交由首則處理」直接丟棄（重啟 reconcile 也一樣跳過 → 永久漏發）、已發送標記用的是合併**前**的組員清單（實送了卻沒標、沒送卻標了都有）。
-**機制（一句話）**：不再「只有首則能發」，改成**哪個組員先到就由它收整組**，等到齊才發；發完還有沒送的，以「（補圖）」再發一則。改動全在 [telegram_relay_service.py](src/services/telegram_relay_service.py)：
+**機制（一句話）**：不再「只有首則能發」，改成**哪個組員先到就由它收整組**，等到齊才發；發完還有沒送的，以「（補圖）」再發一則。改動全在 [telegram_relay_service.py](src/services/relay/telegram_relay_service.py)：
 - **到齊判斷** `_wait_group_settled`：每個組員都有媒體列（`get_group_member_states`，`has_media=false` 視為就緒）**且** 3 秒內沒有新組員／新就緒；湊滿 10 則（Telegram 相簿上限）且都就緒就不等；上限 60 秒，逾時先發已就緒的。
 - **同組同時只有一個收集者** `_process_group_member`：收集中到的組員只登記 `_dirty_groups` 就返回（不佔處理槽空等），收集者發完回頭複查；「檢查 dirty → 移出 active」之間無 await，不會有組員卡在空檔。
 - **各頻道只發還沒送的** `_group_pending_for_channel`：組內已有人送過 → 標題加「（補圖）」；**補圖時效 12 小時**（`_GROUP_FOLLOWUP_MAX_AGE`，以該組首次送出時間算）——重啟時 reconcile 會把全部沒 delivery 記錄的組員（現約 460 筆、158 組舊相簿）重新排入，沒有時效會把舊缺圖一口氣倒進頻道。發之前先快篩，沒有該發的（或全過時效）就不等安靜期。
@@ -1244,9 +1340,9 @@ last_confirmed: 2026-03-31
 - Persona 卡片：`src/llm/persona/persona_card_builder.py`
 - Prompt 組裝：`src/llm/prompt/prompt_builder.py`；/askai 除錯 log 組裝：`src/llm/logger_factory.py`
 - Profile/Impression 寫入 RAG：
-  - 服務層：`src/services/intro_profile_service.py`
+  - 服務層：`src/services/community/intro_profile_service.py`
   - pgvector 介接層：`src/llm/storage/member_profile_store.py`（原 `intro_rag_port.py`，`b80c509` 改名）
-- Impression 審核：`src/services/impression_moderation_service.py`
+- Impression 審核：`src/services/community/impression_moderation_service.py`
 - 設定：
   - `src/sys_settings/llm_settings.py`
   - `src/sys_settings/pgvector_settings.py`
