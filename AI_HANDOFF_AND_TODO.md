@@ -25,6 +25,11 @@
 > 4. 保留可追溯來源，避免之後重複討論同一件事
 
 最後盤點紀錄（只保留近期；過往詳見 `TODO-completed.md` 各歸檔 entry）：
+- 2026-10-01 04:0x（**已 commit**）：拆成四個——`648b80b` fix(scraper) 一致的 Firefox 指紋＋一輪一個 session、`20acc0c` feat(scraper) 巴哈每輪統計、`6f39e87` feat(relay) IT 就地補內文、交接文件 `docs` commit；中間兩個狀態都在容器 /tmp 跑過（scraper 10／16 項、bot 652 項），最終版正式容器 bot 664 項、scraper 16 項全過；`it_comfyui_image.py` 沒進。待驗：約 04:46 HKEPC 通知時補 11 則摘要訊息、巴哈本輪完成那行的統計。
+- 2026-10-01 03:5x（`scraper_it_v2.patch` **03:45:51 套用**）：使用者 03:45:44 重啟 discord-bot、03:46:41 重啟 scraper。bot 的啟動測試比套用早開始，只跑了舊的 652 項（新 12 項已在 /tmp 驗過，下次重啟會進 gate）；但 IT 模組 03:46:03 才載入，跑的是新程式。scraper 03:46:45 第一輪 HKEPC 沒有錯誤（候選都已有內文）。**IT 訊息還沒補**：scraper 一啟動就通知 bot，bot 回頭拿資料時 scraper 的 API 還沒起來（`Cannot connect to host scraper:8000`，scraper 開機時任務與 API 同時啟動的既有時序問題），這次沒跑到補內文；下一次 HKEPC 通知（約 04:46）會補。9/28 起只帶摘要的有 11 則（26811、26813、26818、26820、26821、26825、26828、26833、26837、26838、26840），內文都已到；9/28 那 2 則可能落在 API 3 天範圍外。巴哈第一輪新統計等本輪完成才會出現。
+- 2026-10-01 00:3x（IT 就地補內文＋scraper 抓網頁機制＋巴哈統計，**worktree 完成・未套用・未 commit**）：使用者定案 IT-Q1 B、SC-Q1～Q4 照建議。bot 658 項、scraper 新測試 7 項全過，13 種突變都紅。IT 改用「掃頻道比對網址」就地更新，不動 `sent_articles.db`。實測發現 HKEPC 的 Cloudflare 只擋 Chrome／Safari 模擬、Firefox 全過（403 時有時無的真正原因），「一輪一個瀏覽器」單獨上線會更糟 → 新增待決 SC-Q5 → 使用者要求逐站深入實測、並在共用層讓大家一起用 → 共用層改成只用 Firefox 系＋一輪一個 session（`run_session`），四個爬蟲都接上；實測 HKEPC 兩輪 15/15 有內文。獨立複查完成並照意見修正（v2：BrowserType 可選匯入、IT 從最新讀起／先發新文／編號比對／帶圖失敗退回文字、巴哈中斷也記統計），bot 664、scraper 16 項全過，突變 28 種都紅；待使用者同意後套用＋依序重啟。
+- 2026-09-30 23:4x（IT 新聞被截斷查證，**未動 code**）：使用者回報 EVGA 那篇只發出一段；查證是 HKEPC 內頁 403 時只剩列表頁摘要，bot 照發並標記已發送。9/22 起 73 篇中 23 篇是這樣發出的，從 7/14 就有、與整理無關。新增 [IT 新聞只帶摘要區塊](#it-新聞只帶摘要發出2026-10-01-已上線) 與待決 IT-Q1～Q4。
+- 2026-09-30 22:5x（全功能狀態檢查，**未動 code**）：虛擬機 18:15～21:32 停機（使用者 host 端作業，預期內），21:35 bot 起來後啟動 gate 652 項全過、沒有 ERROR；官網 5581、FB 859～861、PTT 停機期間 13 篇都補發，逐一確認開機前沒發過（沒有重發舊文）；Telegram 補掃、插話、`/askai`、點歌、點名與週期提醒排程都正常。IT 新聞 6 篇因 21:34 通知時 bot 還沒起來而延後，22:34 下一輪 HKEPC 通知時全數補發。**巴哈（23:30 更正）**：不是卡死，是**每輪變慢約 4 倍**。以執行緒建立時間辨認，兩輪都已證實：21:34 那輪 78 分鐘（22:52 結束、轉發 2 篇）、22:34 那輪 78 分鐘（23:48 才開始寫資料庫、23:52 結束、轉發 5 篇；當時 23:34 那輪的執行緒還在，22:34 的已結束）；log 沒有「第幾輪」的標記，某輪超過一小時就會和下一輪的完成紀錄錯配，所以早先誤判成「22:34 那輪 17 分鐘完成」。時間花在抓網頁（正常 18 分鐘→74 分鐘），寫資料庫正常（2～4 分鐘），今天沒有任何請求失敗。**從 13:09 開始**：那時 scraper 映像也一起重建（telegram-scraper 是 12:25），它的 `requirements.txt` 完全沒鎖版本，全部升到最新（curl_cffi 0.16.3、beautifulsoup4 4.15.0、SQLAlchemy 2.1.1、selenium 4.49.0 等）；13:09 之前每輪都約 20 分鐘。影響：巴哈轉發最多延遲約 2 小時；每輪都超過一小時，會和下一輪重疊（排程沒有防重疊），同時兩輪打同一個站。舊映像可能還在（懸空映像 `e06661dbd647`，6/13，1.5GB），可用來比對升級前的版本。待決：找出是哪個套件變慢（建議先比對新舊版本，嫌疑最大的是 curl_cffi）、要不要只鎖那一個套件、要不要幫巴哈任務加防重疊（scraper 端程式，這次整理沒動到）。既有、未變多：插話模型回空內容（今天 5 次，9/25 4 次）、HKEPC 內頁 403（累計 236 次）。
 - 2026-09-30 16:4x（`services/` 分群＋S6-1＋重複活動雜訊修正 **已套用・已重啟・驗證通過・已 commit**）：16:17:41 套用 `services_reorg_v2.patch`（43 檔，與工作副本逐位元組相同），使用者 16:38 重啟；啟動 gate 652 項全過，11 個指令模組、21 個斜線指令、各排程、轉發、Telegram worker、Notify Server 都從新路徑啟動；重啟後沒有任何 ERROR，套用到重啟之間也沒有。指紋遷移在第一篇含活動的公告進來時才跑，新摘要（預期「新發現 0 組，先前已標記 1 組」、不再報 ERROR）要等那時才看得到。S6-2 改定案：使用者認為 dockerfile 的鎖版本沒必要 → dockerfile 還原成只裝 `requirements.txt`；`constraints.txt` 留作紀錄（與容器內 `pip freeze` 102 項逐一相同），檔頭改成「建置不讀、用來對照與暫時退回」。文件路徑更新腳本已跑（交接文件 16 處、記憶 1 處；剩下的舊路徑都在「程式結構整理」的新舊對照裡）。S7-1 使用者選 A 拆五個：`5e10611` 搬家（648 項）、`2b31828` S6-1（650 項）、`f7d4a14` 重複活動只報一次（652 項＝上線版）、`f6e4830` 加 mcp＋版本紀錄、交接文件另一個 `docs` commit；中間兩個狀態都先在容器 `/tmp` 跑過完整測試才 commit，`it_comfyui_image.py` 沒進。
 - 2026-09-30 16:0x（新 image 上線、重複活動查證，**未動 code**）：使用者 13:09 用新 image 重建容器（**`services/` 搬家 patch 尚未套用**，程式仍是 `9b0b916`）；啟動 gate 648 項全過，套件版本與 constraints 一致（mcp 2.2.0、yt-dlp 2026.8.19、numpy 2.5.3、pgvector 0.5.0、llama-index-core 0.14.25、davey 0.1.6、websockets 17.1）；15:56、16:02 正常播歌（語音加密新版 OK）；13:09 後唯一的 ERROR 是 15:56 語音斷線重連（Discord 端切換，升級前也有）。
   - 重複的「群聲共振模擬域」活動查證：兩筆都建於 8/19、8/20（9/22 修正前，當時 `normalize_title` 不認半形 `<>`）；第二筆 `1539937681176272916` 在資料庫已標 `superseded_by` 指向正本 `1539556072082112604`；兩者都在 9/29 11:59 結束。9/22 修正後的每次指紋遷移都只報這同一組、沒有新增重複 → **去重（有重複就更新）正常**。但遷移每跑一次就再報一次 ERROR（累計 26 次），已處理過又已結束的重複變成雜訊。待決：要不要讓遷移略過已標 `superseded_by`／已結束的組合（見活動區塊）。
@@ -213,6 +218,7 @@ affects: 全專案
 | Telegram 訊息 LLM 過濾 + 隔離區 | **構想（2026-09-28）**，討論中 | 0% | [Telegram 過濾](#telegram-訊息-llm-過濾--隔離區2026-09-28-構想討論中) |
 | 週期活動提醒（深塔海墟） | **已實作並 commit（2026-09-29）**，頻道已綁定、身份組已建；待重啟驗證置底收斂 | 90% | [週期活動提醒](#週期活動提醒深塔海墟2026-09-29-已實作待部署驗證) |
 | 新成員歡迎訊息（接手 ProBot） | **已實作（2026-09-28）**，待重啟 discord-bot + 綁頻道驗證 | 90% | [新成員歡迎訊息](#新成員歡迎訊息接手-probot2026-09-28-已實作待部署驗證) |
+| scraper 抓網頁機制＋IT 就地補內文 | **2026-10-01 已上線並 commit**（`648b80b`、`20acc0c`、`6f39e87`）：共用層只用 Firefox 系、一輪一個 session（HKEPC 403 的真正原因是 Cloudflare 擋 Chrome／Safari 模擬）；巴哈每輪統計；IT 摘要訊息內文到了就地更新。待驗：首次補內文、巴哈統計；SC-Q6（被擋時換 session）先觀察 | 90% | [scraper 抓網頁機制](#scraper-抓網頁機制檢查2026-10-01-已上線) |
 | 跨來源整合（Article/FB/PTT/TG） | 有方向，尚未全面收斂 | 35% | [跨來源整合](#跨來源整合專區) |
 | Discord Bot 管理入口 | 規劃中 | 10% | [管理 TODO](#discord-bot-管理入口與指令整理-todo) |
 
@@ -652,6 +658,102 @@ affects: Telegram relay、config.json
 **狀態**：設計討論中（grill 暫停）；以上建議都還沒經使用者確認。
 
 ---
+
+## IT 新聞只帶摘要發出（2026-10-01 已上線）
+
+<!-- @meta
+id: it-article-intro-only
+type: RISK
+status: confirmed
+last_confirmed: 2026-10-01
+affects: services/relay/it_article_monitor.py, scraper/services/hkepc_scraper_service.py
+-->
+
+**症狀（使用者 2026-09-30 回報）**：IT快訊〈前 EVGA 產品經理首度公開內幕…〉轉發的內文跟全文不符、被截斷。
+
+**機制（一句話）**：HKEPC 內頁被擋（403）時資料庫只有列表頁的開頭摘要，bot 發文「有內文用內文、沒有就用摘要」，發完就標記已發送，之後 scraper 補到內文也不會再更新。
+
+- **查證**：該篇 `hkepc_id=26838` 的 `content` 是空的，只有 `introduction`（467 字）；21:34、22:34 兩輪內頁都 403。同輪的 26837（Walmart）也一樣。有內文時上限 4000 字（`EMBED_DESC_MAX`），目前內文都在 2,000 字以內，不會被截。
+- **scraper 會自己補**：每輪都替缺內文的文章重抓內頁（已有內文的才跳過，`hkepc_scraper_service.py` `existing_with_content`）；30 天來只有今天這 2 篇到現在還缺。
+- **量化**：
+  - 9/22 起主 log 有 73 篇 IT 發送，其中 **23 篇（約三分之一）是發送前 15 分鐘內剛被 403**，也就是只帶摘要發出。
+  - 403 紀錄從 7/14 起共 155 篇；每篇被擋幾輪才抓到（輪數：篇數）＝ 1：101、2：34、3：13、4：6、5：1。等 3 輪涵蓋 95%，等 4 輪涵蓋 99%。
+  - 不是這次整理或升級造成的：HKEPC 用自己的請求流程，403 從 7/14 就有。
+- **現成的補救**：`/resend_article` 可以用 hkepc_id 重發 IT 文章；但要等內文補到才有意義。
+
+**使用者決定（2026-10-01）**：IT-Q1 選 B「先發摘要，內文到了直接更新那則 embed」；IT-Q2 同一個機制補今天那 2 篇（免刪除）。
+- **實作方式（未改使用者看到的行為，只換機制）**：不另存訊息 id，改成每次 HKEPC 通知時讀 IT 頻道最近 3 天的訊息（登記表限定文字頻道，1～2 次 API），用 embed 的原文網址（解碼後比對）對回文章；描述剛好等於「沒內文時的摘要版」、而現在有內文，就就地 `edit` 成完整內文，原本沒圖而內文帶圖時補第一張。好處：不必在 `sent_articles.db` 加表（高風險資料檔），已經發出去的舊訊息也會一起補上。排版對不上的訊息不動（寧可漏補，不誤改）。
+- **狀態**：已上線（10/01 03:46 bot 重啟載入）並 commit（`6f39e87`）；複查後修正版 `test_it_article_refresh.py` 12 項、9 種突變都紅。等下一次 HKEPC 通知實際補上摘要訊息。
+
+**第 1 輪的選項（已定案，留作紀錄）**
+- **IT-Q1 修法**：A bot 端「內文到了才發」：沒有內文的先跳過、等下一輪；超過寬限仍沒有，就發摘要並註明「內文未取得，完整內容請點標題」／B 先發摘要，內文到了再就地編輯那則訊息（要另存訊息 id、多一套狀態）／C 只改 scraper，讓 403 少一點。建議 A：只改 `check_and_send_new` 的篩選，不需要新狀態；代價是約三分之一的 IT 新聞晚 1～3 小時發。
+- **IT-Q2 寬限多久**：建議 3 小時（3 輪，涵蓋 95%）；4 小時涵蓋 99%，但晚得更多。
+- **IT-Q3 已經發出的**：建議舊的 21 篇不處理（已是舊聞）；今天這 2 篇等內文補到後，你刪掉原訊息、用 `/resend_article` 重發。
+- **IT-Q4 scraper 端要不要一起降低 403**：原建議先不做；查到抓網頁機制有明確的問題後，改為跟下面「scraper 抓網頁機制」一起處理（見 SC-Q1～Q3）。
+
+## scraper 抓網頁機制檢查（2026-10-01 已上線）
+
+<!-- @meta
+id: scraper-fetch-fingerprint
+type: RISK
+status: confirmed
+last_confirmed: 2026-10-01
+depends_on: it-article-intro-only
+affects: scraper/services/base_scraper_client.py, scraper/services/hkepc_scraper_service.py, scraper/services/bahamut_scraper_service.py
+-->
+
+**使用者問**：是不是被黑名單了？抓網頁的機制（瀏覽器指紋等）有沒有問題、有沒有隨機？
+
+- **不是 IP 被封鎖**：同一台主機直接連，巴哈 0.23 秒、HKEPC 0.5 秒都回 200；scraper 容器內用 curl_cffi 0.16.3 連巴哈也是 0.2 秒、HTTP/2。兩站都在 Cloudflare 後面。HKEPC 的 403 是間歇的（被擋的 155 篇裡 101 篇下一小時就抓到），比較像防火牆逐筆評分，不是封鎖。
+- **有隨機化**（`base_scraper_client.py`）：每個 session 從 10 個瀏覽器目標隨機選一個（Chrome 124／131／136、Edge 99／101、Firefox 133／135／144、Safari 17.0／18.0），另有 30% 機率用本地抓的 Firefox ESR 140 指紋；延遲也是隨機（巴哈每頁 2～5 秒、每篇 0.35～0.9 秒、留言 0.15～0.35 秒）。
+- **查到的問題**（對 httpbin 實測送出的標頭）：
+  1. **標頭自相矛盾**：`_build_page_headers`／`_build_xhr_headers` 對所有 Chromium 目標一律加 `Sec-CH-UA-Platform: "Linux"`，但 curl_cffi 的 Chrome 目標 UA 是 macOS、Edge 是 Windows；自己寫的 `Sec-CH-UA` 還蓋掉了 curl_cffi 內建的正確值（例：chrome131 內建送 `"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"`、平台 `"macOS"`，被換成 `"Chromium";v="131", "Not;A=Brand";v="24", …`、平台 `"Linux"`）。真的瀏覽器不會這樣，是防火牆很容易抓到的特徵。
+  2. **HKEPC 每一頁都開新 session**（`hkepc_scraper_service.py` `_fetch_html`）：每頁隨機換一個瀏覽器、cookie 不延續，同一個 IP 幾秒內從 Mac Chrome 變 Windows Edge 變 Firefox。巴哈是一輪共用一個 session，沒有這個問題。
+  3. **瀏覽器版本偏舊**：Edge 99／101 是 2022 年的版本，其他也是 2024～2025 年；2026 年的真實流量裡很少見。
+  4. **403 當輪不重試**：`_fetch_with_retry` 只在連線例外時重試，拿到 403 直接交回，要等下一小時。
+- **巴哈變慢另案**（見盤點紀錄 22:5x）：取樣 22:34 那輪執行緒 300 次，70% 在刻意的睡眠、21% 等網路、7% 跑 CPU，所以不是被擋或網路慢；請求一次只要 0.2 秒、每輪存的樓數也沒變，卻多花 4 倍時間（兩輪都是抓 74 分鐘＋寫 4 分鐘），原因還沒找到；每輪都比排程間隔長，每小時會有約 18 分鐘兩輪同時在抓。巴哈 logger 等級是 WARNING（`scraper/config.py`），逐筆請求不會寫 log，目前數不到每輪發了幾次請求。
+
+**待決問題（第 1 輪，每題附建議）**
+- **SC-Q1 標頭矛盾**：A 拿掉自己加的 `Sec-CH-UA`／`Sec-CH-UA-Platform`／`Sec-CH-UA-Mobile`，讓 curl_cffi 送內建、與 UA 一致的值；本地 Firefox 指紋本來就不送這些，不受影響／B 保留自訂但改成跟 UA 對應。建議 A：最小改動，而且以後 curl_cffi 新增目標也會自動正確。
+- **SC-Q2 HKEPC 一輪共用一個 session**：建議做，跟巴哈一樣一輪只選一次瀏覽器、cookie 延續。
+- **SC-Q3 瀏覽器池**：建議拿掉 Edge 99／101，改用 curl_cffi 0.16.3 支援的較新目標（實作前先列出它支援的清單再選）。
+- **SC-Q4 巴哈變慢**：建議在「Bahamut 爬蟲任務完成」那行加上本輪的請求次數、睡眠總秒數、抓的頁數，下一輪就知道時間花在哪；不開逐筆 log（太多）。
+
+**使用者決定（2026-10-01）**：SC-Q1～Q4 都照建議。
+
+**第一版實作（worktree `wt3`；後來改成下方共用層版本）**
+- `base_scraper_client.py`：拿掉自訂的 `Sec-CH-UA`／`Platform`／`Mobile`；池改成 Chrome 145／146／150、Firefox 144／147、Safari 26.0／26.0.1（Edge 拿掉）；池裡目前 curl_cffi 不認得的目標會被剔除並記警告，全都不認得時退回 `"chrome"` 別名（requirements 沒鎖版本，避免哪天重建後每個請求都失敗）。PTT 也用這個客戶端，一併受惠。
+- `hkepc_scraper_service.py`：一輪只建一個 session，列表頁與內頁共用。
+- `bahamut_scraper_service.py`＋`main.py`：每輪統計請求次數（含留言 XHR）、成功頁數、等待秒數、抓取耗時，另加寫入資料庫的秒數，寫在「Bahamut 爬蟲任務完成／未完成」那行。
+- 測試：新增 `src/scraper/tests/`（scraper 容器內執行：`docker exec -w /app scraper python -m unittest discover -s tests -t . -p 'test_*.py'`；bot 容器沒有 curl_cffi，不進 bot 的啟動 gate），7 項，8 種突變都紅；測試期間關掉 logging，避免寫進正式 `/logs/scraper*.log`。
+- 實測（httpbin 回顯）：新池 7 個目標的 UA 與平台標頭都一致（Chrome 報 macOS；Firefox／Safari 不送，符合真瀏覽器）。
+
+**實測新發現（2026-10-01 00:2x，影響上線）：HKEPC 的 Cloudflare 看的是「模擬哪種瀏覽器」**
+- 對 HKEPC 內頁與列表頁：Chrome 145／150、Safari 26 **一律被挑戰頁擋下**（403「Just a moment...」，跟我們加不加標頭無關）；Firefox 144／147、本機 Firefox ESR 指紋**全部 200**；主機用普通 curl 也是 200。巴哈不挑（Chrome、Firefox 都 200）。
+- **這就是 403 時有時無的原因**：以前每頁隨機換瀏覽器，抽到 Firefox 的頁面過、抽到 Chrome／Safari／Edge 的被擋，所以同一篇下一小時常就成功；列表頁每天被擋 15～19 次、內頁 2～8 次，兩週來都這樣。
+- **因此「HKEPC 一輪只用一個瀏覽器」單獨上線會更糟**：抽到 Chrome／Safari 的那一輪整輪都會被擋（估計約一半的輪次）。
+- **SC-Q5 HKEPC 用哪些瀏覽器**：A HKEPC 只用 Firefox 系（curl_cffi 的 Firefox＋本機 Firefox ESR 指紋），一輪一個 session／B 一輪一個 session，遇到挑戰頁就換一個瀏覽器重抓那一頁／C 維持每頁隨機換（撤回 SC-Q2）。建議 A：實測 Firefox 全過；只影響 HKEPC（子類別覆寫 `IMPERSONATE_POOL`，基底類別已支援），巴哈、PTT 照舊。之後若 Firefox 也被擋，再加 B 的換瀏覽器重試。
+
+**使用者（2026-10-01 00:4x）**：HKEPC 再測深入一點；UA 等特徵本來就有共用層，不容易被擋的做法應該大家一起共用。→ SC-Q5 改成在共用層處理。
+
+**逐站實測矩陣（2026-10-01，13 種指紋 × 6 個實際網址，請求間隔 1.5～2.5 秒）**
+- HKEPC 內頁與列表：**Chrome 124／136／146／150、Safari 18.0／26.0.1 全部被挑戰頁擋**；Firefox 133／144／147、本機 Firefox ESR、Tor 145、Edge 101 通過；不偽裝的 curl_cffi 內頁過、列表被擋。
+- 巴哈看板與文章、PTT、官網 JSON：13 種全部通過。（第一次跑時 PTT 全標成被擋是誤判：Cloudflare 在正常頁面也嵌 `challenge-platform` 腳本；改成只認「403／503＋Just a moment」後 PTT 全部 200。）
+- **每站一個 Firefox session 模擬正式一輪**：HKEPC 列表 3 頁＋內頁 5 篇（含一直被擋的 26838、26837）、巴哈 4、PTT 4、官網 4，全部 200；本機 Firefox ESR 跑 HKEPC 一輪也全部 200。
+- **用新程式實跑 HKEPC 兩輪**（資料庫以假物件代替、不寫入；刻意抓全部 15 篇內頁）：curl_cffi Firefox 147 一輪、本機 Firefox ESR 一輪，都是 15 篇全有內文、0 錯誤。
+
+**定案並實作（2026-10-01 03:46 上線；commit `648b80b` 抓網頁機制、`20acc0c` 巴哈統計）**
+- 共用層預設池改成**只用 Firefox 系**（firefox144／147＋30% 本機 Firefox ESR）；備援別名改 `"firefox"`。理由：所有網站都通過的只有 Firefox 系；一個 IP 固定用同一種瀏覽器也比每次換一種像真人。Chrome／Safari 目標清單刪掉，要加回先逐站實測。
+- 共用層新增 **`run_session()`**：區塊內 `_build_session()` 都回傳同一個 session（呼叫端的 `with` 不會關掉），離開區塊才關；巢狀沿用外層；區塊外照舊每次新建。HKEPC（`fetch_hkepc_articles`）、PTT（`fetch_ptt_articles_with_content`）、官網（`scrape_articles`）的一輪入口都包上；巴哈本來就一輪一個 session。先前 HKEPC 自己傳 session 的寫法撤回，改用共用機制。
+- 測試：scraper 11 項（共用層標頭、Firefox 池、備援、`run_session` 語意、三個爬蟲一輪一個 session、巴哈統計、完成那行 log），13 種突變都紅；bot 659 項全過（含 IT 就地補內文 7 項）。
+- 套用順序：先重啟 discord-bot（IT 補內文的程式要先上線），等啟動 gate 過、Notify Server 起來，再重啟 scraper（它一啟動就會跑 HKEPC，並通知 bot）。避開 04:00～07:30。
+
+**獨立複查（子 agent，2026-10-01 01:0x）與修正（patch 改為 `scraper_it_v2.patch`）**：沒有會讓現在正式環境出錯的問題；照意見修正：
+- **潛在啟動失敗**：curl_cffi 原始碼把 `BrowserType` 標成 1.x 移除，requirements 沒鎖版本 → 改成可選匯入，拿不到就不過濾（不鎖版本，照 S6-2 的決定）。測試會模擬它被拿掉並重新載入模組。
+- IT 補內文：讀頻道改成**從最新的讀起**（有 `after` 時 discord.py 預設由舊到新，`limit` 會先吃掉最舊的）；改成**先發新文、再補舊訊息**；用**網址裡的文章編號**比對（站方改標題時 scraper 會更新 url）；**帶圖的編輯失敗時退回只換文字**；原本就有圖時改用 `attachment://` 引用原附件（讀回來的圖片網址帶簽章會過期），並明確列出舊附件（沒列的會被刪）。網址解碼拿掉（改用編號後用不到）。
+- 巴哈：中途拋例外時統計留在 `last_stats`，`main.py` 記一行「Bahamut 爬蟲任務中斷」與做到哪；用語法樹檢查所有等待都經過 `_sleep`（複查把 3 處改回 `human_sleep`，舊測試沒紅）。
+- 結果：bot 664 項全過（IT 補內文 12 項，9 種突變都紅）；scraper 16 項（19 種突變都紅）；最終版實抓一頁 HKEPC 列表成功（Firefox 144）。
+- **未做、記為之後的選項（SC-Q6）**：一輪共用 session 後，若該輪指紋被擋會整輪失敗；以前逐頁各自重抽。只用 Firefox 的前提下風險低，建議先觀察，若 HKEPC 又出現 403 再加「遇到挑戰頁換一次 session 重抓」。
 
 ## 週期活動提醒：深塔海墟（2026-09-29 已實作，待部署驗證）
 
