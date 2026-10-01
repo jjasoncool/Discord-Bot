@@ -505,9 +505,9 @@ async def on_message(message):
 
     # 將訊息加入持久化 buffer（非 bot 訊息、有內容或貼圖）
     if not message.author.bot and (message.content or message.stickers):
-        from llm.storage.store_chat import enqueue_message, flush_buffer, buffer_size, FLUSH_THRESHOLD
+        from llm.storage.store_chat import enqueue_message, flush_buffer, should_flush_now
         enqueue_message(message)
-        if buffer_size() >= FLUSH_THRESHOLD:
+        if should_flush_now():
             asyncio.create_task(flush_buffer())
 
     # 同步寫入 raw 備份表（獨立於 pgvector，包含純附件/純 embed 訊息）
