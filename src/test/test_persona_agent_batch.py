@@ -6,6 +6,7 @@
   - production 的 14 天／10 則門檻把 12 個安靜使用者排除在外，而那是 agent
     唯一明確贏的族群（7 天 1 則、90 天 91 則那個案例）
   - 單人失敗不影響其他人：失敗率是調參的唯一依據，中斷整批等於失去資料
+  - 群友暱稱表整批讀一次、每個人都附同一份；讀不到就不附，不擋整批
 
 執行：
     cd src && python -m unittest test.test_persona_agent_batch -v
@@ -26,6 +27,7 @@ from llm.persona.agent import batch  # noqa: E402
 from sys_settings.llm_settings import PersonaAgentSettings  # noqa: E402
 
 GUILD = 1
+NOTE = "【群友的稱呼】（顯示名稱：大家怎麼叫他）\n- 柔柔喵：阿喵"
 
 
 class SelectionTests(unittest.TestCase):
@@ -81,6 +83,8 @@ class RunBatchTests(unittest.TestCase):
         # 而重啟大多發生在白天，等於擋住自己的部署。
         with mock.patch.object(batch, "select_targets", return_value=targets), \
              mock.patch.object(batch, "_past_deadline", return_value=past_deadline), \
+             mock.patch.object(batch, "load_nickname_note",
+                               mock.AsyncMock(return_value=NOTE)) as self.load_note, \
              mock.patch.object(batch.persona_agent, "run_and_persist",
                                side_effect=side_effect) as ran:
             stats = asyncio.run(
@@ -131,6 +135,31 @@ class RunBatchTests(unittest.TestCase):
         self.assertEqual(seen, [["a"], ["b"]],
                          "工具層的白名單一次只能有當前這一人")
 
+
+    def test_every_run_gets_the_same_nickname_note_loaded_once(self):
+        seen = []
+
+        async def side(**kw):
+            seen.append(kw["ctx"].nickname_note)
+            return mock.MagicMock(status="ok"), mock.MagicMock(skip_reason=None)
+
+        self._run(PersonaAgentSettings(enabled=True), ["a", "b"], side)
+        self.assertEqual(seen, [NOTE, NOTE])
+        self.load_note.assert_awaited_once_with(GUILD)
+
+
+class LoadNicknameNoteTests(unittest.TestCase):
+    def test_note_is_built_from_intros_and_impressions(self):
+        persons = {"9": {"intro_profile": [{"metadata": {"alias": "柔喵, 阿喵"}}],
+                         "impression": [], "auto_personality": [{"metadata": {"alias": "柔柔喵"}}]}}
+        with mock.patch.object(batch.persona_agent, "run_db", mock.AsyncMock(return_value=({}, persons))):
+            note = asyncio.run(batch.load_nickname_note(GUILD))
+        self.assertIn("柔柔喵：柔喵、阿喵", note)
+
+    def test_unreadable_profiles_do_not_stop_the_batch(self):
+        """讀不到只是少了暱稱表、歸因比較容易錯，不該讓整批停掉。"""
+        with mock.patch.object(batch.persona_agent, "run_db", mock.AsyncMock(side_effect=RuntimeError("db down"))):
+            self.assertEqual(asyncio.run(batch.load_nickname_note(GUILD)), "")
 
 if __name__ == "__main__":
     unittest.main()

@@ -79,6 +79,8 @@ class ToolContext:
     #: `get_current_persona` 實際交給模型的 agent 版本號（user_id → version）。寫入前拿來核對
     #: 模型看到的就是上一版——沒看到上一版就寫，沒被提到的條目會全部消失
     served_versions: dict[str, int] = field(default_factory=dict, compare=False, hash=False)
+    #: 群友的暱稱表（`agent.nickname_note` 排好的文字），附在給模型的指示後面；空字串就不附
+    nickname_note: str = ""
 
     @classmethod
     def build(
@@ -87,11 +89,13 @@ class ToolContext:
         guild_id: int,
         allowed_ids: Iterable[str],
         fetch: Optional[FetchFn] = None,
+        nickname_note: str = "",
     ) -> "ToolContext":
         return cls(
             guild_id=int(guild_id),
             allowed_ids=frozenset(str(uid) for uid in allowed_ids),
             fetch=fetch or _default_fetch,
+            nickname_note=nickname_note,
         )
 
 

@@ -12,6 +12,15 @@
      相同再依最後一次有佐證的時間（last_seen）由新到舊——所以基本個性用不完的空間自然
      讓給近況，反之亦然。
   4. 放不下的整條跳過，不切半句；文字一模一樣的只放一次。輸出時基本個性在前、近況在後。
+     唯一的改動是拿掉句尾的「。」——串接後會變成「。；」。
+
+**挑之前先擋群內流行語**（純規則，擋下的不佔預算）：同一個詞在 ≥`GROUP_SLANG_MIN_PEOPLE`
+個人的描述裡都被寫成「他的口頭禪」，那是大家都在講的詞，不是誰的特色（實測「484」寫在 3 個人
+身上）。群友的暱稱不算——那是在叫人，歸 ④ 的暱稱表處理；講貼圖的條目也不算。
+
+**隱私不在這裡擋**：健康、性向、感情家庭、政治、具體行程只靠 `persona_description_rules.txt`
+要 ③④ 別寫；住哪裡、宗教、財務、職業不限制。發言本來就是群裡公開講的，管理員認為舊條目留著
+沒差（2026-10-01 決定），不另做關鍵字過濾。
 
 **預算＝一行的上限扣掉標籤、自介與印象**：插話那一行是「「標籤」— 自介。印象。AI觀察」，
 AI觀察排最後、最先被切。bot 讀取時撈到哪幾則印象、什麼順序都會變（SQL 撈新到舊、語意檢索
@@ -68,6 +77,14 @@ BUDGET_MARGIN = 20
 #: 算最壞情況時考慮幾則印象（清理後最長的幾則）。卡片最多放 3 則，6 則取 3 則的排列是 120 種。
 _IMPRESSION_POOL = 6
 
+#: 同一個口頭禪出現在幾個人身上，就當群內流行語
+GROUP_SLANG_MIN_PEOPLE = 2
+_CLAIMS_CATCHPHRASE = re.compile(r"口頭禪|語尾|口癖|慣用語|固定用語|語氣詞")
+_MENTIONS_STICKER = re.compile(r"貼圖|表情")
+_QUOTED = re.compile(r"「([^「」]{1,12})」")
+#: 自介暱稱欄、印象稱呼欄裡分隔多個暱稱的符號（「柔喵, 阿喵」）。不含空白——顯示名稱本身常有空白
+_NICKNAME_SEP = re.compile(r"[,，、/／;；|｜]+")
+
 Mode = Literal["off", "dry_run", "on"]
 
 Section = Literal["core", "recent"]
@@ -91,6 +108,8 @@ class LiteResult:
     items: list[LiteItem] = field(default_factory=list)
     #: 過門檻的條目數，文字相同的算一條（被挑中的一定是其中一部分）
     eligible: int = 0
+    #: 過門檻但被當成群內流行語擋下的條目原文
+    withheld: list[str] = field(default_factory=list)
 
 
 def _episodes(times: list[datetime]) -> int:
@@ -110,11 +129,37 @@ def _evidence_times(change: dict[str, Any], now: datetime) -> list[datetime]:
     return [t for t in (agent_tools._snowflake_time(i) for i in ids) if t is not None and t <= now]
 
 
-def select_lite(changes: Any, budget: int, *, now: Optional[datetime] = None) -> LiteResult:
+def _catchphrase_terms(text: str) -> set[str]:
+    """這條把哪些詞寫成口頭禪（講貼圖的條目不算——貼圖名稱大家都用同一套）。"""
+    if not _CLAIMS_CATCHPHRASE.search(text) or _MENTIONS_STICKER.search(text):
+        return set()
+    return {t.strip() for t in _QUOTED.findall(text) if t.strip()}
+
+
+def find_group_slang(changes_by_author: Mapping[str, Any], nicknames: Iterable[str]) -> frozenset[str]:
+    """被 ≥`GROUP_SLANG_MIN_PEOPLE` 個人的描述寫成口頭禪的詞。看每人最新版本的全部條目
+    （不只過門檻的）——流行語判斷要看「多少人被這樣寫」，跟這條會不會被挑中無關。"""
+    names = {n.strip() for n in nicknames if n and n.strip()}
+    people: dict[str, set[str]] = {}
+    for author_id, changes in changes_by_author.items():
+        for item in agent_tools._persona_items(changes):
+            for term in _catchphrase_terms(item["text"]) - names:
+                people.setdefault(term, set()).add(str(author_id))
+    return frozenset(t for t, who in people.items() if len(who) >= GROUP_SLANG_MIN_PEOPLE)
+
+
+def select_lite(
+    changes: Any,
+    budget: int,
+    *,
+    now: Optional[datetime] = None,
+    group_slang: frozenset[str] = frozenset(),
+) -> LiteResult:
     """從一版 `changes` 挑出精簡版，總長不超過 `budget` 字。"""
     now = now or datetime.now(APP_TZ)
     raw = changes if isinstance(changes, list) else []
     candidates: list[LiteItem] = []
+    withheld: list[str] = []
     for item in agent_tools._persona_items(raw):
         if _RESIDUE.search(item["text"]):
             continue
@@ -122,9 +167,12 @@ def select_lite(changes: Any, budget: int, *, now: Optional[datetime] = None) ->
         episodes = _episodes(times)
         if episodes < MIN_EPISODES:
             continue
+        if _catchphrase_terms(item["text"]) & group_slang:
+            withheld.append(item["text"])
+            continue
         span = (max(times) - min(times)).days
         candidates.append(LiteItem(
-            n=item["n"], text=item["text"], episodes=episodes, span_days=span,
+            n=item["n"], text=item["text"].rstrip("。"), episodes=episodes, span_days=span,
             last_seen=max(times), section="core" if span >= STABLE_SPAN_DAYS else "recent",
         ))
 
@@ -161,7 +209,7 @@ def select_lite(changes: Any, budget: int, *, now: Optional[datetime] = None) ->
     ordered = (sorted((p for p in picked if p.section == "core"), key=by_span)
                + sorted((p for p in picked if p.section == "recent"), key=by_weight))
     return LiteResult(text=_SEP.join(p.text for p in ordered), items=ordered,
-                      eligible=len({c.text for c in candidates}))
+                      eligible=len({c.text for c in candidates}), withheld=withheld)
 
 
 # ── 預算：插話那一行扣掉自介與印象，剩多少給 AI觀察 ──────────────────────────
@@ -260,6 +308,35 @@ def load_guild_state(guild_id: int) -> tuple[dict[str, dict[str, Any]], dict[str
     return versions, persons
 
 
+def member_nicknames(
+    persons: Mapping[str, Mapping[str, list]],
+    display_names: Optional[Mapping[str, str]] = None,
+) -> dict[str, tuple[str, list[str]]]:
+    """群友的暱稱：author_id → (顯示名稱, [暱稱…])，只列有暱稱的人。
+
+    來源是成員自己填的自介「別人常常叫我什麼」，與別人寫的印象「你平常怎麼稱呼他」——群裡
+    叫的「阿喵」「阿狗」不是顯示名稱，只有這兩處有。顯示名稱優先用當下的，沒有就用上次發布時
+    記下的別名。純函式，`persons` 是 `load_guild_state` 的第二個回傳值。
+    """
+    names = display_names or {}
+    out: dict[str, tuple[str, list[str]]] = {}
+    for pid, docs in persons.items():
+        raw = [str(d.get("metadata", {}).get("alias") or "") for d in docs.get("intro_profile", [])]
+        raw += [str(d.get("metadata", {}).get("target_alias") or "") for d in docs.get("impression", [])]
+        nicks: list[str] = []
+        for value in raw:
+            for nick in _NICKNAME_SEP.split(value):
+                nick = nick.strip()
+                if nick and nick not in nicks:
+                    nicks.append(nick)
+        autos = docs.get("auto_personality", [])
+        label = str(names.get(pid) or (autos[0].get("metadata", {}).get("alias") if autos else "") or "")
+        nicks = [n for n in nicks if n != label]
+        if nicks:
+            out[str(pid)] = (label or nicks[0], nicks)
+    return out
+
+
 def split_uncovered(
     results: dict[str, dict[str, Any]], covered: set[str]
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
@@ -291,8 +368,9 @@ def plan_for(
     card_field_chars: int,
     display_name: str = "",
     now: Optional[datetime] = None,
+    group_slang: frozenset[str] = frozenset(),
 ) -> PublishPlan:
-    """一個人要發布什麼（純函式，不碰 DB）。"""
+    """一個人要發布什麼（純函式，不碰 DB）。`group_slang` 由 `build_plans` 跨人算好傳進來。"""
     from llm.persona.persona_card_builder import _clean_impression_text, persona_card_label
 
     person = person or {}
@@ -327,7 +405,7 @@ def plan_for(
     budget = max(0, budget - BUDGET_MARGIN)
     return PublishPlan(
         author_id=author_id, version=int(version_row["version"]), alias=alias, budget=budget,
-        lite=select_lite(version_row["changes"], budget, now=now),
+        lite=select_lite(version_row["changes"], budget, now=now, group_slang=group_slang),
     )
 
 
@@ -347,6 +425,8 @@ def build_plans(
     line_max = AmbientChatSettings().persona_line_max_chars
     versions, persons = load_guild_state(guild_id)
     names = display_names or {}
+    known_names = [n for label, nicks in member_nicknames(persons, names).values() for n in (label, *nicks)]
+    group_slang = find_group_slang({a: row["changes"] for a, row in versions.items()}, known_names)
     plans: dict[str, PublishPlan] = {}
     failed: dict[str, Exception] = {}
     for author_id, row in versions.items():
@@ -354,7 +434,7 @@ def build_plans(
             plans[author_id] = plan_for(
                 author_id, row, persons.get(author_id, {}),
                 line_max_chars=line_max, card_field_chars=PERSONA_MAX_CARD_CHARS,
-                display_name=names.get(author_id, ""), now=now,
+                display_name=names.get(author_id, ""), now=now, group_slang=group_slang,
             )
         except Exception as exc:
             failed[author_id] = exc
@@ -427,6 +507,8 @@ async def run_publish(
             len(lite.items), len(lite.text), core, len(lite.items) - core, lite.eligible,
             lite.text[:200] or "（空，不寫入，交給 ③）",
         )
+        for text in lite.withheld:
+            logger.info("persona 精簡版擋下群內流行語 author=%s：%s", author_id, text[:120])
         if not lite.text:
             stats["empty"] += 1
             continue

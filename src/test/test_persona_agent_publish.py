@@ -6,6 +6,10 @@
   - 預算扣掉標籤、自介與印象，發布當下插話那一行不超過上限——用 bot 讀取時的同一套函式驗
   - 寫入時標上來源與版本；寫入失敗算失敗，不能算成功
   - 發布開啟後，production 萃取（③／手動）跳過 ⑤ 要寫的人；精簡版變空的人回到 ③ 手上
+  - 群內流行語不當成個人特色：同一個詞在 ≥2 人的描述裡都被寫成口頭禪，那幾條都不發；
+    群友的暱稱、講貼圖的條目不算；擋下的不佔預算
+  - 串接後不出現「。；」
+  - 群友暱稱來自自介與印象（④ 的暱稱表、流行語排除都靠它）
 
 執行：
     cd src && python -m unittest test.test_persona_agent_publish -v
@@ -488,6 +492,108 @@ class ProductionExtractionTests(unittest.TestCase):
         with mock.patch("llm.storage.member_profile_store.get_member_profile_store", return_value=store):
             written = asyncio.run(pe.save_personality_results(guild_id=9, results=results))
         self.assertEqual(written, 1)
+
+
+class GroupSlangTests(unittest.TestCase):
+    """真實案例：「484」在 3 個人的描述裡都被寫成他的口頭禪，「何意味」2 人——那是群裡大家都在講的詞。"""
+
+    @staticmethod
+    def changes(*texts):
+        return [item(t, ago(1), ago(3)) for t in texts]
+
+    def test_word_claimed_by_two_people_is_group_slang(self):
+        slang = publish.find_group_slang({
+            "1": self.changes("口頭禪「484」，常帶懷疑語氣"),
+            "2": self.changes("句尾極愛掛「484」當萬能語氣詞"),
+            "3": self.changes("口頭禪「何意味」"),
+        }, nicknames=[])
+        self.assertEqual(slang, {"484"}, "只有一個人被這樣寫的是他自己的口頭禪")
+
+    def test_member_nicknames_are_not_slang(self):
+        """「阿喵」被兩個人寫成口頭禪，其實是在叫群友——那是 ④ 的暱稱表要處理的歸因錯誤，不是流行語。"""
+        slang = publish.find_group_slang({
+            "1": self.changes("「阿喵」是他的固定口頭禪"),
+            "2": self.changes("口頭禪是「阿喵」"),
+        }, nicknames=["阿喵", "柔喵"])
+        self.assertEqual(slang, frozenset())
+
+    def test_sticker_and_plain_mentions_do_not_count(self):
+        """「安可瘋狂」是貼圖名稱，12 個人都用；只是提到一個詞、沒說是口頭禪的也不算。"""
+        slang = publish.find_group_slang({
+            "1": self.changes("興奮時連發「安可瘋狂」貼圖，像口頭禪一樣", "跟「一野」同一陣營"),
+            "2": self.changes("「安可瘋狂」表情是他的口頭禪", "對「一野」有固定損法"),
+        }, nicknames=[])
+        self.assertEqual(slang, frozenset())
+
+    def test_slang_items_are_withheld_without_using_budget(self):
+        claim = item("口頭禪「484」，常帶懷疑語氣", ago(1), ago(3), ago(5))   # 次數最多、排第一
+        mention = item("會拿「484」接別人的梗", ago(1), ago(3))
+        other = item("吐槽擔當", ago(2), ago(4))
+        budget = len(mention["text"]) + 1 + len(other["text"])
+        r = publish.select_lite([claim, mention, other], budget, now=NOW, group_slang=frozenset({"484"}))
+        self.assertEqual(r.withheld, [claim["text"]])
+        self.assertEqual(sorted(i.text for i in r.items), sorted([mention["text"], other["text"]]),
+                         "擋下的不佔預算；只是提到這個詞、沒說是口頭禪的照發")
+
+
+class PunctuationTests(unittest.TestCase):
+    def test_trailing_period_does_not_double_up(self):
+        """真實案例：10 個人的精簡版裡有「。；」——條目自帶句號，串接又加分號。"""
+        r = publish.select_lite([item("吐槽擔當。", ago(1), ago(3)), item("常用低能貶稱。", ago(2), ago(4))],
+                                500, now=NOW)
+        self.assertEqual(r.text, "吐槽擔當；常用低能貶稱")
+
+
+def nickname_docs(pid, intro_alias=None, impression_aliases=(), auto_alias=None):
+    docs = {"intro_profile": [], "impression": [], "auto_personality": []}
+    if intro_alias is not None:
+        docs["intro_profile"].append({"metadata": {"profile_kind": "intro_profile", "author_id": pid,
+                                                   "alias": intro_alias}, "text": ""})
+    for a in impression_aliases:
+        docs["impression"].append({"metadata": {"profile_kind": "impression", "target_user_id": pid,
+                                                "target_alias": a}, "text": ""})
+    if auto_alias is not None:
+        docs["auto_personality"].append({"metadata": {"profile_kind": "auto_personality", "author_id": pid,
+                                                      "alias": auto_alias}, "text": ""})
+    return docs
+
+
+class MemberNicknamesTests(unittest.TestCase):
+    """群裡叫的「阿喵」不是顯示名稱，只有自介「別人常常叫我什麼」與印象「你平常怎麼稱呼他」有。"""
+
+    def test_intro_and_impression_nicknames_are_merged(self):
+        persons = {"1": nickname_docs("1", intro_alias="柔喵, 阿喵", impression_aliases=["阿喵", "喵董"],
+                                      auto_alias="❤️柔柔喵❤️-時渺")}
+        self.assertEqual(publish.member_nicknames(persons), {"1": ("❤️柔柔喵❤️-時渺", ["柔喵", "阿喵", "喵董"])})
+
+    def test_current_display_name_is_the_label_and_not_a_nickname(self):
+        persons = {"1": nickname_docs("1", intro_alias="米拉、拉拉", auto_alias="舊名字")}
+        self.assertEqual(publish.member_nicknames(persons, {"1": "米拉"}), {"1": ("米拉", ["拉拉"])})
+
+    def test_people_without_nicknames_are_left_out(self):
+        persons = {"1": nickname_docs("1", auto_alias="克羅"),
+                   "2": nickname_docs("2", impression_aliases=["阿狗"])}
+        self.assertEqual(publish.member_nicknames(persons), {"2": ("阿狗", ["阿狗"])},
+                         "沒有顯示名稱可用時，用第一個暱稱當標籤")
+
+
+class BuildPlansGroupSlangTests(unittest.TestCase):
+    """⑤ 實際跑的路徑：流行語跨所有人算一次，暱稱從自介與印象排除。"""
+
+    def test_slang_is_withheld_but_nickname_claims_are_kept(self):
+        versions = {
+            "1": {"version": 3, "changes": [item("口頭禪「484」", ago(1), ago(3)), item("吐槽擔當", ago(1), ago(3))]},
+            "2": {"version": 5, "changes": [item("口頭禪「484」", ago(2), ago(4))]},
+            "3": {"version": 2, "changes": [item("「阿喵」是他的固定口頭禪", ago(1), ago(3))]},
+            "4": {"version": 2, "changes": [item("口頭禪是「阿喵」", ago(1), ago(3))]},
+        }
+        persons = {"5": nickname_docs("5", intro_alias="柔喵, 阿喵")}
+        with mock.patch.object(publish, "load_guild_state", return_value=(versions, persons)):
+            plans, failed = publish.build_plans(9, now=NOW)
+        self.assertEqual(failed, {})
+        self.assertEqual(plans["1"].lite.text, "吐槽擔當")
+        self.assertEqual(plans["2"].lite.text, "")
+        self.assertEqual(plans["3"].lite.text, "「阿喵」是他的固定口頭禪")
 
 
 if __name__ == "__main__":

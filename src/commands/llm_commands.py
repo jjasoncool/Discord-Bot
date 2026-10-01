@@ -1389,9 +1389,13 @@ class PersonalityCommands(commands.Cog):
         )
 
         async def _run_and_report() -> None:
+            from llm.persona.agent.batch import load_nickname_note
+
             ctx = persona_tools.ToolContext.build(
                 guild_id=guild_id,
                 allowed_ids=[user_id],   # 白名單只放這一人，工具層會擋掉其他查詢
+                # 跟每晚批次附同一份暱稱表，手動跑的結果才代表晚上會寫出什麼
+                nickname_note=await load_nickname_note(guild_id),
             )
             try:
                 run, validated = await persona_agent.run_and_persist(

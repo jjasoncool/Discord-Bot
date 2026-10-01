@@ -23,7 +23,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from llm.persona.agent import agent as persona_agent
-from llm.persona.agent import store
+from llm.persona.agent import publish, store
 from llm.persona.agent import tools as persona_tools
 from sys_settings.llm_settings import LLMServiceSettings, PersonaAgentSettings
 from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
@@ -105,6 +105,16 @@ def _past_deadline(deadline_hour: int) -> bool:
     return datetime.now(APP_TZ).hour >= deadline_hour
 
 
+async def load_nickname_note(guild_id: int) -> str:
+    """群友暱稱表，整批共用一份。讀不到就不附——少了它只是歸因比較容易錯，不該擋住整批。"""
+    try:
+        _, persons = await persona_agent.run_db(publish.load_guild_state, guild_id)
+    except Exception as exc:
+        logger.warning("persona agent 讀不到群友暱稱表，這次不附：%s", exc)
+        return ""
+    return persona_agent.nickname_note(publish.member_nicknames(persons))
+
+
 async def run_batch(
     *,
     guild_id: int,
@@ -124,6 +134,7 @@ async def run_batch(
 
     run_id = f"batch-{int(time.time())}"
     stats = {"targets": len(targets), "ok": 0, "failed": 0, "written": 0, "unrun": 0}
+    nickname_note = await load_nickname_note(guild_id)
     started = time.perf_counter()
 
     for i, user_id in enumerate(targets, 1):
@@ -138,6 +149,7 @@ async def run_batch(
             ctx = persona_tools.ToolContext.build(
                 guild_id=guild_id,
                 allowed_ids=[user_id],  # 白名單只放這一人，工具層擋掉其他查詢
+                nickname_note=nickname_note,
             )
             run, validated = await persona_agent.run_and_persist(
                 user_id=user_id, guild_id=guild_id, ctx=ctx, model=model,

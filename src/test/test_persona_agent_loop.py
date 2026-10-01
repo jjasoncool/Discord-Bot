@@ -9,6 +9,8 @@
   ① 工具結果要以 `role:"tool"` + 正確的 `tool_call_id` 回填，否則模型接不上
   ② 收集階段 thinking 必須關；產出階段跟著 `FINAL_STEP_THINKING`（預設關）
   ③ 任何例外都要收斂成 status，不能往外拋（批次執行時單人失敗不該波及其他人）
+  ④ 群友暱稱表要附在給模型的指示後面，且跟共用規則檔講的是同一張表——不然模型會把
+     叫人的「阿喵」寫成某人的語尾口頭禪
 
 執行：
     cd src && python -m unittest test.test_persona_agent_loop -v
@@ -275,6 +277,41 @@ class PromptLayeringTests(unittest.TestCase):
         from llm.persona.personality_extractor import load_description_rules
 
         self.assertGreater(len(load_description_rules()), 50)
+
+
+class NicknameNoteTests(unittest.TestCase):
+    """真實案例：KaTsuO 被寫成「『喵』語尾是他的口頭禪」，其實他是在叫阿喵（柔柔喵）。旁人在工具
+    回傳裡只是「他人1」，模型分不出哪些詞是在叫人，所以每次執行都附上群友暱稱表。"""
+
+    NOTE = agent.nickname_note({"9": ("❤️柔柔喵❤️-時渺", ["柔喵", "阿喵"]), "8": ("阿狗", ["阿狗"])})
+
+    def test_note_lists_each_member_with_nicknames(self):
+        self.assertIn("❤️柔柔喵❤️-時渺：柔喵、阿喵", self.NOTE)
+        self.assertIn("阿狗：阿狗", self.NOTE)
+        self.assertEqual(agent.nickname_note({}), "", "沒有人有暱稱就不附")
+
+    def test_note_follows_the_instruction(self):
+        svc = FakeService([says("看夠了"), says(VALID_DIFF)])
+        ctx = tools.ToolContext.build(guild_id=1, allowed_ids=[ALICE], fetch=lambda sql, params: [],
+                                      nickname_note=self.NOTE)
+        run(svc, ctx=ctx)
+        instruction = svc.calls[0]["messages"][1]["content"]
+        self.assertIn(ALICE, instruction)
+        self.assertIn("柔喵、阿喵", instruction)
+
+    def test_without_note_the_instruction_is_unchanged(self):
+        svc = FakeService([says("看夠了"), says(VALID_DIFF)])
+        run(svc)
+        self.assertNotIn("群友的稱呼", svc.calls[0]["messages"][1]["content"])
+
+    def test_shared_rules_refer_to_the_same_table(self):
+        """規則檔（③④ 共用）教模型怎麼用這張表，靠的是表頭名稱；改了一邊另一邊要跟著改。"""
+        from llm.persona.personality_extractor import load_description_rules
+
+        header = self.NOTE.splitlines()[0]
+        table_name = header[:header.index("】") + 1]
+        self.assertIn(table_name, load_description_rules())
+        self.assertIn("不是口頭禪", load_description_rules())
 
 
 class ThinkingBudgetTests(unittest.TestCase):

@@ -23,7 +23,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 from llm.client.lemonade_gate import foreground_recently_active, stream_busy
 from services.llm_service import LLMAPIError
@@ -116,6 +116,17 @@ def load_prompts() -> dict[str, str]:
         "user_prompt_template": own["user_prompt_template"],
         "final_prompt": own["final_prompt"],
     }
+
+
+def nickname_note(nicknames: Mapping[str, tuple[str, Sequence[str]]]) -> str:
+    """把 `publish.member_nicknames` 排成附在指示後面的暱稱表；沒有人有暱稱就回空字串。
+
+    為什麼要附：工具回傳的旁人只有「他人1」這種代號，模型只能從訊息文字讀到人名，分不出
+    「阿喵救我」的「阿喵」是在叫人——實測把叫人的「喵」寫成某人的語尾口頭禪。
+    怎麼用這張表寫在 `persona_description_rules.txt`（③④ 共用），這裡只排資料。
+    """
+    lines = [f"- {label}：{'、'.join(nicks)}" for label, nicks in nicknames.values()]
+    return "【群友的稱呼】（顯示名稱：大家怎麼叫他）\n" + "\n".join(lines) if lines else ""
 
 
 def estimate_tokens(text: str) -> int:
@@ -239,12 +250,12 @@ async def run_for_user(
 
     try:
         prompts = load_prompts()
+        instruction = prompts["user_prompt_template"].replace("{user_id}", str(user_id))
+        if ctx.nickname_note:
+            instruction = f"{instruction}\n\n{ctx.nickname_note}"
         messages: list[dict[str, object]] = [
             {"role": "system", "content": prompts["system_prompt"]},
-            {
-                "role": "user",
-                "content": prompts["user_prompt_template"].replace("{user_id}", str(user_id)),
-            },
+            {"role": "user", "content": instruction},
         ]
         # 固定開銷（system prompt + 每次呼叫都重送的工具宣告）必須先計入，
         # 否則預算會系統性低估約 1,500 token
