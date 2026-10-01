@@ -25,6 +25,11 @@
 > 4. 保留可追溯來源，避免之後重複討論同一件事
 
 最後盤點紀錄（只保留近期；過往詳見 `TODO-completed.md` 各歸檔 entry）：
+- 2026-10-01 15:3x：PA-Q6 使用者選 B → 規則檔放寬成只擋健康、性向、感情家庭、政治、具體行程；`publish.py` 說明同步；persona 測試全過。
+- 2026-10-01 15:2x（Persona M7 隱私與歸因，**已實作・695 測試全過・未 commit**）：PA-Q2、PA-Q4 使用者回「都做」，實作中使用者看到 ⑤ 的隱私關鍵字（地名、持股、宮廟）說「沒差、太敏感」→ ⑤ 不做隱私過濾，只靠規則檔；④ 附群友暱稱表（16 人）、⑤ 擋群內流行語（試算 6 條）、拿掉「。；」。新增待決 PA-Q6（規則檔要不要跟著放寬），規則檔即時生效，要在今晚 04:00 前決定。詳見 Persona 區塊。
+- 2026-10-01 15:0x（grill：Persona M7 第 1 輪回覆，**未動 code**）：PA-Q1 原則同意、PA-Q3 選 C（性化內容不動）定案；PA-Q5 使用者指出自介區已有暱稱 → 查證自介 18 人、印象 8 人有暱稱，但 ④ 寫描述時沒讀它們 → 改成暱稱表從自介＋印象組、不另做 JSON；PA-Q2、PA-Q4 用例子重新說明，待答。
+- 2026-10-01 14:4x（grill：Persona M7 隱私與歸因第 1 輪，**未動 code**）：唯讀盤點目前 66 筆精簡版，寫進 Persona 區塊；重點是原建議「同一個引號詞 ≥2 人就全部不發」會誤殺 47 條（多數是群內暱稱與貼圖名稱，不是群體用語），改建議只比對口頭禪類條目並排除暱稱與貼圖名；提出 PA-Q1～Q5（擋哪些類別、擋法、性化內容、歸因、人工校正檔），③ 退場排到下一輪。
+- 2026-10-01 14:3x（telegram-scraper 的 `print` 全改 logger，**已實作・679 測試全過・未重啟・未 commit**）：使用者排定先做這項與 Persona M7 隱私歸因。45 處（runner 25、handlers 16、db 2、tg_config 2）改成各模組 `logging.getLogger(__name__)`，訊息原文與 `[History]`／`[CatchUp]`／`[Refetch]`／`[Telegram]` 標籤都保留（除錯時照舊 grep）；等級：失敗與重試用 WARNING，`Refetch 處理訊息失敗`、`處理自訂表情時發生例外` 這兩個接住所有例外的地方改 `exception`（附 traceback），其餘 INFO。新增 `telegram_scraper/log_config.py`：console＋`/logs/telegram_scraper.log`（10MB×5 輪替、格式同 bot）；**只由 `main.py` 呼叫**（bot 也 import `tg_config`，import 時改全域 logging 會洗掉 bot 的設定）；log 檔開不了時只留 console、不讓 scraper 起不來；Telethon 的 INFO（斷線重連、FloodWait、補抓漏收更新）保留進檔、逐檔下載訊息關掉；`main.py` 崩潰時把 traceback 寫進檔（容器重建後 docker logs 就沒了）。**為什麼不共用 `settings/logging.json`**：容器只掛 `./src/telegram_scraper` 與 `./logs`，共用要改 compose 掛載並重建容器，這次不做。守衛拿掉 `telegram_scraper/` 的兩條例外（不准 print、logger 一律 `__name__`）。新增 `test_telegram_scraper_logging.py` 5 項，6 種突變都紅；scraper 容器內 import runner／handlers／main 正常、`/logs` 可寫。**生效要重啟 telegram-scraper**（只掛自己的目錄，不受 bot 維護時段限制，但重啟會跑一次歷史掃描）。
 - 2026-10-01 10:4x（Lemonade 升級 11.9.0 → 2026.40.0＋bot 斷線自癒盤點，**未動 code**）：release notes 的 breaking change 逐條對照，bot 都沒用到（版本號格式、`registry_source`、`/docs`、upscale 標籤、ROCm 後端、`system-info` GPU 名稱只進故障快照 log、`user_models.json` 改完要重啟 lemond）；`auto_evict` 預設 false。舊的 `user.` 模型名稱在新版仍可解析。升級當下 bot 沒有任何連線錯誤（`llm_anomaly.log` 今天為空），10:32～10:35 插話處理器卡約 3 分鐘：推測是新版第一次載入 embedding（10:35:51 那批 19 則才寫進 pgvector，期間持有 GPU 閘門），之後 10:37:13 directed 插話成功（首字 29 秒／9,870 tokens 無 cache、24.6 tok/s，09-29 是 33 tok/s，只一筆樣本，待觀察）。**bot 現有的自癒**：每個請求獨立，Lemonade 回來後下一個請求就恢復，不必重啟 bot；連不上時重試 2 次（約 3 秒）後放棄；後端卡死（`network_error`）會自動重發 `/api/v1/load`；ctx 設定由 Lemonade 自己存著。**缺口與待決**：
   - **LM-Q1 聊天向量斷線會掉**：`store_chat` flush 前就清空 buffer，embedding 失敗時 log 寫「將重試」但沒放回 buffer → 那批訊息永遠沒有向量（原始訊息仍在 raw store）。影響不只 RAG：這張聊天表也是 04:00 人格萃取（`personality_extractor` 從這裡撈最近 N 天文字）與 persona agent SQL 工具的資料來源，漏寫的訊息這些地方也看不到。選項：A 失敗的放回 buffer 下輪重試（設上限）／B 定期補寫缺向量的訊息／C 不改、只把 log 改誠實。建議 A。今天沒發生。
     - 10:5x 使用者問「能修嗎、現在有防無限累積嗎」。查證：`_buffer` **沒有任何上限**，現在不會累積只是因為「失敗就丟」；觸發條件是滿 30 則（每則新訊息都檢查、各開一個 flush task）或每 5 分鐘。**另一個問題**：斷線時 flush 仍逐則硬試，每則 3 個變體 × 3 次嘗試，連線被拒約 9 秒／則（30 則約 4.5 分鐘），封包被丟時每次嘗試最多等 `LLM_TIMEOUT` 300 秒；全程持有 GPU 閘門，`/askai` 與插話都要等。B 不採用的理由：raw store 沒存連結預覽，重建出的文字與原本不同。
@@ -58,7 +63,7 @@
 - 2026-09-29（grill：程式結構整理，**討論中・未動 code**）：使用者覺得程式很亂，想依功能分資料夾但要有整體規劃。新增 [程式結構整理區塊](#程式結構整理2026-09-29-構想grill-中)，寫入第 1 輪待決問題（痛點、整理方式、分法原則、跟 MCP 的關係）與盤點事實（一檔多功能的檔案、`discord_bot.py` 塞的東西、轉發應整組、`sent_articles.db` 路徑地雷、沒有測試的功能）。MCP 區塊的 R2-Q5 改為取決於這邊。使用者要先看架構怎麼切、以及不影響功能能先做什麼 → 寫入架構草案（`core/`＋依領域分：relay、schedule、ai、search、community、trade、music、misc）與「現在就能做」清單（資料檔路徑集中、私有 import 守衛、清死碼、更新文件、MCP 照新結構寫）。使用者否決草案 v1（拆了 `llm/` 與 Discord 服務），要求從現有架構出發、最小修改 → 改寫成架構建議 v2（P1～P5）；第 1 項縮小成只加測試釘住 6 個資料檔位置，第 3 項確認 4 處死碼（`chat_persistence` 延遲 import 不是死碼，移出）。使用者提出「檔案命名也是問題」→ 讀到 ComfyUI 區塊既有的「檔名正名」與「不做 llm/services 資料夾重組」決定並補進本區塊；寫入命名盤點與第 2 輪待決問題 N1～N4。使用者回覆：N1 同意、N2 三個都不改、N3 延後、P1 否決（services 就是服務）、P3 入口仍由 `discord_bot.py` 管；使用者定義 `llm/`＝LLM 相關的組裝、優化、橋接、RAG、MCP → 撤回搜尋獨立的修正，寫入 `llm/` 討論 L1～L4 與 P3 確認。使用者回覆 L1 同意、L2 要依 LLM 角色分子資料夾（重開不重組的決定）、L4 本地資料一律放 `localdata/` → 寫入第 4 輪：L2a 子資料夾草案、L2b 搬法（一次搬＋import 守衛）、L3 log 格式化移進 `logger_factory`、L4 MCP 殼放 `services/`。
 - 2026-09-29（grill：MCP／搜尋工具化，**討論中・未動 code**）：新增 [MCP／搜尋工具化區塊](#mcp搜尋工具化2026-09-29-構想grill-中)，寫入第 1 輪待決問題（誰呼叫工具、結果給誰看、關鍵字過濾的痛點、要回答哪類問題），以及兩個子代理的查證事實（`/askai` 與網頁查詢流程、既有 tool calling、各來源資料量與儲存方式、「寫死日期區間」其實是轉發）。定案：社群稽查（依 ID 查人）不納入工具；用途＝查情報，排除 Telegram 內鬼；改由 LLM 決定何時查；先做 MCP server，工具本體共用。補上 Lemonade 實測速度與 bot 接工具的成本估算；寫入第 2 輪待決問題（MCP 客戶端與部署、工具切法、搜尋方式、論壇索引層級）。使用者追問「一定要另開 container 嗎」→ 在 R2-Q1 補上三種放法（塞進 bot 行程／同 container 另一個行程走 stdio／新 container）的利弊。使用者說不會有別的電腦連 → R2-Q1 定案：只有這台的 Claude Code，採放法 ②（stdio、`docker exec` 啟動，bot 重啟一次裝套件）。使用者問程式放哪 → 新增 R2-Q5（建議 `src/search/` 本體＋`src/mcp_server/` 殼；不可取名 `mcp/`；log 分檔）。使用者問「MCP server 不就取代 search？」→ R2-Q5 補上說明（MCP 只是協定殼，搜尋程式一定要有，差別只在放哪），以及 A 的變體。
 - 2026-09-29（新增 repo 根目錄 `AGENTS.md`，**未 commit**）：每次工作都要遵守的規則（討論方式、使用者資料檔高嚴重性規則、Docker 限制、共用元件、程式碼與測試慣例）從本檔與本機記憶搬過去，讓所有 session、一般子代理、雲端都自動載入（Claude Code v2.1.277 以上；repo 裡不要放 `CLAUDE.md`／`CLAUDE.local.md`，否則改讀那個檔）。本檔開頭改成「本檔維護規則」，並寫明每段搬去哪。新規則：討論與 grill 的每一輪都回寫**待決問題（選項＋建議）**；問題每輪只談一個主題、約 3～5 題。依此補寫 Telegram 過濾、ComfyUI、Persona M7 三個暫停主題的待決問題與當時的建議。
-- 2026-09-29（log 統一改成 `__name__` ＋ 設定檔，**已實作・595 測試全過・已 commit・已上線**；06:22 重啟後實測：3 小時 781 行、每行帶模組名稱、httpx 逐筆請求 0 行、測試紀錄只進 `test_run.log`、handler 沒有重複（唯一的重複行是 Telegram 啟動時的相簿補圖略過訊息，見 Telegram 過濾區塊）；之後加上 `discord.player` 壓到 WARNING（每播完一首歌一行 ffmpeg 結束訊息，約 250 行／天，下次重啟生效）與「json 裡的 logger 名稱都要對得到模組」的測試）：原本只有 `discord_bot` 這個 logger 掛了輸出，其他名稱的 logger 紀錄**既不顯示也不進 log 檔**（實證：09-29 00:29 建身份組那筆不在 log）。改為：① 新增 `settings/logging.json`（dictConfig）：root 輸出到畫面＋`discord_bot.log`；類別 logger `article_monitor`／`llm_anomaly` 各寫自己的檔、不往 root 傳；httpx／httpcore／urllib3／llama_index 等壓到 WARNING；每行多印模組名稱 `[時間] [等級] [模組] 訊息`。② `utils/logger_config.py` 改成只讀設定檔（import 即套用、冪等；`LOG_LEVEL` 可覆寫 root 等級）。③ 60 個模組從 `getLogger('discord_bot')` 改 `getLogger(__name__)`；`discord_bot.py` 主程式以 script 執行，明確命名 `discord_bot`；`bot.run(..., log_handler=None)` 避免 discord.py 重複輸出。④ 測試模式：`test/__init__.py` 設 `APP_TEST_LOG_FILE`，所有檔案輸出（含 `llm.logger_factory` 的 prompt 除錯檔）改寫到 `/logs/test_run.log`，實測跑完正式 log 位元組數不變。⑤ 守衛：模組 logger 一律 `__name__`（AST 判斷，類別 logger 與 `discord_bot.py` 例外）、不准 `print`；Rule 的 allowed 支援資料夾。突變驗證都會紅。**要拆分類時**：在 json 加一個 handler＋一個以模組前綴為名的 logger（例：`services.relay.telegram_relay_service`；2026-09-30 起 services 分群，模組名稱跟著變），重啟即可，不動程式碼。**下一批**：telegram-scraper 約 45 處 `print` 改 logger；該容器只掛 `./src/telegram_scraper`，要共用 `settings/logging.json` 得改 compose 掛載（需使用者重建容器）。
+- 2026-09-29（log 統一改成 `__name__` ＋ 設定檔，**已實作・595 測試全過・已 commit・已上線**；06:22 重啟後實測：3 小時 781 行、每行帶模組名稱、httpx 逐筆請求 0 行、測試紀錄只進 `test_run.log`、handler 沒有重複（唯一的重複行是 Telegram 啟動時的相簿補圖略過訊息，見 Telegram 過濾區塊）；之後加上 `discord.player` 壓到 WARNING（每播完一首歌一行 ffmpeg 結束訊息，約 250 行／天，下次重啟生效）與「json 裡的 logger 名稱都要對得到模組」的測試）：原本只有 `discord_bot` 這個 logger 掛了輸出，其他名稱的 logger 紀錄**既不顯示也不進 log 檔**（實證：09-29 00:29 建身份組那筆不在 log）。改為：① 新增 `settings/logging.json`（dictConfig）：root 輸出到畫面＋`discord_bot.log`；類別 logger `article_monitor`／`llm_anomaly` 各寫自己的檔、不往 root 傳；httpx／httpcore／urllib3／llama_index 等壓到 WARNING；每行多印模組名稱 `[時間] [等級] [模組] 訊息`。② `utils/logger_config.py` 改成只讀設定檔（import 即套用、冪等；`LOG_LEVEL` 可覆寫 root 等級）。③ 60 個模組從 `getLogger('discord_bot')` 改 `getLogger(__name__)`；`discord_bot.py` 主程式以 script 執行，明確命名 `discord_bot`；`bot.run(..., log_handler=None)` 避免 discord.py 重複輸出。④ 測試模式：`test/__init__.py` 設 `APP_TEST_LOG_FILE`，所有檔案輸出（含 `llm.logger_factory` 的 prompt 除錯檔）改寫到 `/logs/test_run.log`，實測跑完正式 log 位元組數不變。⑤ 守衛：模組 logger 一律 `__name__`（AST 判斷，類別 logger 與 `discord_bot.py` 例外）、不准 `print`；Rule 的 allowed 支援資料夾。突變驗證都會紅。**要拆分類時**：在 json 加一個 handler＋一個以模組前綴為名的 logger（例：`services.relay.telegram_relay_service`；2026-09-30 起 services 分群，模組名稱跟著變），重啟即可，不動程式碼。**下一批**：telegram-scraper 約 45 處 `print` 改 logger → 2026-10-01 已做（見當天 14:3x 紀錄）。
 - 2026-09-29（週期活動提醒：深塔海墟，**已實作・586 測試全過・已 commit・待部署驗證**）：深塔／海墟各 28 天、週一 04:00 重置、錯開 14 天；重置前一天 20:00 正常 @、重置當下靜音 @ 自助訂閱身份組「深塔海墟提醒」；綁「週期提醒頻道」時自動建身份組＋發面板，每次提醒後面板刪舊發新置底。詳見 [週期活動提醒區塊](#週期活動提醒深塔海墟2026-09-29-已實作待部署驗證)。
 - 2026-09-28（grill：Persona M7 後續／ComfyUI 產圖／Telegram LLM 過濾／深塔海墟提醒，**討論中・未動 code**）：新增 Telegram 過濾與週期提醒兩個草稿區塊並寫入查證事實；ComfyUI 區塊開頭補過時狀態修正（步驟 2 已完成、鎖有漏洞）；過時項目歸檔到 `TODO-completed.md`（Persona 影子模式規劃、Telegram 媒體防雷、ComfyUI 步驟 2 與 `keep_alive` 註解、插話 Phase B 三項、Ollama 時代觀察項），Persona 區塊改成 M7 現況。
 - 2026-09-28（Telegram 相簿漏圖，**scraper＋relay 兩端已實作・545 測試全過・已 commit・已部署；今天缺的 87 張已於 15:58~16:07 補發完成**）：使用者回報 GameData #3223 相簿 8 張只發 1 張。**觸發點＝8/02 補掃 commit `fbd2d3c` 加的全域 `process_lock`**：本意是防「同一則」被三條路徑並行處理，卻把 Telethon 本來並行派發的相簿各張變成逐張排隊（組員寫入間隔 p90 0.03s → 2s），relay 0.5 秒到齊判斷等不到整組就先發、晚到的被丟棄。8/02 起 191 組相簿 77 組缺圖、共 237 張。**改法**：全域鎖 → 單則訊息鎖 `(chat_id, message_id)`（新 [message_lock.py](src/telegram_scraper/message_lock.py)）。**relay 端同輪修掉**（使用者拍板）：改成「哪個組員先到就收整組、等媒體到齊＋3 秒安靜才發、晚到的以（補圖）再發、補圖時效 12 小時」。**補今天缺圖**：先校正 delivery_state（補記實送沒標、撤記標了沒送）再重啟，由 reconcile 走正式路徑補發；唯讀預演＝23 則、87 張。詳見 [補掃區塊 2026-09-28 追加段](#telegram-漏收事件自動補掃2026-08-02-已實作2026-08-18-補上中段缺口盲區2026-09-28-全域鎖改單則訊息鎖修相簿漏圖待部署驗證)。
@@ -1258,7 +1263,7 @@ Lemonade 下被 `_build_chat_extra_body` 丟進 ignored，但**那正是可攜�
 id: persona-extraction-agent
 type: STATE
 status: confirmed
-last_confirmed: 2026-09-28
+last_confirmed: 2026-10-01
 depends_on: personality_extractor, llm_service, lemonade_gate, member_profile_store
 affects: auto_personality、插話／askai 人物卡、discord_bot 04:00 排程
 -->
@@ -1291,13 +1296,35 @@ affects: auto_personality、插話／askai 人物卡、discord_bot 04:00 排程
 - 改版留下的比較句（「並非／而非／不只」）、「。；」雙標點、同一人意思重複的條目（至少 8 人）。
 - 兩位成員顯示名稱都是「DDLC」；③ 遺留的 Banana、Rie 描述內容是「無法分析」。
 
-**待決問題（grill 暫停中，2026-09-28；每題附當時的建議）**
-- **隱私**：建議不發布職業、居住地、宗教、財務（持股、薪資）、政治立場、健康、具體行程（日期＋地點）。做法：④ 的 prompt 加規則不記錄這些類別，⑤ 再用關鍵字當後備（④ 只重跑有新發言的人，舊版本裡的條目要靠 ⑤ 擋）。另建議把招牌梗的 spicy 閘門也套到精簡版（之前列為刻意沒處理，但性化引用已經進到 prompt）。
-- **歸因錯誤**：建議兩個都做——④ 執行時附成員別名表，並加「別人的暱稱不算口頭禪」；⑤ 發布前跨人比對，同一個加引號的詞出現在 2 個人以上的描述裡，就當群體用語、全部不發（純規則，不經 LLM）。
-- **③ 怎麼退場**（會改變既有定案的做法）：建議現在就把「跳過名單」移到送 LLM 之前（③ 今晚實際寫 0 人卻對 36 人跑約 12 分鐘 LLM；改完只替精簡版是空的人寫）。整個刪除的標準建議訂為「⑤ 連續 7 晚 failed=0，且抽查沒有新類型的嚴重問題」。刪之前要先決定三件事：新成員第一版描述從哪來、啟動補跑檢查改看什麼、手動萃取指令留不留。
-- **人工校正**：建議做一個 JSON 設定檔，列「全域不發布的詞」和「某人不發布的詞」，⑤ 發布時跳過含這些詞的條目（`read_json` 會熱載入）；「改完立刻重發」的指令先不做，急的時候手動跑 ⑤。
+**2026-10-01 唯讀盤點（66 筆精簡版，`data_discord_member_profiles_index` 的 `auto_personality`）**
+- 隱私（人工看過上下文，排除誤判後）：居住地 5 人（嘉義 3、桃園 1、海外 1）、具體行程 1（日期＋店名＋時間＋人數）、宗教 1（個人宮廟經歷）、財務 1（持股）；職業、健康、政治 0。關鍵字掃到的另外 4 筆是誤判（「教會」是路邊觀察、「米拉教」是群內角色扮演、「月薪」「投資」是在講別人的梗）。
+- 性化：約 6 人的描述直接引用露骨原句。守則（`persona_guardrails.txt` 第 27 條）允許「本人先開黃腔才接梗」，描述寫進去等於長期許可。
+- 歸因：同一個引號詞出現在 2 人以上的有 10 個，但多數不是群體用語——「阿喵」「阿狗」「一野」是**群內暱稱**（不是顯示名稱，從顯示名稱自動建的別名表抓不到）、「安可瘋狂」「今汐」是**貼圖名稱**；真正的群體用語是「484」（3 人）、「何意味」（2 人）。KaTsuO 的「喵」語尾（實為叫柔柔喵）仍在。
+- **原建議「≥2 人出現就全部不發」會誤殺 47 條**（含 12 條「安可瘋狂」貼圖偏好、克羅「板務搭檔是阿喵」這類真實關係）→ 本輪改建議只比對「口頭禪／語尾／慣用語」類條目，並排除成員暱稱與貼圖名稱。
+- 格式：比較句（並非／而非／不只是）11 人、「。；」雙標點 10 人、「DDLC」撞名、Banana／Rie「無法分析」仍在。
+- 可重用：招牌梗的 `_SENSITIVE_KEYWORDS`（`llm/persona/signature_tag_extractor.py`，私有常數，已涵蓋疾病、性向、感情家庭、財務、宗教、政治；沒有地名、行程、持股）；`persona_description_rules.txt`（③④ 都讀）。
 
-**不反對就照做的預設**：⑤ 串接時修掉「。；」雙標點；④ prompt 加「每條都要能單獨讀懂，不寫跟舊版比較的句子」；同一人意思重複的條目在 ⑤ 用 embedding 相似度去重（之前列為刻意沒處理，但至少 8 人有這個問題）；兩位「DDLC」撞名時標籤加區分碼；回滾步驟寫成文件。⚠️ **需使用者明確同意才做**：刪除 ③ 留下的 Banana、Rie 兩份「無法分析」描述（先備份）。
+**待決問題第 1 輪：發布內容的隱私與歸因（2026-10-01 提出）**
+- **PA-Q1 擋哪些類別 → 定案（使用者 10-01 原則同意）**：不發布居住地（含國家）、具體行程（日期＋地點／店名）、宗教、財務、職業、健康、政治、性向、感情家庭；寫角色、不寫地點（「線下聚會的發起者」可以，「嘉義」「9/26 某店 13:15」不行）。
+- **PA-Q3 性化內容 → 定案 C 不動**（使用者 10-01）：精簡版照舊保留性化條目，也不把招牌梗的 spicy 閘門套過來。
+- **PA-Q5 人工校正檔 → 使用者指出自介區已有暱稱**：查證屬實——自介表單有「別人常常叫我什麼（暱稱/綽號）」（18 人填，例：柔柔喵填「柔喵, 阿喵」），他人印象有「你平常怎麼稱呼他？」（9 筆、8 人，例：阿喵、喵董、阿狗）。但 **④ 寫描述時完全沒讀自介與印象**（只有 ⑤ 拿來算版面與標籤），所以 AI 不知道「阿喵」是誰。改建議：暱稱表直接從「顯示名稱＋自介暱稱＋印象稱呼」組出來，**不另做 JSON**；「不發布的詞」也先不做，等規則上線後真的有漏網再說。限制：66 人中只有 18 人填自介，沒填的人（例：被叫「一野」的 Biboolater）抓不到。
+- **PA-Q2 擋法 → 定案：只靠 ③④ 的規則，⑤ 不做隱私過濾**（使用者 10-01）：先同意 A（規則＋⑤ 關鍵字後備），實作中看到後備的寫法後改口「住哪裡、持股、宮廟這些沒差，不用過濾，太敏感了」（理由：都是群裡公開講的）→ ⑤ 的隱私關鍵字整段拿掉（含日期＋時間），舊條目照留。校準時的數據留作參考：招牌梗的 `_SENSITIVE_KEYWORDS` 拿來掃精簡版 3 筆有 2 筆誤判（「小三」是玩笑、「信仰」是米拉教角色扮演），這也是當初沒打算直接共用它的原因。
+- **PA-Q4 歸因 → 定案：兩個都做，已實作**（使用者 10-01「都做」）。
+- **PA-Q6 規則檔要不要跟著放寬 → 定案 B**（使用者 10-01）：規則檔只留健康、性向、感情家庭、政治與具體行程（日期＋店名／地點）不寫；住哪裡、宗教、財務、職業不限制（跟 ⑤ 不過濾一致，AI 重寫時也不會把「住桃園」這類內容慢慢刪掉）。PA-Q1 的類別清單以此為準。
+
+**PA 第 1 輪實作（2026-10-01，未 commit；④⑤ 不用重啟、今晚 04:00 生效）**
+- 規則檔 `persona_description_rules.txt`（③④ 共用、即時生效）加「不要寫進描述的」：健康、性向、感情家庭、政治（PA-Q6 放寬後）、具體行程寫角色不寫日期店名、叫別人的暱稱不是口頭禪（有附【群友的稱呼】時以它為準）。
+- ④ 暱稱表：`publish.member_nicknames`（自介「別人常常叫我什麼」＋印象「你平常怎麼稱呼他」，顯示名稱當標籤）→ `agent.nickname_note` 排成【群友的稱呼】→ `batch.load_nickname_note` 整批讀一次、經 `ToolContext.nickname_note` 附在給模型的指示後面；讀不到就不附、不擋整批。手動 `/persona_agent_test` 也附同一份（這處要重啟才生效）。實際資料：16 人、323 字；沒填自介的人抓不到（例：被叫「一野」的 Biboolater）。
+- ⑤ 群內流行語：`publish.find_group_slang` 看每人最新版本的全部條目，同一個詞在 ≥2 人的描述裡被寫成口頭禪（口頭禪／語尾／口癖／慣用語／固定用語／語氣詞）就是流行語，那些條目不發、不佔預算；群友暱稱與顯示名稱不算、講貼圖的條目不算。擋下的每條寫進 log「persona 精簡版擋下群內流行語」。唯讀試算：擋 6 條（「484」3 人、「何意味」2 人、「全對」1 人——另一人被寫成口頭禪的那條沒過門檻，但同樣算進人數）。
+- ⑤ 條目句尾的「。」拿掉，不再出現「。；」（試算 0 筆）。
+- 不反對就照做的預設：「每條要能單獨讀懂、不寫比較句」④ 的 `final_prompt` 本來就有（現存 11 人的比較句是舊條目）；**DDLC 撞名、意思重複的條目用 embedding 去重這次沒做**（前者動到插話／askai 讀取端的標籤，後者 ⑤ 要多打 embedding），排到之後。刪 Banana、Rie 仍待使用者同意。
+- 測試：`test_persona_agent_publish`（流行語、暱稱、句號、build_plans 全路徑）、`test_persona_agent_loop`（暱稱表附在指示後、規則檔與表頭同名）、`test_persona_agent_batch`（整批一份、讀不到不擋）共 16 項新測試；12 種突變都紅；完整測試 695 項全過。
+- **為什麼不重啟也會生效**：bot 11:22 啟動後沒跑過 persona agent（log 查證），`publish`／`batch`／`agent`／`tools` 都還沒載入，04:00 才延遲 import，會一起載入新版；`store` 已載入但沒改。重啟也可以（避開 04:00～07:30）。
+
+**待決問題（下一輪再談，2026-09-28 提出時的建議）**
+- **③ 怎麼退場**（會改變既有定案的做法）：建議現在就把「跳過名單」移到送 LLM 之前（③ 今晚實際寫 0 人卻對 36 人跑約 12 分鐘 LLM；改完只替精簡版是空的人寫）。整個刪除的標準建議訂為「⑤ 連續 7 晚 failed=0，且抽查沒有新類型的嚴重問題」。刪之前要先決定三件事：新成員第一版描述從哪來、啟動補跑檢查改看什麼、手動萃取指令留不留。
+
+**不反對就照做的預設**（隨第 1 輪一起做）：⑤ 串接時修掉「。；」雙標點；④ prompt 加「每條都要能單獨讀懂，不寫跟舊版比較的句子」；同一人意思重複的條目在 ⑤ 用 embedding 相似度去重（之前列為刻意沒處理，但至少 8 人有這個問題）；兩位「DDLC」撞名時標籤加區分碼；回滾步驟寫成文件。⚠️ **需使用者明確同意才做**：刪除 ③ 留下的 Banana、Rie 兩份「無法分析」描述（先備份）。
 
 **M7 之後待辦**：拿掉 ③（新成員第一版描述從哪來、補跑檢查改看什麼、手動萃取指令去留）；失敗的 run 隔天重跑；
 證據反查失敗的那晚不寫入；DB 安全網（`write_version` 失敗被當成功、只剩 drop 時寫出空描述）；人工校正管道。
