@@ -520,8 +520,8 @@ async def run_personality_extraction(
     """完整的人格萃取流程：撈資料 → 分組 → 萃取 → 寫入 RAG。
 
     guild: discord.Guild 物件，用於反查 display_name
-    exclude_author_ids: 寫入 RAG 時跳過的人（由 persona agent 精簡版負責的人，
-        見 `llm.persona.agent.publish.production_skip_list`）；萃取照做、回傳照樣包含他們，只是不寫入
+    exclude_author_ids: 不萃取、不寫入的人（由 persona agent 精簡版負責的人，
+        見 `llm.persona.agent.publish.production_skip_list`）；回傳也不含他們
     回傳 {author_id: {"alias": str, "personality": str}}
     """
     global _extraction_running
@@ -579,6 +579,16 @@ async def _run_personality_extraction_impl(
     if not user_groups:
         logger.info("人格萃取：無符合門檻的使用者（最少 %d 則）", MIN_MESSAGES_PER_USER)
         return {}
+    # 精簡版負責的人不送 LLM：反正不會寫入，以前照樣萃取，每晚白跑約 12 分鐘 GPU（2026-09-30、
+    # 10-01 實測各 37／34 人、寫入 0）。每批只看批內成員的訊息，拿掉他們不影響其他人的上下文
+    excluded = {str(a) for a in (exclude_author_ids or ())}
+    if excluded:
+        kept = {uid: group for uid, group in user_groups.items() if uid not in excluded}
+        logger.info("人格萃取：跳過由 persona agent 精簡版負責的 %d 人，剩 %d 人",
+                    len(user_groups) - len(kept), len(kept))
+        user_groups = kept
+        if not user_groups:
+            return {}
     logger.info("人格萃取：%d 位使用者符合分析門檻", len(user_groups))
     if progress_callback:
         total_batches = (len(user_groups) + BATCH_SIZE - 1) // BATCH_SIZE if user_groups else 0
@@ -634,11 +644,8 @@ async def _run_personality_extraction_impl(
 
     # 5. 寫入 RAG（可透過 write_rag=False 跳過，供預覽用）
     if write_rag and results and guild:
-        excluded = {str(a) for a in (exclude_author_ids or ())}
-        to_write = {uid: data for uid, data in results.items() if str(uid) not in excluded}
-        written = await save_personality_results(guild_id=guild.id, results=to_write)
-        logger.info("人格萃取：寫入 RAG %d 筆（跳過由 persona agent 精簡版負責的 %d 人）",
-                    written, len(results) - len(to_write))
+        written = await save_personality_results(guild_id=guild.id, results=results)
+        logger.info("人格萃取：寫入 RAG %d 筆", written)
 
     return results
 

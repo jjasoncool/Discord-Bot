@@ -5,7 +5,7 @@
   - 基本個性（證據跨度長）先挑、最多一半預算；其餘條目依對話次數填滿，用不完的互讓
   - 預算扣掉標籤、自介與印象，發布當下插話那一行不超過上限——用 bot 讀取時的同一套函式驗
   - 寫入時標上來源與版本；寫入失敗算失敗，不能算成功
-  - 發布開啟後，production 萃取（③／手動）跳過 ⑤ 要寫的人；精簡版變空的人回到 ③ 手上
+  - 發布開啟後，production 萃取（③／手動）跳過 ⑤ 要寫的人，③ 連 LLM 都不送；精簡版變空的人回到 ③ 手上
   - 群內流行語不當成個人特色：同一個詞在 ≥2 人的描述裡都被寫成口頭禪，那幾條都不發；
     群友的暱稱、講貼圖的條目不算；擋下的不佔預算
   - 串接後不出現「。；」
@@ -468,21 +468,38 @@ class AutoPersonalityMetadataTests(unittest.TestCase):
 class ProductionExtractionTests(unittest.TestCase):
     """③／手動萃取這一側：跳過 ⑤ 要寫的人、只把真的寫進去的算成功。"""
 
-    def test_excluded_people_are_extracted_but_not_written(self):
+    def test_excluded_people_are_not_sent_to_the_llm(self):
+        """實測 9/30、10/01：③ 對 37／34 人跑了約 12 分鐘 LLM，全部被跳過、寫入 0——要在送 LLM 前就拿掉。"""
         from llm.persona import personality_extractor as pe
-        results = {"1": {"alias": "米拉", "personality": "p"}, "2": {"alias": "克羅", "personality": "p"}}
         guild = mock.MagicMock()
         guild.id = 9
+
+        async def extract(**kw):
+            return {uid: {"alias": "a", "personality": "p"} for uid in kw["user_groups"]}
+
         save = mock.AsyncMock(return_value=1)
+        extract_mock = mock.AsyncMock(side_effect=extract)
         with mock.patch.object(pe, "fetch_recent_messages", return_value=[{"m": 1}]), \
              mock.patch.object(pe, "group_by_user", return_value={"1": [], "2": []}), \
              mock.patch.object(pe, "_fetch_aliases_from_db", return_value={}), \
-             mock.patch.object(pe, "extract_personalities", mock.AsyncMock(return_value=results)), \
+             mock.patch.object(pe, "extract_personalities", extract_mock), \
              mock.patch.object(pe, "save_personality_results", save):
             out = asyncio.run(pe._run_personality_extraction_impl(
                 guild=guild, days=14, model="m", exclude_author_ids={"1"}))
-        self.assertEqual(out, results, "回傳照樣包含被跳過的人")
+        self.assertEqual(list(extract_mock.call_args.kwargs["user_groups"]), ["2"])
+        self.assertEqual(list(out), ["2"])
         self.assertEqual(list(save.call_args.kwargs["results"]), ["2"])
+
+    def test_everyone_excluded_means_no_llm_call(self):
+        from llm.persona import personality_extractor as pe
+        extract_mock = mock.AsyncMock()
+        with mock.patch.object(pe, "fetch_recent_messages", return_value=[{"m": 1}]), \
+             mock.patch.object(pe, "group_by_user", return_value={"1": []}), \
+             mock.patch.object(pe, "extract_personalities", extract_mock):
+            out = asyncio.run(pe._run_personality_extraction_impl(
+                guild=mock.MagicMock(), days=14, model="m", exclude_author_ids={"1"}))
+        self.assertEqual(out, {})
+        extract_mock.assert_not_called()
 
     def test_only_successful_writes_are_counted(self):
         from llm.persona import personality_extractor as pe
