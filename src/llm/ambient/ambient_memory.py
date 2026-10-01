@@ -16,6 +16,7 @@ from typing import Optional
 
 import discord
 
+from llm.preprocess import person_anchor
 from llm.storage.member_profile_store import get_member_profile_store
 from llm.client.lemonade_gate import foreground_recently_active, stream_busy
 from services.llm_service import LLMService
@@ -186,7 +187,7 @@ async def recall_signature_tags(
             raw_name = (getattr(member, "display_name", None) if member else None) \
                 or r.get("alias") or "某人"
             name = _ALIAS_SANITIZE_RE.sub("", raw_name)[:20] or "某人"
-            anchor = f"#{str(aid)[-4:]}" if aid else ""
+            anchor = person_anchor.label("", aid) if aid else ""   # 「#尾碼」或空字串
             note = (
                 "（敏感梗，僅當對方此刻自己又玩到才順勢回扣）"
                 if r.get("sensitivity") == "spicy" else ""

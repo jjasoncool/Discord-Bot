@@ -56,6 +56,7 @@ from llm.preprocess.chat_line import (
     name_with_anchor,
     semantic_message_text,
 )
+from llm.preprocess import person_anchor
 from llm.preprocess.emoji_text_utils import is_emoji_or_symbol_only
 from llm.client.lemonade_gate import foreground_recently_active, stream_busy
 from sys_settings.time_settings import APP_TZ
@@ -296,9 +297,11 @@ async def _build_persona_context(
 
     persona_context: Optional[list[str]] = None
     try:
+        from llm.persona.member_names import member_names_from_guild, name_map_lines
         from llm.retrievers.context_retriever import retrieve_rag_context_sync
 
         loop = asyncio.get_running_loop()
+        names = member_names_from_guild(message.guild)
         rag_context, _meta = await loop.run_in_executor(
             None,
             functools.partial(
@@ -309,9 +312,20 @@ async def _build_persona_context(
                 participant_ids,
                 logger,
                 _SETTINGS.persona_top_k,
+                member_names=names,
             ),
         )
         persona_context = _rag_to_persona_lines(rag_context)
+        # 名字對照：在場的人＋有卡的人，誰還有別的叫法（「一野」就是糯糯）。人物卡最多 3 張、
+        # 在場的人常有 6 個以上，只放卡上會漏掉一半
+        if message.guild:
+            people = [message.author.id, *participant_ids,
+                      *(item.get("person_id") for item in rag_context or [])]
+            name_map = await loop.run_in_executor(
+                None, name_map_lines, message.guild.id, people, names,
+            )
+            if name_map:
+                persona_context = [*(persona_context or []), *name_map]
     except Exception as exc:
         logger.debug("ambient persona 召回失敗：%s", exc)
         return cached[1] if cached else None
@@ -449,7 +463,10 @@ async def _resolve_callback_target(message: discord.Message, query: str) -> Opti
     except Exception as exc:
         logger.debug("callback target 別名解析失敗：%s", exc)
         return None
-    uids = list(dict.fromkeys(uids))
+    # 自介、印象登記的別名查資料庫；Discord 上的名字（伺服器暱稱、全域名稱）查成員快取
+    from llm.persona.member_names import match_members, member_names_from_guild
+
+    uids = list(dict.fromkeys([*uids, *match_members(member_names_from_guild(message.guild), aliases)]))
     return uids[0] if len(uids) == 1 else None
 
 
@@ -580,7 +597,7 @@ async def _build_chat_callback_context(
         gist = " ".join(c["text"].split())[: _SETTINGS.callback_line_max_chars]
         aid = c.get("author_id") or ""
         member = message.guild.get_member(int(aid)) if aid.isdigit() else None
-        author = name_with_anchor(member) if member else (f"某人#{aid[-4:]}" if len(aid) >= 4 else "某人")
+        author = name_with_anchor(member) if member else person_anchor.label("某人", aid)
         lines.append(f"[{_format_recalled_ts(c.get('timestamp'))}] {author}: {gist}")
 
     if _SETTINGS.callback_debug:

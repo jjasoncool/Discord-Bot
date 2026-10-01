@@ -7,9 +7,10 @@
   - 寫入時標上來源與版本；寫入失敗算失敗，不能算成功
   - 發布開啟後，production 萃取（③／手動）跳過 ⑤ 要寫的人，③ 連 LLM 都不送；精簡版變空的人回到 ③ 手上
   - 群內流行語不當成個人特色：同一個詞在 ≥2 人的描述裡都被寫成口頭禪，那幾條都不發；
-    群友的暱稱、講貼圖的條目不算；擋下的不佔預算
+    講貼圖的條目不算；擋下的不佔預算
+  - 把別的群友的名字寫成口頭禪的條目不發（本人的名字不算、單字不算）
   - 串接後不出現「。；」
-  - 群友暱稱來自自介與印象（④ 的暱稱表、流行語排除都靠它）
+  - 群友名字來自 Discord（顯示名稱、伺服器暱稱、全域名稱）、自介與印象
 
 執行：
     cd src && python -m unittest test.test_persona_agent_publish -v
@@ -30,6 +31,7 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from llm.persona.agent import publish  # noqa: E402
+from llm.persona.member_names import name_parts  # noqa: E402
 
 NOW = datetime(2026, 9, 25, 12, tzinfo=timezone.utc)
 _EPOCH_MS = 1420070400000
@@ -527,7 +529,7 @@ class GroupSlangTests(unittest.TestCase):
         self.assertEqual(slang, {"484"}, "只有一個人被這樣寫的是他自己的口頭禪")
 
     def test_member_nicknames_are_not_slang(self):
-        """「阿喵」被兩個人寫成口頭禪，其實是在叫群友——那是 ④ 的暱稱表要處理的歸因錯誤，不是流行語。"""
+        """「阿喵」被兩個人寫成口頭禪，其實是在叫群友——那是歸因錯誤（另一條規則擋），不是流行語。"""
         slang = publish.find_group_slang({
             "1": self.changes("「阿喵」是他的固定口頭禪"),
             "2": self.changes("口頭禪是「阿喵」"),
@@ -548,7 +550,7 @@ class GroupSlangTests(unittest.TestCase):
         other = item("吐槽擔當", ago(2), ago(4))
         budget = len(mention["text"]) + 1 + len(other["text"])
         r = publish.select_lite([claim, mention, other], budget, now=NOW, group_slang=frozenset({"484"}))
-        self.assertEqual(r.withheld, [claim["text"]])
+        self.assertEqual(r.withheld, [(publish.WITHHELD_SLANG, claim["text"])])
         self.assertEqual(sorted(i.text for i in r.items), sorted([mention["text"], other["text"]]),
                          "擋下的不佔預算；只是提到這個詞、沒說是口頭禪的照發")
 
@@ -576,28 +578,78 @@ def nickname_docs(pid, intro_alias=None, impression_aliases=(), auto_alias=None)
 
 
 class MemberNicknamesTests(unittest.TestCase):
-    """群裡叫的「阿喵」不是顯示名稱，只有自介「別人常常叫我什麼」與印象「你平常怎麼稱呼他」有。"""
+    """群裡叫的名字散在三處：Discord（糯糯的全域名稱是「一野shout死你」，群裡叫他一野）、
+    自介「別人常常叫我什麼」、印象「你平常怎麼稱呼他」（「阿喵」只在這裡有）。"""
 
     def test_intro_and_impression_nicknames_are_merged(self):
         persons = {"1": nickname_docs("1", intro_alias="柔喵, 阿喵", impression_aliases=["阿喵", "喵董"],
                                       auto_alias="❤️柔柔喵❤️-時渺")}
         self.assertEqual(publish.member_nicknames(persons), {"1": ("❤️柔柔喵❤️-時渺", ["柔喵", "阿喵", "喵董"])})
 
-    def test_current_display_name_is_the_label_and_not_a_nickname(self):
+    def test_discord_names_join_and_label_the_table(self):
         persons = {"1": nickname_docs("1", intro_alias="米拉、拉拉", auto_alias="舊名字")}
-        self.assertEqual(publish.member_nicknames(persons, {"1": "米拉"}), {"1": ("米拉", ["拉拉"])})
+        names = {"1": ["米拉"], "9": ["糯糯 弗糯糯", "一野shout死你"]}
+        self.assertEqual(publish.member_nicknames(persons, names, people=["9"]),
+                         {"1": ("米拉", ["拉拉"]), "9": ("糯糯 弗糯糯", ["一野shout死你"])},
+                         "顯示名稱以 Discord 當下的為準；沒有自介的人（people）也列")
+        slash = "Biboolater-只剩我沒6命愛彌斯/緋雪/心了"
+        self.assertEqual(publish.member_nicknames({}, {"8": [slash, "Biboolater"]}, people=["8"]),
+                         {"8": (slash, ["Biboolater"])}, "Discord 名字裡的「/」不能拆")
 
-    def test_people_without_nicknames_are_left_out(self):
+    def test_everyone_with_a_name_is_listed(self):
+        """只有一個名字的人也要列：模型才認得訊息裡的「克羅」是群友。"""
         persons = {"1": nickname_docs("1", auto_alias="克羅"),
                    "2": nickname_docs("2", impression_aliases=["阿狗"])}
-        self.assertEqual(publish.member_nicknames(persons), {"2": ("阿狗", ["阿狗"])},
-                         "沒有顯示名稱可用時，用第一個暱稱當標籤")
+        self.assertEqual(publish.member_nicknames(persons), {"1": ("克羅", []), "2": ("阿狗", [])})
+
+
+class MemberNameClaimTests(unittest.TestCase):
+    """真實案例：雞蛋飛被寫成「『糯糯』是他的口頭禪」、Ἡράκλειος「『阿狗』是他的固定口頭禪」——
+    那是在叫群友。④ 只重跑有新發言的人，舊條目要靠發布這關擋。"""
+
+    PARTS = name_parts(["糯糯 弗糯糯", "一野shout死你", "❤️柔柔喵❤️-時渺", "阿喵", "喵董",
+                        "Biboolater-只剩我沒6命愛彌斯/緋雪/心了", "棒槌 or 不是棒槌", "我們之間沒有愛"])
+
+    def withheld(self, text):
+        return publish.withhold_reason(text, member_parts=self.PARTS)
+
+    def test_member_names_written_as_catchphrases_are_withheld(self):
+        for text in ("「糯糯」是他的口頭禪", "口頭禪「肥糯糯」，用來自嘲",      # 名字的一段、含名字
+                     "「一野」是他的口頭禪", "常把「伺候阿喵吃肉」掛嘴邊當口頭禪"):  # 名字的一部分、句子裡有名字
+            self.assertEqual(self.withheld(text), publish.WITHHELD_MEMBER_NAME, text)
+
+    def test_single_characters_and_plain_mentions_are_kept(self):
+        """「喵」這種單字到處都是；沒說是口頭禪、只是寫跟誰互動的照發。"""
+        self.assertIsNone(self.withheld("「喵」語尾是他的習慣，像口頭禪"))
+        self.assertIsNone(self.withheld("常跟「糯糯」互損，替他出頭"))
+        self.assertIsNone(self.withheld("「緋雪」是他的口頭禪"), "名字裡用符號隔開的一段（遊戲角色）不算名字")
+
+    def test_partial_words_are_not_names(self):
+        """複查指出：自介別名「棒槌 or 不是棒槌」切出「or」，「sorry」就被當成名字；
+        「我們之間沒有愛」讓「我們」被當成名字。英文要整個字、開頭要到詞的邊界才算。"""
+        self.assertIsNone(self.withheld("口頭禪「sorry」，道歉也像在敷衍"))
+        self.assertIsNone(self.withheld("「我們」是他的口頭禪"))
+        self.assertEqual(self.withheld("口頭禪「or not」"), publish.WITHHELD_MEMBER_NAME, "整個字照算")
+
+    def test_own_name_is_not_withheld(self):
+        """自稱不是誤認：糯糯自封「肥糯糯」照發，別人把「糯糯」當口頭禪才擋。"""
+        versions = {
+            "9": {"version": 2, "changes": [item("自封「肥糯糯」，當口頭禪自嘲", ago(1), ago(3))]},
+            "1": {"version": 2, "changes": [item("「糯糯」是他的口頭禪", ago(1), ago(3)), item("吐槽擔當", ago(1), ago(3))]},
+        }
+        names = {"9": ["糯糯 弗糯糯", "一野shout死你"], "1": ["雞蛋飛"]}
+        with mock.patch.object(publish, "load_guild_state", return_value=(versions, {})):
+            plans, _ = publish.build_plans(9, member_names=names, now=NOW)
+        self.assertEqual(plans["9"].lite.text, "自封「肥糯糯」，當口頭禪自嘲")
+        self.assertEqual(plans["1"].lite.text, "吐槽擔當")
+        self.assertEqual(plans["1"].lite.withheld, [(publish.WITHHELD_MEMBER_NAME, "「糯糯」是他的口頭禪")])
+        self.assertEqual(plans["9"].alias, "糯糯 弗糯糯", "顯示名稱取 member_names 的第一個")
 
 
 class BuildPlansGroupSlangTests(unittest.TestCase):
     """⑤ 實際跑的路徑：流行語跨所有人算一次，暱稱從自介與印象排除。"""
 
-    def test_slang_is_withheld_but_nickname_claims_are_kept(self):
+    def test_slang_and_member_names_are_withheld_for_different_reasons(self):
         versions = {
             "1": {"version": 3, "changes": [item("口頭禪「484」", ago(1), ago(3)), item("吐槽擔當", ago(1), ago(3))]},
             "2": {"version": 5, "changes": [item("口頭禪「484」", ago(2), ago(4))]},
@@ -610,7 +662,8 @@ class BuildPlansGroupSlangTests(unittest.TestCase):
         self.assertEqual(failed, {})
         self.assertEqual(plans["1"].lite.text, "吐槽擔當")
         self.assertEqual(plans["2"].lite.text, "")
-        self.assertEqual(plans["3"].lite.text, "「阿喵」是他的固定口頭禪")
+        self.assertEqual(plans["3"].lite.withheld, [(publish.WITHHELD_MEMBER_NAME, "「阿喵」是他的固定口頭禪")],
+                         "阿喵是群友（自介登記的暱稱）：不算流行語，算把名字寫成口頭禪")
 
 
 if __name__ == "__main__":

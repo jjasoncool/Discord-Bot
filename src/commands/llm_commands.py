@@ -16,6 +16,8 @@ from discord.ext import commands
 import llm
 from llm.logger_factory import build_askai_prompt_log, get_or_create_file_logger
 from llm.client.lemonade_gate import imagegen_busy, note_foreground_activity
+from llm.persona.member_names import member_names_from_guild, name_map_lines
+from llm.preprocess import person_anchor
 from llm.preprocess.chat_line import name_with_anchor
 from llm.preprocess.vision_image import (
     DEFAULT_MAX_FRAMES,
@@ -409,11 +411,7 @@ class LLMCommands(commands.Cog):
             for uid_str in mentioned_user_ids:
                 member = interaction.guild.get_member(int(uid_str))
                 if member:
-                    short_id = uid_str[-4:] if len(uid_str) >= 4 else ""
-                    name_with_id = (
-                        f"{member.display_name}#{short_id}"
-                        if short_id else member.display_name
-                    )
+                    name_with_id = person_anchor.label(member.display_name, uid_str)
                     resolved_question = resolved_question.replace(
                         f"<@{uid_str}>", name_with_id
                     ).replace(
@@ -469,6 +467,7 @@ class LLMCommands(commands.Cog):
         # 在 executor 中執行以避免阻塞 event loop（影響語音 heartbeat 等）。
         # mentioned_user_ids 必須顯式傳入：resolved_question 已把 <@id> 換成 display_name，
         # 內部重抽會失敗，會導致 +35 mention boost 永遠不生效（2026-04-27 修正）
+        member_names = member_names_from_guild(interaction.guild)
         rag_context, rag_meta = await asyncio.get_running_loop().run_in_executor(
             None,
             functools.partial(
@@ -480,6 +479,7 @@ class LLMCommands(commands.Cog):
                 logger,
                 5,
                 mentioned_user_ids=mentioned_user_ids,
+                member_names=member_names,
             ),
         )
 
@@ -563,28 +563,12 @@ class LLMCommands(commands.Cog):
                 logger.warning("web_task 收尾失敗: %s", exc, exc_info=True)
                 web_meta["error"] = f"await_failed:{type(exc).__name__}"
 
-        # 聊天記錄：提取純文字，並用 persona card alias 標註身份
-        # _build_discord_context_item 已在每行 display_name 後加 #XXXX 錨點
-        # 這裡只做 alias 註記，不再需要撞名偵測
-        alias_map: dict[str, str] = rag_meta.get("alias_map", {})
-
+        # 聊天記錄：每行已是「顯示名稱#尾碼: 內容」（_build_discord_context_item）。其他叫法
+        # （自介暱稱、全域名稱…）統一放 persona_context 尾端的「名字對照」，不再逐行加註——
+        # 以前只有拿到人物卡的人才有加註，卡最多 3 張
         chat_context: list[str] | None = None
         if discord_context:
-            lines: list[str] = []
-            for item in discord_context:
-                content = item.get("content", "")
-                if not content:
-                    continue
-                author_id = item.get("author_id", "")
-
-                # 如果這個人有 persona card，在 display_name#XXXX 後標註 alias
-                # content 格式: "[14:30] ❤️柔柔喵❤️#4635: 內容"
-                # 改成:        "[14:30] ❤️柔柔喵❤️#4635(喵董): 內容"
-                card_alias = alias_map.get(author_id, "")
-                if card_alias and card_alias not in content:
-                    content = content.replace(": ", f"({card_alias}): ", 1)
-                lines.append(content)
-            chat_context = lines or None
+            chat_context = [item["content"] for item in discord_context if item.get("content")] or None
 
         # Bot 自身回覆歷史（獨立於 chat_history 額度外）
         bot_history: list[str] | None = None
@@ -625,26 +609,36 @@ class LLMCommands(commands.Cog):
         # 例：新進群、未填自介、AI 觀察未跑、或 user_id 已不在群內
         unmatched_mention_ids = mentioned_uid_set - matched_mention_ids
         for uid in unmatched_mention_ids:
-            short_id = uid[-4:] if len(uid) >= 4 else ""
             member = interaction.guild.get_member(int(uid)) if interaction.guild else None
-            display_name = member.display_name if member else f"user_{short_id}"
-            label = f"{display_name}#{short_id}" if short_id else display_name
+            label = person_anchor.label(member.display_name if member else "某人", uid)
             target_items.append(
                 f"「{label}」— 群內尚無此人的 persona 紀錄；"
                 f"可從 chat_history 推測，否則請老實說對此人不熟悉"
             )
         target_profiles = target_items or None
 
+        # 名字對照：發問者、聊天裡的人、被提到的人、有卡的人，誰還有別的叫法
+        name_map = await asyncio.get_running_loop().run_in_executor(
+            None,
+            name_map_lines,
+            interaction.guild.id if interaction.guild else 0,
+            [
+                asker_uid_str,
+                *(item.get("author_id") for item in discord_context or []),
+                *(mentioned_user_ids or []),
+                *(item.get("person_id") for item in rag_context or []),
+            ],
+            member_names,
+        ) if interaction.guild else []
+        if name_map:
+            persona_context = [*(persona_context or []), *name_map]
+
         # 組 asker_profile：可信的發問者身份資訊（給 system block）
         # asker_display_name 永遠帶 #XXXX，跟 chat_history / persona card 對齊
         asker_display_name_raw = getattr(
             interaction.user, "display_name", interaction.user.name
         )
-        asker_short_id = asker_uid_str[-4:] if len(asker_uid_str) >= 4 else ""
-        asker_display_name = (
-            f"{asker_display_name_raw}#{asker_short_id}"
-            if asker_short_id else asker_display_name_raw
-        )
+        asker_display_name = person_anchor.label(asker_display_name_raw, asker_uid_str)
         now_str = datetime.now(APP_TZ).strftime("%Y-%m-%d %H:%M (UTC+8)")
         guild_name = interaction.guild.name if interaction.guild else "(DM)"
         channel_name = getattr(interaction.channel, "name", "") or "(unknown)"
@@ -948,10 +942,12 @@ class _PersonalityResultPagerView(discord.ui.View):
         # production 的描述，直到下一晚發布才換回來（沒開啟時名單是空的）
         try:
             from llm.persona.agent.publish import production_skip_list, split_uncovered
+            from llm.persona.member_names import member_names_from_guild
 
-            guild = interaction.guild
-            names = {str(m.id): m.display_name for m in guild.members} if guild else None
-            skip = await production_skip_list(self.guild_id, display_names=names)
+            # 跟每晚 ⑤ 用同一份名字，跳過名單才會跟 ⑤ 實際寫的人一致
+            skip = await production_skip_list(
+                self.guild_id, member_names=member_names_from_guild(interaction.guild),
+            )
         except Exception as exc:
             logger.error("讀取精簡版名單失敗，這次不寫入: %s", exc, exc_info=True)
             await interaction.edit_original_response(
@@ -1390,12 +1386,16 @@ class PersonalityCommands(commands.Cog):
 
         async def _run_and_report() -> None:
             from llm.persona.agent.batch import load_nickname_note
+            from llm.persona.member_names import member_names_from_guild
 
             ctx = persona_tools.ToolContext.build(
                 guild_id=guild_id,
                 allowed_ids=[user_id],   # 白名單只放這一人，工具層會擋掉其他查詢
-                # 跟每晚批次附同一份暱稱表，手動跑的結果才代表晚上會寫出什麼
-                nickname_note=await load_nickname_note(guild_id),
+                # 跟每晚批次附同一份名字表，手動跑的結果才代表晚上會寫出什麼
+                nickname_note=await load_nickname_note(
+                    guild_id, target_id=user_id,
+                    member_names=member_names_from_guild(interaction.guild),
+                ),
             )
             try:
                 run, validated = await persona_agent.run_and_persist(

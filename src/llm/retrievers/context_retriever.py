@@ -15,6 +15,7 @@ import discord
 
 from llm.preprocess.chat_line import format_chat_line
 from llm.preprocess.tokenization import tokenize_for_retrieval, tokens_for_debug
+from llm.persona.member_names import display_names, match_members
 from llm.persona.persona_card_builder import (
     PERSONA_MAX_PARTICIPANTS,
     PERSONA_MAX_CARDS,
@@ -676,12 +677,15 @@ def retrieve_rag_context_sync(
     logger: logging.Logger,
     top_k: int = 5,
     mentioned_user_ids: list[str] | None = None,
+    member_names: dict[str, list[str]] | None = None,
 ) -> tuple[list[dict[str, str]], dict[str, int | bool | str]]:
     """同步版本，供 run_in_executor 呼叫。
 
     mentioned_user_ids: 上游已從原始 question（含 <@id>）抽出的 user_id 列表。
         若為 None，內部會從 question 重抽——但若 caller 已把 question 替換成
         display_name（resolved），重抽會失敗，必須顯式傳入。
+    member_names: Discord 成員名字（`llm.persona.member_names.member_names_from_guild`）。
+        有給時卡片標籤用顯示名稱，問句裡的詞也會比對 Discord 名字找人（「一野」→ 糯糯）。
     """
     return _retrieve_rag_context_impl(
         question=question,
@@ -691,6 +695,7 @@ def retrieve_rag_context_sync(
         logger=logger,
         top_k=top_k,
         mentioned_user_ids=mentioned_user_ids,
+        member_names=member_names,
     )
 
 
@@ -703,6 +708,7 @@ def _retrieve_rag_context_impl(
     logger: logging.Logger,
     top_k: int = 5,
     mentioned_user_ids: list[str] | None = None,
+    member_names: dict[str, list[str]] | None = None,
 ) -> tuple[list[dict[str, str]], dict[str, int | bool | str]]:
     """檢索 member_profile RAG（guild scoped + identity aware + persona cards）。"""
 
@@ -745,6 +751,8 @@ def _retrieve_rag_context_impl(
     # caller 若已將 question 替換成 display_name，重抽會失敗，必須顯式傳入
     if mentioned_user_ids is None:
         mentioned_user_ids = extract_mentioned_user_ids(question)
+    # 問句裡的詞對到 Discord 名字的人（自介、印象的別名由下面 Stage 2 的 SQL 比對）
+    alias_user_ids = match_members(member_names or {}, alias_hints)
     participant_ids = [str(uid) for uid in (participant_user_ids or []) if uid]
     participant_ids = list(dict.fromkeys(participant_ids))[:PERSONA_MAX_PARTICIPANTS]
     meta["participant_count"] = len(participant_ids)
@@ -839,7 +847,8 @@ def _retrieve_rag_context_impl(
             logger.warning("member-profile SQL participant retrieval 失敗: %s", exc)
 
     # Stage 2: alias SQL 輔助
-    if psycopg2 is not None and (alias_hints or mentioned_user_ids):
+    named_ids = list(dict.fromkeys([*(mentioned_user_ids or []), *alias_user_ids]))
+    if psycopg2 is not None and (alias_hints or named_ids):
         try:
             with _pgvector_connect() as conn:
                 with conn.cursor() as cur:
@@ -870,8 +879,8 @@ def _retrieve_rag_context_impl(
                             str(guild_id),
                             *like_values,
                             *like_values,
-                            mentioned_user_ids or ["0"],
-                            mentioned_user_ids or ["0"],
+                            named_ids or ["0"],
+                            named_ids or ["0"],
                             max(6, top_k + 2),
                         ],
                     )
@@ -969,20 +978,12 @@ def _retrieve_rag_context_impl(
         intent=intent,
         alias_hints=alias_hints,
         max_cards=min(max(1, top_k), PERSONA_MAX_CARDS),
+        display_names=display_names(member_names),
     )
     meta["cards_generated"] = len(persona_cards)
 
-    # 建立 person_id → alias 對照表，供聊天記錄標註使用
-    alias_map: dict[str, str] = {}
-    for card in persona_cards:
-        pid = card.get("person_id", "")
-        alias = card.get("alias", "")
-        if pid and alias:
-            alias_map[pid] = alias
-
     rag_context = format_persona_cards_for_context(persona_cards)
     meta["cards_sent"] = max(0, len(rag_context) - 1 if rag_context else 0)
-    meta["alias_map"] = alias_map
 
     meta["selected_count_before_trim"] = len(rag_context)
     card_budget = min(max(1, top_k), PERSONA_MAX_CARDS)

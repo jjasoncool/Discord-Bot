@@ -118,15 +118,28 @@ def load_prompts() -> dict[str, str]:
     }
 
 
-def nickname_note(nicknames: Mapping[str, tuple[str, Sequence[str]]]) -> str:
-    """把 `publish.member_nicknames` 排成附在指示後面的暱稱表；沒有人有暱稱就回空字串。
+def nickname_note(
+    nicknames: Mapping[str, tuple[str, Sequence[str]]], target_id: Optional[str] = None
+) -> str:
+    """把 `publish.member_nicknames` 排成附在指示後面的名字表；沒有人就回空字串。
 
     為什麼要附：工具回傳的旁人只有「他人1」這種代號，模型只能從訊息文字讀到人名，分不出
     「阿喵救我」的「阿喵」是在叫人——實測把叫人的「喵」寫成某人的語尾口頭禪。
-    怎麼用這張表寫在 `persona_description_rules.txt`（③④ 共用），這裡只排資料。
+    **本人那一行標出來、排第一**：指示裡只有 user_id，模型原本不知道本人叫什麼，別人喊
+    「一野」時分不出是叫本人還是叫別人（實測把叫糯糯的「一野」寫成另一個人的暱稱）。
+    **不放 user_id、不編號**：使用者 ID 跟訊息 ID 一樣是長串數字，給了會被抄成證據；編號會跟
+    條目的 ref 混在一起。怎麼用這張表寫在 `persona_description_rules.txt`（③④ 共用）。
     """
-    lines = [f"- {label}：{'、'.join(nicks)}" for label, nicks in nicknames.values()]
-    return "【群友的稱呼】（顯示名稱：大家怎麼叫他）\n" + "\n".join(lines) if lines else ""
+    lines = []
+    for pid, (label, nicks) in nicknames.items():
+        line = f"- {label}：{'、'.join(nicks)}" if nicks else f"- {label}"
+        if pid == target_id:
+            lines.insert(0, f"{line}（本人）")
+        else:
+            lines.append(line)
+    if not lines:
+        return ""
+    return "【群友的稱呼】（顯示名稱：其他名字與大家怎麼叫他；標「本人」的是這次要更新的人）\n" + "\n".join(lines)
 
 
 def estimate_tokens(text: str) -> int:

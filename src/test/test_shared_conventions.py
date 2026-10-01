@@ -201,6 +201,43 @@ def _find_named_module_loggers(path: Path) -> list[int]:
     return hits
 
 
+def _is_tail_slice(node: ast.AST) -> bool:
+    """`x[-4:]` 這種取尾巴的切片。"""
+    return (isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice)
+            and node.slice.upper is None and isinstance(node.slice.lower, ast.UnaryOp)
+            and isinstance(node.slice.lower.op, ast.USub))
+
+
+def _find_handwritten_person_anchors(path: Path) -> list[int]:
+    """找自己拼的「名字#user_id 尾碼」：`f"#{uid[-4:]}"`，或先 `short = uid[-4:]` 再 `f"{name}#{short}"`。
+
+    錨點是 prompt 裡認人的鍵（聊天行、人物卡、名字對照要同一個），撞號時還要自動加長——散在
+    7 處各寫一份時，改長度得改 7 個地方，漏一處兩邊就對不上。只抓這兩種形狀：`#{...}` 在本專案
+    很常見（行號、訊息編號），也有不少 `[-4:]` 只是給 log 看的 trace id，誤判會擋住啟動 gate。
+    """
+    hits: list[int] = []
+    for func in ast.walk(_parse(path)):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
+            continue
+        sliced = {
+            t.id
+            for n in ast.walk(func) if isinstance(n, ast.Assign)
+            if any(_is_tail_slice(x) for x in ast.walk(n.value))
+            for t in n.targets if isinstance(t, ast.Name)
+        }
+        for node in ast.walk(func):
+            if not isinstance(node, ast.JoinedStr):
+                continue
+            for prev, cur in zip(node.values, node.values[1:]):
+                if not (isinstance(prev, ast.Constant) and str(prev.value).endswith("#")
+                        and isinstance(cur, ast.FormattedValue)):
+                    continue
+                expr = cur.value
+                if _is_tail_slice(expr) or (isinstance(expr, ast.Name) and expr.id in sliced):
+                    hits.append(node.lineno)
+    return sorted(set(hits))
+
+
 RULES = [
     Rule(
         name="全站時區",
@@ -248,6 +285,19 @@ RULES = [
         # discord_bot.py 以 script 執行（__name__ 是 __main__），明確命名成 discord_bot；
         # scraper 是獨立容器、有自己的 utils/logger.py；scripts 是手動執行的 CLI 工具
         allowed={"discord_bot.py", "scraper/", "scripts/"},
+    ),
+    Rule(
+        name="prompt 裡認人的錨點（名字#尾碼）",
+        finder=_find_handwritten_person_anchors,
+        canonical="llm.preprocess.person_anchor.label() / suffix()",
+        allowed={"llm/preprocess/person_anchor.py"},
+    ),
+    Rule(
+        name="群友的 Discord 名字（顯示名稱、伺服器暱稱、全域名稱）",
+        pattern=r"\.global_name\b|\.nick\b",
+        canonical="llm.persona.member_names.member_names_from_guild()",
+        # 名字要從同一處讀，④ 的名字表、⑤ 的擋名字、白天的名字對照與找人才會一致
+        allowed={"llm/persona/member_names.py"},
     ),
     Rule(
         name="不用 print 記錄（只會出現在 docker logs，不會進 log 檔）",

@@ -290,6 +290,14 @@ class NicknameNoteTests(unittest.TestCase):
         self.assertIn("阿狗：阿狗", self.NOTE)
         self.assertEqual(agent.nickname_note({}), "", "沒有人有暱稱就不附")
 
+    def test_target_is_marked_and_listed_first(self):
+        """真實案例：指示只有 user_id，模型不知道本人叫什麼——別人喊糯糯「一野」，被寫成另一個人的暱稱。"""
+        note = agent.nickname_note({"8": ("克羅", []), "9": ("糯糯 弗糯糯", ["一野shout死你"])}, target_id="9")
+        lines = note.splitlines()
+        self.assertEqual(lines[1], "- 糯糯 弗糯糯：一野shout死你（本人）")
+        self.assertEqual(lines[2], "- 克羅")
+        self.assertNotIn("9", "".join(lines[1:]).replace("糯糯", ""), "不放 user_id：會被抄成證據")
+
     def test_note_follows_the_instruction(self):
         svc = FakeService([says("看夠了"), says(VALID_DIFF)])
         ctx = tools.ToolContext.build(guild_id=1, allowed_ids=[ALICE], fetch=lambda sql, params: [],
@@ -312,6 +320,7 @@ class NicknameNoteTests(unittest.TestCase):
         table_name = header[:header.index("】") + 1]
         self.assertIn(table_name, load_description_rules())
         self.assertIn("不是口頭禪", load_description_rules())
+        self.assertIn("本人", load_description_rules(), "表上標本人，規則要講那是誰")
 
 
 class ThinkingBudgetTests(unittest.TestCase):

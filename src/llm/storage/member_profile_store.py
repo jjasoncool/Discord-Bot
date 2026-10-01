@@ -129,6 +129,10 @@ class NullMemberProfileStore:
         _ = (guild_id, author_id, alias, personality, extra_metadata)
         return False   # 沒有真的寫到任何地方
 
+    def aliases_for_users(self, *, guild_id: int, user_ids: list[str]) -> dict[str, list[str]]:
+        _ = (guild_id, user_ids)
+        return {}
+
 
 class PgVectorMemberProfileStore:
     """以 pgvector 實作的 MemberProfileStore。"""
@@ -592,6 +596,42 @@ class PgVectorMemberProfileStore:
         except Exception as exc:
             logger.error("find_user_ids_by_alias 失敗: %s", exc, exc_info=True)
         return uids
+
+    def aliases_for_users(self, *, guild_id: int, user_ids: list[str]) -> dict[str, list[str]]:
+        """這些人在自介與印象裡登記的名字：user_id → [自介「別人常常叫我什麼」, 印象「你平常怎麼稱呼他」…]。
+
+        給 prompt 的「名字對照」用（`llm.persona.member_names.name_map_lines`）。原樣回傳欄位值，
+        「柔喵, 阿喵」這種一欄多個的由呼叫端拆。失敗回空（名字對照少幾個名字，不影響回覆）。
+        """
+        if not user_ids:
+            return {}
+        table = self._get_physical_table_name()
+        out: dict[str, list[str]] = {}
+        try:
+            with self._get_db_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        SELECT metadata_->>'author_id', metadata_->>'alias' FROM {table}
+                        WHERE metadata_->>'doc_type'='member_profile'
+                          AND metadata_->>'guild_id'=%s
+                          AND metadata_->>'profile_kind'='intro_profile'
+                          AND metadata_->>'author_id' = ANY(%s)
+                        UNION ALL
+                        SELECT metadata_->>'target_user_id', metadata_->>'target_alias' FROM {table}
+                        WHERE metadata_->>'doc_type'='member_profile'
+                          AND metadata_->>'guild_id'=%s
+                          AND metadata_->>'profile_kind'='impression'
+                          AND metadata_->>'target_user_id' = ANY(%s);
+                        """,
+                        [str(guild_id), list(user_ids), str(guild_id), list(user_ids)],
+                    )
+                    for uid, alias in cur.fetchall():
+                        if uid and alias:
+                            out.setdefault(str(uid), []).append(str(alias))
+        except Exception as exc:
+            logger.warning("aliases_for_users 失敗（名字對照只用 Discord 名字）: %s", exc)
+        return out
 
     # ── 功能二記憶：招牌梗 signature_tag（持久印象層；corroboration + 慢衰減）─────────
     # 與 preference_fact 同表同形（profile_kind='signature_tag'），但治理更硬：歸屬必須是程式碼

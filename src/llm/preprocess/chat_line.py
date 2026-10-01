@@ -17,6 +17,7 @@ import re
 from datetime import tzinfo
 from typing import TYPE_CHECKING, Callable, Optional
 
+from llm.preprocess import person_anchor
 from llm.preprocess.emoji_text_utils import replace_custom_emoji_with_description
 from llm.preprocess.sticker_cache import get_sticker_text
 from llm.preprocess.vision_image import is_vision_image
@@ -31,14 +32,9 @@ _MENTION_RE = re.compile(r"<@!?(\d+)>")
 
 
 def name_with_anchor(author) -> str:
-    """顯示名稱 + #XXXX（user_id 後四碼），跟 persona card 標題對齊，穩定分辨同名/相似的人。
-
-    完整 user_id 不進 prompt（降敏 + 省 token）；撞號代價只在 LLM 描述層。
-    """
+    """顯示名稱 + #尾碼（見 `person_anchor`），跟人物卡、名字對照對齊，穩定分辨同名/相似的人。"""
     name = getattr(author, "display_name", None) or author.name
-    uid = str(getattr(author, "id", "") or "")
-    short = uid[-4:] if len(uid) >= 4 else ""
-    return f"{name}#{short}" if short else name
+    return person_anchor.label(name, getattr(author, "id", "") or "")
 
 
 def resolve_user_mentions(text: str, msg) -> str:
@@ -69,7 +65,7 @@ def resolve_user_mentions(text: str, msg) -> str:
                 user = None
         if user is not None:
             return name_with_anchor(user)
-        return f"某人#{uid[-4:]}" if len(uid) >= 4 else "某人"
+        return person_anchor.label("某人", uid)
 
     return _MENTION_RE.sub(_sub, text)
 
@@ -157,20 +153,18 @@ _WARNED_ANCHOR_COLLISIONS: set = set()
 
 
 def _check_anchor_collision(msgs: list) -> None:
-    """偵測「兩個人的 user_id 後四碼相同」→ prompt 裡的 `#XXXX` 會同時指向兩個人。
+    """偵測「兩個人的錨點相同」→ prompt 裡的 `#尾碼` 會同時指向兩個人。
 
-    錨點是模型辨認「這幾行是同一個人」的唯一依據（顯示名會改、persona card 用自填別名），
-    撞號等於讓它把兩個人當成一個，而且完全無聲無息。實測 78 位發言者目前 0 撞號，但機率
-    隨群成長上升（約：100 人 39%、150 人 67% 會出現至少一組），所以留個警報。
-
-    真的撞到再處理——加長到 5 碼會讓既有 persona card 文字裡存的 4 碼對不上，要一併重建。
+    錨點是模型辨認「這幾行是同一個人」的依據，撞號等於讓它把兩個人當成一個。現有成員撞號時
+    `person_anchor` 會自動加長；這裡抓的是剩下的情況——已經離開伺服器的人不在成員名單裡，
+    一律 4 碼，可能跟現有成員撞。
     """
     seen: dict = {}
     for m in msgs:
         uid = str(getattr(getattr(m, "author", None), "id", "") or "")
-        if len(uid) < 4:
+        anchor = person_anchor.suffix(uid)
+        if not anchor:
             continue
-        anchor = uid[-4:]
         prev = seen.setdefault(anchor, uid)
         if prev == uid:
             continue
@@ -179,9 +173,8 @@ def _check_anchor_collision(msgs: list) -> None:
             continue
         _WARNED_ANCHOR_COLLISIONS.add(key)
         logger.warning(
-            "chat_line 錨點撞號：user_id %s 與 %s 的後四碼都是 #%s → prompt 裡的 #%s 會指向"
-            "兩個人，模型可能把他們當同一人。要修得把 name_with_anchor 加長到 5 碼，"
-            "並一併重建 persona card（那裡的文字存了 4 碼）。",
+            "chat_line 錨點撞號：user_id %s 與 %s 的錨點都是 #%s → prompt 裡的 #%s 會指向"
+            "兩個人，模型可能把他們當同一人（多半是其中一人已離開伺服器，不在自動加長的名單裡）。",
             prev, uid, anchor, anchor,
         )
 

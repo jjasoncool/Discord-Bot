@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Mapping
 
+from llm.preprocess import person_anchor
 from llm.preprocess.tokenization import tokens_for_debug
 
 # Persona RAG 預算與關聯控制（避免 token 爆量）
@@ -76,7 +77,10 @@ def build_persona_cards(
     intent: str,
     alias_hints: list[str],
     max_cards: int,
+    display_names: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
+    """`display_names`（author_id → Discord 當下的顯示名稱）有給時，卡片標籤用它——跟聊天行同一個
+    名字；自介、印象裡的其他叫法放「名字對照」（`llm.persona.member_names`）。沒給才用自介別名。"""
     grouped: dict[str, dict[str, Any]] = {}
 
     for doc in docs:
@@ -128,8 +132,8 @@ def build_persona_cards(
         intro_summary = "；".join(card["intro_texts"][:1])
         impression_summary = "；".join(card["impression_texts"][:PERSONA_MAX_IMPRESSIONS_PER_CARD])
         auto_personality_summary = "；".join(card["auto_personality_texts"][:1])
-        # 優先用自我介紹的 alias，其次才用 impression 的
-        primary_alias = card["intro_alias"]
+        # 優先用 Discord 當下的顯示名稱，其次自我介紹的 alias，再其次 impression 的
+        primary_alias = (display_names or {}).get(person_id) or card["intro_alias"]
         if not primary_alias:
             other = sorted(card["other_aliases"])
             primary_alias = other[0] if other else ""
@@ -149,7 +153,9 @@ def build_persona_cards(
             score += 25
         if mentioned_user_ids and person_id in mentioned_user_ids:
             score += 35
-        if primary_alias and any(h in normalize_alias_text(primary_alias) for h in alias_hints):
+        # 標籤改成顯示名稱後，問句裡講的可能是自介別名——每個名字都比對，加分才不會掉
+        known = [primary_alias, card["intro_alias"], *card["other_aliases"]]
+        if any(h in normalize_alias_text(n) for n in known if n for h in alias_hints):
             score += 20
 
         cards.append(
@@ -259,11 +265,8 @@ def _clean_auto_personality_text(raw: str) -> str:
 def persona_card_label(card: dict[str, Any]) -> str:
     """卡片那一行開頭的標籤。`llm.persona.agent.publish` 算精簡版預算時也用這支，兩邊才不會分岔。"""
     alias = card.get("alias") or "未知"
-    person_id = str(card.get("person_id") or "")
-    # 末 4 碼當穩定身份錨點，跟 chat_history 行的 display_name#XXXX 對齊
-    # 完整 user_id 不進 prompt（降敏 + 省 token）；撞號代價只在 LLM 描述層
-    short_id = person_id[-4:] if len(person_id) >= 4 else ""
-    return f"{alias}#{short_id}" if short_id else alias
+    # 錨點跟聊天行、名字對照同一個（見 `person_anchor`）
+    return person_anchor.label(alias, card.get("person_id") or "")
 
 
 def format_persona_cards_for_context(cards: list[dict[str, Any]]) -> list[dict[str, str]]:

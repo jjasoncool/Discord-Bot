@@ -14,9 +14,13 @@
   4. 放不下的整條跳過，不切半句；文字一模一樣的只放一次。輸出時基本個性在前、近況在後。
      唯一的改動是拿掉句尾的「。」——串接後會變成「。；」。
 
-**挑之前先擋群內流行語**（純規則，擋下的不佔預算）：同一個詞在 ≥`GROUP_SLANG_MIN_PEOPLE`
-個人的描述裡都被寫成「他的口頭禪」，那是大家都在講的詞，不是誰的特色（實測「484」寫在 3 個人
-身上）。群友的暱稱不算——那是在叫人，歸 ④ 的暱稱表處理；講貼圖的條目也不算。
+**挑之前先擋兩種「口頭禪」條目**（純規則，擋下的不佔預算；講貼圖的條目不算）：
+
+  - 群內流行語：同一個詞在 ≥`GROUP_SLANG_MIN_PEOPLE` 個人的描述裡都被寫成「他的口頭禪」，那是
+    大家都在講的詞，不是誰的特色（實測「484」寫在 3 個人身上）。
+  - 把群友的名字寫成口頭禪：引號裡的詞是別的群友的名字、暱稱，或名字的一段（實測雞蛋飛被寫成
+    「『糯糯』是他的口頭禪」，糯糯是群友）。④ 寫描述時有暱稱表可對照，這裡是後備——④ 只重跑
+    有新發言的人，舊條目只有這一關擋得到。本人自己的名字不算（自稱不是誤認）。
 
 **隱私不在這裡擋**：健康、性向、感情家庭、政治、具體行程只靠 `persona_description_rules.txt`
 要 ③④ 別寫；住哪裡、宗教、財務、職業不限制。發言本來就是群裡公開講的，管理員認為舊條目留著
@@ -54,6 +58,7 @@ from datetime import datetime
 from typing import Any, Iterable, Literal, Mapping, Optional
 
 from llm.persona.agent import tools as agent_tools
+from llm.persona.member_names import merge_names, name_parts, names_member
 from sys_settings.time_settings import APP_TZ
 
 logger = logging.getLogger(__name__)
@@ -82,8 +87,8 @@ GROUP_SLANG_MIN_PEOPLE = 2
 _CLAIMS_CATCHPHRASE = re.compile(r"口頭禪|語尾|口癖|慣用語|固定用語|語氣詞")
 _MENTIONS_STICKER = re.compile(r"貼圖|表情")
 _QUOTED = re.compile(r"「([^「」]{1,12})」")
-#: 自介暱稱欄、印象稱呼欄裡分隔多個暱稱的符號（「柔喵, 阿喵」）。不含空白——顯示名稱本身常有空白
-_NICKNAME_SEP = re.compile(r"[,，、/／;；|｜]+")
+WITHHELD_SLANG = "群內流行語"
+WITHHELD_MEMBER_NAME = "把群友名字寫成口頭禪"
 
 Mode = Literal["off", "dry_run", "on"]
 
@@ -108,8 +113,8 @@ class LiteResult:
     items: list[LiteItem] = field(default_factory=list)
     #: 過門檻的條目數，文字相同的算一條（被挑中的一定是其中一部分）
     eligible: int = 0
-    #: 過門檻但被當成群內流行語擋下的條目原文
-    withheld: list[str] = field(default_factory=list)
+    #: 過門檻但被擋下的條目：(原因, 原文)
+    withheld: list[tuple[str, str]] = field(default_factory=list)
 
 
 def _episodes(times: list[datetime]) -> int:
@@ -136,15 +141,29 @@ def _catchphrase_terms(text: str) -> set[str]:
     return {t.strip() for t in _QUOTED.findall(text) if t.strip()}
 
 
+def withhold_reason(
+    text: str, group_slang: frozenset[str] = frozenset(), member_parts: frozenset[str] = frozenset()
+) -> Optional[str]:
+    """這條不該發布的原因；可以發布時回 None。`member_parts` 是**別人**的名字（見 `name_parts`）。"""
+    terms = _catchphrase_terms(text)
+    if terms & group_slang:
+        return WITHHELD_SLANG
+    if any(names_member(t, member_parts, allow_longer=True) for t in terms):
+        return WITHHELD_MEMBER_NAME
+    return None
+
+
 def find_group_slang(changes_by_author: Mapping[str, Any], nicknames: Iterable[str]) -> frozenset[str]:
     """被 ≥`GROUP_SLANG_MIN_PEOPLE` 個人的描述寫成口頭禪的詞。看每人最新版本的全部條目
-    （不只過門檻的）——流行語判斷要看「多少人被這樣寫」，跟這條會不會被挑中無關。"""
-    names = {n.strip() for n in nicknames if n and n.strip()}
+    （不只過門檻的）——流行語判斷要看「多少人被這樣寫」，跟這條會不會被挑中無關。
+    群友的名字不算流行語（那是在叫人，另一條規則處理）。"""
+    parts = name_parts(nicknames)
     people: dict[str, set[str]] = {}
     for author_id, changes in changes_by_author.items():
         for item in agent_tools._persona_items(changes):
-            for term in _catchphrase_terms(item["text"]) - names:
-                people.setdefault(term, set()).add(str(author_id))
+            for term in _catchphrase_terms(item["text"]):
+                if not names_member(term, parts, allow_longer=True):
+                    people.setdefault(term, set()).add(str(author_id))
     return frozenset(t for t, who in people.items() if len(who) >= GROUP_SLANG_MIN_PEOPLE)
 
 
@@ -154,12 +173,16 @@ def select_lite(
     *,
     now: Optional[datetime] = None,
     group_slang: frozenset[str] = frozenset(),
+    member_parts: frozenset[str] = frozenset(),
 ) -> LiteResult:
-    """從一版 `changes` 挑出精簡版，總長不超過 `budget` 字。"""
+    """從一版 `changes` 挑出精簡版，總長不超過 `budget` 字。
+
+    `group_slang`、`member_parts`（別人的名字）由 `build_plans` 跨人算好傳進來，見 `withhold_reason`。
+    """
     now = now or datetime.now(APP_TZ)
     raw = changes if isinstance(changes, list) else []
     candidates: list[LiteItem] = []
-    withheld: list[str] = []
+    withheld: list[tuple[str, str]] = []
     for item in agent_tools._persona_items(raw):
         if _RESIDUE.search(item["text"]):
             continue
@@ -167,8 +190,9 @@ def select_lite(
         episodes = _episodes(times)
         if episodes < MIN_EPISODES:
             continue
-        if _catchphrase_terms(item["text"]) & group_slang:
-            withheld.append(item["text"])
+        reason = withhold_reason(item["text"], group_slang, member_parts)
+        if reason:
+            withheld.append((reason, item["text"]))
             continue
         span = (max(times) - min(times)).days
         candidates.append(LiteItem(
@@ -310,30 +334,30 @@ def load_guild_state(guild_id: int) -> tuple[dict[str, dict[str, Any]], dict[str
 
 def member_nicknames(
     persons: Mapping[str, Mapping[str, list]],
-    display_names: Optional[Mapping[str, str]] = None,
+    member_names: Optional[Mapping[str, list[str]]] = None,
+    people: Iterable[str] = (),
 ) -> dict[str, tuple[str, list[str]]]:
-    """群友的暱稱：author_id → (顯示名稱, [暱稱…])，只列有暱稱的人。
+    """群友的名字：author_id → (顯示名稱, [其他名字與暱稱…])。
 
-    來源是成員自己填的自介「別人常常叫我什麼」，與別人寫的印象「你平常怎麼稱呼他」——群裡
-    叫的「阿喵」「阿狗」不是顯示名稱，只有這兩處有。顯示名稱優先用當下的，沒有就用上次發布時
-    記下的別名。純函式，`persons` 是 `load_guild_state` 的第二個回傳值。
+    來源三處：Discord 的伺服器暱稱與全域名稱（`member_names.member_names_from_guild`）、成員自己填的自介
+    「別人常常叫我什麼」、別人寫的印象「你平常怎麼稱呼他」——群裡叫的「阿喵」不是 Discord 上的
+    名字，只有後兩處有。列的人是 `persons`（有自介、印象或描述）加上 `people`（呼叫端給的，
+    例如有 ④ 版本的人）。顯示名稱優先用 Discord 當下的，沒有就用上次發布時記下的別名。
+    純函式，`persons` 是 `load_guild_state` 的第二個回傳值。
     """
-    names = display_names or {}
+    discord_names = member_names or {}
     out: dict[str, tuple[str, list[str]]] = {}
-    for pid, docs in persons.items():
-        raw = [str(d.get("metadata", {}).get("alias") or "") for d in docs.get("intro_profile", [])]
-        raw += [str(d.get("metadata", {}).get("target_alias") or "") for d in docs.get("impression", [])]
-        nicks: list[str] = []
-        for value in raw:
-            for nick in _NICKNAME_SEP.split(value):
-                nick = nick.strip()
-                if nick and nick not in nicks:
-                    nicks.append(nick)
+    for pid in dict.fromkeys([*map(str, persons), *map(str, people)]):
+        docs = persons.get(pid, {})
+        names = merge_names(discord_names.get(pid, []), [
+            *(str(d.get("metadata", {}).get("alias") or "") for d in docs.get("intro_profile", [])),
+            *(str(d.get("metadata", {}).get("target_alias") or "") for d in docs.get("impression", [])),
+        ])
         autos = docs.get("auto_personality", [])
-        label = str(names.get(pid) or (autos[0].get("metadata", {}).get("alias") if autos else "") or "")
-        nicks = [n for n in nicks if n != label]
-        if nicks:
-            out[str(pid)] = (label or nicks[0], nicks)
+        stored = str((autos[0].get("metadata", {}).get("alias") if autos else "") or "")
+        label = (discord_names.get(pid) or [stored])[0] or (names[0] if names else "")
+        if label:
+            out[pid] = (label, [n for n in names if n != label])
     return out
 
 
@@ -369,8 +393,10 @@ def plan_for(
     display_name: str = "",
     now: Optional[datetime] = None,
     group_slang: frozenset[str] = frozenset(),
+    member_parts: frozenset[str] = frozenset(),
 ) -> PublishPlan:
-    """一個人要發布什麼（純函式，不碰 DB）。`group_slang` 由 `build_plans` 跨人算好傳進來。"""
+    """一個人要發布什麼（純函式，不碰 DB）。`group_slang`、`member_parts`（別人的名字）由
+    `build_plans` 跨人算好傳進來。"""
     from llm.persona.persona_card_builder import _clean_impression_text, persona_card_label
 
     person = person or {}
@@ -405,7 +431,8 @@ def plan_for(
     budget = max(0, budget - BUDGET_MARGIN)
     return PublishPlan(
         author_id=author_id, version=int(version_row["version"]), alias=alias, budget=budget,
-        lite=select_lite(version_row["changes"], budget, now=now, group_slang=group_slang),
+        lite=select_lite(version_row["changes"], budget, now=now, group_slang=group_slang,
+                         member_parts=member_parts),
     )
 
 
@@ -413,20 +440,27 @@ def build_plans(
     guild_id: int,
     *,
     display_names: Optional[Mapping[str, str]] = None,
+    member_names: Optional[Mapping[str, list[str]]] = None,
     now: Optional[datetime] = None,
 ) -> tuple[dict[str, PublishPlan], dict[str, Exception]]:
     """每個有 agent 版本的人要發布什麼。回傳 `(計畫, 算失敗的人與例外)`。
 
-    同步（讀 DB），呼叫端丟 executor。⑤ 與 `production_skip_list` 共用這一份，兩邊才會一致。
+    同步（讀 DB），呼叫端丟 executor。⑤ 與 `production_skip_list` 共用這一份，兩邊才會一致——
+    所以兩邊要傳同一份名字。`member_names` 見 `member_names.member_names_from_guild`（第一個是顯示名稱）；
+    只給 `display_names` 時當成每人只有一個名字。
     """
     from llm.persona.persona_card_builder import PERSONA_MAX_CARD_CHARS
     from sys_settings.llm_settings import AmbientChatSettings
 
     line_max = AmbientChatSettings().persona_line_max_chars
     versions, persons = load_guild_state(guild_id)
-    names = display_names or {}
-    known_names = [n for label, nicks in member_nicknames(persons, names).values() for n in (label, *nicks)]
-    group_slang = find_group_slang({a: row["changes"] for a, row in versions.items()}, known_names)
+    if member_names is None:
+        member_names = {pid: [name] for pid, name in (display_names or {}).items() if name}
+    names = {pid: ns[0] for pid, ns in member_names.items() if ns}
+    nicknames = member_nicknames(persons, member_names, people=versions)
+    own_parts = {pid: name_parts((label, *nicks)) for pid, (label, nicks) in nicknames.items()}
+    all_parts = frozenset().union(*own_parts.values())
+    group_slang = find_group_slang({a: row["changes"] for a, row in versions.items()}, all_parts)
     plans: dict[str, PublishPlan] = {}
     failed: dict[str, Exception] = {}
     for author_id, row in versions.items():
@@ -435,6 +469,8 @@ def build_plans(
                 author_id, row, persons.get(author_id, {}),
                 line_max_chars=line_max, card_field_chars=PERSONA_MAX_CARD_CHARS,
                 display_name=names.get(author_id, ""), now=now, group_slang=group_slang,
+                # 本人的名字不算：自稱不是誤認
+                member_parts=all_parts - own_parts.get(author_id, frozenset()),
             )
         except Exception as exc:
             failed[author_id] = exc
@@ -453,7 +489,10 @@ def effective_publish_mode() -> Mode:
 
 
 async def production_skip_list(
-    guild_id: int, *, display_names: Optional[Mapping[str, str]] = None
+    guild_id: int,
+    *,
+    display_names: Optional[Mapping[str, str]] = None,
+    member_names: Optional[Mapping[str, list[str]]] = None,
 ) -> set[str]:
     """③ 與手動萃取寫入時要跳過的人：發布開啟時，⑤ 會寫精簡版的人；沒開啟時是空的。
 
@@ -464,7 +503,7 @@ async def production_skip_list(
         return set()
     from llm.persona.agent.agent import run_db
 
-    plans, _ = await run_db(build_plans, guild_id, display_names=display_names)
+    plans, _ = await run_db(build_plans, guild_id, display_names=display_names, member_names=member_names)
     return {author_id for author_id, plan in plans.items() if plan.lite.text}
 
 
@@ -475,6 +514,7 @@ async def run_publish(
     mode: Mode,
     display_names: Optional[Mapping[str, str]] = None,
     profile_store: Any = None,
+    member_names: Optional[Mapping[str, list[str]]] = None,
 ) -> dict[str, int]:
     """把每個有 agent 版本的人的精簡版寫進 `auto_personality`（或只試算）。
 
@@ -483,13 +523,15 @@ async def run_publish(
     - `on`：寫入；精簡版是空的人不動，③ 照常更新他們（見 `production_skip_list`）
 
     不依賴當晚 ④ 有沒有跑：發布的是每個人**最新的**版本，當晚沒輪到的人也照樣發布。
-    `display_names` 是 author_id → 當下的顯示名稱，用來更新別名。
+    `display_names` 是 author_id → 當下的顯示名稱，用來更新別名；`member_names` 見
+    `member_names.member_names_from_guild`，有給就以它為準（顯示名稱也從它取）。
     """
     if mode == "off":
         return {"skipped": 1}
     from llm.persona.agent.agent import run_db
 
-    plans, failed = await run_db(build_plans, guild_id, display_names=display_names)
+    plans, failed = await run_db(build_plans, guild_id, display_names=display_names,
+                                 member_names=member_names)
     stats = {"people": len(plans) + len(failed), "written": 0, "dry_run": 0, "empty": 0,
              "failed": len(failed)}
     for author_id, exc in failed.items():
@@ -507,8 +549,8 @@ async def run_publish(
             len(lite.items), len(lite.text), core, len(lite.items) - core, lite.eligible,
             lite.text[:200] or "（空，不寫入，交給 ③）",
         )
-        for text in lite.withheld:
-            logger.info("persona 精簡版擋下群內流行語 author=%s：%s", author_id, text[:120])
+        for reason, text in lite.withheld:
+            logger.info("persona 精簡版擋下 author=%s（%s）：%s", author_id, reason, text[:120])
         if not lite.text:
             stats["empty"] += 1
             continue

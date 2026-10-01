@@ -97,6 +97,7 @@ bot = MyBot()
 async def on_ready():
     logger.info(f'機器人 {bot.user.name} 已連接到 Discord!')
     logger.info(f'機器人 ID: {bot.user.id}')
+    _refresh_person_anchors()
 
     # 創建邀請連結
     permissions = discord.Permissions(
@@ -223,14 +224,17 @@ async def on_ready():
             # 發布開啟時，⑤ 要寫精簡版的人 ③ 不寫：否則每晚 ③ 會先把精簡版蓋回 production
             # 的描述，要等 ④ 跑完、⑤ 才換回來（約 3 小時）；這段時間重啟的話，補跑檢查看到
             # ③ 已經跑過就不補，整天都是 production 的版本。讀名單失敗就照舊全寫。
-            def _display_names() -> dict[str, str]:
-                return {str(m.id): m.display_name for m in guild.members}
+            def _member_names() -> dict[str, list[str]]:
+                # 顯示名稱＋伺服器暱稱＋全域名稱：④ 的名字表與 ⑤ 的擋名字規則都靠它，
+                # ③ 的跳過名單也要用同一份，才會跟 ⑤ 實際寫的人一致
+                from llm.persona.member_names import member_names_from_guild
+                return member_names_from_guild(guild)
 
             skip: set[str] = set()
             try:
                 from llm.persona.agent.publish import production_skip_list
 
-                skip = await production_skip_list(guild.id, display_names=_display_names())
+                skip = await production_skip_list(guild.id, member_names=_member_names())
             except Exception as exc:
                 logger.warning("讀取精簡版名單失敗，③ 照常寫入所有人: %s", exc)
             try:
@@ -269,6 +273,7 @@ async def on_ready():
                         guild_id=guild.id,
                         model=runtime_config.personality_model or runtime_config.model,
                         settings=agent_settings,
+                        member_names=_member_names(),
                     )
             except Exception as exc:
                 # agent 失敗不該影響任何既有功能
@@ -282,7 +287,7 @@ async def on_ready():
                 await run_publish(
                     guild_id=guild.id,
                     mode=effective_publish_mode(),
-                    display_names=_display_names(),
+                    member_names=_member_names(),
                 )
             except Exception as exc:
                 logger.error("persona 精簡版發布失敗（production 描述不受影響）: %s", exc, exc_info=True)
@@ -655,11 +660,23 @@ async def on_raw_reaction_remove(payload):
         logger.debug("ai_interactions 反應記錄略過(remove): %s", _exc)
 
 
+def _refresh_person_anchors() -> None:
+    """prompt 裡「名字#尾碼」的撞號名單跟著成員名單走（見 `llm.preprocess.person_anchor`）。"""
+    from llm.preprocess import person_anchor
+    person_anchor.refresh(m.id for g in bot.guilds for m in g.members)
+
+
 @bot.event
 async def on_member_join(member):
     """新成員加入 → 在歡迎頻道發歡迎訊息（未綁歡迎頻道則靜默）。"""
+    _refresh_person_anchors()
     from services.community.member_welcome import send_welcome
     await send_welcome(member)
+
+
+@bot.event
+async def on_member_remove(member):
+    _refresh_person_anchors()
 
 async def auto_start_article_monitor(bot):
     """自動啟動官方文章更新功能"""

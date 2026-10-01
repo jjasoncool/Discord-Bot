@@ -6,7 +6,7 @@
   - production 的 14 天／10 則門檻把 12 個安靜使用者排除在外，而那是 agent
     唯一明確贏的族群（7 天 1 則、90 天 91 則那個案例）
   - 單人失敗不影響其他人：失敗率是調參的唯一依據，中斷整批等於失去資料
-  - 群友暱稱表整批讀一次、每個人都附同一份；讀不到就不附，不擋整批
+  - 群友名字表整批讀一次、每個人跑時把自己那行標成本人；讀不到就不附，不擋整批
 
 執行：
     cd src && python -m unittest test.test_persona_agent_batch -v
@@ -27,7 +27,7 @@ from llm.persona.agent import batch  # noqa: E402
 from sys_settings.llm_settings import PersonaAgentSettings  # noqa: E402
 
 GUILD = 1
-NOTE = "【群友的稱呼】（顯示名稱：大家怎麼叫他）\n- 柔柔喵：阿喵"
+NICKNAMES = {"a": ("柔柔喵", ["阿喵"]), "b": ("糯糯 弗糯糯", ["一野shout死你"])}
 
 
 class SelectionTests(unittest.TestCase):
@@ -83,8 +83,8 @@ class RunBatchTests(unittest.TestCase):
         # 而重啟大多發生在白天，等於擋住自己的部署。
         with mock.patch.object(batch, "select_targets", return_value=targets), \
              mock.patch.object(batch, "_past_deadline", return_value=past_deadline), \
-             mock.patch.object(batch, "load_nickname_note",
-                               mock.AsyncMock(return_value=NOTE)) as self.load_note, \
+             mock.patch.object(batch, "load_member_nicknames",
+                               mock.AsyncMock(return_value=NICKNAMES)) as self.load_names, \
              mock.patch.object(batch.persona_agent, "run_and_persist",
                                side_effect=side_effect) as ran:
             stats = asyncio.run(
@@ -136,16 +136,16 @@ class RunBatchTests(unittest.TestCase):
                          "工具層的白名單一次只能有當前這一人")
 
 
-    def test_every_run_gets_the_same_nickname_note_loaded_once(self):
+    def test_names_load_once_and_each_run_marks_its_own_person(self):
         seen = []
 
         async def side(**kw):
-            seen.append(kw["ctx"].nickname_note)
+            seen.append(kw["ctx"].nickname_note.splitlines()[1])
             return mock.MagicMock(status="ok"), mock.MagicMock(skip_reason=None)
 
         self._run(PersonaAgentSettings(enabled=True), ["a", "b"], side)
-        self.assertEqual(seen, [NOTE, NOTE])
-        self.load_note.assert_awaited_once_with(GUILD)
+        self.assertEqual(seen, ["- 柔柔喵：阿喵（本人）", "- 糯糯 弗糯糯：一野shout死你（本人）"])
+        self.load_names.assert_awaited_once_with(GUILD, None)
 
 
 class LoadNicknameNoteTests(unittest.TestCase):

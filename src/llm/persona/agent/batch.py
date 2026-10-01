@@ -105,14 +105,24 @@ def _past_deadline(deadline_hour: int) -> bool:
     return datetime.now(APP_TZ).hour >= deadline_hour
 
 
-async def load_nickname_note(guild_id: int) -> str:
-    """群友暱稱表，整批共用一份。讀不到就不附——少了它只是歸因比較容易錯，不該擋住整批。"""
+async def load_member_nicknames(
+    guild_id: int, member_names: Optional[dict[str, list[str]]] = None
+) -> dict[str, tuple[str, list[str]]]:
+    """群友名字表，整批共用一份。讀不到就回空——少了它只是歸因比較容易錯，不該擋住整批。"""
     try:
-        _, persons = await persona_agent.run_db(publish.load_guild_state, guild_id)
+        versions, persons = await persona_agent.run_db(publish.load_guild_state, guild_id)
     except Exception as exc:
-        logger.warning("persona agent 讀不到群友暱稱表，這次不附：%s", exc)
-        return ""
-    return persona_agent.nickname_note(publish.member_nicknames(persons))
+        logger.warning("persona agent 讀不到群友名字表，這次不附：%s", exc)
+        return {}
+    return publish.member_nicknames(persons, member_names, people=versions)
+
+
+async def load_nickname_note(
+    guild_id: int, target_id: Optional[str] = None, member_names: Optional[dict[str, list[str]]] = None
+) -> str:
+    """手動 `/persona_agent_test` 用：讀名字表並排成附給模型的文字，`target_id` 那一行標成本人。"""
+    nicknames = await load_member_nicknames(guild_id, member_names)
+    return persona_agent.nickname_note(nicknames, target_id=target_id)
 
 
 async def run_batch(
@@ -121,8 +131,12 @@ async def run_batch(
     model: str,
     settings: Optional[PersonaAgentSettings] = None,
     llm_service: Any = None,
+    member_names: Optional[dict[str, list[str]]] = None,
 ) -> dict[str, int]:
-    """跑一輪批次，回傳統計。任何單人失敗都不會中斷整批。"""
+    """跑一輪批次，回傳統計。任何單人失敗都不會中斷整批。
+
+    `member_names` 見 `member_names.member_names_from_guild`；沒給時名字表只有自介與印象的暱稱。
+    """
     s = settings or PersonaAgentSettings()
     if not s.enabled:
         logger.info("persona agent 未啟用，跳過")
@@ -134,7 +148,7 @@ async def run_batch(
 
     run_id = f"batch-{int(time.time())}"
     stats = {"targets": len(targets), "ok": 0, "failed": 0, "written": 0, "unrun": 0}
-    nickname_note = await load_nickname_note(guild_id)
+    nicknames = await load_member_nicknames(guild_id, member_names)
     started = time.perf_counter()
 
     for i, user_id in enumerate(targets, 1):
@@ -149,7 +163,7 @@ async def run_batch(
             ctx = persona_tools.ToolContext.build(
                 guild_id=guild_id,
                 allowed_ids=[user_id],  # 白名單只放這一人，工具層擋掉其他查詢
-                nickname_note=nickname_note,
+                nickname_note=persona_agent.nickname_note(nicknames, target_id=user_id),
             )
             run, validated = await persona_agent.run_and_persist(
                 user_id=user_id, guild_id=guild_id, ctx=ctx, model=model,
