@@ -1,7 +1,10 @@
 import asyncio
 import json
+import logging
 import asyncpg
 import re
+
+logger = logging.getLogger(__name__)
 
 
 class TelegramDatabase:
@@ -45,7 +48,7 @@ class TelegramDatabase:
                         f"無法連線 PostgreSQL（已重試 {max_retries} 次）：{exc}"
                     ) from exc
 
-                print(
+                logger.warning(
                     f"[Telegram][DB] PostgreSQL 尚未 ready，"
                     f"{retry_delay_sec:.1f} 秒後重試 "
                     f"({attempt}/{max_retries})"
@@ -66,7 +69,7 @@ class TelegramDatabase:
             # CREATE DATABASE 不能使用 bind parameter 指定識別字，需手動組 SQL。
             quoted_db = target_db.replace('"', '""')
             await conn.execute(f'CREATE DATABASE "{quoted_db}"')
-            print(f"[Telegram][DB] 已自動建立 database: {target_db}")
+            logger.info(f"[Telegram][DB] 已自動建立 database: {target_db}")
         finally:
             await conn.close()
 

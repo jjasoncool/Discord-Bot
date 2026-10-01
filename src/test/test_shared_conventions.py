@@ -246,15 +246,16 @@ RULES = [
         finder=_find_named_module_loggers,
         canonical="logging.getLogger(__name__)",
         # discord_bot.py 以 script 執行（__name__ 是 __main__），明確命名成 discord_bot；
-        # scraper／telegram_scraper 是獨立容器；scripts 是手動執行的 CLI 工具
-        allowed={"discord_bot.py", "scraper/", "telegram_scraper/", "scripts/"},
+        # scraper 是獨立容器、有自己的 utils/logger.py；scripts 是手動執行的 CLI 工具
+        allowed={"discord_bot.py", "scraper/", "scripts/"},
     ),
     Rule(
         name="不用 print 記錄（只會出現在 docker logs，不會進 log 檔）",
         pattern=r"(?<![\w.])print\(",
         canonical="logging.getLogger(__name__)",
-        # 獨立容器與手動執行的 CLI 工具；telegram_scraper 改用 logger 後要從這裡拿掉
-        allowed={"scraper/", "telegram_scraper/", "scripts/"},
+        # scraper 是獨立容器；scripts 是手動執行的 CLI 工具。
+        # telegram_scraper 也是獨立容器，但已改用 logger（log_config.py 由入口設定）
+        allowed={"scraper/", "scripts/"},
     ),
     Rule(
         name="官方公告原文網址",

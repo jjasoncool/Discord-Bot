@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -15,6 +16,8 @@ from handlers import (
 )
 from message_lock import KeyedLock, message_lock_key
 from tg_config import TelegramConfig, TelegramRuntimeConfigWatcher
+
+logger = logging.getLogger(__name__)
 
 
 # relay（discord-bot 容器）透過此 pg NOTIFY channel 要求重抓某則訊息，
@@ -42,30 +45,30 @@ async def _handle_refetch_request(payload, client, config, runtime_watcher, db, 
         chat_id = int(data["chat_id"])
         message_id = int(data["message_id"])
     except Exception as exc:
-        print(f"[Refetch] payload 解析失敗 payload={payload!r}: {exc}")
+        logger.warning(f"[Refetch] payload 解析失敗 payload={payload!r}: {exc}")
         return
 
     msg = None
     try:
         msg = await client.get_messages(chat_id, ids=message_id)
     except Exception as exc:
-        print(f"[Refetch] 以 chat_id={chat_id} 取訊息失敗，改用 source_channel 重試: {exc}")
+        logger.warning(f"[Refetch] 以 chat_id={chat_id} 取訊息失敗，改用 source_channel 重試: {exc}")
     if msg is None:
         try:
             msg = await client.get_messages(config.source_channel, ids=message_id)
         except Exception as exc:
-            print(f"[Refetch] 取訊息失敗 chat_id={chat_id} msg_id={message_id}: {exc}")
+            logger.warning(f"[Refetch] 取訊息失敗 chat_id={chat_id} msg_id={message_id}: {exc}")
             return
     if msg is None:
-        print(f"[Refetch] 找不到訊息 chat_id={chat_id} msg_id={message_id}")
+        logger.warning(f"[Refetch] 找不到訊息 chat_id={chat_id} msg_id={message_id}")
         return
 
     try:
         async with message_locks.hold(message_lock_key(msg)):
             await handle_refetch_message(msg, chat_id, client, config, runtime_watcher, db)
-        print(f"[Refetch] 完成 chat_id={chat_id} msg_id={message_id}")
+        logger.info(f"[Refetch] 完成 chat_id={chat_id} msg_id={message_id}")
     except Exception as exc:
-        print(f"[Refetch] 處理訊息失敗 chat_id={chat_id} msg_id={message_id}: {exc}")
+        logger.exception(f"[Refetch] 處理訊息失敗 chat_id={chat_id} msg_id={message_id}: {exc}")
 
 
 _catchup_chat_id_cache: dict[str, int] = {}
@@ -81,7 +84,7 @@ async def _resolve_catchup_chat_id(client, source_channel: str) -> int | None:
         entity = await client.get_entity(source_channel)
         chat_id = int(get_peer_id(entity))
     except Exception as exc:
-        print(f"[CatchUp] 解析頻道 chat_id 失敗 channel={source_channel}: {exc}")
+        logger.warning(f"[CatchUp] 解析頻道 chat_id 失敗 channel={source_channel}: {exc}")
         return None
 
     _catchup_chat_id_cache[source_channel] = chat_id
@@ -147,13 +150,13 @@ async def _catch_up_channel(
                 accepted += 1
 
     if accepted or fetched > skipped:
-        print(
+        logger.info(
             f"[CatchUp] {source_channel} 補回漏收訊息："
             f"視窗 {window_start}~{last_id} 撈到 {fetched} 筆、"
             f"已存在略過 {skipped} 筆、收下 {accepted} 筆"
         )
     if fetched >= CATCHUP_GAP_WINDOW + CATCHUP_MAX_PER_CYCLE:
-        print(
+        logger.info(
             f"[CatchUp] {source_channel} 已達單輪上限"
             f"（{CATCHUP_GAP_WINDOW + CATCHUP_MAX_PER_CYCLE} 筆），剩餘部分下一輪繼續"
         )
@@ -192,7 +195,7 @@ async def _catch_up_loop(
                 raise
             except Exception as exc:
                 # 單一頻道失敗（FloodWait、暫時性網路問題等）不能拖垮整個補掃迴圈
-                print(f"[CatchUp] {source_channel} 補掃失敗（下一輪重試）: {exc}")
+                logger.warning(f"[CatchUp] {source_channel} 補掃失敗（下一輪重試）: {exc}")
 
 
 async def run_telegram_scraper(config: TelegramConfig) -> None:
@@ -216,7 +219,7 @@ async def run_telegram_scraper(config: TelegramConfig) -> None:
     )
     await db.connect()
     await db.init_db()
-    print("[Telegram] DB 初始化完成")
+    logger.info("[Telegram] DB 初始化完成")
 
     session_path = f"{config.session_dir}/{config.session_name}"
     client = TelegramClient(session_path, config.api_id, config.api_hash)
@@ -238,7 +241,7 @@ async def run_telegram_scraper(config: TelegramConfig) -> None:
 
     catchup_task: asyncio.Task | None = None
     try:
-        print("[Telegram] 正在啟動 client...")
+        logger.info("[Telegram] 正在啟動 client...")
         await client.start()
 
         # on-demand 重抓監聽：越早起越好——歷史掃描可能很久，這段期間也要能收 relay 的
@@ -259,20 +262,20 @@ async def run_telegram_scraper(config: TelegramConfig) -> None:
                 task.add_done_callback(refetch_tasks.discard)
 
             await refetch_listen_conn.add_listener(EMOJI_REFETCH_CHANNEL, _on_refetch_notify)
-            print(f"[Telegram] 已監聽自訂表情重抓通知: {EMOJI_REFETCH_CHANNEL}")
+            logger.info(f"[Telegram] 已監聽自訂表情重抓通知: {EMOJI_REFETCH_CHANNEL}")
         except Exception as exc:
-            print(f"[Telegram] 啟動重抓監聽失敗（不影響主流程）: {exc}")
+            logger.warning(f"[Telegram] 啟動重抓監聽失敗（不影響主流程）: {exc}")
 
         if runtime_snapshot.forward_whitelist:
-            print(f"[Telegram] Forward 白名單已啟用: {sorted(runtime_snapshot.forward_whitelist)}")
+            logger.info(f"[Telegram] Forward 白名單已啟用: {sorted(runtime_snapshot.forward_whitelist)}")
         else:
-            print("[Telegram] Forward 白名單未設定")
+            logger.info("[Telegram] Forward 白名單未設定")
 
-        print(f"[Telegram] 已連線，開始抓取來源頻道: {', '.join(listen_channels)}")
+        logger.info(f"[Telegram] 已連線，開始抓取來源頻道: {', '.join(listen_channels)}")
         cutoff_dt = None
         if runtime_snapshot.history_hours is not None:
             cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=runtime_snapshot.history_hours)
-            print(f"[Telegram] 歷史時間窗已啟用：最近 {runtime_snapshot.history_hours} 小時")
+            logger.info(f"[Telegram] 歷史時間窗已啟用：最近 {runtime_snapshot.history_hours} 小時")
 
         # 逐頻道處理歷史：iter_messages 預設由新到舊，先收集後反轉成舊到新再 insert，
         # 確保「同一頻道」DB id（BIGSERIAL）與訊息時間順序一致，relay 發文才能按時序。
@@ -281,16 +284,16 @@ async def run_telegram_scraper(config: TelegramConfig) -> None:
             pending_msgs = []
             async for msg in client.iter_messages(source_channel, limit=None):
                 if cutoff_dt is not None and msg.date is not None and msg.date < cutoff_dt:
-                    print(f"[Telegram] {source_channel} 已達歷史時間窗，停止收集（message_id={msg.id}）")
+                    logger.info(f"[Telegram] {source_channel} 已達歷史時間窗，停止收集（message_id={msg.id}）")
                     break
                 pending_msgs.append(msg)
                 if config.history_limit > 0 and len(pending_msgs) >= config.history_limit:
-                    print(f"[Telegram] {source_channel} 已達歷史訊息上限（{config.history_limit} 筆），停止收集")
+                    logger.info(f"[Telegram] {source_channel} 已達歷史訊息上限（{config.history_limit} 筆），停止收集")
                     break
 
             # 反轉：舊 → 新，依序 insert 讓 PK 與時間序一致
             pending_msgs.reverse()
-            print(f"[Telegram] {source_channel} 開始依時序處理歷史訊息（共 {len(pending_msgs)} 筆）")
+            logger.info(f"[Telegram] {source_channel} 開始依時序處理歷史訊息（共 {len(pending_msgs)} 筆）")
 
             accepted_history_count = 0
             for msg in pending_msgs:
@@ -299,9 +302,9 @@ async def run_telegram_scraper(config: TelegramConfig) -> None:
                 )
                 if accepted:
                     accepted_history_count += 1
-            print(f"[Telegram] {source_channel} 歷史訊息抓取完成（收下 {accepted_history_count} 筆）")
+            logger.info(f"[Telegram] {source_channel} 歷史訊息抓取完成（收下 {accepted_history_count} 筆）")
 
-        print("[Telegram] 全部來源歷史抓取完成，開始監聽新訊息")
+        logger.info("[Telegram] 全部來源歷史抓取完成，開始監聽新訊息")
 
         catchup_interval_min = runtime_watcher.get_snapshot().catchup_interval_min
         catchup_task = asyncio.create_task(
@@ -309,9 +312,9 @@ async def run_telegram_scraper(config: TelegramConfig) -> None:
             name="telegram_catch_up",
         )
         if catchup_interval_min > 0:
-            print(f"[Telegram] 週期性補掃已啟動（每 {catchup_interval_min} 分鐘增量重掃）")
+            logger.info(f"[Telegram] 週期性補掃已啟動（每 {catchup_interval_min} 分鐘增量重掃）")
         else:
-            print("[Telegram] 週期性補掃目前為停用狀態（catchup_interval_min <= 0）")
+            logger.info("[Telegram] 週期性補掃目前為停用狀態（catchup_interval_min <= 0）")
 
         await client.run_until_disconnected()
     finally:

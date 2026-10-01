@@ -1,3 +1,4 @@
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,8 @@ from filters import (
     should_skip_forward,
 )
 from tg_config import TelegramConfig, TelegramRuntimeConfigWatcher, add_identifier_to_forward_whitelist
+
+logger = logging.getLogger(__name__)
 
 
 _MIME_TO_EXT: dict[str, str] = {
@@ -250,7 +253,7 @@ async def _download_custom_emojis(
     try:
         await db.update_message_entities(message_pk, entities)
     except Exception as exc:
-        print(f"[{log_prefix}] 回填 entities 失敗 message_pk={message_pk}: {exc}")
+        logger.warning(f"[{log_prefix}] 回填 entities 失敗 message_pk={message_pk}: {exc}")
 
     known = await db.get_known_emoji_ids(doc_ids)
     todo = [d for d in doc_ids if d not in known]
@@ -261,7 +264,7 @@ async def _download_custom_emojis(
         from telethon.tl.functions.messages import GetCustomEmojiDocumentsRequest
         documents = await client(GetCustomEmojiDocumentsRequest(document_id=todo))
     except Exception as exc:
-        print(f"[{log_prefix}] 取自訂表情 document 失敗 ids={todo}: {exc}")
+        logger.warning(f"[{log_prefix}] 取自訂表情 document 失敗 ids={todo}: {exc}")
         return
 
     for doc in documents or []:
@@ -274,7 +277,7 @@ async def _download_custom_emojis(
         try:
             file_path = await client.download_media(doc, file=target_path)
         except Exception as exc:
-            print(f"[{log_prefix}] 下載自訂表情失敗 doc_id={doc_id}: {exc}")
+            logger.warning(f"[{log_prefix}] 下載自訂表情失敗 doc_id={doc_id}: {exc}")
             continue
         rel_path = _to_shared_media_rel_path(str(file_path), media_dir) if file_path else None
         try:
@@ -285,9 +288,9 @@ async def _download_custom_emojis(
                 is_animated=is_animated,
             )
         except Exception as exc:
-            print(f"[{log_prefix}] 寫入自訂表情記錄失敗 doc_id={doc_id}: {exc}")
+            logger.warning(f"[{log_prefix}] 寫入自訂表情記錄失敗 doc_id={doc_id}: {exc}")
         else:
-            print(f"[{log_prefix}] 自訂表情已下載 doc_id={doc_id} animated={is_animated} path={rel_path}")
+            logger.info(f"[{log_prefix}] 自訂表情已下載 doc_id={doc_id} animated={is_animated} path={rel_path}")
 
 
 _chat_title_cache: dict[int, str | None] = {}
@@ -337,7 +340,7 @@ async def _process_message(
             message=message,
             primary_sources=primary_sources,
         ):
-            print(f"[{log_prefix}] 略過主頻轉發（去重）message_id={message.id}")
+            logger.info(f"[{log_prefix}] 略過主頻轉發（去重）message_id={message.id}")
             return False
 
     allow_forward_here = await is_forward_source_in_whitelist(
@@ -347,7 +350,7 @@ async def _process_message(
     )
 
     if should_skip_forward(is_forward_message, runtime_snapshot.skip_forwards, allow_forward_here):
-        print(f"[{log_prefix}] 略過轉發訊息 message_id={message.id}")
+        logger.info(f"[{log_prefix}] 略過轉發訊息 message_id={message.id}")
         return False
 
     # 先經過略過判斷後，剩下的是允許通過的轉發訊息，再補來源 chat_id 到白名單
@@ -356,7 +359,7 @@ async def _process_message(
         added = add_identifier_to_forward_whitelist(config.runtime_config_path, source_chat_id or "")
         if added:
             runtime_watcher.refresh(force=True)
-            print(f"[{log_prefix}] 已自動加入 forward 白名單來源 chat_id={source_chat_id}")
+            logger.info(f"[{log_prefix}] 已自動加入 forward 白名單來源 chat_id={source_chat_id}")
 
     text = raw_text or ""
     has_media = bool(message.media)
@@ -367,9 +370,9 @@ async def _process_message(
     if source_label:
         # 逐頻道掃描（History / CatchUp）用實際來源頻道標示，不能用 config.source_channel——
         # 那是多來源設定的第一個頻道，會把其他頻道的訊息全標成它，除錯時嚴重誤導。
-        print(f"[{log_prefix}] source_channel={source_label} message_id={message.id} has_media={has_media} text={text}")
+        logger.info(f"[{log_prefix}] source_channel={source_label} message_id={message.id} has_media={has_media} text={text}")
     else:
-        print(f"[{log_prefix}] chat_id={chat_id} message_id={message.id} has_media={has_media} text={text}")
+        logger.info(f"[{log_prefix}] chat_id={chat_id} message_id={message.id} has_media={has_media} text={text}")
 
     # 取得 Telegram media group ID（同一相簿的訊息共享此值）
     raw_grouped_id = getattr(message, "grouped_id", None)
@@ -397,18 +400,18 @@ async def _process_message(
             # 使用穩定檔名（依 photo/document ID），避免重啟產生 (N) 後綴
             target_path = _build_stable_media_path(message, runtime_snapshot.media_dir)
             file_path = await client.download_media(message, file=target_path or runtime_snapshot.media_dir)
-            print(f"[{log_prefix}] 媒體已下載: {file_path}")
+            logger.info(f"[{log_prefix}] 媒體已下載: {file_path}")
             media_items: list[dict] = []
             if file_path:
                 file_rel_path = _to_shared_media_rel_path(str(file_path), runtime_snapshot.media_dir)
                 media_items.append(_build_media_item(message, file_rel_path))
             await db.upsert_media_items(message_pk, media_items)
         else:
-            print(f"[{log_prefix}] 媒體已存在，略過下載 message_pk={message_pk}")
+            logger.info(f"[{log_prefix}] 媒體已存在，略過下載 message_pk={message_pk}")
             # 檔案在就不重抓，但 spoiler 旗標仍要校正——早期版本讀錯欄位（media_unread），
             # 舊資料全被記成非 spoiler，不在這裡回填就永遠錯下去。
             if await db.update_media_spoiler(message_pk, bool(getattr(message.media, "spoiler", False))):
-                print(f"[{log_prefix}] 已校正 spoiler 旗標 message_pk={message_pk}")
+                logger.info(f"[{log_prefix}] 已校正 spoiler 旗標 message_pk={message_pk}")
 
     # 2.5 下載內嵌自訂表情（premium custom emoji），供 relay 轉成 Discord App Emoji。
     # 只在「即時新訊息」與「on-demand 重抓」時做；啟動歷史掃描（History）刻意跳過，
@@ -424,14 +427,14 @@ async def _process_message(
                 log_prefix=log_prefix,
             )
         except Exception as exc:
-            print(f"[{log_prefix}] 處理自訂表情時發生例外 message_pk={message_pk}: {exc}")
+            logger.exception(f"[{log_prefix}] 處理自訂表情時發生例外 message_pk={message_pk}: {exc}")
 
     # 3. 通知（僅新訊息才 NOTIFY）
     if inserted_new:
         await db.notify_new_message(message_pk)
-        print(f"[{log_prefix}] DB 新增訊息成功 message_pk={message_pk}")
+        logger.info(f"[{log_prefix}] DB 新增訊息成功 message_pk={message_pk}")
     else:
-        print(f"[{log_prefix}] DB 已存在訊息（略過重複）message_pk={message_pk}")
+        logger.info(f"[{log_prefix}] DB 已存在訊息（略過重複）message_pk={message_pk}")
 
     return True
 

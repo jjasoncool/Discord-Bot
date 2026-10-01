@@ -1,10 +1,13 @@
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_channel_identifier(value: str) -> str:
@@ -239,9 +242,9 @@ class TelegramRuntimeConfigWatcher:
             runtime_json = _load_runtime_json_config(self.runtime_config_path)
             self._snapshot = self._build_snapshot_from_runtime_json(runtime_json)
             self._last_mtime = mtime
-            print("[Telegram] runtime_config.json 已重新載入（watcher）")
+            logger.info("[Telegram] runtime_config.json 已重新載入（watcher）")
         except Exception as exc:
-            print(f"[Telegram] runtime_config.json 重新載入失敗，沿用舊快照: {exc}")
+            logger.warning(f"[Telegram] runtime_config.json 重新載入失敗，沿用舊快照: {exc}")
 
         return self._snapshot
 
