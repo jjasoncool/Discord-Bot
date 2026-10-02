@@ -32,6 +32,7 @@
 - 2026-10-02 10:xx（巴哈轉發第 2 輪，**worktree・未套用・未 commit**）：使用者 BH-Q5 B、Q7 B、Q8 A；Q7 封存串跳過編輯、有新回覆先解除封存，Q8 編號修正，20 項新測試、完整 740 項全過、21 種突變全紅。使用者追問 BH-Q6「原文刪除或大幅修改怎麼辦」→ 查證：刪文從沒偵測（0 篇）、大幅刪減被擋 1 篇、API 不回傳這些狀態；BH-Q6 改成問「本文要不要往下的連結」（建議加），新增 BH-Q9 刪文要不要標示（建議維持）。
 - 2026-10-02 09:5x（巴哈轉發限速：複查與補強，**worktree・未套用・未 commit**）：兩輪更新之間的乾淨比對確認舊錯誤顯示的規模（3.7 劇情串 7 則；全部串 log 圈出 35 則回覆留言沒顯示）→ BH-Q5；子 agent 獨立複查無必修問題，照意見補續文增減與溢出格測試、排程改成從編完起算、被拒的編輯不佔名額；新增待決 BH-Q6～Q8。18 項新測試、完整 738 項全過、18 種突變全紅。
 - 2026-10-02 09:2x（巴哈轉發限速，**worktree 完成・未套用・未 commit**）：查證不是「每輪全部重編」，是 Discord 對編輯舊訊息的未公開限速（同串約 5 秒一則）；另確認 9/12 篇續文導航連結被洗掉、建立當下沒記 hash 讓第一輪新留言不顯示等 4 個顯示錯誤。使用者 BH-Q1～Q4 全照建議；TDD 11 項新測試、完整 731 項全過、11 種突變全紅。待：獨立複查、BH-Q5（舊錯誤顯示要不要修）、套用＋重啟。詳見[巴哈轉發編輯](#巴哈轉發編輯被限速續文留言格顯示錯誤2026-10-02-已上線)。
+- 2026-10-02 13:xx（歸檔第二輪，**未動 code**）：使用者回覆——① Ambient 自我蒸餾確定不做 → 整段歸檔、記憶同步改成「不做」；② ProBot 早就關了 → 新成員歡迎沒有待辦，摘要與現況列拿掉；④「產品能力 TODO」「跨來源整合」「Reaction 統計」改寫成只留未實作（對照程式確認：reaction 收集已由 `raw_message_store` 完成、發文已共用 `post_to_channel`、Telegram 自成分層、/askai 沒有回饋按鈕、還有 7 處直接讀 `config.json`）；⑤ 兩段指令規劃合併成「指令整理與管理入口」，指令數更新為 21＋2、權限收斂註明 9/21 已做的部分；SFT 決策門檻搬到產品能力 TODO。五段改寫前原文都歸檔。③ 使用者問「是指哪個程式」→ 已說明（9/22 活動修正 `814a57f` 的多面向複查，剩 `article_monitor` 轉發 embed 與 `event_time_parser` 解析兩個面向沒跑），待使用者決定。交接文件約 1,450 行。
 - 2026-10-02 12:xx（交接文件歸檔，**未動 code**）：使用者要求整理沒用的東西。子 agent 唯讀盤點（查 log 與 git 佐證）後，整段或已完成部分的**原文**搬到 `TODO-completed.md`（13 個歸檔區塊，Index 已加列），交接文件從 3,154 行減到約 1,710 行，只留仍有效的待辦、待決與坑；核對過：舊檔每一行都還在新交接文件或歸檔檔裡（只有 4 行是刻意改寫）；內部連結全部對得上。另把 LM-Q2／LM-Q4 從盤點紀錄搬成「Lemonade 後端與寫入緩衝的待決」區塊、mcp 2.x 改名提醒搬到 MCP 區塊、現況摘要依現況改寫。巴哈轉發區塊（另一個 session 的）沒動。**待使用者決定**：① Ambient「自我蒸餾 learned_style」是否確定不做（已被 style_refs 取代？）→ 是就歸檔；② ProBot 歡迎功能關了嗎；③ 活動自動發布 9/22 對抗性複查剩的 embed／parser 兩面向還要做嗎；④ 半年沒動的「產品能力 TODO」「跨來源整合」「Reaction 統計」要保留、歸檔或改寫；⑤「指令收斂 Dashboard」與「管理入口與指令整理 TODO」兩段重疊要不要合併。Persona M7 內部精簡排在 10/05 刪 ③ 時一起做。（`TODO-completed.md` Index 有 23 列舊連結本來就對不到：舊標題日期前有空格、連結少了連字號，這次沒動。）
 - 2026-10-02 09:0x（PA-Q13 手動修正，**動了資料庫：使用者明確同意**）：四條舊歸因錯誤各寫一個新版本改寫、只替這四人重新發布精簡版；備份在 `logs/persona_manual_fix_2026-10-02.json`。
 - 2026-10-02 08:5x（驗收，**未動 code**）：③⑤ 與白天名字對照都照預期；發現 ④ 不會主動修正舊的歸因錯誤（Biboolater「被暱稱一野」已發布）→ PA-Q13；④ token 用量同人中位數 +3,100、預算停止收集 9 次 → 觀察；另發現巴哈轉發每小時重新編輯已轉發的回覆，被 Discord 限速（見下行）。
@@ -114,78 +115,89 @@ last_confirmed: 2026-09-29
 
 ---
 
-## 指令收斂與管理 Dashboard（規劃，未動工）
+## 指令整理與管理入口（規劃，未動工）
 
 <!-- @meta
 id: command-consolidation-dashboard
 type: DECISION
 status: draft
-last_confirmed: 2026-08-20
+last_confirmed: 2026-10-02
 depends_on: persona-extraction-agent
 affects: commands/, notify_server
 -->
 
-**問題**：目前 28 個 slash command，其中 AI／人格這群就有 9 個，而且用了**三種前綴**：
+> 2026-10-02 由「指令收斂與管理 Dashboard」（2026-08-20）與「Discord Bot 管理入口與指令整理 TODO」（2026-03-31）合併，兩段原文已歸檔到 `TODO-completed.md`。
 
-| 前綴 | 指令 |
+**現況（2026-10-02 盤點）**：21 個斜線指令＋2 個前綴指令。原本記的 `askai_prompt_debug`／`askai_prompt_trace`／`askai_response_trace` 已不存在；PR-Q4 會在刪 ③ 時再刪 `personality_extract`、`personality_extract_status`。
+
+| 檔案 | 指令 |
 |---|---|
-| `askai_` | `askai`、`askai_prompt_debug`、`askai_prompt_trace`、`askai_response_trace` |
-| `ai_` | `ai_diary` |
-| `personality_` | `personality_extract`、`personality_extract_status` |
-| `persona_` | `persona_agent_test` |
-| （無） | `forget_tag` |
+| `commands/llm_commands.py` | `askai`、`ai_diary`、`persona_agent_test`、`personality_extract`、`personality_extract_status` |
+| `commands/user_commands.py` | `forget_tag`、`list_item_price`、`watch_keywords` |
+| `commands/article_commands.py` | `article_manager`、`get_baha_post`、`resend_article` |
+| `commands/management_commands.py` | `server_manager`、`server_info` |
+| `commands/rollcall_commands.py` | `rollcall_panel` |
+| `commands/trade_commands.py` | `trade_info`、`select_item`、`set_item_prices` |
+| `commands/test_commands.py`（正式環境也有載入） | `anonymous`、`echo`、`list_forum_posts`、`multi_select_demo`；前綴 `ping`、`helloworld` |
 
-同一個領域三種叫法，指令列表已經找不到東西。
+### 第一步：分層與子指令（低風險）
 
-### Phase 1：收斂成 subcommand group（低風險，可先做）
+- [ ] `test_commands` 改成只在開發環境載入（現在正式環境也載入，其中 5 個斜線指令沒有任何權限檢查，見下方「權限檢查收斂」）
+- [ ] 完成命令分類清單（使用者／管理者／開發）——上表是起點
+- [ ] AI／人格這群收成一個 `/persona` 子指令群組：PR-Q4 刪掉兩個萃取指令後剩 `persona_agent_test` → `/persona test`、`forget_tag` → `/persona forget_tag`、`ai_diary` → `/persona diary`。`/askai` **保持獨立**（天天用，藏進子指令反而難找）
+- [ ] 文章類提子指令設計稿：`/article start|stop|status|test`
+- **時機**：PR-Q4 刪 ③ 的兩個指令時一起改，避免改兩次（原本寫的「M4 排程上線時一起改」已過時）；與「程式結構整理」的 P2（拆 `llm_commands.py`、`user_commands.py`）一起考慮
 
-Discord 原生支援兩層子指令，一組最多 25 個 —— 9 個指令會收成選單裡的**一個**項目：
+### 第二步：管理入口與面板
 
-```
-/persona extract          （原 personality_extract）
-/persona status           （原 personality_extract_status）
-/persona test             （原 persona_agent_test）
-/persona forget_tag       （原 forget_tag）
-/persona diary            （原 ai_diary）
-/persona trace prompt|response   （原 askai_prompt_trace / askai_response_trace）
-```
+- [ ] 建立 `/panel admin` 空殼，把 `/article_manager` 掛進主控台（保留舊命令）
+- [ ] 人格管理面板，沿用 `intro_panel`／`community_panel`／點名的常駐訊息＋按鈕：上次萃取時間、成功筆數、失敗清單；按鈕：立即跑、跑 agent（選成員）、看最近一次 diff；agent 執行中顯示進度（步數／已用 token）。比子指令好在不用記指令名，而且看得到狀態
 
-`/askai` **保持獨立** —— 使用者天天用，藏進子指令反而難找。
+### 第三步：網頁 dashboard（真正的目標）
 
-**時機**：M4 排程上線時會再加指令（樣本清單維護、手動觸發），**一起改比較划算**，不要現在改一次、M4 再改一次。
-
-### Phase 2：管理面板（沿用既有 panel 機制）
-
-專案已有 `intro_panel` / `community_panel` / rollcall 的 `_try_refresh_admin_panel` —— 常駐訊息 + 按鈕，狀態變動時刷新。人格面板可直接沿用同一套：
-
-- 上次萃取時間 / 成功筆數 / 失敗清單
-- 按鈕：立即萃取、跑 agent（選成員）、看最近一次 diff
-- agent 執行中顯示進度（步數 / 已用 token）
-
-**比子指令好在**：不用記指令名，而且**看得到狀態**。
-
-### Phase 3：網頁 dashboard（真正的目標）
-
-`notify_server.py` 已經是 bot 內的 aiohttp server（`/health`、`/notify/{source}`），加唯讀路由即可。
-
-**資料源就是 M3 的兩張表**，所以這一階段**必須排在 M3 之後**：
+`notify_server.py` 已經是 bot 內的 aiohttp server（`/health`、`/notify/{source}`），加唯讀路由即可。資料源都已存在：
 
 | 頁面 | 資料源 |
 |---|---|
-| 人格版本歷史 / 長期漂移 | `persona_agent_versions` |
+| 人格版本歷史／長期漂移 | `persona_agent_versions` |
 | 執行紀錄、失敗率、幻覺率趨勢 | `persona_agent_runs` |
-| production vs agent 並排比對（M6 評測用） | 兩張表 + `auto_personality` |
+| 精簡版 vs agent 完整描述並排 | 兩張表＋`auto_personality` |
 
-**安全性**：只綁 host-only 介面或加 token，絕不開在對外網段 —— 內容是成員的完整發言證據。
+**安全性**：只綁 host-only 介面或加 token，絕不開在對外網段——內容是成員的完整發言證據。
 
-### 順序建議
+### 追蹤指標
 
-```
-M3（建表）→ Phase 1（子指令，與 M4 一起改）→ Phase 2（面板）→ Phase 3（網頁）
-```
+- [ ] 管理操作是否可由單一入口完成
+- [ ] 指令數量是否下降或更清楚
+- [ ] 正式環境是否已隔離開發命令
+- [ ] 是否維持可回滾（舊入口仍可用）
 
-Phase 3 的價值最高但依賴最多；Phase 1 隨時可做但要挑對時機（避免改兩次）。
+### 權限檢查收斂（暫緩）
 
+<!-- @meta
+id: permission-consolidation
+type: TODO
+status: blocked
+last_confirmed: 2026-10-02
+-->
+
+**現況（2026-10-02）**：9/21 已做掉一部分——`7817bd4` 刪掉兩個 `_check_guild_and_owner` 薄包裝、`3cbf28c` 點名按鈕改走共用的權限檢查（原本少了「在不在伺服器內」，私訊時會 `AttributeError`）。剩兩種寫法並存：5 個指令用 `@app_commands.checks.has_permissions(administrator=True)`（錯誤訊息是英文預設值），其餘在函式內呼叫 `utils/utils.py` 的 `check_guild(...)`（33 處）。9/04 的完整盤點已歸檔。
+
+**9/04 做過、已還原的方案（可直接重做）**
+1. `check_guild` 更名 `check_permission`——原名只描述四件事裡的第一件
+2. `utils/utils.py` 新增 `require_permission(owner=/admin=/role=)` 裝飾器＋`PermissionDenied`（`app_commands.CheckFailure` 子類）；`check_permission` 自己會回中文訊息，而 `discord_bot.on_app_command_error` 會把非冷卻錯誤再回一句「執行命令時發生錯誤」，**不自訂例外就會連發兩則**
+3. 指令改用裝飾器；按鈕／選單 callback 不是 app command，用不了裝飾器，改直呼 `check_permission`
+
+**重做時的坑**
+- `llm_commands` 的 `persona_agent_test` 是**入口出口各驗一次**（followup token 有 15 分鐘，期間權限可能被撤銷）——刻意的縱深防禦，不可以當成重複刪掉
+- 裝飾器必須在 `@app_commands.command` 之下才會被註冊成 check
+
+**尚未解決（一起盤到）**
+- ⚠️ `/anonymous` **零權限檢查**：任何人可叫機器人匿名發訊息到他看得到的任何頻道；`test_commands` 另外幾個同樣零檢查。使用者 2026-09-04 決定「沒有特別要求就先不用」動
+- owner 語意不一致：`check_role` 中 OWNER_ID 自動通過，`check_guild(admin_only=True)` 中不會
+- `config.json` 的 `role_mapping.Moderator` 是空陣列，`check_role` 對未設定的角色 fail-closed——哪天有指令寫 `required_role="Moderator"`，除 owner 外全數被擋，訊息卻像權限不足
+
+**待決：AST 守衛**：提案在 `test_shared_conventions.py` 加「每個 `@app_commands.command` 都必須有 `@require_permission`」，白名單用函式層級（`檔名.函式名`）。它跑在容器啟動 gate 裡，誤判會讓 bot 起不來，本專案一貫「寧可漏判不要誤判」；風險未評估完，**先不加**。
 ---
 
 ## 現況摘要
@@ -202,7 +214,7 @@ Phase 3 的價值最高但依賴最多；Phase 1 隨時可做但要挑對時機�
 | ComfyUI 產圖 + GPU 資源仲裁 | **規劃定案（2026-09-02）**；租約鎖與卸載 helper 已完成（`e13343d`），鎖有漏洞待修；落地細節討論中 | 25% | [ComfyUI 產圖](#comfyui-產圖--gpu-資源仲裁2026-09-02-規劃定案未開工) |
 | AI 私聊頻道 + 三層記憶（功能一·姊妹案） | 規劃完成（含道德守門）；人設 prompt 已就位；**本輪暫放旁邊** | 10% | [AI 私聊頻道](#ai-私聊頻道--三層記憶機制規劃中) |
 | 使用者指令記憶 (/remember) | 規劃中（與 AI 私聊頻道互補） | 5% | [/remember 規劃](#使用者指令記憶-remember-未來工作) |
-| Reaction 統計 / 社群互動玩法 | 規劃中 | 5% | [Reaction TODO](#reaction-統計與社群互動玩法) |
+| Reaction 統計 / 社群互動玩法 | 資料收集已完成（`raw_message_store`）；玩法、/askai 整合、人格加權都還沒做 | 15% | [Reaction 統計](#reaction-統計與社群互動玩法規劃資料收集已完成) |
 | 點歌機器人（Music Bot） | 已上線運作 | 85% | [點歌機器人](#點歌機器人專區) |
 | Telegram relay 可靠性 | 補掃、媒體防雷、相簿漏圖修正都已上線並驗證（9/29 起合併與補圖符合設計） | 98% | [Telegram 補掃](#telegram-漏收補掃與相簿漏圖已上線) |
 | 活動自動發布（公告 → Discord 伺服器活動） | **已上線**（連結修正、重複活動修正、就地升級）；待下一篇含活動的公告確認遷移摘要 | 95% | [活動自動發布](#活動自動發布連結指向錯誤--重複建活動已上線) |
@@ -210,11 +222,10 @@ Phase 3 的價值最高但依賴最多；Phase 1 隨時可做但要挑對時機�
 | MCP／搜尋工具化（網頁、公告、論壇） | **構想（2026-09-29）**，grill 第 2 輪；已定先做 MCP、LLM 決定何時查、位置（`services/search/`＋`llm/mcp_server.py`）、關鍵字全文搜尋、論壇索引範圍、`search`＋`fetch` 兩個工具；**設計已全部定案**，待實作 | 15% | [MCP／搜尋工具化](#mcp搜尋工具化2026-09-29-構想grill-中) |
 | Telegram 訊息 LLM 過濾 + 隔離區 | **構想（2026-09-28）**，討論中 | 0% | [Telegram 過濾](#telegram-訊息-llm-過濾--隔離區2026-09-28-構想討論中) |
 | 週期活動提醒（深塔海墟矩陣） | **已上線**：9/29 20:00 矩陣結束前提醒實發、手機通知確認正常；待 10/7 矩陣開放與自介面板置底驗證 | 95% | [週期活動提醒](#週期活動提醒深塔海墟矩陣已上線) |
-| 新成員歡迎訊息（接手 ProBot） | **已上線**（10/01 07:59 首次實發）；ProBot 歡迎功能是否已關待確認 | 95% | [新成員歡迎訊息](#新成員歡迎訊息接手-probot已上線) |
 | scraper 抓網頁機制＋IT 就地補內文 | **已上線**：IT 補內文已驗證（10/01 補 11 則）；HKEPC 10/01 03:46 後 0 次 403；巴哈每輪仍約 80 分鐘待查；SC-Q6 觀察 | 95% | [scraper 抓網頁機制](#scraper-抓網頁機制檢查2026-10-01-已上線) |
 | 巴哈轉發編輯限速＋續文／留言格顯示錯誤 | **2026-10-02 已上線並驗證**：同串編輯排隊 6 秒、續文逐則比對並補回導航連結、建立當下記 hash；封存串等新回覆再補、新回覆編號修正、本文底部連到第一則續文；24 項新測試、完整 744 項全過；**11:16 上線驗證：429 由 104→0、同串間隔 6 秒、連結全部到位**；BH-Q5 已修 31 格；commit `b11df27`；之後觀察每天 429 與熱門串單輪耗時 | 100% | [巴哈轉發編輯](#巴哈轉發編輯被限速續文留言格顯示錯誤2026-10-02-已上線) |
-| 跨來源整合（Article/FB/PTT/TG） | 有方向，尚未全面收斂 | 35% | [跨來源整合](#跨來源整合專區) |
-| Discord Bot 管理入口 | 規劃中 | 10% | [管理 TODO](#discord-bot-管理入口與指令整理-todo) |
+| 跨來源整合（Article/FB/PTT/TG） | 發文已共用 `post_to_channel`、Telegram 自成分層；讀資料與事件模型整合沒做（動手前先照「沿用現有架構」重新評估） | 40% | [跨來源整合](#跨來源整合專區規劃發文已共用) |
+| 指令整理與管理入口 | 規劃：test 指令隔離、`/persona` 子指令（與 PR-Q4 一起）、管理面板、網頁 dashboard；權限檢查收斂暫緩 | 10% | [指令整理](#指令整理與管理入口規劃未動工) |
 
 > 已完成 / 過往工作（Bahamut scraper + 反爬基礎設施、幽靈點名核心 + DM、社群 ID 查詢 Phase 0、Telegram Relay、Music Bot 完整實作等）詳見 `TODO-completed.md`。
 >
@@ -528,22 +539,6 @@ affects: 排程、身份組、config.json
 - 矩陣提醒**不寫階段編號**（S2-3 這種要靠版本號解析，版本號可能跳 4.0）。
 - 版本延期時官方一定會公告：排程每次都依最新公告重算，面板與提醒日期跟著更新即可。
 - 深塔／海墟期數：使用者覺得可有可無；可由「深塔第 33 期＝2026-03-02、海墟第 14 期＝2026-02-16、每 28 天 +1」直接推算。
-
----
-
-## 新成員歡迎訊息：接手 ProBot（已上線）
-
-<!-- @meta
-id: member-welcome-message
-type: STATE
-status: confirmed
-last_confirmed: 2026-10-02
-affects: settings/channel_registry.py, services/community/member_welcome.py（新）, discord_bot.py, test/test_member_welcome.py（新）
--->
-
-> 已上線：9/28 15:04 綁定「歡迎」頻道，10/01 07:59 首次實發歡迎訊息。設計與實作紀錄已歸檔到 `TODO-completed.md`「新成員歡迎訊息：接手 ProBot（歸檔 2026-10-02，原 2026-09-28）」。
-
-- [ ] ProBot 的歡迎功能關了嗎？（log 查不到，待使用者確認；沒關的話新成員會收到兩則歡迎）
 
 ---
 
@@ -937,14 +932,7 @@ last_confirmed: 2026-10-02
 
 > 原內容停在 2026-03 的 Ollama 時代（gemma4、`ollama_runtime_config.json`），已歸檔到 `TODO-completed.md`「專案 AI 架構總覽（Ollama 時代）（歸檔 2026-10-02，原 2026-03-31）」。留著這個區塊是因為其他區塊的 `depends_on` 指向 `project-architecture`；重寫時以 `AGENTS.md` 與 `src/` 現在的分層為準。
 
-### SFT 決策門檻
-
-滿足以下條件再投入 SFT：
-- 有足量高品質資料（非噪音對話）
-- 有清楚評估集與 KPI（不是憑感覺）
-- 已做過 prompt/RAG/模型路由優化仍卡住
-
-否則先不做 SFT，先做產品迭代 + 資料閉環。
+SFT 決策門檻已搬到「產品能力 TODO」。
 
 ---
 
@@ -970,112 +958,40 @@ last_confirmed: 2026-04-19
 
 ---
 
-## Reaction 統計與社群互動玩法
+## Reaction 統計與社群互動玩法（規劃；資料收集已完成）
 
 <!-- @meta
 id: reaction-stats-todo
 type: TODO
 status: draft
 depends_on: [project-architecture]
-affects: [product-todo, context-prompt-optimization]
-last_confirmed: 2026-04-18
+affects: [product-todo]
+last_confirmed: 2026-10-02
 -->
 
-> **目標：** 用 Discord reaction 統計把群內互動量化，餵回 `/askai` 與人格萃取，讓 bot 更有「社群感」。
+> **目標：** 用 Discord reaction 統計把群內互動量化，餵回 `/askai` 與人格描述，讓 bot 更有「社群感」。
 
-### 現況
-- `intents.reactions = True` 已開（`src/discord_bot.py:43`）
-- 僅 `src/commands/forum_monitor.py:123` 在監聽 `on_raw_reaction_add`（論壇管理用途）
-- **尚無任何「某 user 的訊息被按了多少表情」的累積統計**
+**資料已經有了（原 Phase 1 的收集部分）**：`discord_bot.py` 的 `on_raw_reaction_add`／`remove` → `llm/storage/raw_message_store.py` 寫進 `discord_messages_raw.reaction_breakdown`（每則訊息：誰按了哪個表情、依表情與類別計數）；bot 自己按的不算、自訂與 unicode 表情已統一比對鍵；插話「依稀記得」的召回已經拿它當重要度。原規劃要新建的 `message_reactions` 表不需要了。原規劃全文已歸檔。
 
-### Phase 1 — 基礎統計 + 公開玩法（共用一組 DB）
+### 還沒做
 
-- [ ] 在 `discord_bot.py` 註冊全域 `on_raw_reaction_add` / `on_raw_reaction_remove` 監聽
-- [ ] `state_db` 新增 `message_reactions` 表：欄位至少含 `message_id`, `message_author_id`, `guild_id`, `channel_id`, `emoji`, `reactor_id`, `added_at`；索引 `(message_author_id, emoji)`、`(message_id)`
-- [ ] 排除機器人自己按的 reaction（避免污染）
-- [ ] emoji normalize：unicode emoji vs custom emoji（`<:name:id>`）統一比對鍵
-- [ ] **每週金句頒獎**：排程每週日發佈過去 7 天 top 3 reacted 訊息到指定頻道
+**玩法（都用上面的資料）**
+- [ ] **每週金句頒獎**：排程每週日發佈過去 7 天 reaction 最多的 3 則訊息到指定頻道
 - [ ] **神級發言名人堂**：訊息 reaction 數達門檻（預設 10）自動複製到 `#hall-of-fame` 頻道
-- [ ] **個人招牌 emoji**：新增 `/my_emoji` 查被按最多的 emoji、top N 送反應的人
+- [ ] **個人招牌 emoji**：`/my_emoji` 查自己被按最多的 emoji、送反應最多的前 N 人
 
-### Phase 2 — /askai 整合（殺手級應用）
+**/askai 整合**
+- [ ] 查發問者近 N 天的 reaction 熱點（熱門發言 1～3 則＋招牌 emoji），在 `asker_profile` 下方加 `<asker_recent_highlights>` 區塊
+- [ ] 讓模型能自然帶出「你上週那句大家反應很好」；safety rules 標為可信，提醒不要整段引述原文以免尷尬
 
-- [ ] `_handle_askai_request` 查詢 asker 近 N 天 reaction 熱點（top 1~3 熱門發言 + 招牌 emoji）
-- [ ] 在 `asker_profile` 下方新增 `<asker_recent_highlights>` 區塊餵給 LLM
-- [ ] LLM 能自然帶出「你上週說的那句 XXX 大家反應很好」等社群感回答
-- [ ] 記得 safety rules 中標為「可信」並提醒不要直接引述完整原文以免尷尬
-
-### Phase 3 — 強化人格萃取
-
-- [ ] `personality_extractor` prompt 餵入該使用者的 reaction-received 模式（常收到哪類 emoji → 推論人格面向）
-- [ ] 設計加權規則：例如收到 🤣 多 → 加權「幽默感」；收到 😢 多 → 加權「共感」
-- [ ] 跟 `emoji_dictionary.txt` 聯動，把 emoji 語意轉成自然語言特徵
+**人格描述加權**（原本寫給 ③；③ 預定 10/05 後刪，要做就改寫給 ④ persona agent）
+- [ ] 把「這個人常收到哪類 emoji」當線索（收到 🤣 多 → 幽默感、😢 多 → 共感），跟 `emoji_dictionary.txt` 聯動轉成自然語言特徵
 
 ### 設計備忘
 
-- **歷史回補**（批次掃 `channel.history()` 抓既有 reaction）**不納入 Phase 1**；先跑一段時間累積自然資料，有需要再做
-- Discord 只會回傳「目前還存在的 reaction」，撤回的無法回補
-- 大群 `channel.history` 有 rate limit，需批次 + 退避
-- 隱私：使用者退群後的 reaction 記錄保留政策待定（預設保留，需評估）
-- reaction vs /askai 整合可能加 context token 成本，需在 Phase 2 實測並設上限
-
-### 建議實作順序
-
-**先 Phase 1 全做完**（事件收集 + DB + 三個玩法）→ **再 Phase 2**（用 Phase 1 累積資料 + askai 整合）→ **最後 Phase 3**（人格萃取加權）。
-Phase 1 三個玩法**共用同一張 DB**，不要拆開做。
-
-### 涉及檔案（預估）
-
-| 檔案 | 角色 |
-|---|---|
-| `src/discord_bot.py` | 註冊 reaction 事件監聽 |
-| `src/services/state_db.py` | 新增 `message_reactions` 表 + 查詢 API |
-| `src/services/reaction_stats_service.py`（新增） | 聚合查詢、排程邏輯 |
-| `src/commands/reaction_commands.py`（新增） | `/my_emoji`、每週金句公告 |
-| `src/commands/llm_commands.py` | Phase 2：組 `asker_recent_highlights` |
-| `src/llm/persona/personality_extractor.py` | Phase 3：萃取時加權 reaction 訊號 |
-
----
-
-## Ambient 互動紀錄 + 正向學習（自我蒸餾 → 個性演化）
-
-<!-- 2026-06-22 -->
-
-### 目標
-讓琇紫從「群眾對它插話的反應」學習，逐步長出**被這個群塑形的個性**——但 **prompt 不能無限增長**：靠「蒸餾成固定大小的風格、覆寫」，不是「堆 few-shot」。
-
-### 已實作（Part A，已驗證；**反應捕捉待重啟生效**）
-- **`ai_interactions` 表**（pgvector 那個 Postgres，普通 SQL、軟連結、無硬 FK）。每次「真的開口」的插話寫一筆：
-  `directed / trigger_kind / trigger_author_id / trigger_message_id / trigger_text / context_snippet / reply_text / reply_message_id / trace_id`
-  + 反應證據欄 `reaction_count / positive_reactions / negative_reactions`。
-- **寫入**：`ambient_reply._record_ambient_interaction`（送出後 `asyncio.to_thread` 寫，best-effort）。
-- **反應＝群眾的隱式標籤**：`on_raw_reaction_add/remove` → 若被按的是 bot 插話（`ai_interactions_store.is_tracked_reply` 記憶體集合命中）→ `note_reaction` 用既有 `reaction_classifier`（讀 `emoji_dictionary.txt`，認得自訂 emoji）分類：agree/laugh=正向、negative=負向 → 更新該筆。
-- **日記讀**：`diary_reflection` 撈當天 `ai_interactions` 結構化餵入（自發/被問各幾次、當時在聊什麼、回了什麼、哪句有正向反應）。
-- 檔案：`src/llm/storage/ai_interactions_store.py`(新)、`ambient_reply.py`、`ambient_diary.py`、`discord_bot.py`(on_ready 建表 + 反應 hook)。
-
-### Phase 2 — 自我蒸餾學習（**計畫，未實作**）
-核心：**蒸餾不堆疊**。定期把累積的正/負向插話歸納成一小段固定大小的「學到的風格」，**覆寫**不追加。
-- **資料來源/標記**：`ai_interactions`；正向＝`positive_reactions>0 且 negative_reactions=0`、負向＝`negative_reactions>0` 或事後有人說「尬聊」。（之後可加更強訊號：被回話 / 被 echo。）
-- **蒸餾 job**（複用排程範本，每 3~7 天一次）：撈近期正/負向插話 → LLM「歸納 3~6 條：你在這群講話最對味/最冷場的樣子（切入點、句式、梗的類型）」→ **與現有 learned_style 合併精煉**（累積、不重練）。
-- **輸出**：寫進新檔 `settings/prompts/learned_style.txt`（**長度上限 ~500 字 / ≤6 條，覆寫**）；`_load_ambient_prompt` 多組這一層（identity + guardrails + **learned_style** + 插話行為）；mtime 自動生效。
-- **不爆 prompt**：原始例子永不進 prompt，只有蒸餾後的原則進；固定大小覆寫。
-- **長出個性**：profile 隨更多正向資料演化 → 風格偏向這群會獎勵的樣子（仍在 base 人格框架內）。
-- **護欄**：learned_style 從屬於 guardrails/identity（只影響「怎麼講」、不碰安全紅線）；人類可讀可手改；某習慣不再得反應 → 下次蒸餾自然淡出（自我修正）。
-- **對稱**：等同把現有 `personality_extractor`（蒸餾成員個性）指向 bot 自己。
-
-### 節奏（已與 user 確認 2026-06-22）
-1. **表情/反應蒐集先建立、先上線**（Part A ✅，待重啟）。
-2. **先收集 1~2 週**，用日記觀察「這群到底會不會按反應」；若他們愛回話多過按讚 → 把「被回/被 echo」也納入標記。
-3. **有訊號再建 Phase 2 蒸餾**（先有資料再學，別蒸餾空氣）。
-
-### 涉及檔案（Phase 2 預估）
-| 檔案 | 角色 |
-|---|---|
-| `src/settings/prompts/learned_style.txt`（新） | 蒸餾出的固定大小「學到的風格」 |
-| `src/llm/self_distill.py`（新，暫名） | 撈 `ai_interactions` 正/負向 → LLM 蒸餾 → 覆寫 learned_style |
-| `src/llm/ambient/ambient_reply.py` `_load_ambient_prompt` | 多組 learned_style 一層 |
-| `src/discord_bot.py` | 蒸餾排程（每 3~7 天） |
-
+- 歷史回補（掃 `channel.history()` 抓既有 reaction）先不做：Discord 只回傳目前還存在的 reaction，大群還有 rate limit
+- 使用者退群後的 reaction 紀錄保留政策待定（預設保留）
+- /askai 整合會增加 context token，實作時要設上限
 ---
 
 ## 使用者指令記憶 (/remember) 未來工作
@@ -1476,123 +1392,29 @@ last_confirmed: 2026-04-18
 
 ---
 
-## 跨來源整合專區
+## 跨來源整合專區（規劃；發文已共用）
 
 <!-- @meta
 id: cross-source-integration
-type: STATE
-status: confirmed
+type: TODO
+status: draft
 depends_on: []
 affects: [project-architecture]
-last_confirmed: 2026-04-07
+last_confirmed: 2026-10-02
 -->
 
-> Telegram Relay 已完成（歸檔至 `TODO-completed.md`）。
+> **已完成的部分**：Telegram 轉發自成一套分層（`TelegramMessageRepository`、`MessageRouteResolver`、`TelegramRenderAdapter`、`DiscordMessagePublisher`、`MessageRelayWorker`，都在 `services/relay/telegram_relay_service.py`）；Article、FB、PTT、IT 與活動發文已共用 `utils.discord_content.post_to_channel`（論壇／文字頻道分流、附件分批、失敗退純文字）；FB 改推送模式；Telegram 路由可在 `/server_manager` 設定。原規劃全文（2026-03-25 共識、RenderPlan 結構、遷移原則）已歸檔。
+>
+> **動手前先對照**：2026-09-29 起的原則是「沿用現有架構、先指出不合理處再最小修改，不另起一套分層」。下面這些是 3 月規劃裡還沒做的，要做之前照這條重新評估值不值得。
 
-### 整合方案（按部就班）
+### 還沒做
 
-**優先整合順序（2026-03-25 共識）：**
-1. 先整合讀資料（fetch/orchestrator）
-2. 再整合 render/route
-3. Publisher 放後面
-- 理由：Article/FB/PTT 在取文與去重流程有高度相似性，先抽讀資料風險較低；發文端差異（TextChannel / ForumThread / 留言增量 / 圖片策略）較大，適合後置整合
-
-**Step 1 — 整合讀資料流程：**
-- 新增 `SourceFetchPort` + 來源實作：`ArticleFetchAdapter`、`FbFetchAdapter`、`PttFetchAdapter`、`TelegramFetchAdapter`
-- 新增 `SourceFetchOrchestrator`（strategy/case 分派）
-- 保留各來源原本去重邏輯不動
-
-**Step 2 — 統一事件模型：**
-- 定義 `MessageRenderAdapter`（標準輸入模型）+ 各來源實作
-- Adapter 採**無損封裝**：
-  - `normalized_payload`：共用欄位（給 Publisher）
-  - `source_payload_raw`：完整原始資料
-  - `source_meta`：來源型別、版本、追蹤 key
-- 原則：
-  1. Publisher 只依賴 `normalized_payload`，不碰來源細節
-  2. 任何來源特有欄位不得丟棄，必須保留在 `source_payload_raw`
-  3. 若某來源需要特殊顯示（例如 PTT 留言串、Forum tag、Telegram spoiler），由對應 Adapter 在轉換階段映射到 `normalized_payload` 的擴充欄位，或由來源專屬 post-processor 處理，避免硬塞到 Publisher
-
-**Step 3 — 導入 Route Resolver：**
-- `MessageRouteResolver`，route 規則從流程碼中抽離
-- Telegram 先接 `telegram_channel_routes`，其他來源逐步納入
-
-**Step 4 — 整合 Publisher：**
-- 新增/補強 `DiscordMessagePublisher`（文字、附件分批、重試、錯誤紀錄）
-- 保留 `send_article_to_channel/send_fb_post_to_channel/send_ptt_post_to_forum_channel` 外觀，內部逐步改呼叫 publisher
-- 先做 capability 共用，不做來源語意硬整併
-
-**Step 5 — 收斂 Worker：**
-- 視穩定度決定是否導入 `MessageRelayWorker` 作為統一事件協調器
-- 若導入，先把 Telegram 事件觸發收斂進來，再評估其他 source
-
-**Step 6 — 設定與管理命令統一：**
-- 保持 `config.json` 為單一 runtime 設定來源
-- 新增 route 管理命令（查詢/設定 Telegram routes）
-- 逐步把分散 `open(config.json)` 的寫法統一到 `ChannelConfig`
-
-### 格式保留策略
-
-**核心原則：同一個 Publisher 只負責「對頻道發文能力」，內容與格式邏輯留在 Adapter。**
-
-**分層責任（避免格式被洗平）：**
-
-1. `*RenderAdapter`（來源專屬）
-   - 負責：內容組裝（文字段落、欄位順序、標題、footer）、視覺格式（Embed 樣式、Forum thread 命名、留言分段）、來源特化（PTT 留言續推、FB 首圖策略、Telegram spoiler）
-   - 輸出：`RenderPlan`（發文計畫，不是單一字串）
-
-2. `DiscordMessagePublisher`（共用能力）
-   - 只負責執行 `RenderPlan`：send/edit/reply/thread 建立、附件分批、retry/backoff、錯誤處理與 observability log
-   - **不決定內容文案與版型**
-
-> 這樣可讓 PTT 保持「先開 thread → 送附圖 → 補留言」、FB 保持「主文+首圖 → 其餘分批」、Article 保持「現有 embed 欄位與圖像策略」，而 Publisher 只做可靠執行。
-
-**RenderPlan 結構：**
-- `target_type`: `text_channel | forum_channel | thread`
-- `operations[]`: `create_thread`、`send_embed_with_files`、`send_files_batch`、`send_comment_chunks`
-- `payload_meta`: source/type/version/trace id
-
-**遷移原則：**
-1. 先做 adapter 輸出與舊行為 golden output 比對
-2. 逐來源切換（Article → FB → PTT → Telegram），一次只切一條
-3. 每切一條做發文結果快照比對（文字、embed 欄位順序、圖片順序、thread/留言行為）
-4. 若不一致，先修 adapter 不改 publisher
-
-### Source 路徑分流
-
-1. **Telegram（TG）走事件消費層 + Telegram Repository**
-   - 入口：`MessageRelayWorker`
-   - 即時：`LISTEN telegram_new_message`
-   - 補償：每 1 小時 polling 補漏
-   - 查詢：`TelegramMessageRepository` 依 message key 取完整訊息 + 媒體
-
-2. **FB 走 Scraper 推送通知（與 Bahamut 同模式）**
-   - Scraper 抓完 → POST `/notify/fb` → `notify_server._process_fb` → `FBMonitor.check_and_send_fb_posts()`
-   - 不再輪詢（原 `start_fb_monitoring` 每 600 秒）
-
-3. **PTT / Article 走來源資料存取層（SourceMessageRepository/Fetch）**
-   - 目前來源型態：API pull
-   - 由對應 fetch/repository adapter 取資料（非 Telegram notify 路徑）
-   - 後續再進入 render adapter 與共用 publisher
-
-3. **整合原則**
-   - TG 與 PTT/FB/Article 允許「入口不同」
-   - 但在 render/publish 階段收斂到同一套契約（`RenderPlan` + `DiscordMessagePublisher`）
-
-### 跨來源 TODO
-
-**P0（本期必做）：**
-- [ ] 建立 `SourceFetchPort` 與來源實作（Article/FB/PTT/Telegram）
-- [ ] 建立 `SourceFetchOrchestrator`（strategy/case 分派）
-
-**P1（穩定化）：**
-- [ ] 建立 `MessageRenderAdapter` 無損封裝模型
-- [ ] 統一 config 讀寫方式，減少直接 `open(config.json)` 的分散寫法
-
-**P2（整合擴充）：**
-- [ ] 保留外部 API 不變，逐步內部改接 publisher（Article/FB/PTT）
-- [ ] 規劃/新增管理命令：telegram route 查詢與設定
-
+- [ ] 讀資料整合：`SourceFetchPort`＋各來源實作、`SourceFetchOrchestrator`（各來源原本的去重邏輯不動）
+- [ ] 統一事件模型：無損封裝（`normalized_payload`／`source_payload_raw`／`source_meta`），目前只有 Telegram 有自己的 RenderAdapter
+- [ ] Route 規則從流程碼抽離、其他來源納入（目前只有 Telegram 有 `MessageRouteResolver`）
+- [ ] 視穩定度把其他來源的事件觸發收斂進 `MessageRelayWorker`
+- [ ] 設定讀寫統一到 `ChannelConfig`：還有 7 處直接 `open(config.json)`（10-02 盤點）
+- Telegram 路由設定的既有 bug（用來源名稱當 key 寫入，只有 chat_id 當 key 查得到）記在「Telegram 訊息 LLM 過濾」區塊的「順便發現的既有問題」
 ---
 
 ## 產品能力 TODO
@@ -1600,113 +1422,31 @@ last_confirmed: 2026-04-07
 <!-- @meta
 id: product-todo
 type: TODO
-status: confirmed
-last_confirmed: 2026-03-31
+status: draft
+last_confirmed: 2026-10-02
 -->
 
-### Phase 0（1 週，先拿數據）
-- [ ] 在 `/askai` 回覆後加入快速反饋（👍/👎 或按鈕）
-- [ ] 寫入回饋日誌（含問題、回覆、model、context meta、feedback）
-- [ ] 建立每日 KPI 彙總腳本（互動量、滿意率、平均回覆長度、失敗率）
+> 2026-03 的規劃，到 2026-10-02 都還沒做（盤點過）。原文已歸檔；這裡標上後來的相關進展。
 
-### Phase 1（1~2 週，提升好玩度）
-- [ ] 增加「每日話題/今日任務」指令
-- [ ] 增加「群友印象小卡」展示指令
-- [ ] 增加「梗庫/金句」功能
-- [ ] 增加「輕量遊戲化」：連續互動天數、活躍徽章
+### Phase 0：先拿數據
+- [ ] `/askai` 回覆後加快速反饋（👍／👎 或按鈕）——插話已經有 `ai_interactions` 記反應，/askai 還沒有
+- [ ] 寫入回饋日誌（問題、回覆、model、context meta、feedback）
+- [ ] 每日 KPI 彙總（互動量、滿意率、平均回覆長度、失敗率）
 
-### Phase 2（2 週，品質優化）
-- [ ] 建立 Prompt A/B 實驗（至少 2 組 system prompt）
-- [ ] 模型路由策略（閒聊/技術問答/審核分流不同模型）
-- [ ] RAG 召回評估集（固定 50~100 題做離線比較）
+### Phase 1：提升好玩度
+- [ ] 「每日話題／今日任務」指令
+- [ ] 「群友印象小卡」展示指令
+- [ ] 「梗庫／金句」功能——招牌梗（`signature_tag`）已在內部累積各人的梗，可以拿它當資料來源；金句可跟「Reaction 統計」的每週金句合併
+- [ ] 輕量遊戲化：連續互動天數、活躍徽章
 
-### Phase 3（資料成熟後再做 SFT）
-- [ ] 蒐集 3k~10k 高品質多輪對話（含偏好標註）
-- [ ] 先做偏好對齊（DPO/ORPO）小模型實驗
+### Phase 2：品質優化
+- [ ] Prompt A/B 實驗（至少 2 組 system prompt）
+- [ ] 模型路由（閒聊／技術問答／審核分流）——目前 GPU 一次只放得下一顆大模型（見 ComfyUI 區塊），全部共用同一顆
+- [ ] RAG 召回評估集（固定 50～100 題做離線比較）
+
+### Phase 3：資料成熟後再做 SFT
+- [ ] 蒐集 3k～10k 高品質多輪對話（含偏好標註）
+- [ ] 先做偏好對齊（DPO／ORPO）小模型實驗
 - [ ] 若明顯優於 prompt-only，再擴大 SFT
 
----
-
-## Discord Bot 管理入口與指令整理 TODO
-
-<!-- @meta
-id: discord-management-todo
-type: TODO
-status: confirmed
-last_confirmed: 2026-03-31
--->
-
-### 目標 1：入口整合
-- [ ] 建立 `/panel admin` 空殼
-- [ ] 將 `/article_manager` 掛入主控台（保留舊命令）
-
-### 目標 2：指令分層（使用者 vs 管理者 vs 開發）
-- [ ] `test_commands` 改成 dev-only 載入
-- [ ] 完成命令分類清單
-
-### 目標 3：子命令化
-- [ ] 提出子命令設計稿（`/article start|stop|status|test`）
-
-### 追蹤指標
-- [ ] 管理操作是否可由單一入口完成
-- [ ] 指令數量是否下降或更清楚
-- [ ] 正式環境是否已隔離開發命令
-- [ ] 是否維持可回滾（舊入口仍可用）
-
-### 目標 4：權限檢查收斂（**2026-09-04 盤點完成・改動已還原・暫緩**）
-
-<!-- @meta
-id: permission-consolidation
-type: TODO
-status: blocked
-last_confirmed: 2026-09-04
--->
-
-**暫緩原因**：使用者決定先專注 ComfyUI 串接，不想同時承擔這個改動的風險。實作過一次、
-測試全綠（353），但**已 `git checkout` 全數還原**，本節保留盤點結果，重做時不必再查一遍。
-
-**現況：同一件事有五種寫法**（23 個 slash 指令 + 21 個按鈕／選單 callback）
-
-| 寫法 | 用在哪 | 問題 |
-|---|---|---|
-| `@app_commands.checks.has_permissions(administrator=True)` | 5 個指令 | 錯誤訊息是英文預設值 |
-| `check_guild(interaction, owner_only=/admin_only=/required_role=)` | 函式體內，12 個指令 | 藏在第 4~6 行，盤點要逐一打開看 |
-| `user_commands._check_guild_and_owner()` | 5 個 callback | **只透傳 `owner_only`**，`admin_only` / `required_role` 被丟掉 → 該檔永遠設不了管理員限制 |
-| `management_commands._check_guild_and_owner()` | 8 個 callback | 同名但預設值相反（`owner_only=True`），兩個 cog 讀同一個名字得到不同行為 |
-| `rollcall._check_admin()` | 8 個按鈕 | 自己重寫，**少了「在不在伺服器內」** → 私訊時 `interaction.user` 是 `User` 沒有 `guild_permissions`，會 `AttributeError` |
-
-底層其實都通到 `utils/utils.py` 的 `check_guild()`；`check_role()` 是它的角色判斷零件，
-另外被 `commands/forum_monitor.py` 獨立使用（吃 member 不吃 interaction，所以不能合併）。
-
-**做過的方案（可直接重做）**
-1. `check_guild` → 更名 `check_permission`（33 處）——原名只描述四件事裡的第一件
-2. `utils/utils.py` 新增 `require_permission(owner=/admin=/role=)` 裝飾器 + `PermissionDenied`
-   （`app_commands.CheckFailure` 子類）；`check_permission` 自己會回中文訊息，而
-   `discord_bot.on_app_command_error` 會把非冷卻錯誤再回一句「執行命令時發生錯誤」，
-   **不自訂例外就會連發兩則**
-3. 17/23 指令改用裝飾器；三個薄包裝刪除，21 個 callback 改直呼 `check_permission`
-   （callback 不是 app command，用不了裝飾器）
-4. `test_commands` 6 個維持零檢查（見下）
-
-**重做時已知的三個坑**
-- `management_commands` 的 View 內是 `self.cog._check_guild_and_owner(...)`，跟其他寫法不同，
-  整批取代會漏掉兩處
-- `llm_commands` 的 `persona_agent_test` 是**入口出口各驗一次**（followup token 有 15 分鐘，
-  期間權限可能被撤銷）——那是刻意的縱深防禦，不可以當成重複刪掉
-- 裝飾器必須在 `@app_commands.command` 之下才會被註冊成 check
-
-**尚未解決（與本次收斂無關，但一起盤到）**
-- ⚠️ `/anonymous` **零權限檢查**：任何人可叫機器人匿名發訊息到他看得到的任何頻道。
-  `test_commands` 另外 5 個（`echo` / `list_forum_posts` / `ping` / `hello_world` /
-  `multi_select_demo`）同樣零檢查。使用者 2026-09-04 決定「沒有特別要求就先不用」動。
-- owner 語意不一致：`check_role` 中 OWNER_ID **自動通過**，`check_guild(admin_only=True)`
-  中**不會**——同一個 owner 走不同路徑結果不同
-- `config.json` 的 `role_mapping.Moderator` 是空陣列。`check_role` 對未設定的角色 fail-closed，
-  所以哪天有指令寫 `required_role="Moderator"`，除 owner 外全數被擋，而訊息會說「僅限具有
-  Moderator 角色的使用者使用」——看起來像權限不足，實際是設定沒填
-
-**待決：AST 守衛**
-提案是在 `test_shared_conventions.py` 加一條「每個 `@app_commands.command` 都必須有
-`@require_permission`」，白名單用**函式層級**（`檔名.函式名`）而非整檔豁免，新增指令忘記加就紅。
-但**它跑在容器啟動 gate 裡，誤判會讓 bot 起不來**，而本專案的取捨一貫是「寧可漏判不要誤判」。
-風險未評估完（指令宣告形式有幾種、AST 會不會漏、改名會怎樣），**先不加**。
+**SFT 決策門檻**（從架構總覽搬來）：有足量高品質資料（非噪音對話）、有清楚的評估集與 KPI、已做過 prompt／RAG／模型路由優化仍卡住——三者都滿足才投入 SFT，否則先做產品迭代＋資料閉環。
