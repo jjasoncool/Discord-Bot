@@ -246,6 +246,10 @@ Dorothy_wink = laugh
 # === 自動偵測 2026-08-15（待填寫） ===
 Dorothy_chaos = negative
 Dorothy_cry = negative
-Dorothy_fear = negative
+Dorothy_fear = 嚇到、害怕 | negative
 Dorothy_grab = agree
 Dorothy_laugh = laugh
+
+# === 別的伺服器的表情（AI 看圖補的，可直接改） ===
+UN_PoincoWOW = 震驚、哇 | think
+ok = 呆滯、無語 | neutral
