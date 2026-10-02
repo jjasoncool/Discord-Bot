@@ -603,6 +603,54 @@ class DiaryReflectionSettings(BaseSettings):
         return (init_settings,)
 
 
+
+class EmojiAutofillSettings(BaseSettings):
+    """看到沒描述的表情或貼圖時，背景讓模型看圖補字典（`llm.preprocess.emoji_autofill`）。
+
+    補哪些：別的伺服器的表情與貼圖、本伺服器表情字典裡空白或只有類別字的行；使用者寫過的描述不動。
+    每個只看一次（寫進字典就查得到），沒出現過的不處理。只吃 class 預設值，理由同 `PersonaAgentSettings`。
+    """
+
+    #: off＝不做；dry_run＝看圖、寫 log，不寫檔（改 prompt 後想先抽查時用）；on＝寫入字典
+    #: 2026-10-02 使用者同意直接正式寫入（實測 10 個有 4 個偏，偏的由使用者看到再改，AI 不會再動）
+    mode: Literal["off", "dry_run", "on"] = "on"
+
+    #: 每天最多看幾張（含失敗與看不出來的）。近 30 天別的伺服器的表情 168 種，平均一天不到 6 種新的
+    daily_limit: int = 30
+    #: 看不出來、失敗、或試跑看過的，隔多久才再看同一個
+    retry_hours: int = 24
+    #: 04:00 維護（人格萃取、persona agent）在用模型，這段時間不跑；錯過的下次被看到再補
+    quiet_start: str = "04:00"
+    quiet_end: str = "07:30"
+
+    #: 描述長度上限（字典檔頭的填寫指南寫 5～15 字）
+    max_description_chars: int = 15
+    #: 給模型看的訊息每則截斷長度
+    max_context_chars: int = 200
+
+    prompt_path: str = "/app/settings/prompts/emoji_autofill_prompt.txt"
+    #: 每天第一次改寫字典前備份到這裡，各保留 `backup_keep` 份
+    backup_dir: str = "/logs/dictionary_backup"
+    backup_keep: int = 14
+
+    #: 逾時就當這次失敗（下次被看到、過了 `retry_hours` 再試）。不另設 context 長度：
+    #: 有的後端換 context 長度要重載模型，會拖慢插話
+    timeout_seconds: int = 120
+
+    model_config = SettingsConfigDict(extra="forbid", frozen=True)
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: Any,
+        env_settings: Any,
+        dotenv_settings: Any,
+        file_secret_settings: Any,
+    ) -> Tuple[Any, ...]:
+        """停用 env/dotenv，僅接受初始化參數與 class 預設值。"""
+        return (init_settings,)
+
 def load_context_safety_rules(path: str | Path) -> LLMContextSafetyRules:
     """讀取並驗證 safety rules JSON（嚴格模式：缺檔或缺值直接拋錯）。"""
     safety_path = Path(path)

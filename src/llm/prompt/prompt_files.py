@@ -4,7 +4,7 @@
 一字不差的載入器（只差 log 訊息與設定路徑），persona agent 又要第三份。這種
 複製貼上的問題不在行數，而在於**修一個 bug 要記得改好幾處**。
 
-不只 prompt：表情字典也走 `read_parsed`（自己的解析函式，檔案改了才重新解析）。
+不只 prompt：表情字典、貼圖字典也走 `read_parsed`（各自的解析函式，檔案改了才重新解析）。
 
 不收斂的例外（形狀不同，各自保留）：
   - `llm_service._load_runtime_config_cached`：讀的是 pydantic 設定物件，錯誤處理不同

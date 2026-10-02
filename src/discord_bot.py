@@ -531,8 +531,19 @@ async def on_message(message):
         from llm.ambient.ambient_reply import maybe_ambient_reply
         asyncio.create_task(maybe_ambient_reply(bot, message))
 
+    # 沒描述的表情／貼圖：背景讓模型看圖補字典（每個只看一次；節流與錯誤自己處理）
+    if not message.author.bot and message.guild is not None and (message.stickers or "<" in (message.content or "")):
+        from llm.preprocess.emoji_autofill import observe as observe_emoji
+        asyncio.create_task(observe_emoji(message))
+
     # 繼續處理命令
     await bot.process_commands(message)
+
+@bot.event
+async def on_guild_stickers_update(guild, before, after):
+    """伺服器貼圖有增刪改 → 更新描述快取。bot 長時間不重啟，不能只在啟動時載入。"""
+    from llm.preprocess.sticker_cache import update_guild
+    update_guild(before, after)
 
 @bot.event
 async def on_typing(channel, user, when):

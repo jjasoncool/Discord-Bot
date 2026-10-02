@@ -5,6 +5,7 @@
 不給圖的話，模型只看得到一個名稱，不知道對方回了什麼。
 
 - 判斷「別的伺服器」：表情名稱不在字典檔（字典連待填的佔位都有記）；貼圖不在本伺服器的快取。
+- AI 看過、寫進字典的（`emoji_autofill`）就不再下載：表情換成描述、貼圖查 `sticker_dictionary`。
 - 只處理最新那則與被回覆的那則（呼叫端決定），每則最多 `MAX_IMAGES` 張，跟其他圖共用呼叫端的總額度。
 - Lottie 動態貼圖沒有圖檔，只留名稱。
 """
@@ -14,7 +15,7 @@ import logging
 import re
 from typing import Any, Iterable, Optional
 
-from llm.preprocess import emoji_dictionary, sticker_cache
+from llm.preprocess import emoji_dictionary, sticker_cache, sticker_dictionary
 from llm.preprocess.vision_image import download_images
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ def _targets(text: str, stickers: Iterable[Any]) -> list[tuple[str, str]]:
             out.setdefault(url, f"表情 :{name}:")
     for st in stickers or ():
         sticker_id = getattr(st, "id", 0)
-        if sticker_cache.is_known(sticker_id):
+        if sticker_cache.is_known(sticker_id) or sticker_dictionary.lookup(sticker_id):
             continue
         url = sticker_image_url(st)
         if url:

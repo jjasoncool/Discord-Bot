@@ -265,9 +265,10 @@ def _string_mentions(filename: str):
     return finder
 
 
-#: 字典一律走 `emoji_dictionary`：以前三個讀取者各自解析、各自快取，使用者手改字典要等 04:00
-#: 偵測到新表情才會全部生效。
+#: 字典一律走各自的讀寫模組：以前三個讀取者各自解析、各自快取，使用者手改字典要等 04:00
+#: 偵測到新表情才會全部生效；AI 補描述也只能經過「不覆寫人寫的描述」那一關。
 _find_emoji_dictionary_paths = _string_mentions("emoji_dictionary.txt")
+_find_sticker_dictionary_paths = _string_mentions("sticker_dictionary.txt")
 
 RULES = [
     Rule(
@@ -337,10 +338,16 @@ RULES = [
         allowed={"utils/link_fix.py"},
     ),
     Rule(
-        name="讀自訂表情字典",
+        name="讀寫自訂表情字典",
         finder=_find_emoji_dictionary_paths,
-        canonical="llm.preprocess.emoji_dictionary.entries()",
+        canonical="llm.preprocess.emoji_dictionary.entries() / fill()",
         allowed={"llm/preprocess/emoji_dictionary.py"},
+    ),
+    Rule(
+        name="讀寫別的伺服器的貼圖字典",
+        finder=_find_sticker_dictionary_paths,
+        canonical="llm.preprocess.sticker_dictionary.lookup() / add()",
+        allowed={"llm/preprocess/sticker_dictionary.py"},
     ),
     Rule(
         name="不用 print 記錄（只會出現在 docker logs，不會進 log 檔）",
