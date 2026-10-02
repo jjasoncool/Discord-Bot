@@ -270,6 +270,41 @@ def _string_mentions(filename: str):
 _find_emoji_dictionary_paths = _string_mentions("emoji_dictionary.txt")
 _find_sticker_dictionary_paths = _string_mentions("sticker_dictionary.txt")
 
+
+def _find_sleep_until_in_tree(tree: ast.Module) -> list[int]:
+    """`asyncio.sleep(...)` 的秒數是從某個時刻算出來的（`.total_seconds()`，直接寫或先存進變數）。
+
+    這是手寫定時排程的特徵：「算出離下一次還有幾秒、睡到那時」。固定間隔的 sleep
+    （輪詢、重試、限速）不算，那些不是排程。
+    """
+    def calls_total_seconds(node: ast.AST) -> bool:
+        return any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                   and n.func.attr == "total_seconds" for n in ast.walk(node))
+
+    hits: set[int] = set()
+    for func in ast.walk(tree):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        timed: set[str] = set()
+        for node in ast.walk(func):
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)) and node.value is not None \
+                    and calls_total_seconds(node.value):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                timed.update(t.id for t in targets if isinstance(t, ast.Name))
+        for node in ast.walk(func):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "sleep" and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "asyncio" and node.args):
+                continue
+            arg = node.args[0]
+            if calls_total_seconds(arg) or any(isinstance(n, ast.Name) and n.id in timed for n in ast.walk(arg)):
+                hits.add(node.lineno)
+    return sorted(hits)
+
+
+def _find_sleep_until(path: Path) -> list[int]:
+    return _find_sleep_until_in_tree(_parse(path))
+
 RULES = [
     Rule(
         name="全站時區",
@@ -362,6 +397,18 @@ RULES = [
         finder=_find_hardcoded_article_urls,
         canonical="services.relay.article_monitor.official_article_url()",
         allowed={"services/relay/article_monitor.py"},
+    ),
+    Rule(
+        name="定時排程（算出離下一次還有幾秒、睡到那時）",
+        finder=_find_sleep_until,
+        canonical="utils.due_loop.run_due_loop（tick 回傳下一次的時刻）",
+        # 2026-10-03 抽出 run_due_loop 時已有這四份，各自處理補跑、空轉與出錯（TR-Q9 決定逐步搬，
+        # 搬完就從這裡移除）。人格萃取與日記在 04:00 維護時段跑，搬的時候要避開重啟時段。
+        allowed={
+            "commands/periodic_reminder_commands.py",
+            "services/community/rollcall_service.py",
+            "discord_bot.py",
+        },
     ),
 ]
 
@@ -464,6 +511,33 @@ class TimezoneGuardTests(unittest.TestCase):
     def test_ignores_timezone_utc(self):
         src = "from datetime import timezone\nUTC = timezone.utc\n"
         self.assertEqual(_find_hardcoded_utc_offsets_in_source(src), [])
+
+
+class SleepUntilFinderTests(unittest.TestCase):
+    """「定時排程」規則的偵測器本身。四份手寫排程都是先把秒數存進變數再睡，
+    只認 `asyncio.sleep(x.total_seconds())` 的話一份都抓不到。"""
+
+    def _scan(self, src):
+        return _find_sleep_until_in_tree(ast.parse(src))
+
+    def test_catches_seconds_computed_into_a_variable(self):
+        src = (
+            "import asyncio\n"
+            "async def loop(target, now):\n"
+            "    wait_seconds = (target - now).total_seconds()\n"
+            "    await asyncio.sleep(max(wait_seconds, 1))\n"
+        )
+        self.assertEqual(self._scan(src), [4])
+
+    def test_ignores_fixed_intervals(self):
+        src = (
+            "import asyncio\n"
+            "INTERVAL = 6 * 3600\n"
+            "async def loop():\n"
+            "    await asyncio.sleep(INTERVAL)\n"
+            "    await asyncio.sleep(0.5)\n"
+        )
+        self.assertEqual(self._scan(src), [])
 
 
 class AnnouncementTimezoneTests(unittest.TestCase):
