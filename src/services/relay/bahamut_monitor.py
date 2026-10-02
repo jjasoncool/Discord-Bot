@@ -46,8 +46,11 @@ LAST_SLOT_LIMIT = COMMENT_SLOT_LIMIT - LAST_SLOT_NAV_RESERVE
 COMMENT_SLOTS_COUNT = 3
 # 第一則 embed 內容安全上限（embed 總大小限制 6000，留空間給 title + image + metadata）
 FIRST_EMBED_CONTENT_LIMIT = 3500
+# 續文底部的導航連結：Discord ID 最長 20 位數時連結共 107 字。
+# 舊值借用留言格的 100，續文切到滿時連結塞不下、被略過（實際 ID 19 位數時是 104 字）
+CONTINUATION_NAV_RESERVE = 110
 # 續文 embed 內容上限（預留導航空間）
-CONTINUATION_CONTENT_LIMIT = EMBED_DESC_LIMIT - LAST_SLOT_NAV_RESERVE
+CONTINUATION_CONTENT_LIMIT = EMBED_DESC_LIMIT - CONTINUATION_NAV_RESERVE
 # 續文被清空時的佔位文字
 CONTINUATION_REMOVED_PLACEHOLDER = "（此段已更新移除）"
 # 巴哈論壇 tag 名稱
@@ -56,12 +59,18 @@ BAHAMUT_FORUM_TAG_NAME = "巴哈"
 COMMENT_SLOT_PLACEHOLDER = "💬 預留留言區（等待更新中...）"
 # 每則 Discord 訊息之間的延遲（秒），避免 rate limit
 SEND_DELAY = 0.8
-# 同一則訊息兩次 edit 之間的最小間隔（秒）
-# Discord 對單一訊息 PATCH 限制約 5 次 / 5 秒，留安全餘裕
-MIN_EDIT_INTERVAL = 1.5
+# 同一個討論串裡兩次 edit 之間的最小間隔（秒）
+# Discord 對編輯舊訊息有未公開的較嚴限速：實測同一串約 5 秒只能編一則（429 要求等待最長 5.04 秒），
+# 只按「同一則訊息」冷卻擋不住同串的其他訊息，熱門串每則都會先吃 429 再等
+THREAD_EDIT_INTERVAL = 6.0
 # 巴哈小屋個人頁 URL 模板
 BAHAMUT_PROFILE_URL = "https://home.gamer.com.tw/profile/index.php?owner={user_id}"
 
+
+
+def _continuation_nav(guild_id: int, thread_id: int, next_msg_id: int) -> str:
+    """接在續文底部、連到下一則續文的導航連結。"""
+    return f"\n\n⬇️ [更多內文...](https://discord.com/channels/{guild_id}/{thread_id}/{next_msg_id})"
 
 
 def _author_link(name: str, user_id: str) -> str:
@@ -76,17 +85,30 @@ def _author_link(name: str, user_id: str) -> str:
 _thread_locks: Dict[str, asyncio.Lock] = {}
 # 全域並行上限：同時最多處理 N 篇文章（避免 rate limit 和資源搶奪）
 _concurrency_semaphore = asyncio.Semaphore(3)
-# 每則訊息最後一次 edit 的 monotonic 時戳，用於強制 per-message 冷卻
-_last_edit_ts: Dict[int, float] = {}
+# 每個討論串下一次可以 edit 的 monotonic 時戳
+_next_edit_at: Dict[int, float] = {}
 
 
 async def _edit_with_cooldown(msg: discord.Message, **kwargs) -> None:
-    """對同一則訊息的 edit 強制冷卻，主動避開 Discord 429。"""
-    elapsed = time.monotonic() - _last_edit_ts.get(msg.id, 0.0)
-    if elapsed < MIN_EDIT_INTERVAL:
-        await asyncio.sleep(MIN_EDIT_INTERVAL - elapsed)
-    await msg.edit(**kwargs)
-    _last_edit_ts[msg.id] = time.monotonic()
+    """同一個討論串的 edit 排隊，主動避開 Discord 對編輯舊訊息的限速。"""
+    channel_id = msg.channel.id
+    now = time.monotonic()
+    previous = _next_edit_at.get(channel_id, 0.0)
+    start = max(now, previous)
+    # 先登記再等：同串有兩個 edit 同時進來時也會依序錯開
+    reserved = start + THREAD_EDIT_INTERVAL
+    _next_edit_at[channel_id] = reserved
+    if start > now:
+        await asyncio.sleep(start - now)
+    try:
+        await msg.edit(**kwargs)
+    except Exception:
+        # 被拒絕的 edit（例如討論串已封存）不佔名額，否則每則失敗都白等一個間隔
+        if _next_edit_at.get(channel_id) == reserved:
+            _next_edit_at[channel_id] = previous
+        raise
+    # discord.py 吃到 429 會自己等完重試：間隔從真正編完的時間起算
+    _next_edit_at[channel_id] = max(_next_edit_at[channel_id], time.monotonic() + THREAD_EDIT_INTERVAL)
 
 
 def _get_thread_lock(content_key: str) -> asyncio.Lock:
@@ -477,6 +499,7 @@ class BahamutMonitor(BaseContentMonitor):
             # 2. 發送主文續文
             starter_message = created.message if hasattr(created, "message") else None
             main_cont_ids = await self._send_continuations(thread, main_cont_chunks, main_embed.color.value if main_embed.color else COLOR_MAIN_POST, starter_message or thread)
+            main_desc = await self._link_post_to_continuations(thread, starter_message, main_embed, main_cont_chunks, main_cont_ids)
 
             # 3. 發送主文額外圖片（第 2 張起）
             await self._send_post_images(thread, main_post)
@@ -488,7 +511,7 @@ class BahamutMonitor(BaseContentMonitor):
                 post_data=main_post,
             )
             main_state["msg_id"] = starter_message.id if starter_message else thread.id
-            main_state["content_hash"] = content_hash(main_embed.description or "")
+            main_state["content_hash"] = content_hash(main_desc)
             main_state["continuation_msg_ids"] = main_cont_ids
             state["posts"][main_sn] = main_state
 
@@ -507,6 +530,7 @@ class BahamutMonitor(BaseContentMonitor):
 
                     # 回覆續文
                     reply_cont_ids = await self._send_continuations(thread, reply_cont_chunks, reply_embed.color.value if reply_embed.color else COLOR_REPLY, reply_msg)
+                    reply_desc = await self._link_post_to_continuations(thread, reply_msg, reply_embed, reply_cont_chunks, reply_cont_ids)
 
                     # 回覆的額外圖片
                     await self._send_post_images(thread, reply)
@@ -517,7 +541,7 @@ class BahamutMonitor(BaseContentMonitor):
                         post_data=reply,
                     )
                     reply_state["msg_id"] = reply_msg.id
-                    reply_state["content_hash"] = content_hash(reply_embed.description or "")
+                    reply_state["content_hash"] = content_hash(reply_desc)
                     reply_state["continuation_msg_ids"] = reply_cont_ids
                     state["posts"][reply_sn] = reply_state
 
@@ -593,26 +617,39 @@ class BahamutMonitor(BaseContentMonitor):
             new_replies = thread_data.get("replies") or []
             guild_id = thread.guild.id
 
+            # 封存的串編輯一定被拒（50083），hash 不會更新、每輪白試。
+            # 只有推數／留言變動時不為此把舊貼文頂回活躍列表；變動留著，等有新回覆時一起補上
+            if getattr(thread, "archived", False):
+                if all(r.get("sn", "") in old_state["posts"] for r in new_replies):
+                    logger.debug("增量更新：討論串已封存，等有新回覆再更新 board=%s post_id=%s", board_id, post_id)
+                    return old_state
+                # 有新回覆時發文本來就會解除封存；先解除，前面的編輯才不會被拒
+                try:
+                    await thread.edit(archived=False)
+                except Exception as e:
+                    logger.warning("增量更新：解除封存失敗 board=%s post_id=%s: %s", board_id, post_id, e)
+
             # 1. 更新主文 embed（GP/BP 同步，用 DB hash 比對）
             main_sn = main_post.get("sn", "")
             main_post_state = old_state["posts"].get(main_sn)
             if main_post_state and main_post_state.get("msg_id"):
                 try:
                     updated_embed, cont_chunks = self.format_main_post_embed(main_post)
+                    color = updated_embed.color.value if updated_embed.color else COLOR_MAIN_POST
+                    # 續文先同步（後段改了、導航連結掉了都要補）：第一則續文確定後，本文底部的連結才指得對
+                    await self._update_continuations(thread, cont_chunks, color, main_post_state)
+                    self._add_continuation_link(updated_embed, guild_id, thread.id, cont_chunks, main_post_state)
                     new_hash = content_hash(updated_embed.description or "")
                     old_hash = main_post_state.get("content_hash")
-                    color = updated_embed.color.value if updated_embed.color else COLOR_MAIN_POST
                     if old_hash is None:
                         main_post_state["content_hash"] = new_hash
-                        await self._update_continuations(thread, cont_chunks, color, main_post_state)
                         logger.debug("增量更新：主文首次寫入 hash sn=%s", main_sn)
                     elif new_hash != old_hash:
                         main_msg = await thread.fetch_message(main_post_state["msg_id"])
                         await _edit_with_cooldown(main_msg, embed=updated_embed)
                         await asyncio.sleep(SEND_DELAY)
-                        await self._update_continuations(thread, cont_chunks, color, main_post_state)
                         main_post_state["content_hash"] = new_hash
-                        logger.info("增量更新：已更新主文 embed + 續文 sn=%s", main_sn)
+                        logger.info("增量更新：已更新主文 embed sn=%s", main_sn)
                     else:
                         logger.debug("增量更新：主文無變化，跳過 sn=%s", main_sn)
                 except Exception as e:
@@ -629,20 +666,20 @@ class BahamutMonitor(BaseContentMonitor):
                             2,
                         )
                         updated_embed, cont_chunks = self.format_reply_embed(reply, reply_idx)
+                        color = updated_embed.color.value if updated_embed.color else COLOR_REPLY
+                        await self._update_continuations(thread, cont_chunks, color, reply_state)
+                        self._add_continuation_link(updated_embed, guild_id, thread.id, cont_chunks, reply_state)
                         new_hash = content_hash(updated_embed.description or "")
                         old_hash = reply_state.get("content_hash")
-                        color = updated_embed.color.value if updated_embed.color else COLOR_REPLY
                         if old_hash is None:
                             reply_state["content_hash"] = new_hash
-                            await self._update_continuations(thread, cont_chunks, color, reply_state)
                             logger.debug("增量更新：回覆首次寫入 hash sn=%s", reply_sn)
                         elif new_hash != old_hash:
                             reply_msg = await thread.fetch_message(reply_state["msg_id"])
                             await _edit_with_cooldown(reply_msg, embed=updated_embed)
                             await asyncio.sleep(SEND_DELAY)
-                            await self._update_continuations(thread, cont_chunks, color, reply_state)
                             reply_state["content_hash"] = new_hash
-                            logger.info("增量更新：已更新回覆 embed + 續文 sn=%s", reply_sn)
+                            logger.info("增量更新：已更新回覆 embed sn=%s", reply_sn)
                         else:
                             logger.debug("增量更新：回覆無變化，跳過 sn=%s", reply_sn)
                     except Exception as e:
@@ -757,13 +794,13 @@ class BahamutMonitor(BaseContentMonitor):
                 if len(all_comment_slots) > total_existing_slots and (slots or overflow_slots):
                     # 找最後一個 msg 作為 reply anchor
                     if overflow_slots:
-                        last_msg_id = overflow_slots[-1]["msg_id"]
+                        prev_slot = overflow_slots[-1]
                         last_comments = all_comment_slots[total_existing_slots - 1] if total_existing_slots - 1 < len(all_comment_slots) else []
                     else:
-                        last_msg_id = slots[-1]["msg_id"]
+                        prev_slot = slots[-1]
                         last_comments = all_comment_slots[COMMENT_SLOTS_COUNT - 1] if COMMENT_SLOTS_COUNT - 1 < len(all_comment_slots) else []
 
-                    prev_msg = await thread.fetch_message(last_msg_id)
+                    prev_msg = await thread.fetch_message(prev_slot["msg_id"])
 
                     for data_idx in range(total_existing_slots, len(all_comment_slots)):
                         overflow_comments = all_comment_slots[data_idx]
@@ -772,7 +809,12 @@ class BahamutMonitor(BaseContentMonitor):
 
                         overflow_msg = await thread.send(embed=embed, reference=prev_msg)
                         await asyncio.sleep(SEND_DELAY)
-                        overflow_slots.append({"msg_id": overflow_msg.id, "used_chars": used_chars})
+                        overflow_slot = {
+                            "msg_id": overflow_msg.id,
+                            "used_chars": used_chars,
+                            "content_hash": content_hash(embed.description or ""),
+                        }
+                        overflow_slots.append(overflow_slot)
 
                         # edit 前一格加導航連結
                         nav_link = f"https://discord.com/channels/{guild_id}/{thread.id}/{overflow_msg.id}"
@@ -783,8 +825,10 @@ class BahamutMonitor(BaseContentMonitor):
                         if len(description) > EMBED_DESC_LIMIT:
                             description = description[:EMBED_DESC_LIMIT - 20] + "\n\n⋯（已截斷）"
                         await _edit_with_cooldown(prev_msg, embed=discord.Embed(description=description, color=COLOR_COMMENTS))
+                        prev_slot["content_hash"] = content_hash(description)
 
                         prev_msg = overflow_msg
+                        prev_slot = overflow_slot
                         last_comments = overflow_comments
 
                 # 更新 synced_comment_ids
@@ -792,7 +836,8 @@ class BahamutMonitor(BaseContentMonitor):
 
             # 4. 新回覆（state 裡沒有的 sn）
             existing_sns = set(old_state["posts"].keys())
-            new_reply_idx = len(existing_sns) + 1  # 接續原本的回覆編號
+            # 接續原本的回覆編號：主文是 #1，existing_sns 已含主文，迴圈裡先 +1 就是下一則
+            new_reply_idx = len(existing_sns)
             for reply in new_replies:
                 reply_sn = reply.get("sn", "")
                 if reply_sn in existing_sns:
@@ -805,12 +850,14 @@ class BahamutMonitor(BaseContentMonitor):
 
                 # 回覆續文
                 reply_cont_ids = await self._send_continuations(thread, reply_cont_chunks, reply_embed.color.value if reply_embed.color else COLOR_REPLY, reply_msg)
+                reply_desc = await self._link_post_to_continuations(thread, reply_msg, reply_embed, reply_cont_chunks, reply_cont_ids)
 
                 # 回覆的額外圖片
                 await self._send_post_images(thread, reply)
 
                 reply_state = await self._send_post_comments(thread=thread, post_data=reply)
                 reply_state["msg_id"] = reply_msg.id
+                reply_state["content_hash"] = content_hash(reply_desc)
                 reply_state["continuation_msg_ids"] = reply_cont_ids
                 old_state["posts"][reply_sn] = reply_state
 
@@ -829,6 +876,37 @@ class BahamutMonitor(BaseContentMonitor):
             logger.error("增量更新巴哈討論串失敗: %s", e, exc_info=True)
             return None
 
+    @staticmethod
+    def _add_continuation_link(embed: discord.Embed, guild_id: int, thread_id: int, chunks: List[str], post_state: Dict) -> None:
+        """本文被切斷時，底部加「更多內文」連到第一則續文（改文變長時新續文在串尾，從本文要找得到）。
+        連結目標是存在 state 的第一則續文 id，建立後就不變，所以算進 hash 也不會每輪判定有變。"""
+        cont_ids = post_state.get("continuation_msg_ids") or []
+        if chunks and cont_ids:
+            embed.description = (embed.description or "") + _continuation_nav(guild_id, thread_id, cont_ids[0])
+
+    async def _link_post_to_continuations(
+        self,
+        thread: discord.Thread,
+        msg,
+        embed: discord.Embed,
+        chunks: List[str],
+        cont_ids: List[int],
+    ) -> str:
+        """新發的本文補上往下的連結（續文要先發出去才有 id）。
+        回傳 Discord 上實際的描述給呼叫端記 hash：補失敗就記沒連結的版本，下一輪會再補。"""
+        plain = embed.description or ""
+        if msg is None or not (chunks and cont_ids):
+            return plain
+        linked = embed.copy()
+        self._add_continuation_link(linked, thread.guild.id, thread.id, chunks, {"continuation_msg_ids": cont_ids})
+        try:
+            await _edit_with_cooldown(msg, embed=linked)
+            await asyncio.sleep(SEND_DELAY)
+            return linked.description
+        except Exception as e:
+            logger.warning("本文續文連結添加失敗: %s", e)
+            return plain
+
     async def _send_continuations(
         self,
         thread: discord.Thread,
@@ -844,7 +922,7 @@ class BahamutMonitor(BaseContentMonitor):
             return []
         guild_id = thread.guild.id
         continuation_msg_ids = []
-        prev_msg = first_msg
+        prev_cont_msg = None
 
         for i, chunk_text in enumerate(chunks):
             cont_embed = discord.Embed(description=chunk_text, color=color)
@@ -853,22 +931,16 @@ class BahamutMonitor(BaseContentMonitor):
             await asyncio.sleep(SEND_DELAY)
             continuation_msg_ids.append(cont_msg.id)
 
-            # 前一則加導航連結（除了第一則續文，因為它緊跟在主 embed 後面不需要導航）
-            if len(continuation_msg_ids) >= 2:
-                # edit 前一則續文加導航
-                prev_cont_id = continuation_msg_ids[-2]
+            # 前一則續文加導航連結（第一則續文緊跟在主 embed 後面，主 embed 不需要導航）
+            if prev_cont_msg is not None:
                 try:
-                    prev_cont_msg = await thread.fetch_message(prev_cont_id)
-                    nav_link = f"https://discord.com/channels/{guild_id}/{thread.id}/{cont_msg.id}"
-                    old_desc = prev_cont_msg.embeds[0].description if prev_cont_msg.embeds else ""
-                    new_desc = old_desc + f"\n\n⬇️ [更多內文...]({nav_link})"
-                    if len(new_desc) <= EMBED_DESC_LIMIT:
-                        await _edit_with_cooldown(prev_cont_msg, embed=discord.Embed(description=new_desc, color=color))
-                        await asyncio.sleep(SEND_DELAY)
+                    new_desc = chunks[i - 1] + _continuation_nav(guild_id, thread.id, cont_msg.id)
+                    await _edit_with_cooldown(prev_cont_msg, embed=discord.Embed(description=new_desc, color=color))
+                    await asyncio.sleep(SEND_DELAY)
                 except Exception as e:
                     logger.warning("續文導航連結添加失敗: %s", e)
 
-            prev_msg = cont_msg
+            prev_cont_msg = cont_msg
 
         return continuation_msg_ids
 
@@ -880,79 +952,48 @@ class BahamutMonitor(BaseContentMonitor):
         post_state: Dict,
     ) -> None:
         """
-        增量更新續文：edit 既有的 / 清空多出的 / 追加新的。
-        直接修改 post_state["continuation_msg_ids"]。
+        增量更新續文：不夠的追加、多出的改成佔位，再逐則比對應有內容（含導航連結），
+        跟訊息上的一樣就不編。直接修改 post_state["continuation_msg_ids"]。
         """
-        new_chunks = chunks
-        old_cont_ids = post_state.get("continuation_msg_ids") or []
+        cont_ids = list(post_state.get("continuation_msg_ids") or [])
+        if not cont_ids and not chunks:
+            return
         guild_id = thread.guild.id
+        sent = {}
 
-        updated_ids = list(old_cont_ids)
-
-        # 1. edit 既有的續文
-        for i, cont_id in enumerate(old_cont_ids):
+        # 1. 不夠的先追加（排在討論串最後，reply 前一則方便往回找）；導航連結等全部 id 確定後一起補
+        if len(chunks) > len(cont_ids):
             try:
-                cont_msg = await thread.fetch_message(cont_id)
-                if i < len(new_chunks):
-                    # 有對應的新內容 → edit
-                    new_embed = discord.Embed(description=new_chunks[i], color=color)
-                    await _edit_with_cooldown(cont_msg, embed=new_embed)
+                prev_msg = await thread.fetch_message(cont_ids[-1] if cont_ids else post_state["msg_id"])
+                for i in range(len(cont_ids), len(chunks)):
+                    prev_msg = await thread.send(embed=discord.Embed(description=chunks[i], color=color), reference=prev_msg)
                     await asyncio.sleep(SEND_DELAY)
-                else:
-                    # 多出來 → edit 為佔位文字
-                    cleared_embed = discord.Embed(description=CONTINUATION_REMOVED_PLACEHOLDER, color=0x808080)
-                    await _edit_with_cooldown(cont_msg, embed=cleared_embed)
-                    await asyncio.sleep(SEND_DELAY)
+                    cont_ids.append(prev_msg.id)
+                    sent[prev_msg.id] = prev_msg
+            except Exception as e:
+                logger.warning("增量更新：追加續文失敗: %s", e)
+
+        # 2. 逐則比對；Discord 會修掉內容頭尾的空白，比對時一起忽略
+        for i, cont_id in enumerate(cont_ids):
+            if i < len(chunks):
+                expected = chunks[i]
+                if i + 1 < len(chunks) and i + 1 < len(cont_ids):
+                    expected += _continuation_nav(guild_id, thread.id, cont_ids[i + 1])
+                expected_color = color
+            else:
+                expected, expected_color = CONTINUATION_REMOVED_PLACEHOLDER, 0x808080
+            try:
+                cont_msg = sent.get(cont_id) or await thread.fetch_message(cont_id)
+                current = (cont_msg.embeds[0].description if cont_msg.embeds else None) or ""
+                if current.strip() == expected.strip():
+                    continue
+                await _edit_with_cooldown(cont_msg, embed=discord.Embed(description=expected, color=expected_color))
+                await asyncio.sleep(SEND_DELAY)
+                logger.info("增量更新：已更新續文 msg=%s", cont_id)
             except Exception as e:
                 logger.warning("增量更新：edit 續文失敗 cont_id=%s: %s", cont_id, e)
 
-        # 2. 需要追加新的續文
-        if len(new_chunks) > len(old_cont_ids):
-            # 找最後一個有效的續文（或主文）作為 reply anchor
-            # 先找最後一個非清空的續文
-            last_valid_idx = -1
-            for i in range(min(len(old_cont_ids), len(new_chunks)) - 1, -1, -1):
-                last_valid_idx = i
-                break
-
-            if last_valid_idx >= 0:
-                prev_msg = await thread.fetch_message(old_cont_ids[last_valid_idx])
-            else:
-                prev_msg = await thread.fetch_message(post_state["msg_id"])
-
-            for i in range(len(old_cont_ids), len(new_chunks)):
-                # 先檢查有沒有已清空的續文可以復用
-                if i < len(updated_ids):
-                    try:
-                        reuse_msg = await thread.fetch_message(updated_ids[i])
-                        new_embed = discord.Embed(description=new_chunks[i], color=color)
-                        await _edit_with_cooldown(reuse_msg, embed=new_embed)
-                        await asyncio.sleep(SEND_DELAY)
-                        prev_msg = reuse_msg
-                        continue
-                    except Exception:
-                        pass
-
-                # 新建續文（reply to 前一則）
-                new_embed = discord.Embed(description=new_chunks[i], color=color)
-                new_msg = await thread.send(embed=new_embed, reference=prev_msg)
-                await asyncio.sleep(SEND_DELAY)
-                updated_ids.append(new_msg.id)
-
-                # 前一則加導航連結
-                try:
-                    nav_link = f"https://discord.com/channels/{guild_id}/{thread.id}/{new_msg.id}"
-                    prev_desc = prev_msg.embeds[0].description if prev_msg.embeds else ""
-                    new_desc = prev_desc + f"\n\n⬇️ [更多內文...]({nav_link})"
-                    if len(new_desc) <= EMBED_DESC_LIMIT:
-                        await _edit_with_cooldown(prev_msg, embed=discord.Embed(description=new_desc, color=color))
-                        await asyncio.sleep(SEND_DELAY)
-                except Exception as e:
-                    logger.warning("續文導航連結添加失敗: %s", e)
-
-                prev_msg = new_msg
-
-        post_state["continuation_msg_ids"] = updated_ids
+        post_state["continuation_msg_ids"] = cont_ids
 
     async def _send_post_images(
         self,
@@ -1029,9 +1070,11 @@ class BahamutMonitor(BaseContentMonitor):
 
             msg = await thread.send(embed=embed)
             await asyncio.sleep(SEND_DELAY)
+            # 建立當下就記 hash：沒記的話下一輪只會補記、不會編，這期間的新留言就不會出現
             post_state["comment_slots"].append({
                 "msg_id": msg.id,
                 "used_chars": used_chars,
+                "content_hash": content_hash(embed.description or ""),
             })
 
         # 如果留言超過 3 格，處理溢出（鏈式 reply）
@@ -1042,6 +1085,7 @@ class BahamutMonitor(BaseContentMonitor):
             # prev_msg: 上一格的訊息物件（第一輪是第三格）
             # prev_comments: 上一格的留言資料（用於 edit 加導航連結）
             prev_msg = await thread.fetch_message(post_state["comment_slots"][-1]["msg_id"])
+            prev_slot = post_state["comment_slots"][-1]
             prev_comments = comment_slots_data[COMMENT_SLOTS_COUNT - 1] if COMMENT_SLOTS_COUNT - 1 < len(comment_slots_data) else []
 
             for overflow_comments in comment_slots_data[COMMENT_SLOTS_COUNT:]:
@@ -1056,10 +1100,12 @@ class BahamutMonitor(BaseContentMonitor):
                     reference=prev_msg,
                 )
                 await asyncio.sleep(SEND_DELAY)
-                post_state["overflow_slots"].append({
+                overflow_slot = {
                     "msg_id": overflow_msg.id,
                     "used_chars": used_chars,
-                })
+                    "content_hash": content_hash(embed.description or ""),
+                }
+                post_state["overflow_slots"].append(overflow_slot)
 
                 # edit 前一格，在底部 append 導航連結
                 nav_link = f"https://discord.com/channels/{guild_id}/{thread.id}/{overflow_msg.id}"
@@ -1070,9 +1116,11 @@ class BahamutMonitor(BaseContentMonitor):
                 if len(description) > EMBED_DESC_LIMIT:
                     description = description[:EMBED_DESC_LIMIT - 20] + "\n\n⋯（已截斷）"
                 await _edit_with_cooldown(prev_msg, embed=discord.Embed(description=description, color=COLOR_COMMENTS))
+                prev_slot["content_hash"] = content_hash(description)
 
                 # 推進：當前格變成下一輪的「前一格」
                 prev_msg = overflow_msg
+                prev_slot = overflow_slot
                 prev_comments = overflow_comments
 
         return post_state
