@@ -38,6 +38,14 @@ TWITTER_STATUS_RE = re.compile(
 # 替代用的可預覽網域（顯示用）。
 FIXUP_DOMAIN = "fixupx.com"
 
+# 認得的貼文連結（給展開內容用）：x.com／twitter.com 本身，加上 fixupx 這類嵌入服務改寫後的網址——
+# bot 自己轉發的就是 fixupx.com，群友回覆它時要從這裡認出是哪一篇。
+TWEET_LINK_RE = re.compile(
+    r"https?://(?:www\.|mobile\.)?(?:x|twitter|fixupx|fxtwitter|vxtwitter|fixvx)\.com/"
+    r"[A-Za-z0-9_]+/status/(?P<id>\d+)",
+    re.IGNORECASE,
+)
+
 # Twitter 自家 syndication CDN（查類型用，免金鑰）。
 _SYNDICATION_URL = "https://cdn.syndication.twimg.com/tweet-result"
 _SYNDICATION_TIMEOUT = 8  # 秒；查不到就走 fail-open，不要卡太久
@@ -105,14 +113,19 @@ def rewrite_twitter_links(content: str) -> str | None:
     return "\n".join(fixed_links)
 
 
-async def _classify_tweet(session, tweet_id: str) -> str:
-    """查 syndication CDN 判斷單則貼文類型。
+def tweet_ids(text: str) -> list[str]:
+    """文字裡出現的貼文 id（含 fixupx 等改寫網址），去重、照出現順序。"""
+    return list(dict.fromkeys(m.group("id") for m in TWEET_LINK_RE.finditer(text or "")))
 
-    回傳：
-        "video"     → 推文存在且含影片（含 Twitter GIF，本質也是影片，Discord 同樣播不了）
-        "non_video" → 推文存在但無影片（純圖片 / 純文字）
-        "not_found" → 服務明確回 404 / tombstone / 沒有貼文主體（確定不存在）
-        "unknown"   → 逾時 / 5xx / 內容無法解析（服務問題，無法判斷）
+
+async def fetch_tweet(session, tweet_id: str) -> tuple[str, dict | None]:
+    """查 syndication CDN 取單則貼文。回傳 `(狀態, 資料)`，狀態是：
+
+        "ok"        → 有貼文主體，資料是 CDN 回的 dict（內文、作者、mediaDetails…）
+        "not_found" → 服務明確回 404 / tombstone（確定不存在）
+        "unknown"   → 逾時 / 5xx / 內容無法解析 / 沒有貼文主體（服務問題，無法判斷）
+
+    轉 fixupx 判斷類型（`_classify_tweet`）與給 AI 看的貼文內容（`llm.preprocess.tweet_context`）共用這支。
     """
     import aiohttp
 
@@ -123,44 +136,54 @@ async def _classify_tweet(session, tweet_id: str) -> str:
         timeout = aiohttp.ClientTimeout(total=_SYNDICATION_TIMEOUT)
         async with session.get(url, timeout=timeout) as resp:
             if resp.status == 404:
-                return "not_found"
+                return "not_found", None
             if resp.status >= 500:
-                return "unknown"
+                return "unknown", None
 
             try:
                 data = await resp.json(content_type=None)
             except Exception:
                 # 空 body / 非 JSON（常見於被限流）→ 當服務問題，fail-open。
-                return "unknown"
+                return "unknown", None
 
             if not isinstance(data, dict) or not data:
-                return "unknown"
+                return "unknown", None
 
             # tombstone / 已刪 → 確定不存在。
             if data.get("__typename") == "TweetTombstone" or "tombstone" in data:
-                return "not_found"
+                return "not_found", None
 
             # 沒有任何貼文主體欄位（例如限流回 {}）→ 視為服務問題，fail-open。
             if not any(k in data for k in ("mediaDetails", "text", "id_str")):
-                return "unknown"
+                return "unknown", None
 
-            media = data.get("mediaDetails") or []
-            has_video = any(
-                m.get("type") in ("video", "animated_gif") for m in media
-            )
-            # 保險：頂層 video 欄位也算。
-            if not has_video and data.get("video"):
-                has_video = True
-
-            return "video" if has_video else "non_video"
+            return "ok", data
     except asyncio.TimeoutError:
-        logger.warning("查詢 tweet %s 類型逾時，視為服務問題（fail-open）", tweet_id)
-        return "unknown"
+        logger.warning("查詢 tweet %s 逾時，視為服務問題（fail-open）", tweet_id)
+        return "unknown", None
     except Exception as exc:
-        logger.warning(
-            "查詢 tweet %s 類型失敗，視為服務問題（fail-open）：%s", tweet_id, exc
-        )
-        return "unknown"
+        logger.warning("查詢 tweet %s 失敗，視為服務問題（fail-open）：%s", tweet_id, exc)
+        return "unknown", None
+
+
+async def _classify_tweet(session, tweet_id: str) -> str:
+    """查 syndication CDN 判斷單則貼文類型。
+
+    回傳：
+        "video"     → 推文存在且含影片（含 Twitter GIF，本質也是影片，Discord 同樣播不了）
+        "non_video" → 推文存在但無影片（純圖片 / 純文字）
+        "not_found" → 服務明確回 404 / tombstone / 沒有貼文主體（確定不存在）
+        "unknown"   → 逾時 / 5xx / 內容無法解析（服務問題，無法判斷）
+    """
+    status, data = await fetch_tweet(session, tweet_id)
+    if status != "ok":
+        return status
+    media = data.get("mediaDetails") or []
+    has_video = any(m.get("type") in ("video", "animated_gif") for m in media)
+    # 保險：頂層 video 欄位也算。
+    if not has_video and data.get("video"):
+        has_video = True
+    return "video" if has_video else "non_video"
 
 
 async def select_video_links(content: str, session=None) -> str | None:

@@ -8,6 +8,7 @@
      （**人數不當判準**——那是語意問題，留給模型的第一關）
   5. 靜默期依對話節奏切換：慢節奏等人講完、熱聊只等一下就開講
   6. L4-b 接續（armed 用完即熄、window、chain 上限）
+  7. 最新這則給模型看的文字：只回貼圖不會被當成「被 @ 卻沒說話」、自訂表情換成意思（2026-10-02）
 
 全部 hermetic：不碰 DB、不碰模型、不連網（k-NN 特徵在測試中被替換掉）。
 
@@ -198,6 +199,55 @@ class MentionResolutionTests(unittest.TestCase):
         m = self._msg_with("那是 <@436506192047636490>", mentions=[u])
         m.content = "那是 <@436506192047636490>"
         self.assertEqual("那是 克羅#6490", semantic_message_text(m))
+
+
+class MessageTextTests(unittest.TestCase):
+    """最新這則給模型看的文字。真實案例：只回貼圖時 content 是空的，被 @／reply 的模型以為
+    「被點名卻沒說話」，回「怎麼突然點我名」「點我卻不說話」（6/22 起 16 次，全是伺服器貼圖）。"""
+
+    @staticmethod
+    def _text(content="", stickers=(), descriptions=None, known=()):
+        """`known`：字典有登錄、還沒填描述的本伺服器表情。"""
+        from llm.ambient import ambient_reply
+        from llm.preprocess import emoji_dictionary, emoji_text_utils
+        descriptions = descriptions or {}
+        entries = {n: emoji_dictionary.EmojiEntry(n, descriptions.get(n, ""), None)
+                   for n in [*descriptions, *known]}
+        m = _msg(content)
+        m.stickers = [SimpleNamespace(id=900 + i, name=n) for i, n in enumerate(stickers)]
+        with mock.patch.object(emoji_text_utils, "_load_descriptions", return_value=descriptions), \
+             mock.patch.object(emoji_dictionary, "entries", return_value=entries):
+            return ambient_reply._message_text(m)
+
+    def test_sticker_only_is_not_an_empty_mention(self):
+        self.assertEqual(self._text(stickers=["哭哭貓"]), "[貼圖：哭哭貓]")
+        self.assertEqual(self._text("笑死", stickers=["哭哭貓"]), "笑死 [貼圖：哭哭貓]")
+
+    def test_custom_emoji_becomes_its_meaning(self):
+        """原始代碼拿去當檢索詞，會召回一堆內容只有 `<@數字>` 的舊訊息。"""
+        text = self._text("<:encorecrazy:1280783256999952464>", descriptions={"encorecrazy": "安可瘋狂"})
+        self.assertIn("安可瘋狂", text)
+        self.assertNotIn("<:", text)
+
+    def test_other_server_emoji_keeps_its_name(self):
+        """別的伺服器的表情字典沒有，至少留名稱（2026-10-02 起）。"""
+        self.assertEqual(self._text("<:other_server:123456789012345678>"), ":other_server:")
+
+    def test_undescribed_emoji_still_says_something_was_sent(self):
+        """本伺服器還沒填描述的表情照舊拿掉，但不能變成「只 @ 了我」。"""
+        self.assertEqual(self._text("<:pending:123456789012345678>", known=["pending"]), "(一個表情符號)")
+
+    def test_main_pass_reads_the_converted_text(self):
+        """只測 helper 不夠：主流程改回讀 `message.content` 時這裡要紅。"""
+        import inspect
+        from llm.ambient import ambient_reply
+        src = inspect.getsource(ambient_reply._run_one_ambient_pass)
+        self.assertIn("stripped = _message_text(message)", src)
+        self.assertNotIn("(message.content or \"\").strip()", src)
+
+    def test_nothing_at_all_stays_empty(self):
+        """真的只有 @、什麼都沒附——留空，讓上層照舊說「對方只 @ 了我」。"""
+        self.assertEqual(self._text(""), "")
 
 
 class AnchorCollisionTests(unittest.TestCase):

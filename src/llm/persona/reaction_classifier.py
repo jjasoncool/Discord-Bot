@@ -20,9 +20,9 @@ Dictionary 格式（擴充過的 emoji_dictionary.txt）：
 from __future__ import annotations
 
 import logging
-import threading
-from pathlib import Path
 from typing import Literal
+
+from llm.preprocess import emoji_dictionary
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,6 @@ Category = Literal["agree", "laugh", "think", "negative", "neutral"]
 
 _VALID_CATEGORIES: set[str] = {"agree", "laugh", "think", "negative", "neutral"}
 
-_EMOJI_DICT_PATH = "/app/settings/emoji_dictionary.txt"
 
 # 從描述關鍵字推斷類別（供未顯式標註的 custom emoji 使用）
 _DESCRIPTION_KEYWORD_RULES: list[tuple[tuple[str, ...], Category]] = [
@@ -80,38 +79,6 @@ UNICODE_EMOJI_CATEGORIES: dict[str, Category] = {
 }
 
 
-# 快取：{emoji_name: category}，從 emoji_dictionary.txt 載入
-_custom_emoji_categories: dict[str, Category] | None = None
-_cache_lock = threading.Lock()
-
-
-def _parse_dict_line(line: str) -> tuple[str, str, str | None] | None:
-    """解析一行 dict entry。
-
-    支援格式：
-      name = description
-      name = description | category
-      name =                     ← 空值，回 None
-    """
-    line = line.strip()
-    if not line or line.startswith("#") or "=" not in line:
-        return None
-    name, _, rest = line.partition("=")
-    name = name.strip()
-    rest = rest.strip()
-    if not name or not rest:
-        return None
-
-    # 檢查是否有顯式 category
-    if "|" in rest:
-        desc_part, _, cat_part = rest.rpartition("|")
-        desc = desc_part.strip()
-        cat = cat_part.strip().lower()
-        if cat not in _VALID_CATEGORIES:
-            # 類別不合法：當作沒寫，只用描述
-            return (name, rest, None)
-        return (name, desc, cat)
-    return (name, rest, None)
 
 
 def _infer_category_from_description(description: str) -> Category:
@@ -123,57 +90,18 @@ def _infer_category_from_description(description: str) -> Category:
 
 
 def _load_custom_emoji_categories() -> dict[str, Category]:
-    """從 emoji_dictionary.txt 載入並快取 custom emoji 分類。
-
-    載入流程：
-    1. 逐行解析
-    2. 有顯式 | category → 用那個
-    3. 沒顯式 → 從描述關鍵字推斷
-    4. 都推不出 → neutral
-    """
-    global _custom_emoji_categories
-    if _custom_emoji_categories is not None:
-        return _custom_emoji_categories
-
-    with _cache_lock:
-        if _custom_emoji_categories is not None:
-            return _custom_emoji_categories
-
-        result: dict[str, Category] = {}
-        path = Path(_EMOJI_DICT_PATH)
-        if not path.exists():
-            logger.warning("reaction_classifier: 找不到 emoji dict: %s", path)
-            _custom_emoji_categories = result
-            return result
-
-        try:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                parsed = _parse_dict_line(line)
-                if not parsed:
-                    continue
-                name, desc, explicit_cat = parsed
-                if explicit_cat is not None:
-                    result[name] = explicit_cat  # type: ignore[assignment]
-                else:
-                    result[name] = _infer_category_from_description(desc)
-        except Exception as exc:
-            logger.warning("reaction_classifier: 載入 emoji dict 失敗: %s", exc)
-
-        _custom_emoji_categories = result
-        logger.info(
-            "reaction_classifier: 已載入 %d 個 custom emoji 分類",
-            len(result),
-        )
-        return result
+    """custom emoji 名稱 → 分類：有顯式 `| category` 用那個，沒有就從描述關鍵字推斷，都推不出是 neutral。
+    字典讀取與重讀見 `llm.preprocess.emoji_dictionary`；待填（沒描述）的不列。"""
+    return {
+        name: e.category or _infer_category_from_description(e.description)  # type: ignore[misc]
+        for name, e in emoji_dictionary.entries().items() if e.description
+    }
 
 
 def reload_custom_emoji_categories() -> int:
-    """強制清快取並重載（emoji dict 更新後呼叫）。回傳載入項目數。"""
-    global _custom_emoji_categories
-    with _cache_lock:
-        _custom_emoji_categories = None
-    mapping = _load_custom_emoji_categories()
-    return len(mapping)
+    """強制重讀字典（emoji dict 更新後呼叫）。回傳項目數。"""
+    emoji_dictionary.reload()
+    return len(_load_custom_emoji_categories())
 
 
 def classify_reaction(emoji_name: str, emoji_id: str | None = None) -> Category:

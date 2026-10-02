@@ -238,6 +238,37 @@ def _find_handwritten_person_anchors(path: Path) -> list[int]:
     return sorted(set(hits))
 
 
+def _find_syndication_urls(path: Path) -> list[int]:
+    """找自己寫的 Twitter syndication CDN 網址。查貼文（類型、內文、縮圖）一律走 `utils.link_fix.fetch_tweet`，
+    token 演算法與失敗時的 fail-open 規則只有一份。網址寫在字串裡，regex 規則看不到（字串會被遮掉），所以走 AST。"""
+    return sorted({
+        node.lineno for node in ast.walk(_parse(path))
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and "syndication.twimg.com" in node.value
+    })
+
+
+def _string_mentions(filename: str):
+    """找自己指到某個資料檔的字串（說明文字 docstring 提到檔名不算）。網址或路徑寫在字串裡，
+    regex 規則看不到（字串會被遮掉），所以走 AST。"""
+    def finder(path: Path) -> list[int]:
+        tree = _parse(path)
+        docstrings = {
+            id(node.body[0].value) for node in ast.walk(tree)
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.body and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant)
+        }
+        return sorted({
+            node.lineno for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings
+            and filename in node.value
+        })
+    return finder
+
+
+#: 字典一律走 `emoji_dictionary`：以前三個讀取者各自解析、各自快取，使用者手改字典要等 04:00
+#: 偵測到新表情才會全部生效。
+_find_emoji_dictionary_paths = _string_mentions("emoji_dictionary.txt")
+
 RULES = [
     Rule(
         name="全站時區",
@@ -298,6 +329,18 @@ RULES = [
         canonical="llm.persona.member_names.member_names_from_guild()",
         # 名字要從同一處讀，④ 的名字表、⑤ 的擋名字、白天的名字對照與找人才會一致
         allowed={"llm/persona/member_names.py"},
+    ),
+    Rule(
+        name="查 X 貼文（syndication CDN）",
+        finder=_find_syndication_urls,
+        canonical="utils.link_fix.fetch_tweet / llm.preprocess.tweet_context.expand_tweets",
+        allowed={"utils/link_fix.py"},
+    ),
+    Rule(
+        name="讀自訂表情字典",
+        finder=_find_emoji_dictionary_paths,
+        canonical="llm.preprocess.emoji_dictionary.entries()",
+        allowed={"llm/preprocess/emoji_dictionary.py"},
     ),
     Rule(
         name="不用 print 記錄（只會出現在 docker logs，不會進 log 檔）",

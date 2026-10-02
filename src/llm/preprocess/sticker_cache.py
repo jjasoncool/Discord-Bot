@@ -39,3 +39,8 @@ def get_sticker_text(sticker: discord.StickerItem) -> Optional[str]:
         return f"[貼圖：{cached}]"
     # 非 guild sticker（標準貼圖），只用名稱
     return f"[貼圖：{sticker.name}]"
+
+
+def is_known(sticker_id: int) -> bool:
+    """這張貼圖是不是本伺服器的（啟動時預載過描述）。別的伺服器的貼圖不在快取裡。"""
+    return sticker_id in _sticker_cache

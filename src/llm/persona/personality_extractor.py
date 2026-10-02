@@ -11,6 +11,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Awaitable, Callable, Collection, Protocol
 
 
+from llm.preprocess import emoji_dictionary
 from llm.preprocess.emoji_text_utils import (
     reload_descriptions as _reload_emoji_descriptions,
     replace_custom_emoji_with_description,
@@ -191,27 +192,9 @@ def group_by_user(
     }
 
 
-_EMOJI_DICT_PATH = "/app/settings/emoji_dictionary.txt"
-
-
 def _load_all_emoji_names_from_file() -> set[str]:
-    """讀檔，回傳所有已登記的 emoji name（含空值佔位），用於判斷是否需要新增。"""
-    from pathlib import Path
-    names: set[str] = set()
-    path = Path(_EMOJI_DICT_PATH)
-    if not path.exists():
-        return names
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            name = line.split("=", 1)[0].strip()
-            if name:
-                names.add(name)
-    except Exception as exc:
-        logger.warning("讀取 emoji 字典失敗: %s", exc)
-    return names
+    """所有已登記的 emoji name（含空值佔位），用於判斷是否需要新增。"""
+    return set(emoji_dictionary.entries())
 
 
 def refresh_emoji_dictionary(guild) -> int:
@@ -236,7 +219,7 @@ def refresh_emoji_dictionary(guild) -> int:
         )
         return 0
 
-    path = Path(_EMOJI_DICT_PATH)
+    path = Path(emoji_dictionary.EMOJI_DICT_PATH)
     today = datetime.now().strftime("%Y-%m-%d")
     block = [
         "",

@@ -18,6 +18,8 @@ from llm.logger_factory import build_askai_prompt_log, get_or_create_file_logger
 from llm.client.lemonade_gate import imagegen_busy, note_foreground_activity
 from llm.persona.member_names import member_names_from_guild, name_map_lines
 from llm.preprocess import person_anchor
+from llm.preprocess.external_emoji import external_emoji_context
+from llm.preprocess.tweet_context import expand_tweets
 from llm.preprocess.chat_line import name_with_anchor
 from llm.preprocess.vision_image import (
     DEFAULT_MAX_FRAMES,
@@ -663,6 +665,14 @@ class LLMCommands(commands.Cog):
             if image_payload is None:
                 return
 
+        # X 貼文連結、別的伺服器的表情：補上說明與圖給模型看（只加在給模型的問題，檢索與網搜照舊用原問題）
+        tweet_notes, tweet_images = await expand_tweets(question)
+        emoji_notes, emoji_images = await external_emoji_context(question)
+        extra_notes = tweet_notes + emoji_notes
+        llm_question = resolved_question + ("\n\n" + "\n".join(extra_notes) if extra_notes else "")
+        if tweet_images or emoji_images:
+            image_payload = (image_payload or []) + tweet_images + emoji_images
+
         image_meta: dict[str, str | int | bool] | None = None
         if image and image_payload:
             image_meta = {
@@ -691,7 +701,7 @@ class LLMCommands(commands.Cog):
 
         # 用 asyncio.Task 包裝，取消時可中斷 Ollama HTTP 請求
         llm_task = asyncio.create_task(self.llm_service.generate_reply(
-            prompt=resolved_question,
+            prompt=llm_question,
             system=system_prompt,
             chat_context=chat_context,
             bot_history=bot_history,

@@ -136,3 +136,33 @@ def to_png_first_frame(data: bytes) -> bytes:
         return data
     logger.info("vision 圖片已退成 PNG 第一幀（%d → %d bytes）", len(data), len(converted))
     return converted
+
+
+async def download_images(session, urls, *, limit: int, max_bytes: int = 5 * 1024 * 1024,
+                          timeout: float = 8) -> list[str]:
+    """下載網址上的圖 → base64（給 vision 模型），最多 `limit` 張；動圖只取第一幀。
+
+    任何一張失敗（逾時、非 200、太大、空檔）就跳過那張，不拋例外——圖只是補充，少一張不該擋住回覆。
+    X 貼文縮圖（`tweet_context`）與別的伺服器的表情／貼圖（`external_emoji`）共用。
+    """
+    import base64
+
+    import aiohttp
+
+    out: list[str] = []
+    for url in urls:
+        if len(out) >= limit:
+            break
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+                if resp.status != 200:
+                    continue
+                data = await resp.read()
+        except Exception as exc:
+            logger.debug("下載圖片失敗 %s：%s", url, exc)
+            continue
+        if not data or len(data) > max_bytes:
+            continue
+        out.extend(base64.b64encode(f).decode("utf-8") for f in extract_key_frames(data, max_frames=1)[:1])
+    return out
+

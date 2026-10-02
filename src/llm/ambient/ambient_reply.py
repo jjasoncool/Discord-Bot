@@ -57,6 +57,8 @@ from llm.preprocess.chat_line import (
     semantic_message_text,
 )
 from llm.preprocess import person_anchor
+from llm.preprocess.external_emoji import external_emoji_context
+from llm.preprocess.tweet_context import expand_tweets
 from llm.preprocess.emoji_text_utils import is_emoji_or_symbol_only
 from llm.client.lemonade_gate import foreground_recently_active, stream_busy
 from sys_settings.time_settings import APP_TZ
@@ -652,6 +654,20 @@ async def _prepare_images(message: discord.Message) -> Optional[list[str]]:
     return out or None
 
 
+async def _media_context(msg: discord.Message) -> tuple[list[str], list[str]]:
+    """訊息裡模型原本看不懂的東西 → `(說明行, 圖 base64)`：
+
+    - X 貼文連結（含 bot 轉發的 fixupx）：作者、內文、影片縮圖或圖片。實例：群友回覆 bot 轉發的影片說
+      「肛塞？」，模型只看得到網址，回「你怎麼從我發的連結跳到肛塞」——其實是一支花瓶影片。
+    - 別的伺服器的表情與貼圖：字典查不到描述，附上圖片。
+    只用在最新那則與被回覆的那則；任何失敗都回空的那一份，不擋住回覆。
+    """
+    content = msg.content or ""
+    tweet_notes, tweet_imgs = await expand_tweets(content)
+    emoji_notes, emoji_imgs = await external_emoji_context(content, getattr(msg, "stickers", None) or ())
+    return tweet_notes + emoji_notes, tweet_imgs + emoji_imgs
+
+
 async def _resolve_replied_to(
     message: discord.Message,
 ) -> Optional[discord.Message]:
@@ -1071,6 +1087,22 @@ def _is_silence(reply: str, sentinel: str) -> bool:
     return reply.strip().strip("。．.!！?？ ").lower() == "pass"
 
 
+def _message_text(message: discord.Message) -> str:
+    """最新這則訊息給模型看的文字：貼圖、自訂表情、@ 都轉成看得懂的字。
+
+    不能直接用 `message.content`：Discord 貼圖不在 content 裡，只回貼圖的訊息會變成空字串，
+    被 @／reply 時模型就以為「被點名卻沒說話」（6/22 起 16 次只回貼圖，都被回「怎麼突然點我名」這類話）。
+    貼圖描述來自既有的 `sticker_cache`（啟動時預載「名稱｜描述」），`semantic_message_text` 會帶出來；
+    自訂表情留著 `<:name:id>` 原始代碼，拿去當檢索詞會召回一堆內容只有 `<@數字>` 的舊訊息。
+    別的伺服器的表情會留名稱（`:名稱:`）；本伺服器還沒填描述的表情會被整段拿掉，至少留個標記讓模型知道對方回了東西。
+    「有沒有可聊的內容」的閘（`_passes_content_gate`）刻意仍看原文——純貼圖不該讓它自己插話。
+    """
+    text = semantic_message_text(message).strip()
+    if not text and (message.content or "").strip():
+        return "(一個表情符號)"
+    return text
+
+
 def _passes_content_gate(msg: discord.Message) -> bool:
     """單則有沒有「可聊的內容」：非指令、非空、非純連結、非純表情、長度在區間內。有圖直接放行。"""
     stripped = (msg.content or "").strip()
@@ -1102,7 +1134,7 @@ async def _run_one_ambient_pass(
         自己起的頭，仍要過**讓位、降溫硬閘、每小時上限**——否則會繞過防 model swap
         ping-pong 的保護，也會在群裡已經喊停時還一路接下去。不吃冷卻（來回對話本該連貫）。
     """
-    stripped = (message.content or "").strip()
+    stripped = _message_text(message)
     has_image = _has_image(message)
 
     cid = message.channel.id
@@ -1214,6 +1246,14 @@ async def _run_one_ambient_pass(
             if ref_imgs:
                 image_payload = ((image_payload or []) + ref_imgs)[:_SETTINGS.image_max_count]
 
+    # ── 模型原本看不懂的東西：X 貼文連結、別的伺服器的表情與貼圖（見 `_media_context`）──
+    reply_notes, reply_imgs = await _media_context(replied_msg) if replied_msg is not None else ([], [])
+    latest_notes, latest_imgs = await _media_context(message)
+    if reply_notes and replied_to_text is not None:
+        replied_to_text = replied_to_text + "\n" + "\n".join(reply_notes)
+    if latest_imgs or reply_imgs:   # 群友自己貼的圖優先，整體受 image_max_count 上限
+        image_payload = ((image_payload or []) + latest_imgs + reply_imgs)[:_SETTINGS.image_max_count]
+
     # ── 「最新訊息」框架（P1-5）：自發 vs 被點名分開包 ──
     # 被 @/reply（directed）：對方真的在跟你說話 → 維持 <latest_user_message from=發話者>。
     # 自發插話：把觸發訊息併進「你旁觀到的對話」，latest 換成中性自我提示、且不帶 from——
@@ -1227,6 +1267,8 @@ async def _run_one_ambient_pass(
             prompt_text = "(對方貼了一張圖)"
         else:
             prompt_text = "(對方只 @ 了我，沒有文字)"
+        if latest_notes:
+            prompt_text = prompt_text + "\n" + "\n".join(latest_notes)
     else:
         asker_for_bundle = None
         _ts = message.created_at.astimezone(APP_TZ).strftime("%H:%M")
@@ -1239,7 +1281,7 @@ async def _run_one_ambient_pass(
                 format_chat_line(
                     message, APP_TZ, time_only=True, compact=False,
                     prefix=f"#{_next_no} ",
-                )
+                ) + "".join(f" {n}" for n in latest_notes)
             ]
             thread_map[_next_no] = message
         elif image_payload:
