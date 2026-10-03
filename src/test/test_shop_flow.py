@@ -1,0 +1,649 @@
+"""商品上架（services.community.shop_service ＋ commands.shop_commands ＋ 交易模組）。
+
+用真的交易模組與真的 Discord 元件，只把 Discord 本身換成假的伺服器（沿用 test_trade_flow 的 World）。
+
+守的底線：
+  1. 上架：只有觀星者；bot 代發商品貼文（標題、說明、上架者暱稱、商品圖換固定檔名並由 embed 引用第一張）；
+     價格單位太長（塞不進按鈕的 custom_id）、圖太大都在發文前擋下；
+     還沒有品相就沒有購買選單；不是圖片、商品論壇沒綁定都說清楚原因。之後更新貼文不傳附件清單（圖才不會被刪）。
+  2. 管理：只有上架者或管理員（含群主）；新增（單一、批次）後購買選單出現，有預購就掛「預購中」；
+     最多 25 個；品相編號不重用；數量不能改得比已下單少；有進行中訂單的品相不能刪；
+     下架後選單與按鈕停用、標題【已下架】、鎖定，但預購截止照樣提醒。
+  3. 下單：不能買自己的；一次最多 5 種；賣完、截止、超過剩餘都擋下；下單就預留（貼文上的剩餘跟著變）；
+     開出只有買家與上架者的交易 thread，訂單訊息有明細、總計與訂單紀錄；同一位買家加購沿用 thread、
+     另一位買家各開一個；交易 thread 開不起來就把預留還回去；加購會作廢原本的領收通知；
+     正在取消的 thread 不再收訂單。
+  4. 接上交易模組：商品交易完成不封存、不刪商品貼文、不結束其他買家的 thread——商品論壇改綁或解除也一樣
+     （交易種類看交易 thread 裡的訂單紀錄，不看來源貼文在哪）；取消時把這個 thread 所有訂單（首次＋加購，
+     多長的 thread 都讀完）的預留還回去。
+  5. 預購截止：截止時在含這個品相、還沒完成的交易 thread @ 雙方提醒一次；品相標成已截止、不能再買；
+     重啟後不重複提醒；一個 thread 發不出去不影響其他人、也不會每小時重複 @；沒有未截止的預購就拿掉標籤；
+     已被封存的商品貼文也找得到，處理完封存回去。
+  6. 置頂上架說明：綁定時發一篇並置頂、建好「預購中」標籤（建不了要告訴管理員）；已經有就不重發。
+  7. 名字一律是伺服器暱稱（快取拿不到就向 API 查）。
+  8. 分層：商品模組不 import 指令層；介面層按鈕與選單的 custom_id 解析得回同一筆資料。
+"""
+
+import ast
+import asyncio
+import itertools
+import os
+import sys
+import unittest
+from datetime import timedelta
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SRC_DIR = os.path.dirname(HERE)
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
+
+import discord  # noqa: E402
+
+from commands import shop_commands  # noqa: E402
+from commands.shop_commands import DiscordShopViews  # noqa: E402
+from services.community import shop_service, trade_service  # noqa: E402
+from services.community.shop_listing import ShopError, Variant, listing_from_message, parse_batch  # noqa: E402
+from services.community.shop_service import ListingSource, ShopService  # noqa: E402
+from services.community.trade_service import CANCEL, NOTIFY, RECEIVE, TradeService  # noqa: E402
+from sys_settings.shop_settings import ShopSettings  # noqa: E402
+from test.test_trade_flow import (  # noqa: E402  只拿假物件，不拿 TestCase（免得被重跑）
+    ARCHIVE_ID, BOT, CART_ID, FORUM_ID, OUTSIDER, OWNER, REQUESTER, SUPPLIER, SUPPLIER_B,
+    FakeMessage, FakeThread, World, _make_view,
+)
+
+SHOP_ID = 400
+SELLER = SUPPLIER          # 上架者（Trader）
+BUYER = REQUESTER
+BUYER_B = OUTSIDER
+TRADERS = {SUPPLIER.id, SUPPLIER_B.id}
+
+
+class ShopForum:
+    def __init__(self, world):
+        self.world = world
+        self.id = SHOP_ID
+        self.guild = world.guild
+        self.available_tags = []
+        self.all_threads = []
+        self._tag_ids = itertools.count(900)
+
+    @property
+    def threads(self):
+        return [t for t in self.all_threads if not t.archived]
+
+    async def archived_threads(self, *, limit=100):
+        for thread in sorted((t for t in self.all_threads if t.archived),
+                             key=lambda t: t.archive_timestamp, reverse=True):
+            yield thread
+
+    async def create_tag(self, *, name):
+        tag = SimpleNamespace(id=next(self._tag_ids), name=name)
+        self.available_tags.append(tag)
+        return tag
+
+
+class ForumThread(FakeThread):
+    """商品論壇裡的貼文（商品、置頂說明）。"""
+
+    def __init__(self, world, tid, name, forum, owner_id):
+        super().__init__(world, tid, name, parent_id=forum.id)
+        self.parent = forum
+        self.owner_id = owner_id
+        self.applied_tags = []
+        self.flags = SimpleNamespace(pinned=False)
+        self.jump_url = f"https://discord.com/channels/1/{tid}"
+        self.mention = f"<#{tid}>"
+
+    async def edit(self, **kwargs):
+        if "applied_tags" in kwargs:
+            self.applied_tags = list(kwargs.pop("applied_tags"))
+        if "pinned" in kwargs:
+            self.flags.pinned = kwargs.pop("pinned")
+        if "auto_archive_duration" in kwargs:
+            self.auto_archive_duration = kwargs.pop("auto_archive_duration")
+        await super().edit(**kwargs)
+
+    def tag_names(self):
+        return [t.name for t in self.applied_tags]
+
+
+class FakeAttachment:
+    def __init__(self, filename, content_type="image/png", size=1000):
+        self.filename = filename
+        self.content_type = content_type
+        self.size = size
+
+    async def to_file(self, *, filename):
+        return SimpleNamespace(filename=filename, source=self.filename)
+
+
+class ShopTestCase(unittest.TestCase):
+    def setUp(self):
+        self.world = World()
+        self.forum = ShopForum(self.world)
+        self.world.channels[SHOP_ID] = self.forum
+        self.config = {
+            "trade_forum_channel_id": FORUM_ID,
+            "cart_delivery_channel_id": CART_ID,
+            "archive_channel_id": ARCHIVE_ID,
+            "shop_forum_channel_id": SHOP_ID,
+        }
+        self.posts = []
+
+        async def get_configured_id(key, *args, **kwargs):
+            return self.config.get(key)
+
+        async def check_role(member, role):
+            return role == "Trader" and member.id in TRADERS
+
+        async def shop_post(channel, *, embed=None, files=None, thread_title=None, view=None, **kwargs):
+            thread = ForumThread(self.world, next(self.world.ids), thread_title, channel, owner_id=BOT.id)
+            message = FakeMessage(self.world, thread.id, BOT, "", view=view, embed=embed, thread=thread)
+            message.files = list(files or [])
+            thread.messages.append(message)
+            channel.all_threads.append(thread)
+            self.world.channels[thread.id] = thread
+            self.posts.append(thread)
+            return message
+
+        async def trade_post(channel, **kwargs):
+            self.world.archived_posts.append((channel, kwargs))
+            return SimpleNamespace(id=next(self.world.ids))
+
+        self.ephemeral = mock.AsyncMock(name="safe_send_interaction_message")
+        for p in (
+            mock.patch.object(trade_service.ChannelConfig, "get_configured_id", side_effect=get_configured_id),
+            mock.patch.object(trade_service, "check_role", side_effect=check_role),
+            mock.patch.object(shop_service, "check_role", side_effect=check_role),
+            mock.patch.object(trade_service, "post_to_channel", side_effect=trade_post),
+            mock.patch.object(shop_service, "post_to_channel", side_effect=shop_post),
+            mock.patch.object(trade_service, "safe_send_interaction_message", self.ephemeral),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        self.trade, self.shop = self.services()
+
+    def services(self):
+        """新的服務實例＝模擬 bot 重啟：記憶體裡什麼都沒有，只剩 Discord 上的東西。"""
+        trade = TradeService(self.world.bot, make_view=_make_view)
+        shop = ShopService(self.world.bot, trade=trade, views=DiscordShopViews(ShopSettings()),
+                           now=lambda: self.world.now)
+        trade.add_source_kind(shop.source)
+        return trade, shop
+
+    def call(self, coro):
+        return asyncio.run(coro)
+
+    # ── 操作捷徑 ──
+
+    def list_item(self, seller=SELLER, title="月相代儲", attachments=(), unit=""):
+        return self.call(self.shop.create_listing(seller, title=title, description="交付方式：遊戲內交易",
+                                                  unit=unit, attachments=attachments))
+
+    def add(self, thread, *lines, actor=SELLER):
+        drafts, errors = parse_batch("\n".join(lines), now=self.world.now)
+        assert not errors, errors
+        return self.call(self.shop.add_variants(thread.id, actor, drafts))
+
+    def listing(self, thread):
+        return listing_from_message(thread.messages[0])
+
+    def order(self, thread, buyer, picks):
+        return self.call(self.shop.place_order(thread.id, buyer, picks))
+
+    def cutoff_text(self, **delta):
+        moment = (self.world.now + timedelta(**delta)).astimezone(shop_service.APP_TZ)
+        return moment.strftime("%Y/%m/%d %H:%M")
+
+    def press(self, thread, user, action, ref):
+        interaction = SimpleNamespace(
+            user=user, channel=thread, message=None,
+            response=SimpleNamespace(is_done=lambda: False, defer=mock.AsyncMock()),
+        )
+        self.call(self.trade.handle_button(interaction, action, ref))
+
+    def ref_of(self, thread):
+        return trade_service.TradeRef(*map(int, thread.messages[0].view.custom_ids[0].split(":")[2:]))
+
+
+class ListingCreateTests(ShopTestCase):
+
+    def test_only_sellers_can_list(self):
+        with self.assertRaises(ShopError):
+            self.list_item(seller=BUYER)
+        self.assertEqual(self.posts, [])
+
+    def test_listing_post(self):
+        thread = self.list_item(attachments=[FakeAttachment("a.PNG"), FakeAttachment("b.jpg", "image/jpeg")])
+
+        message = thread.messages[0]
+        self.assertEqual(thread.name, "月相代儲")
+        self.assertEqual(message.embed.author.name, f"上架者：{SELLER.display_name}")
+        self.assertEqual([f.filename for f in message.files], ["item_1.png", "item_2.jpg"])
+        self.assertEqual(message.embed.image.url, "attachment://item_1.png")
+        listing = self.listing(thread)
+        self.assertEqual((listing.owner_id, listing.unit, listing.variants), (SELLER.id, "NT$", ()))
+        self.assertEqual([getattr(c, "options", None) for c in message.components[0].children], [None])  # 只有管理按鈕
+        self.assertEqual(thread.auto_archive_duration, 10080)
+
+    def test_rejections_explain_why(self):
+        with self.assertRaises(ShopError) as caught:
+            self.list_item(attachments=[FakeAttachment("x.pdf", "application/pdf")])
+        self.assertIn("不是圖片", str(caught.exception))
+        with self.assertRaises(ShopError) as caught:
+            self.list_item(attachments=[FakeAttachment("big.png", size=50 * 1024 * 1024)])
+        self.assertIn("太大", str(caught.exception))
+        with self.assertRaises(ShopError) as caught:
+            self.list_item(unit="鳴潮遊戲內星聲幣")  # 中文編碼後塞不進按鈕的 custom_id
+        self.assertIn("單位太長", str(caught.exception))
+        self.assertEqual(self.posts, [])
+        self.assertEqual(self.listing(self.list_item(unit="遊戲內星聲幣")).unit, "遊戲內星聲幣")
+        del self.config["shop_forum_channel_id"]
+        with self.assertRaises(ShopError) as caught:
+            self.list_item()
+        self.assertIn("/server_manager", str(caught.exception))
+
+
+class ManageTests(ShopTestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.thread = self.list_item()
+
+    def test_only_owner_or_admin(self):
+        with self.assertRaises(ShopError):
+            self.add(self.thread, "60 月相｜30｜10｜", actor=BUYER)
+        with self.assertRaises(ShopError):
+            self.add(self.thread, "60 月相｜30｜10｜", actor=SUPPLIER_B)  # 別的觀星者也不行
+        self.add(self.thread, "60 月相｜30｜10｜", actor=OWNER)  # 群主可以
+        self.assertEqual(len(self.listing(self.thread).variants), 1)
+
+    def test_variants_show_the_buy_menu_and_preorder_tag(self):
+        self.add(self.thread, "60 月相｜30｜10｜", f"6480 月相｜3000｜3｜{self.cutoff_text(days=1)}")
+
+        select = self.thread.messages[0].components[0].children[0]
+        self.assertEqual([o.label for o in select.options], ["60 月相", "6480 月相"])
+        self.assertEqual(select.max_values, 2)
+        self.assertEqual(len(self.thread.messages[0].embed.fields), 2)
+        self.assertEqual(self.thread.tag_names(), ["預購中"])
+        # 一般更新不傳附件清單：傳了（就算是空的）Discord 會把 embed 引用的商品圖刪掉
+        self.assertEqual(self.thread.messages[0].edits[-1]["attachments"], "unchanged")
+
+    def test_at_most_25_variants(self):
+        self.add(self.thread, *[f"品相{n}｜1" for n in range(25)])
+        with self.assertRaises(ShopError):
+            self.add(self.thread, "多一個｜1")
+
+    def test_limit_cannot_go_below_orders_and_ordered_variant_cannot_be_deleted(self):
+        self.add(self.thread, "60 月相｜30｜10｜")
+        self.order(self.thread, BUYER, {1: 3})
+        draft, = parse_batch("60 月相｜30｜2｜", now=self.world.now)[0]
+        with self.assertRaises(ShopError):
+            self.call(self.shop.edit_variant(self.thread.id, SELLER, 1, draft))
+        with self.assertRaises(ShopError):
+            self.call(self.shop.delete_variant(self.thread.id, SELLER, 1))
+
+    def test_deleted_numbers_are_not_reused(self):
+        self.add(self.thread, "60 月相｜30｜10｜", "300 月相｜150｜｜")
+        self.call(self.shop.delete_variant(self.thread.id, SELLER, 2))
+        self.add(self.thread, "980 月相｜490｜｜")
+        self.assertEqual([v.key for v in self.listing(self.thread).variants], [1, 3])
+
+    def test_close_listing(self):
+        self.add(self.thread, f"6480 月相｜3000｜3｜{self.cutoff_text(days=1)}")
+
+        self.call(self.shop.close_listing(self.thread.id, SELLER))
+
+        children = self.thread.messages[0].components[0].children
+        self.assertTrue(all(c.disabled for c in children))
+        self.assertTrue(self.thread.name.startswith("【已下架】"))
+        self.assertTrue(self.thread.locked)
+        self.assertEqual(self.thread.tag_names(), ["預購中"])  # 已成立的預購交易，截止時仍要提醒
+        with self.assertRaises(ShopError):
+            self.call(self.shop.check_pick(self.thread.id, BUYER, [1]))
+
+
+class OrderTests(ShopTestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.thread = self.list_item()
+        self.add(self.thread, "60 月相｜30｜10｜", "寰宇電台｜20｜｜", "一條龍｜40｜1｜")
+
+    def test_cannot_buy_own_listing(self):
+        with self.assertRaises(ShopError):
+            self.call(self.shop.check_pick(self.thread.id, SELLER, [1]))
+
+    def test_order_reserves_and_opens_a_private_thread(self):
+        opened = self.order(self.thread, BUYER, {1: 2, 2: 1})
+
+        listing = self.listing(self.thread)
+        self.assertEqual((listing.variant(1).taken, listing.variant(1).remaining), (2, 8))
+        self.assertIn("剩 8", self.thread.messages[0].embed.fields[0].value)
+        trade = opened.thread
+        self.assertEqual(sorted(trade.members), sorted([BUYER.id, SELLER.id]))
+        self.assertTrue(trade.name.startswith("【交易中】需求者 與 供應者甲"))
+        self.assertEqual(trade.messages[0].embed.fields[0].name, "商品貼文")
+        note = trade.messages[-1]
+        self.assertIn("60 月相 ×2", note.content)
+        self.assertIn("總計 NT$80", note.content)
+        self.assertTrue(note.components[0].children[0].custom_id.startswith("shop:order:"))
+        self.assertTrue(note.components[0].children[0].disabled)
+
+    def test_same_buyer_adds_on_other_buyer_gets_own_thread(self):
+        first = self.order(self.thread, BUYER, {1: 1})
+        again = self.order(self.thread, BUYER, {2: 1})
+        other = self.order(self.thread, BUYER_B, {1: 1})
+
+        self.assertFalse(again.created)
+        self.assertIs(again.thread, first.thread)
+        self.assertIn("寰宇電台", first.thread.messages[-1].content)
+        self.assertIsNot(other.thread, first.thread)
+        self.assertEqual(len(self.world.cart.all_threads), 2)
+
+    def test_at_most_five_kinds_per_order(self):
+        self.add(self.thread, *[f"加購{n}｜1" for n in range(3)])
+        with self.assertRaises(ShopError) as caught:
+            self.call(self.shop.check_pick(self.thread.id, BUYER, [1, 2, 3, 4, 5, 6]))
+        self.assertIn("最多挑 5 種", str(caught.exception))
+
+    def test_add_on_voids_the_receipt_notice(self):
+        trade = self.order(self.thread, BUYER, {1: 1}).thread
+        self.press(trade, SELLER, NOTIFY, self.ref_of(trade))
+        notice = trade.messages[-1]
+
+        self.order(self.thread, BUYER, {2: 1})
+        self.world.advance(hours=25)
+        self.call(self.trade.run_receipt_deadlines(self.world.now))
+
+        self.assertEqual(notice.components, [])
+        self.assertIn("作廢", notice.content)
+        self.assertFalse(trade.locked)
+
+    def test_thread_being_cancelled_takes_no_more_orders(self):
+        first = self.order(self.thread, BUYER, {1: 1}).thread
+
+        async def race():
+            # 取消拿著 thread 的鎖時又來一筆加購：加購列出 thread 時它還沒結束，等到鎖時已經結束了
+            lock = self.trade._lock(first.id)
+            await lock.acquire()
+            order = asyncio.create_task(self.shop.place_order(self.thread.id, BUYER, {1: 1}))
+            for _ in range(5):
+                await asyncio.sleep(0)
+            self.trade._closed.add(first.id)
+            lock.release()
+            return await order
+
+        again = self.call(race())
+
+        self.assertTrue(again.created)
+        self.assertIsNot(again.thread, first)
+        self.assertEqual(sum("🧾" in (c or "") for c in first.sent()), 1)  # 加購沒有發進正在取消的 thread
+
+    def test_unavailable_choices_are_refused(self):
+        self.order(self.thread, BUYER, {3: 1})
+        with self.assertRaises(ShopError) as caught:
+            self.call(self.shop.check_pick(self.thread.id, BUYER_B, [3]))
+        self.assertIn("已售完", str(caught.exception))
+        with self.assertRaises(ShopError) as caught:
+            self.order(self.thread, BUYER_B, {1: 11})
+        self.assertIn("只剩", str(caught.exception))
+
+    def test_reservation_is_returned_when_the_trade_cannot_open(self):
+        del self.config["cart_delivery_channel_id"]
+        with self.assertRaises(ShopError):
+            self.order(self.thread, BUYER, {1: 2})
+        self.assertEqual(self.listing(self.thread).variant(1).taken, 0)
+
+
+class TradeIntegrationTests(ShopTestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.thread = self.list_item()
+        self.add(self.thread, "60 月相｜30｜10｜", "寰宇電台｜20｜5｜")
+
+    def test_completing_keeps_the_listing_and_other_buyers(self):
+        mine = self.order(self.thread, BUYER, {1: 2}).thread
+        theirs = self.order(self.thread, BUYER_B, {1: 1}).thread
+
+        self.press(mine, BUYER, RECEIVE, self.ref_of(mine))
+
+        self.assertTrue(mine.locked)
+        self.assertIn("商品貼文保留", mine.sent()[-1])
+        self.assertFalse(self.thread.deleted)
+        self.assertEqual(self.world.archived_posts, [])
+        self.assertFalse(theirs.locked)
+        self.assertEqual(self.listing(self.thread).variant(1).taken, 3)  # 完成的算賣出，不還回
+
+    def test_listing_is_safe_even_if_the_shop_forum_is_unbound(self):
+        mine = self.order(self.thread, BUYER, {1: 2}).thread
+        theirs = self.order(self.thread, BUYER_B, {1: 1}).thread
+        del self.config["shop_forum_channel_id"]  # 管理員解除綁定（或讀不到設定）
+
+        self.press(mine, BUYER, RECEIVE, self.ref_of(mine))
+
+        self.assertIn("商品貼文保留", mine.sent()[-1])
+        self.assertFalse(self.thread.deleted)
+        self.assertEqual(self.world.archived_posts, [])
+        self.assertFalse(theirs.locked)
+
+    def test_long_threads_are_read_to_the_first_order(self):
+        mine = self.order(self.thread, BUYER, {1: 2}).thread
+        for _ in range(250):
+            mine.messages.append(FakeMessage(self.world, next(self.world.ids), BUYER, "聊天"))
+
+        self.press(mine, SELLER, CANCEL, self.ref_of(mine))
+
+        self.assertEqual(self.listing(self.thread).variant(1).taken, 0)
+
+    def test_cancel_returns_every_order_in_the_thread(self):
+        mine = self.order(self.thread, BUYER, {1: 2}).thread
+        self.order(self.thread, BUYER, {1: 1, 2: 1})  # 加購
+        self.assertEqual(self.listing(self.thread).variant(1).taken, 3)
+
+        self.press(mine, SELLER, CANCEL, self.ref_of(mine))
+
+        listing = self.listing(self.thread)
+        self.assertEqual((listing.variant(1).taken, listing.variant(2).taken), (0, 0))
+        self.assertIn("預留的數量會還回", mine.sent()[-1])
+
+
+class PreorderTests(ShopTestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.thread = self.list_item()
+        self.add(self.thread, f"6480 月相｜3000｜3｜{self.cutoff_text(days=1)}", "60 月相｜30｜｜")
+        self.cutoff = self.listing(self.thread).variant(1).cutoff
+        self.pre = self.order(self.thread, BUYER, {1: 1}).thread
+        self.instant = self.order(self.thread, BUYER_B, {2: 1}).thread
+
+    def run_cutoffs(self, shop=None):
+        return self.call((shop or self.shop).run_preorder_cutoffs(self.world.now))
+
+    def test_cutoff_reminds_open_trades_once(self):
+        self.world.advance(hours=12)
+        self.assertEqual(self.run_cutoffs(), self.cutoff)
+
+        self.world.advance(days=1)
+        self.run_cutoffs()
+
+        reminder = self.pre.sent()[-1]
+        self.assertIn("⏰", reminder)
+        self.assertIn(BUYER.mention, reminder)
+        self.assertIn(SELLER.mention, reminder)
+        self.assertNotIn("⏰", self.instant.sent()[-1])
+        self.assertTrue(self.listing(self.thread).variant(1).closed)
+        self.assertEqual(self.thread.tag_names(), [])
+        count = len(self.pre.messages)
+        _, restarted = self.services()
+        self.run_cutoffs(restarted)
+        self.assertEqual(len(self.pre.messages), count)
+        with self.assertRaises(ShopError):
+            self.call(self.shop.check_pick(self.thread.id, OUTSIDER, [1]))
+
+    def test_archived_listing_is_still_found(self):
+        self.thread.auto_archive()
+        self.world.advance(days=2)
+
+        self.run_cutoffs()
+
+        self.assertIn("⏰", self.pre.sent()[-1])
+        self.assertTrue(self.listing(self.thread).variant(1).closed)
+        self.assertTrue(self.thread.archived)  # 改之前解除封存，改完封存回去
+
+    def test_closed_listing_still_reminds(self):
+        self.call(self.shop.close_listing(self.thread.id, SELLER))
+        self.world.advance(days=2)
+
+        self.run_cutoffs()
+
+        self.assertIn("⏰", self.pre.sent()[-1])
+        self.assertTrue(self.thread.archived and self.thread.locked)
+
+    def test_one_failed_reminder_does_not_repeat_the_others(self):
+        other = self.order(self.thread, SUPPLIER_B, {1: 1}).thread
+
+        async def broken(*args, **kwargs):
+            raise discord.HTTPException(mock.MagicMock(status=500), "send failed")
+
+        self.pre.send = broken
+        self.world.advance(days=2)
+        with self.assertLogs(shop_service.logger, level="ERROR"):
+            self.run_cutoffs()
+        self.assertIn("⏰", other.sent()[-1])
+        count = len(other.messages)
+
+        self.run_cutoffs()
+
+        self.assertEqual(len(other.messages), count)
+        self.assertTrue(self.listing(self.thread).variant(1).closed)
+
+
+class GuideTests(ShopTestCase):
+
+    def test_guide_is_posted_and_pinned_once(self):
+        note = self.call(self.shop.ensure_guide(self.forum))
+        guide = self.posts[-1]
+        self.assertEqual(guide.name, "📌 上架說明")
+        self.assertTrue(guide.flags.pinned)
+        self.assertIn(guide.jump_url, note)
+        self.assertEqual(guide.messages[0].components[0].children[0].custom_id, shop_commands.GUIDE_CUSTOM_ID)
+
+        guide.auto_archive()
+        self.call(self.shop.ensure_guide(self.forum))
+
+        self.assertEqual(len(self.posts), 1)
+        self.assertFalse(guide.archived)
+        self.assertEqual([t.name for t in self.forum.available_tags], ["預購中"])
+
+    def test_missing_tag_permission_is_reported(self):
+        async def refuse(**kwargs):
+            raise discord.Forbidden(mock.MagicMock(status=403), "Missing Permissions")
+
+        self.forum.create_tag = refuse
+        note = self.call(self.shop.ensure_guide(self.forum))
+        self.assertIn("⚠️", note)
+        self.assertIn("預購中", note)
+
+
+class ServerNicknameTests(ShopTestCase):
+
+    def test_seller_name_comes_from_the_server_when_the_cache_misses(self):
+        thread = self.list_item()
+        self.world.cached = set()
+
+        self.add(thread, "60 月相｜30｜10｜")
+
+        self.assertEqual(thread.messages[0].embed.author.name, f"上架者：{SELLER.display_name}")
+        self.assertIn(SELLER.id, self.world.api_lookups)
+
+
+class LayeringTests(unittest.TestCase):
+
+    def test_shop_service_does_not_import_commands(self):
+        for module in (shop_service, sys.modules["services.community.shop_listing"]):
+            tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+            names = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
+            names |= {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+            with self.subTest(module.__name__):
+                self.assertFalse([n for n in names if n.split(".")[0] == "commands"])
+
+    def test_custom_ids_resolve_back(self):
+        async def check():
+            cases = [
+                shop_commands.ShopManageButton(21, 7, "PY:幣"),
+                shop_commands.ShopConfirmOrder(500, {1: 2, 3: 1}),
+                shop_commands.ShopPanelButton("batch", 500),
+                shop_commands.ShopConfirmButton("delete", 500, 7),
+                shop_commands.ShopConfirmButton("close", 500),
+                shop_commands.ShopBatchButton("fix", 500),
+                shop_commands.ShopBuySelect(500, options=[discord.SelectOption(label="x", value="1:2:::0:0")]),
+            ]
+            for original in cases:
+                cls = type(original)
+                match = cls.__discord_ui_compiled_template__.fullmatch(original.item.custom_id)
+                self.assertIsNotNone(match, original.item.custom_id)
+                restored = await cls.from_custom_id(None, original.item, match)
+                self.assertEqual(restored.item.custom_id, original.item.custom_id)
+                self.assertLessEqual(len(original.item.custom_id), 100)
+            self.assertEqual(cases[1].picks, (await shop_commands.ShopConfirmOrder.from_custom_id(
+                None, cases[1].item,
+                shop_commands.ShopConfirmOrder.__discord_ui_compiled_template__.fullmatch(cases[1].item.custom_id))).picks)
+
+        asyncio.run(check())
+
+    def test_panel_menus_carry_the_variant(self):
+        from services.community.shop_listing import Listing
+        from datetime import datetime, timezone
+
+        async def check():
+            variant = Variant(3, "6480 月相", 3000, limit=3, taken=1,
+                              cutoff=datetime(2099, 10, 20, 15, 59, tzinfo=timezone.utc))
+            listing = Listing(thread_id=500, owner_id=21, unit="NT$", title="t", description="", variants=(variant,))
+            view = shop_commands._panel_view(listing)
+            picks = [c for c in view.children if isinstance(c, shop_commands.ShopPickSelect)]
+            self.assertEqual([p.item.custom_id for p in picks], ["shop:pick:edit:500", "shop:pick:delete:500"])
+            option = picks[0].item.options[0]
+            self.assertEqual(Variant.decode(option.value, option.label.split(". ", 1)[-1]), variant)
+
+        asyncio.run(check())
+
+    def test_batch_preview_round_trip(self):
+        async def check():
+            text = "6480 月相｜3000｜3｜2099/10/20 23:59\n寰宇電台｜20"
+            embed, view = shop_commands._batch_preview(500, text)
+            restored = shop_commands._preview_text(SimpleNamespace(embeds=[embed]))
+            self.assertEqual(parse_batch(restored, now=shop_commands._now()), parse_batch(text, now=shop_commands._now()))
+            self.assertEqual([c.item.custom_id for c in view.children], ["shop:batchok:500", "shop:batchfix:500"])
+            bad, bad_view = shop_commands._batch_preview(500, "壞掉的一行")
+            self.assertIn("第 1 行", bad.description)
+            self.assertEqual([c.item.custom_id for c in bad_view.children], ["shop:batchfix:500"])
+
+        asyncio.run(check())
+
+    def test_cog_wires_the_listing_source_into_trades(self):
+        async def check():
+            trade = TradeService(mock.MagicMock(), make_view=_make_view)
+            bot = mock.MagicMock()
+            bot.get_cog.return_value = SimpleNamespace(trade=trade)
+            bot.wait_until_ready = mock.AsyncMock()
+            cog = shop_commands.ShopCommands(bot)
+            await cog.cog_load()
+            try:
+                self.assertIs(cog.shop.trade, trade)
+                self.assertTrue(any(isinstance(k, ListingSource) for k in trade._kinds))
+                bot.add_dynamic_items.assert_called_once()
+                bot.add_view.assert_called_once()
+            finally:
+                await cog.cog_unload()
+
+        asyncio.run(check())
+
+
+if __name__ == "__main__":
+    unittest.main()
