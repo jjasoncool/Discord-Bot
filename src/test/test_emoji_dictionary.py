@@ -5,6 +5,8 @@
 - 三個讀取者（表情轉文字、反應分類、新表情偵測）讀的是同一份解析；類別不合法時整段當描述
 - 本伺服器的表情：有描述換成描述；字典有登錄但還沒填描述的照舊拿掉（管理員維護）
 - 別的伺服器的表情（字典沒登錄）：保留 `:名稱:`，不然模型不知道對方回了什麼
+- 只寫一個類別字的行（`wfrog_stock_decline = agree`，使用者習慣這樣填）＝類別、描述待填：
+  按反應照使用者的類別算（以前被當成描述，類別推斷成 neutral），聊天文字裡先拿掉
 
 執行：
     cd src && python -m unittest test.test_emoji_dictionary -v
@@ -31,6 +33,7 @@ frog_angry = 生氣 | negative
 LULW = 爆笑
 pending =
 weird = 描述 | 不是類別
+stock_down = agree
 """
 
 
@@ -54,6 +57,8 @@ class ParseTests(DictionaryFileTestBase):
         self.assertEqual((e["LULW"].description, e["LULW"].category), ("爆笑", None))
         self.assertEqual(e["pending"].description, "", "待填的佔位也要列出（新表情偵測靠它）")
         self.assertEqual(e["weird"].description, "描述 | 不是類別", "類別不合法就整段當描述")
+        self.assertEqual((e["stock_down"].description, e["stock_down"].category), ("", "agree"),
+                         "只寫一個類別字＝類別，描述待填")
 
     def test_hand_edits_take_effect_without_restart(self):
         self.assertEqual(ed.entries()["LULW"].description, "爆笑")
@@ -66,7 +71,7 @@ class ParseTests(DictionaryFileTestBase):
 class EmojiTextTests(DictionaryFileTestBase):
     def test_this_server_and_other_servers(self):
         text = emoji_text_utils.replace_custom_emoji_with_description(
-            "<:frog_angry:1> <:pending:2> <a:other_server:3> 好")
+            "<:frog_angry:1> <:pending:2> <:stock_down:4> <a:other_server:3> 好")
         self.assertEqual(text, ":生氣: :other_server: 好",
                          "有描述換描述；本伺服器待填的拿掉；別的伺服器的留名稱")
 
@@ -76,10 +81,11 @@ class EmojiTextTests(DictionaryFileTestBase):
         self.assertEqual(cats["frog_angry"], "negative")
         self.assertIn("LULW", cats)
         self.assertNotIn("pending", cats, "還沒填描述的不分類")
+        self.assertEqual(cats["stock_down"], "agree", "只寫類別的照使用者的類別算，不能推斷成 neutral")
 
     def test_new_emoji_detection_sees_placeholders(self):
         from llm.persona import personality_extractor as pe
-        self.assertEqual(pe._load_all_emoji_names_from_file(), {"frog_angry", "LULW", "pending", "weird"})
+        self.assertEqual(pe._load_all_emoji_names_from_file(), {"frog_angry", "LULW", "pending", "weird", "stock_down"})
 
 
 if __name__ == "__main__":

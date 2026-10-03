@@ -1,6 +1,8 @@
 """自訂表情字典 `settings/emoji_dictionary.txt` 的唯一讀寫點。
 
 格式：`emoji_name = 語意描述[ | 情緒類別]`；`#` 開頭與空行略過；`name =`（空值）是待填的佔位。
+只寫一個類別字（`wfrog_stock_decline = agree`）＝只填了類別、描述待填——使用者新表情多半這樣填，
+以前被當成描述 `agree`：聊天文字變成 `:agree:`、按反應時類別從描述推斷成 neutral，使用者的類別沒生效。
 
 **檔案改了就重讀**（`prompt_files.read_parsed` 看修改時間）：使用者會手動維護描述，以前只有
 04:00 偵測到新表情時才重載，手改要等 bot 重啟才生效。
@@ -57,6 +59,8 @@ def parse_line(line: str) -> Optional[EmojiEntry]:
         cat = cat.strip().lower()
         if cat in VALID_CATEGORIES:
             return EmojiEntry(name, desc.strip(), cat)
+    elif rest.lower() in VALID_CATEGORIES:
+        return EmojiEntry(name, "", rest.lower())
     return EmojiEntry(name, rest, None)
 
 

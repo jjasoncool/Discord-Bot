@@ -90,11 +90,11 @@ def _infer_category_from_description(description: str) -> Category:
 
 
 def _load_custom_emoji_categories() -> dict[str, Category]:
-    """custom emoji 名稱 → 分類：有顯式 `| category` 用那個，沒有就從描述關鍵字推斷，都推不出是 neutral。
-    字典讀取與重讀見 `llm.preprocess.emoji_dictionary`；待填（沒描述）的不列。"""
+    """custom emoji 名稱 → 分類：有寫類別用那個（含只寫類別、描述待填的），沒有就從描述關鍵字推斷，
+    都推不出是 neutral。字典讀取與重讀見 `llm.preprocess.emoji_dictionary`；描述與類別都沒填的不列。"""
     return {
         name: e.category or _infer_category_from_description(e.description)  # type: ignore[misc]
-        for name, e in emoji_dictionary.entries().items() if e.description
+        for name, e in emoji_dictionary.entries().items() if e.category or e.description
     }
 
 
