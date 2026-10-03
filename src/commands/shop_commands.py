@@ -159,7 +159,9 @@ _PANEL_ACTIONS = {
     "batch": ("批次新增", discord.ButtonStyle.primary),
     "info": ("編輯商品資訊", discord.ButtonStyle.secondary),
     "close": ("下架", discord.ButtonStyle.danger),
+    "back": ("返回", discord.ButtonStyle.secondary),  # 確認畫面用，不放在主面板
 }
+_PANEL_MAIN = ("add", "batch", "info", "close")
 
 
 def _panel_embed(listing: Listing) -> discord.Embed:
@@ -171,9 +173,34 @@ def _panel_embed(listing: Listing) -> discord.Embed:
     return embed
 
 
+async def _show_panel(interaction: discord.Interaction, listing: Listing, text: Optional[str] = None) -> None:
+    """重畫管理面板（這則只有上架者看得到的訊息）。
+
+    每次操作完都重畫：Discord 的選單選過同一項就不會再通知 bot，重畫才會回到未選取
+    （使用者 2026-10-03：編輯一次之後選單卡在那一項，第二次就編輯不了）。呼叫前要先回應過互動。"""
+    await interaction.edit_original_response(content=text, embed=_panel_embed(listing), view=_panel_view(listing))
+
+
+async def _panel_with_error(interaction: discord.Interaction, shop: ShopService, listing_id: int, text: str) -> None:
+    """失敗時也重畫面板（選單才會回到未選取），讀不到商品就只顯示訊息。"""
+    try:
+        listing = await shop.check_manager(listing_id, interaction.user)
+    except ShopError:
+        await interaction.edit_original_response(content=text, embed=None, view=None)
+        return
+    await _show_panel(interaction, listing, text)
+
+
+def _confirm_view(action: str, listing_id: int, key: Optional[int] = None) -> discord.ui.View:
+    view = discord.ui.View(timeout=None)
+    view.add_item(ShopConfirmButton(action, listing_id, key))
+    view.add_item(ShopPanelButton("back", listing_id))
+    return view
+
+
 def _panel_view(listing: Listing) -> discord.ui.View:
     view = discord.ui.View(timeout=None)
-    for action in _PANEL_ACTIONS:
+    for action in _PANEL_MAIN:
         view.add_item(ShopPanelButton(action, listing.thread_id))
     if listing.variants:
         # 選項的 value 就是品相資料：選了直接開 modal，不必再向 Discord 讀（modal 要在 3 秒內送出）
@@ -185,7 +212,7 @@ def _panel_view(listing: Listing) -> discord.ui.View:
 
 
 class ShopPanelButton(discord.ui.DynamicItem[discord.ui.Button],
-                      template=r"shop:panel:(?P<action>add|batch|info|close):(?P<listing>\d+)"):
+                      template=r"shop:panel:(?P<action>add|batch|info|close|back):(?P<listing>\d+)"):
     """管理面板的按鈕。面板只有上架者看得到；真正寫入時 ShopService 會再檢查一次權限。"""
 
     def __init__(self, action: str, listing_id: int):
@@ -207,9 +234,17 @@ class ShopPanelButton(discord.ui.DynamicItem[discord.ui.Button],
         elif self.action == "batch":
             await interaction.response.send_modal(BatchModal(self.listing_id))
         elif self.action == "close":
-            view = discord.ui.View(timeout=None)
-            view.add_item(ShopConfirmButton("close", self.listing_id))
-            await _reply(interaction, "確定要下架這篇商品嗎？下架後不再接單，已成立的交易照常進行。", view=view)
+            # 確認畫面直接換在面板上（不另開訊息），按「返回」回到面板
+            await interaction.response.edit_message(
+                content="確定要下架這篇商品嗎？下架後不再接單，已成立的交易照常進行。",
+                embed=None, view=_confirm_view("close", self.listing_id))
+        elif self.action == "back":
+            await interaction.response.defer()
+            try:
+                listing = await shop.check_manager(self.listing_id, interaction.user)
+            except ShopError as exc:
+                return await interaction.edit_original_response(content=str(exc), embed=None, view=None)
+            await _show_panel(interaction, listing)
         else:
             # 編輯商品資訊要帶入目前的標題與說明，只能讀一次商品貼文（偶爾慢於 3 秒時 modal 會開不起來）
             try:
@@ -248,9 +283,8 @@ class ShopPickSelect(discord.ui.DynamicItem[discord.ui.Select],
         if self.action == "edit":
             await interaction.response.send_modal(VariantModal(self.listing_id, variant))
         else:
-            view = discord.ui.View(timeout=None)
-            view.add_item(ShopConfirmButton("delete", self.listing_id, variant.key))
-            await _reply(interaction, f"確定要刪除「{variant.name}」嗎？", view=view)
+            await interaction.response.edit_message(content=f"確定要刪除「{variant.name}」嗎？", embed=None,
+                                                    view=_confirm_view("delete", self.listing_id, variant.key))
 
 
 class ShopConfirmButton(discord.ui.DynamicItem[discord.ui.Button],
@@ -278,17 +312,16 @@ class ShopConfirmButton(discord.ui.DynamicItem[discord.ui.Button],
         await interaction.response.edit_message(content="處理中……", view=None)  # 先拿掉按鈕，避免連按
         try:
             if self.action == "delete":
-                await shop.delete_variant(self.listing_id, interaction.user, self.key)
-                text = "已刪除這個品相。"
-            else:
-                await shop.close_listing(self.listing_id, interaction.user)
-                text = "已下架。"
+                listing = await shop.delete_variant(self.listing_id, interaction.user, self.key)
+                return await _show_panel(interaction, listing, "已刪除這個品相。")
+            await shop.close_listing(self.listing_id, interaction.user)
+            return await interaction.edit_original_response(content="已下架。", embed=None, view=None)
         except ShopError as exc:
             text = str(exc)
         except Exception:
             logger.error("商品上架：%s 失敗 商品=%s", self.action, self.listing_id, exc_info=True)
             text = "處理時發生錯誤，請截圖通知管理員。"
-        await interaction.edit_original_response(content=text)
+        await _panel_with_error(interaction, shop, self.listing_id, text)
 
 
 # ── 批次新增 ──
@@ -345,14 +378,14 @@ class ShopBatchButton(discord.ui.DynamicItem[discord.ui.Button],
             return await interaction.response.edit_message(embed=embed, view=view)
         await interaction.response.edit_message(content="新增中……", embed=None, view=None)
         try:
-            await shop.add_variants(self.listing_id, interaction.user, drafts)
-            result = f"已新增 {len(drafts)} 個品相。"
+            listing = await shop.add_variants(self.listing_id, interaction.user, drafts)
+            return await _show_panel(interaction, listing, f"已新增 {len(drafts)} 個品相。")
         except ShopError as exc:
             result = str(exc)
         except Exception:
             logger.error("商品上架：批次新增失敗 商品=%s", self.listing_id, exc_info=True)
             result = "處理時發生錯誤，請截圖通知管理員。"
-        await interaction.edit_original_response(content=result)
+        await _panel_with_error(interaction, shop, self.listing_id, result)
 
 
 _BATCH_HELP = (
@@ -417,22 +450,22 @@ class VariantModal(discord.ui.Modal):
         shop = _shop(interaction)
         if shop is None:
             return await _missing(interaction)
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        # 從面板打開的 modal：延後回應後直接更新那則面板（選單回到未選取、清單是最新的）
+        await interaction.response.defer()
         try:
             draft = parse_draft(self.name.value, self.price.value, self.limit.value, self.cutoff.value,
                                 preorder=(self.kind.values or ["instant"])[0] == "preorder", now=_now())
             if self.variant is None:
-                await shop.add_variants(self.listing_id, interaction.user, [draft])
-                text = f"已新增「{draft.name}」。"
-            else:
-                await shop.edit_variant(self.listing_id, interaction.user, self.variant.key, draft)
-                text = f"已更新「{draft.name}」。"
+                listing = await shop.add_variants(self.listing_id, interaction.user, [draft])
+                return await _show_panel(interaction, listing, f"已新增「{draft.name}」。")
+            listing = await shop.edit_variant(self.listing_id, interaction.user, self.variant.key, draft)
+            return await _show_panel(interaction, listing, f"已更新「{draft.name}」。")
         except ShopError as exc:
-            text = str(exc)
+            text = f"⚠️ {exc}"
         except Exception:
             logger.error("商品上架：儲存品相失敗 商品=%s", self.listing_id, exc_info=True)
             text = "處理時發生錯誤，請截圖通知管理員。"
-        await _reply(interaction, text)
+        await _panel_with_error(interaction, shop, self.listing_id, text)
 
 
 # ── 商品資訊（上架、編輯） ──
@@ -463,23 +496,32 @@ class ListingInfoModal(discord.ui.Modal):
         shop = _shop(interaction)
         if shop is None:
             return await _missing(interaction)
-        await interaction.response.defer(ephemeral=True, thinking=True)
         attachments = list(self.images.values or [])
+        if self.listing is not None:
+            # 從管理面板打開的：更新那則面板
+            await interaction.response.defer()
+            try:
+                listing = await shop.edit_info(self.listing.thread_id, interaction.user, title=self.title_input.value,
+                                               description=self.description.value, unit=self.unit.value,
+                                               attachments=attachments)
+                return await _show_panel(interaction, listing, "已更新商品資訊。")
+            except ShopError as exc:
+                text = f"⚠️ {exc}"
+            except Exception:
+                logger.error("商品上架：儲存商品資訊失敗", exc_info=True)
+                text = "處理時發生錯誤，請截圖通知管理員。"
+            return await _panel_with_error(interaction, shop, self.listing.thread_id, text)
+        # 從置頂說明打開的（上架）：另發一則只有自己看得到的結果，不能去改置頂說明
+        await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            if self.listing is None:
-                thread = await shop.create_listing(
-                    interaction.user, title=self.title_input.value, description=self.description.value,
-                    unit=self.unit.value, attachments=attachments)
-                text = f"已上架：{thread.mention}\n接著到貼文按「⚙️ 管理商品（上架者）」加入品相。"
-            else:
-                await shop.edit_info(self.listing.thread_id, interaction.user, title=self.title_input.value,
-                                     description=self.description.value, unit=self.unit.value,
-                                     attachments=attachments)
-                text = "已更新商品資訊。"
+            thread = await shop.create_listing(
+                interaction.user, title=self.title_input.value, description=self.description.value,
+                unit=self.unit.value, attachments=attachments)
+            text = f"已上架：{thread.mention}\n接著到貼文按「⚙️ 管理商品（上架者）」加入品相。"
         except ShopError as exc:
             text = str(exc)
         except Exception:
-            logger.error("商品上架：儲存商品資訊失敗", exc_info=True)
+            logger.error("商品上架：上架失敗", exc_info=True)
             text = "處理時發生錯誤，請截圖通知管理員。"
         await _reply(interaction, text)
 
@@ -511,7 +553,10 @@ class QuantityModal(discord.ui.Modal):
         try:
             rows, total, listing = await shop.quote(self.listing_id, interaction.user, picks)
         except ShopError as exc:
+            await shop.refresh_listing(self.listing_id)
             return await _reply(interaction, str(exc))
+        # 重畫商品貼文：選單選過同一組就不會再通知 bot，這次取消的話下次才選得回同樣的商品
+        await shop.refresh_listing(self.listing_id)
         embed = discord.Embed(title=f"確認下單：{listing.title}", color=discord.Color.gold(),
                               description="\n".join(f"・{row}" for row in rows) + f"\n\n**總計 {money(listing.unit, total)}**")
         embed.set_footer(text="按「確認下單」後會預留數量，並開一個只有你和上架者的交易 thread。")

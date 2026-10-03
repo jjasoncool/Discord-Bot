@@ -375,6 +375,17 @@ class ShopService:
 
     # ── 購買 ──
 
+    async def refresh_listing(self, listing_id: int) -> None:
+        """資料不變、重畫商品貼文：購買選單回到未選取。
+
+        Discord 的選單選過同一組就不會再通知 bot；買家填完數量後如果取消，下次才選得回同樣的商品。"""
+        try:
+            async with self._lock(listing_id):
+                thread, message, listing = await self.load(listing_id)
+                await self._save(thread, message, listing)
+        except Exception:
+            logger.warning("商品上架：重畫商品貼文失敗 商品=%s", listing_id, exc_info=True)
+
     async def check_pick(self, listing_id: int, buyer: discord.Member, keys: Sequence[int], *,
                          listing: Optional[Listing] = None) -> list[Variant]:
         """買家在下拉選完：檢查這些品相現在能不能買，回傳要填數量的品相。

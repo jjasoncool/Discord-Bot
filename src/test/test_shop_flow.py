@@ -22,6 +22,9 @@
   6. 置頂上架說明：綁定時發一篇並置頂、建好「預購中」標籤（建不了要告訴管理員）；已經有就不重發。
   7. 名字一律是伺服器暱稱（快取拿不到就向 API 查）。
   8. 分層：商品模組不 import 指令層；介面層按鈕與選單的 custom_id 解析得回同一筆資料。
+  9. 選單不會卡住：Discord 的選單選過同一項就不會再通知 bot（使用者 2026-10-03 實測：編輯一次後
+     第二次編輯不了）。管理面板每次操作完都重畫（編輯、新增、刪除、批次），確認畫面換在面板上；
+     買家填完數量也重畫商品貼文。
 """
 
 import ast
@@ -568,6 +571,82 @@ class ServerNicknameTests(ShopTestCase):
 
         self.assertEqual(thread.messages[0].embed.author.name, f"上架者：{SELLER.display_name}")
         self.assertIn(SELLER.id, self.world.api_lookups)
+
+
+class PanelRedrawTests(ShopTestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.thread = self.list_item()
+        self.add(self.thread, "60 月相｜30｜10｜", "寰宇電台｜20｜｜")
+        p = mock.patch.object(shop_commands, "safe_send_interaction_message", mock.AsyncMock())
+        self.sent_ephemeral = p.start()
+        self.addCleanup(p.stop)
+
+    def interaction(self, user=SELLER, message=None):
+        return SimpleNamespace(
+            client=SimpleNamespace(get_cog=lambda name: SimpleNamespace(shop=self.shop)),
+            user=user, guild=self.world.guild, channel=self.thread, message=message,
+            response=SimpleNamespace(defer=mock.AsyncMock(), edit_message=mock.AsyncMock(),
+                                     send_modal=mock.AsyncMock(), is_done=lambda: True),
+            edit_original_response=mock.AsyncMock(),
+        )
+
+    def assert_panel_redrawn(self, interaction, text):
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        self.assertIn(text, kwargs["content"])
+        picks = [c for c in kwargs["view"].children if isinstance(c, shop_commands.ShopPickSelect)]
+        self.assertEqual(len(picks), 2)  # 重畫出新的選單＝回到未選取
+        return kwargs
+
+    def test_editing_a_variant_redraws_the_panel(self):
+        async def run():
+            listing = self.listing(self.thread)
+            modal = shop_commands.VariantModal(self.thread.id, listing.variant(1))
+            modal.name._value, modal.price._value, modal.limit._value, modal.cutoff._value = "60 月相", "35", "10", ""
+            modal.kind._values = ["instant"]
+            interaction = self.interaction()
+            await modal.on_submit(interaction)
+            return interaction
+
+        interaction = self.call(run())
+
+        interaction.response.defer.assert_awaited_once_with()  # 延後回應＝之後改的是面板那則
+        kwargs = self.assert_panel_redrawn(interaction, "已更新")
+        self.assertIn("NT$35", kwargs["embed"].description)
+        self.assertEqual(self.listing(self.thread).variant(1).price, 35)
+
+    def test_delete_confirmation_stays_in_the_panel(self):
+        async def run():
+            listing = self.listing(self.thread)
+            pick = shop_commands._panel_view(listing).children[-1]  # 刪除品相選單
+            pick.item._values = [pick.item.options[1].value]
+            asking = self.interaction()
+            await pick.callback(asking)
+            confirm = asking.response.edit_message.await_args.kwargs["view"].children[0]
+            doing = self.interaction()
+            await confirm.callback(doing)
+            return asking, doing
+
+        asking, doing = self.call(run())
+
+        self.assertIn("寰宇電台", asking.response.edit_message.await_args.kwargs["content"])
+        self.assert_panel_redrawn(doing, "已刪除")
+        self.assertEqual([v.name for v in self.listing(self.thread).variants], ["60 月相"])
+
+    def test_filling_quantities_redraws_the_listing(self):
+        message = self.thread.messages[0]
+        before = len(message.edits)
+
+        async def run():
+            modal = shop_commands.QuantityModal(self.thread.id, list(self.listing(self.thread).variants[:1]))
+            modal.inputs[0][2]._value = "2"
+            await modal.on_submit(self.interaction(user=BUYER, message=message))
+
+        self.call(run())
+
+        self.assertEqual(len(message.edits), before + 1)  # 買家的購買選單回到未選取
+        self.sent_ephemeral.assert_awaited()  # 明細＋確認下單
 
 
 class LayeringTests(unittest.TestCase):
