@@ -73,6 +73,7 @@ async def post_to_channel(
     follow_up_label: Optional[str] = None,
     files_per_message: int = 10,
     view: Optional[discord.ui.View] = None,
+    allowed_mentions: Optional[discord.AllowedMentions] = None,
 ) -> Optional[discord.Message]:
     """依「綁定的頻道型別」自動決定發文方式，並穩健處理附件：
 
@@ -86,6 +87,7 @@ async def post_to_channel(
         自動退成純文字重發，並把所有附件改走後續批次補送。
       - follow_up_label 當第一個補送批次的說明文字（例：「本文附圖（後續補送）」）。
       - view（按鈕、選單）只掛在第一則；退成純文字重發時也會帶著。
+      - allowed_mentions 給轉貼別人訊息的呼叫端用（例：封存對話），免得內容裡的 @ 又通知一次。
 
     回傳首則 discord.Message（forum 為 thread 首則）；呼叫端可用 msg.channel
     取得 thread / 文字頻道繼續發後續內容（留言等），forum / text 寫法一致。
@@ -109,6 +111,8 @@ async def post_to_channel(
             kwargs["files"] = attachments
         if view is not None:
             kwargs["view"] = view
+        if allowed_mentions is not None:
+            kwargs["allowed_mentions"] = allowed_mentions
         if isinstance(channel, discord.ForumChannel):
             if tags:
                 kwargs["applied_tags"] = tags
