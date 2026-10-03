@@ -10,7 +10,7 @@
      即使那個 thread 已經被 Discord 自動封存（封存後就不在 discord.py 的快取裡）。
   4. 按鈕各有其人：只有供應方能通知領收與取消，只有需求方能按已領收；別人按不改變任何狀態。
   5. 完成：先發完成訊息再鎖定（反過來 thread 會被重新打開），標題改成【已完成】；
-     需求貼文的對話以附檔封存後刪除原貼文（封存失敗就保留、刪除失敗要說）；同一篇的其他
+     需求貼文的對話以附檔封存後刪除原貼文（封存失敗就保留、刪除失敗要說；不在自由市場的貼文絕不刪）；同一篇的其他
      供應方 thread @ 雙方後結束，已被自動封存的也一樣。結束後再按通知不會把 thread 打開。
   6. 取消：標題【已取消】並鎖定；需求貼文保留；只清掉這位供應方的接單表情（需求貼文
      已被自動封存也清得掉）。
@@ -136,10 +136,13 @@ class FakeMessage:
     def __init__(self, world, mid, author, content="", *, mentions=(), view=None, embed=None, thread=None):
         self.id = mid
         self.thread = thread
+        self.channel = thread
         self.author = author
         self.content = content or ""
         self.mentions = list(mentions)
         self.embed = embed
+        self.embeds = [embed] if embed is not None else []
+        self.edits = []
         self.view = view
         self.created_at = world.now
         self.attachments = []
@@ -151,13 +154,26 @@ class FakeMessage:
         self.view = view
         self.components = []
         if view is not None:
-            self.components = [SimpleNamespace(children=[SimpleNamespace(custom_id=c) for c in view.custom_ids])]
+            # 真的 discord.ui.View（商品上架的測試）直接用它的元件；交易測試的假 view 只有 custom_ids
+            children = getattr(view, "children", None)
+            if children is None:
+                children = [SimpleNamespace(custom_id=c) for c in view.custom_ids]
+            # 從 Discord 讀回來的訊息元件沒有 DynamicItem 那層包裝
+            children = [getattr(child, "item", child) for child in children]
+            self.components = [SimpleNamespace(children=list(children))]
 
-    async def edit(self, *, content=None, view="unchanged"):
+    async def edit(self, *, content=None, view="unchanged", embed="unchanged", attachments="unchanged"):
+        # 跟 Discord 一樣：封存中的 thread 改不了訊息（50083 Thread is archived）
+        if self.thread is not None and self.thread.archived:
+            raise discord.HTTPException(mock.MagicMock(status=400), "Thread is archived")
+        self.edits.append({"content": content, "view": view, "embed": embed, "attachments": attachments})
         if content is not None:
             self.content = content
         if view != "unchanged":
             self._set_view(view)
+        if embed != "unchanged":
+            self.embed = embed
+            self.embeds = [embed] if embed is not None else []
 
     async def add_reaction(self, emoji):
         self.reactions.append(SimpleNamespace(emoji=emoji, me=True))
@@ -494,6 +510,17 @@ class CompleteTests(TradeFlowTestCase):
         self.assertFalse(self.post.deleted)
         self.assertIn("封存失敗", self.thread.sent()[-1])
         self.assertTrue(self.thread.locked)
+
+    def test_post_outside_the_market_is_never_deleted(self):
+        # 保險：刪掉的東西救不回來，只有確定在自由市場裡的貼文才封存、刪除
+        self.config["trade_forum_channel_id"] = OTHER_FORUM_ID
+
+        self.press(self.thread, REQUESTER, RECEIVE, self.ref)
+
+        self.assertTrue(self.thread.locked)
+        self.assertFalse(self.post.deleted)
+        self.assertEqual(self.world.archived_posts, [])
+        self.assertFalse(self.other.locked)
 
     def test_source_kept_when_delete_fails(self):
         async def refuse():

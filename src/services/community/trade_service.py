@@ -18,6 +18,10 @@
 一位完成後需求貼文會封存並刪除，其他供應方的 thread 一併結束（TR-Q8）。
 只有供應方能取消（TR-Q4：避免需求方受領服務後擅自取消；需求方想取消就跟供應方說）。
 
+交易的來源有兩種：自由市場的需求貼文（預設，寫在這裡）與商品貼文（`SourceKind`，由商品上架
+`services.community.shop_service` 交進來）。兩者差在完成與取消後怎麼處理來源：需求貼文成交一次就
+封存刪除、結束其他供應方的 thread；商品貼文保留、可以賣給很多人，取消時把預留的數量還回去。
+
 按鈕長什麼樣子屬於 Discord 介面，由 commands/forum_monitor.py 以 `make_view` 交進來；
 這裡不 import 指令層（理由同點名服務：互相 import 會形成循環）。
 """
@@ -31,7 +35,7 @@ import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import AsyncIterator, Callable, Iterator, Optional, Sequence
+from typing import AsyncIterator, Callable, Iterator, Optional, Protocol, Sequence
 
 import discord
 from discord.utils import snowflake_time
@@ -80,12 +84,14 @@ _ARCHIVED_KEPT = "archived_kept"  # 已複製到封存頻道，但刪除原貼�
 _MISSING = "missing"    # 需求貼文已經不在（被刪、或別的供應方完成時已封存）
 _LOCKED = "locked"      # 封存頻道沒設定，只鎖定需求貼文
 _FAILED = "failed"      # 複製失敗，保留原貼文
+_FOREIGN = "foreign"    # 來源不在自由市場（例：商品貼文被誤判），不封存、不刪、不結束其他交易
 _ARCHIVE_NOTE = {
     _ARCHIVED: "需求貼文已封存。",
     _ARCHIVED_KEPT: "需求貼文已封存，但刪除原貼文失敗，請通知管理員刪除。",
     _MISSING: "",
     _LOCKED: "封存頻道未設定，需求貼文已鎖定。",
     _FAILED: "需求貼文封存失敗，已保留原貼文，請通知管理員。",
+    _FOREIGN: "",
 }
 
 
@@ -107,6 +113,37 @@ class OpenedTrade:
     #: False＝同一位供應方對同一篇需求已經有進行中的 thread，沿用它
     created: bool
     supplier: discord.Member
+
+
+@dataclass(frozen=True)
+class TradeNote:
+    """開單時（或同一組再次下單時）發進交易 thread 的一則訊息，例如商品的訂單明細。"""
+
+    content: str
+    view: Optional[discord.ui.View] = None
+
+
+class SourceKind(Protocol):
+    """自由市場以外的交易來源（例：商品貼文）。自由市場的需求貼文是預設，不用實作這個。"""
+
+    #: 開單訊息裡指向來源的欄位名稱，例「商品貼文」
+    label: str
+
+    async def owns(self, thread: discord.Thread, ref: TradeRef) -> bool:
+        """這個交易 thread 歸我管嗎。要從交易 thread 本身判斷（例：裡面有訂單紀錄），
+        不能看來源貼文在哪：論壇改綁或讀不到設定時會被誤當成自由市場，商品貼文就被封存刪掉。"""
+
+    def opening_text(self, ref: TradeRef) -> str:
+        """開單訊息的說明。"""
+
+    async def on_complete(self, thread: discord.Thread, ref: TradeRef) -> str:
+        """交易完成時處理來源；回傳要加在完成訊息裡的說明（可以是空字串）。"""
+
+    def cancel_text(self, ref: TradeRef) -> str:
+        """取消訊息。"""
+
+    async def on_cancel(self, thread: discord.Thread, ref: TradeRef) -> None:
+        """交易取消、thread 鎖定之後處理來源（例：把預留的數量還回去）。"""
 
 
 def ref_from_match(match: re.Match) -> TradeRef:
@@ -190,6 +227,18 @@ class TradeService:
         self._locks: dict[object, asyncio.Lock] = {}
         # 這個行程裡已經結束的 thread（Discord 的鎖定狀態要等事件回來才會更新到快取）
         self._closed: set[int] = set()
+        self._kinds: list[SourceKind] = []
+
+    def add_source_kind(self, kind: SourceKind) -> None:
+        """登記自由市場以外的交易來源（商品上架的 cog 載入時呼叫）。"""
+        self._kinds.append(kind)
+
+    async def _kind_for(self, thread: discord.Thread, ref: TradeRef) -> Optional[SourceKind]:
+        """交易屬於哪一種來源；None＝自由市場的需求貼文。"""
+        for kind in self._kinds:
+            if await kind.owns(thread, ref):
+                return kind
+        return None
 
     # ── 入口：供應方對需求貼文按表情 ──
 
@@ -206,14 +255,14 @@ class TradeService:
         forum_id = await self._channel_id(self.settings.forum_channel_key)
         if forum_id is None:
             return None
-        source = await self._get_thread(payload.channel_id)
+        source = await self.get_thread(payload.channel_id)
         if source is None or getattr(source, "parent_id", None) != forum_id:
             return None
 
         guild = self.bot.get_guild(payload.guild_id)
         # 表情事件本身帶著 Discord 當下送來的成員資料（含伺服器暱稱與身份組，不是快取）；
         # 沒帶才走快取 → API
-        supplier = payload.member or await self._member(guild, payload.user_id)
+        supplier = payload.member or await self.member(guild, payload.user_id)
         if supplier is None or supplier.bot:
             return None
         if not await check_role(supplier, self.settings.supplier_role):
@@ -226,24 +275,40 @@ class TradeService:
         if requester_id is None:
             logger.info("交易：需求貼文 %s 找不到需求方（或需求方就是供應方），不開單", source.id)
             return None
-        requester = await self._member(guild, requester_id)
+        requester = await self.member(guild, requester_id)
         if requester is None or requester.bot:
             logger.info("交易：需求方 %s 不在伺服器裡或是 bot，不開單（需求貼文 %s）", requester_id, source.id)
             return None
         return await self.open_trade(source, requester, supplier)
 
     async def open_trade(
-        self, source: discord.Thread, requester: discord.Member, supplier: discord.Member
+        self, source: discord.Thread, requester: discord.Member, supplier: discord.Member,
+        *, note: Optional[TradeNote] = None, kind: Optional[SourceKind] = None,
     ) -> Optional[OpenedTrade]:
-        """為（需求貼文, 供應方）開一個私人交易 thread；同一組已經有進行中的就沿用。"""
+        """為（來源貼文, 需求方, 供應方）開一個私人交易 thread；同一組已經有進行中的就沿用。
+
+        `note` 會發在開單訊息之後；沿用既有 thread 時就只發它（例：同一位買家加購），
+        而且原本的領收通知會作廢：加購的東西不能跟著舊通知被自動領收。
+        `kind` 是來源種類（自由市場不用給），只影響開單訊息的寫法。"""
         cart = await self._channel(self.settings.cart_channel_key)
         if cart is None:
             logger.error("交易：購物車頻道未設定或找不到，無法開交易 thread（需求貼文 %s）", source.id)
             return None
-        async with self._lock(("open", source.id, supplier.id)):
+        async with self._lock(("open", source.id, requester.id, supplier.id)):
+            # 同一組＝同一篇來源、同一位需求方、同一位供應方：商品貼文是很多買家對同一位上架者，
+            # 只看供應方會把不同買家的單混進同一個 thread
             for thread, ref in await self._open_trades_for(cart, source.id):
-                if ref is not None and ref.supplier_id == supplier.id:
-                    await thread.send(f"{supplier.mention} 又對需求貼文按了表情；這筆交易還在這個 thread 進行中。")
+                if ref is None or ref.supplier_id != supplier.id or ref.requester_id != requester.id:
+                    continue
+                # 鎖住再確認一次：剛好被取消的 thread 不能再收訂單（取消時讀過的訂單才會還回）
+                async with self._lock(thread.id):
+                    if thread.id in self._closed or thread.locked:
+                        continue
+                    if note is None:
+                        await thread.send(f"{supplier.mention} 又對需求貼文按了表情；這筆交易還在這個 thread 進行中。")
+                    else:
+                        await thread.send(content=note.content, view=note.view)
+                        await self._retire_requests(thread, "（有新的加購，這次通知已作廢，請供應方交付後重新通知）")
                     return OpenedTrade(thread, False, supplier)
 
             ref = TradeRef(source.id, requester.id, supplier.id)
@@ -260,9 +325,11 @@ class TradeService:
                 await thread.add_user(supplier)
                 await thread.send(
                     content=f"{requester.mention} {supplier.mention}",
-                    embed=self._opening_embed(ref),
+                    embed=self._opening_embed(ref, kind),
                     view=self._make_view(ref, (NOTIFY, CANCEL, HELP)),
                 )
+                if note is not None:
+                    await thread.send(content=note.content, view=note.view)
             except Exception:
                 # 沒有開單訊息就讀不到交易身分，同一位供應方再按會又開一個，所以整個刪掉
                 with contextlib.suppress(discord.HTTPException):
@@ -315,15 +382,19 @@ class TradeService:
             if thread.id in self._closed:
                 return
             # 同一時間只有一則有效的通知：期限從它起算，舊的拿掉按鈕
-            async for message in thread.history(limit=100):
-                if self._is_active_request(message):
-                    await message.edit(content=f"{message.content}\n（已由新的通知取代）", view=None)
+            await self._retire_requests(thread, "（已由新的通知取代）")
             await thread.send(
                 content=(f"<@{ref.requester_id}>，供應方 <@{ref.supplier_id}> 已通知交付完成。"
                          "收到後請按「已領收」；還沒收到請按「還沒領收」，自動領收會暫停。"
                          f"{hours} 小時內都沒有按，將自動視為已領收。"),
                 view=self._make_view(ref, (RECEIVE, HOLD, HELP)),
             )
+
+    async def _retire_requests(self, thread: discord.Thread, note: str) -> None:
+        """拿掉還有效的領收通知上的按鈕（期限跟著消失）。呼叫端要先拿著這個 thread 的鎖。"""
+        async for message in thread.history(limit=None):
+            if self._is_active_request(message):
+                await message.edit(content=f"{message.content}\n{note}", view=None)
 
     async def hold_receipt(self, thread: discord.Thread, ref: TradeRef, message: Optional[discord.Message]) -> None:
         """需求方說還沒領收：拿掉那則通知上的按鈕（期限跟著消失），請供應方交付後再通知一次。"""
@@ -353,31 +424,49 @@ class TradeService:
         return True
 
     async def cancel(self, thread: discord.Thread, ref: TradeRef) -> None:
+        kind = await self._kind_for(thread, ref)
         async with self._lock(thread.id):
             if thread.id in self._closed:
                 return
             # 先發訊息再鎖定：對已封存的 thread 發訊息會把它重新打開
-            await thread.send(f"<@{ref.requester_id}>，供應方 <@{ref.supplier_id}> 已取消這筆交易，"
-                              "此 thread 將鎖定。需求貼文保留，其他供應方仍可接單。")
+            if kind is None:
+                text = (f"<@{ref.requester_id}>，供應方 <@{ref.supplier_id}> 已取消這筆交易，"
+                        "此 thread 將鎖定。需求貼文保留，其他供應方仍可接單。")
+            else:
+                text = kind.cancel_text(ref)
+            await thread.send(text)
             await self._close(thread, CANCELLED_PREFIX)
-        await self._clear_supplier_reactions(ref)
+        if kind is None:
+            await self._clear_supplier_reactions(ref)
+        else:
+            try:
+                await kind.on_cancel(thread, ref)
+            except Exception:
+                logger.error("交易：取消後處理來源失敗 thread=%s ref=%s", thread.id, ref, exc_info=True)
         logger.info("交易：取消 thread=%s ref=%s", thread.id, ref)
 
     async def complete(self, thread: discord.Thread, ref: TradeRef, *, auto: bool) -> None:
+        kind = await self._kind_for(thread, ref)
         async with self._lock(thread.id):
             if thread.id in self._closed:
                 return
-            result = await self._archive_source(ref)
+            if kind is None:
+                result = await self._archive_source(ref)
+                note = _ARCHIVE_NOTE[result]
+            else:
+                result = "kept"
+                note = await kind.on_complete(thread, ref)
             if auto:
                 who = (f"<@{ref.requester_id}> 在 {self.settings.receipt_timeout_hours} 小時內沒有按已領收，"
                        "自動視為已領收")
             else:
                 who = f"<@{ref.requester_id}> 已領收"
-            await thread.send(f"{who}，交易完成。{_ARCHIVE_NOTE[result]}此 thread 將鎖定。")
+            await thread.send(f"{who}，交易完成。{note}此 thread 將鎖定。")
             await self._close(thread, COMPLETED_PREFIX)
-        logger.info("交易：完成 thread=%s ref=%s auto=%s 需求貼文=%s", thread.id, ref, auto, result)
-        # 在鎖外處理：兩位供應方同時完成時，各自拿著自己的鎖去等對方的鎖會卡死
-        await self._end_other_trades(ref, keep_thread_id=thread.id)
+        logger.info("交易：完成 thread=%s ref=%s auto=%s 來源=%s", thread.id, ref, auto, result)
+        if kind is None and result != _FOREIGN:
+            # 需求貼文成交一次就結束；在鎖外處理：兩位供應方同時完成時，各自拿著自己的鎖去等對方的鎖會卡死
+            await self._end_other_trades(ref, keep_thread_id=thread.id)
 
     # ── 入口：定時檢查領收期限（utils.due_loop 每次醒來呼叫）──
 
@@ -428,6 +517,11 @@ class TradeService:
         except Exception:
             self._closed.discard(thread.id)
             raise
+
+    async def open_trades_for_source(self, source_id: int) -> list[tuple[discord.Thread, Optional[TradeRef]]]:
+        """同一篇來源還沒結束的交易 thread（例：商品預購截止時要提醒的那些）。"""
+        cart = await self._channel(self.settings.cart_channel_key)
+        return [] if cart is None else await self._open_trades_for(cart, source_id)
 
     async def _open_trades_for(
         self, cart: discord.TextChannel, source_id: int
@@ -531,9 +625,13 @@ class TradeService:
         """把需求貼文的對話複製到封存頻道（完整內容附 .txt），成功才刪除原貼文。"""
         # 同一篇需求只封存一次：兩位供應方同時完成時，後到的會發現貼文已經不在
         async with self._lock(("source", ref.source_id)):
-            source = await self._get_thread(ref.source_id)
+            source = await self.get_thread(ref.source_id)
             if source is None:
                 return _MISSING
+            # 保險：只有確定在自由市場裡的貼文才封存、刪除（刪掉的東西救不回來）
+            if getattr(source, "parent_id", None) != await self._channel_id(self.settings.forum_channel_key):
+                logger.warning("交易：來源 %s 不在自由市場，不封存也不刪除", ref.source_id)
+                return _FOREIGN
             archive = await self._channel(self.settings.archive_channel_key)
             if archive is None:
                 logger.error("交易：封存頻道未設定，只鎖定需求貼文 %s", ref.source_id)
@@ -569,7 +667,7 @@ class TradeService:
     async def _transcript(self, source: discord.Thread) -> str:
         messages = [m async for m in source.history(limit=self.settings.archive_history_limit, oldest_first=True)]
         # 向 API 抓回來的歷史訊息，作者不在快取時只有全域名稱；名字一律從伺服器取
-        names = await self._display_names(source.guild, (m.author.id for m in messages))
+        names = await self.display_names(source.guild, (m.author.id for m in messages))
         lines = [f"需求貼文：{source.name}", ""]
         for message in messages:
             when = message.created_at.astimezone(APP_TZ).strftime("%Y-%m-%d %H:%M")
@@ -582,7 +680,7 @@ class TradeService:
 
     async def _archive_summary(self, source: discord.Thread, ref: TradeRef) -> str:
         # 封存貼文寫名字不寫 @，免得每次封存都去提醒雙方
-        names = await self._display_names(source.guild, (ref.requester_id, ref.supplier_id))
+        names = await self.display_names(source.guild, (ref.requester_id, ref.supplier_id))
         return (f"需求貼文：{source.name}\n"
                 f"需求方：{names.get(ref.requester_id) or ref.requester_id}　"
                 f"供應方：{names.get(ref.supplier_id) or ref.supplier_id}\n"
@@ -594,7 +692,7 @@ class TradeService:
 
         自由市場的貼文一小時沒人講話就會被自動封存，對封存中的 thread 改反應會被 Discord 拒絕，
         所以先解除封存（貼文會回到活躍列表，也剛好表示這篇需求又可以接了）。"""
-        source = await self._get_thread(ref.source_id)
+        source = await self.get_thread(ref.source_id)
         if source is None:
             return
         try:
@@ -614,14 +712,14 @@ class TradeService:
             logger.warning("交易：清掉供應方 %s 在需求貼文 %s 上的表情失敗：%s",
                            ref.supplier_id, ref.source_id, "、".join(failed))
 
-    def _opening_embed(self, ref: TradeRef) -> discord.Embed:
-        embed = discord.Embed(
-            title="交易確認",
-            description=(f"供應方 <@{ref.supplier_id}> 接下了需求方 <@{ref.requester_id}> 的需求，"
-                         "請在這裡討論交易細節。"),
-            color=discord.Color.gold(),
-        )
-        embed.add_field(name="需求貼文", value=f"<#{ref.source_id}>", inline=False)
+    def _opening_embed(self, ref: TradeRef, kind: Optional[SourceKind] = None) -> discord.Embed:
+        if kind is None:
+            description = (f"供應方 <@{ref.supplier_id}> 接下了需求方 <@{ref.requester_id}> 的需求，"
+                           "請在這裡討論交易細節。")
+        else:
+            description = kind.opening_text(ref)
+        embed = discord.Embed(title="交易確認", description=description, color=discord.Color.gold())
+        embed.add_field(name=kind.label if kind else "需求貼文", value=f"<#{ref.source_id}>", inline=False)
         embed.add_field(
             name="流程",
             value=(f"供應方交付後按「通知需求方領收」，需求方收到後按「已領收」即完成；"
@@ -639,7 +737,7 @@ class TradeService:
         channel_id = await self._channel_id(key)
         return self.bot.get_channel(channel_id) if channel_id is not None else None
 
-    async def _get_thread(self, thread_id: int) -> Optional[discord.Thread]:
+    async def get_thread(self, thread_id: int) -> Optional[discord.Thread]:
         channel = self.bot.get_channel(thread_id)
         if channel is not None:
             return channel
@@ -649,7 +747,7 @@ class TradeService:
         except discord.HTTPException:
             return None
 
-    async def _member(self, guild: Optional[discord.Guild], user_id: int) -> Optional[discord.Member]:
+    async def member(self, guild: Optional[discord.Guild], user_id: int) -> Optional[discord.Member]:
         """取伺服器成員；要顯示的名字一律用它的 display_name（伺服器暱稱）。
 
         沿用 2025-07 `b456d91` 的做法：成員快取有時候拿不到人（當時接單就因此失敗），
@@ -670,11 +768,11 @@ class TradeService:
             logger.warning("交易：向 API 查成員 %s 失敗，可能是權限或 Discord 狀態問題", user_id, exc_info=True)
         return None
 
-    async def _display_names(self, guild: Optional[discord.Guild], user_ids) -> dict[int, str]:
+    async def display_names(self, guild: Optional[discord.Guild], user_ids) -> dict[int, str]:
         """一批使用者的伺服器暱稱（每人只查一次）；查不到的不在結果裡，由呼叫端決定怎麼顯示。"""
         names: dict[int, str] = {}
         for user_id in dict.fromkeys(user_ids):
-            member = await self._member(guild, user_id)
+            member = await self.member(guild, user_id)
             if member is not None:
                 names[user_id] = member.display_name
         return names
