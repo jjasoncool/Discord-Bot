@@ -2,8 +2,8 @@
 
 商品貼文本身就是紀錄（使用者 2026-10-03 決定不加資料表，延續交易的做法）：
   - 標題、說明、商品圖：貼文第一則訊息的 embed。
-  - 上架者 id、下一個品相編號、幣別、是否已下架：「⚙️ 管理商品（上架者）」按鈕的 custom_id 與停用狀態。
-  - 每個商品（品相）：購買下拉選單的一個選項，名稱寫在 label，其餘寫在 value（`Variant.encode`）。
+  - 上架者 id、下一個品項編號、幣別、是否已下架：「⚙️ 管理商品（上架者）」按鈕的 custom_id 與停用狀態。
+  - 每個商品（品項）：購買下拉選單的一個選項，名稱寫在 label，其餘寫在 value（`Variant.encode`）。
     選項只有 bot 寫得進去，重啟後照樣讀得回來；embed 上的商品清單只是依它產生的顯示。
   - 下單：交易 thread 裡訂單訊息上的一顆停用按鈕，custom_id 帶「商品編號x數量」（`order_custom_id`）。
 """
@@ -24,8 +24,8 @@ MANAGE_PREFIX = "shop:manage:"
 ORDER_PREFIX = "shop:order:"
 #: 購買下拉選單：shop:buy:商品貼文id
 BUY_TEMPLATE = r"shop:buy:(?P<listing>\d+)"
-#: 管理按鈕：shop:manage:上架者id:下一個品相編號:幣別（URL 編碼，單位裡有冒號也不會亂）
-#: 品相編號只增不減：刪掉的編號不重用，舊訂單、舊選單才不會對到新的品相
+#: 管理按鈕：shop:manage:上架者id:下一個品項編號:幣別（URL 編碼，單位裡有冒號也不會亂）
+#: 品項編號只增不減：刪掉的編號不重用，舊訂單、舊選單才不會對到新的品項
 MANAGE_TEMPLATE = r"shop:manage:(?P<owner>\d+):(?P<seq>\d+):(?P<unit>[^:]*)"
 CUSTOM_ID_LIMIT = 100
 _MANAGE_RE = re.compile(MANAGE_TEMPLATE)
@@ -67,7 +67,7 @@ def format_cutoff(moment: datetime) -> str:
 
 @dataclass(frozen=True)
 class Variant:
-    """一篇商品裡的一個品相。"""
+    """一篇商品裡的一個品項。"""
 
     key: int                            # 商品內的編號，建立後不變（訂單與提醒靠它對應）
     name: str
@@ -129,7 +129,7 @@ class Variant:
 
 @dataclass(frozen=True)
 class Draft:
-    """上架者填的一個品相（還沒有編號與已下單數量）。"""
+    """上架者填的一個品項（還沒有編號與已下單數量）。"""
 
     name: str
     price: int
@@ -145,7 +145,7 @@ class Draft:
 
 def parse_draft(name: str, price: str, limit: str, cutoff: str, *,
                 preorder: Optional[bool], now: datetime, min_limit: int = 1) -> Draft:
-    """檢查上架者填的品相。preorder＝None 時看有沒有填截止時間（批次新增用）。
+    """檢查上架者填的品項。preorder＝None 時看有沒有填截止時間（批次新增用）。
 
     min_limit：新增時數量至少 1；編輯時填的是「剩餘數量」，可以填 0（停賣、標成已售完）。"""
     name = (name or "").strip()
@@ -185,7 +185,7 @@ def parse_draft(name: str, price: str, limit: str, cutoff: str, *,
 
 
 def parse_batch(text: str, *, now: datetime) -> tuple[list[Draft], list[str]]:
-    """批次新增：一行一項「名稱｜價格｜數量｜預購截止」，數量與截止可留空。回傳（品相, 錯誤）。"""
+    """批次新增：一行一項「名稱｜價格｜數量｜預購截止」，數量與截止可留空。回傳（品項, 錯誤）。"""
     drafts: list[Draft] = []
     errors: list[str] = []
     for number, raw in enumerate((text or "").splitlines(), start=1):
@@ -213,7 +213,7 @@ class Listing:
     image: Optional[str] = None             # embed 引用的附件檔名（attachment://檔名）
     variants: tuple[Variant, ...] = ()
     closed: bool = False                    # 已下架
-    key_seq: int = 1                        # 下一個品相編號（只增不減）
+    key_seq: int = 1                        # 下一個品項編號（只增不減）
 
     def variant(self, key: int) -> Optional[Variant]:
         return next((v for v in self.variants if v.key == key), None)
@@ -245,7 +245,7 @@ def manage_custom_id(owner_id: int, key_seq: int, unit: str) -> str:
 def unit_fits(unit: str) -> bool:
     """幣別編碼後要塞得進管理按鈕的 custom_id（中文一個字編碼後佔 9 個字元）。
 
-    用最長的使用者 id（20 位）與三位數的品相編號估算，規則就不會因人而異：中文大約 7 個字以內。"""
+    用最長的使用者 id（20 位）與三位數的品項編號估算，規則就不會因人而異：中文大約 7 個字以內。"""
     return len(manage_custom_id(10 ** 19, 999, unit)) <= CUSTOM_ID_LIMIT
 
 
@@ -312,7 +312,7 @@ def render_embed(listing: Listing, owner_name: str, now: datetime) -> discord.Em
 
 
 def select_options(listing: Listing, now: datetime) -> list[discord.SelectOption]:
-    """購買下拉選單的選項。賣完或截止的也留著：品相資料就存在這裡。"""
+    """購買下拉選單的選項。賣完或截止的也留著：品項資料就存在這裡。"""
     return [
         discord.SelectOption(label=v.name, value=v.encode(), description=v.status(listing.unit, now)[:100])
         for v in listing.variants
@@ -382,7 +382,7 @@ def apply_order(listing: Listing, picks: dict[int, int]) -> Listing:
 
 
 def release_order(listing: Listing, picks: dict[int, int]) -> Listing:
-    """取消時把預留的數量還回去（品相被刪掉的就略過）。"""
+    """取消時把預留的數量還回去（品項被刪掉的就略過）。"""
     for key, qty in picks.items():
         variant = listing.variant(key)
         if variant is not None:

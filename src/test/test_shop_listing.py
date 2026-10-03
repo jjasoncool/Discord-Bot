@@ -1,11 +1,11 @@
 """商品貼文的資料（services.community.shop_listing）。
 
 守的底線：
-  1. 品相資料寫進下拉選項的 value 再讀回來不會走樣（不限量、預購截止、已截止都一樣）；
-     商品貼文上真的 Discord 元件讀得回同一篇商品：上架者、幣別（含冒號也行）、品相、是否下架。
+  1. 品項資料寫進下拉選項的 value 再讀回來不會走樣（不限量、預購截止、已截止都一樣）；
+     商品貼文上真的 Discord 元件讀得回同一篇商品：上架者、幣別（含冒號也行）、品項、是否下架。
   2. 批次新增一行一項「名稱｜價格｜數量｜預購截止」：全形半形分隔都可以、空行略過；
      截止時間一定要寫年份（使用者 2026-10-03）、要在未來；錯的行標出行號。
-  3. 下單檢查：已下架、品相被刪、已售完、預購截止、數量超過剩餘都擋下並說明理由；
+  3. 下單檢查：已下架、品項被刪、已售完、預購截止、數量超過剩餘都擋下並說明理由；
      下單預留、取消還回（不會變成負的）。
   4. 訂單紀錄（停用按鈕的 custom_id）讀得回同一筆，一次 5 種也不超過 Discord 的 100 字上限。
   5. 顯示：商品圖用 attachment://檔名 引用（改訊息時圖才不會不見）；狀態寫出價格、剩餘、截止時間。
@@ -92,7 +92,7 @@ class ListingOnMessageTests(unittest.TestCase):
         return listing_from_message(asyncio.run(build()))
 
     def assert_round_trip(self, listing):
-        # 管理按鈕記的是「下一個品相編號」，讀回來的 key_seq 就是它
+        # 管理按鈕記的是「下一個品項編號」，讀回來的 key_seq 就是它
         self.assertEqual(self._round_trip(listing), replace(listing, key_seq=listing.next_key()))
 
     def test_components_round_trip(self):
@@ -181,7 +181,7 @@ class OrderTests(unittest.TestCase):
     def test_reserve_and_release(self):
         reserved = apply_order(LISTING, {1: 2, 3: 5})
         self.assertEqual((reserved.variant(1).taken, reserved.variant(3).taken), (10, 5))
-        released = release_order(reserved, {1: 99, 3: 5, 42: 1})  # 還太多不會變負的、被刪的品相略過
+        released = release_order(reserved, {1: 99, 3: 5, 42: 1})  # 還太多不會變負的、被刪的品項略過
         self.assertEqual((released.variant(1).taken, released.variant(3).taken), (0, 0))
 
     def test_order_record_round_trip(self):

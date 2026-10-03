@@ -4,11 +4,11 @@
 
 守的底線：
   1. 上架：只有觀星者；bot 代發商品貼文（標題、說明、上架者暱稱、商品圖換固定檔名並由 embed 引用第一張）；
-     幣別有數字（只能填符號，金額在品相）、太長（塞不進按鈕的 custom_id）、圖太大都在發文前擋下；
-     還沒有品相就沒有購買選單；不是圖片、商品論壇沒綁定都說清楚原因。之後更新貼文不傳附件清單（圖才不會被刪）。
+     幣別有數字（只能填符號，金額在品項）、太長（塞不進按鈕的 custom_id）、圖太大都在發文前擋下；
+     還沒有品項就沒有購買選單；不是圖片、商品論壇沒綁定都說清楚原因。之後更新貼文不傳附件清單（圖才不會被刪）。
   2. 管理：只有上架者或管理員（含群主）；新增（單一、批次）後購買選單出現，有預購就掛「預購中」；
-     最多 25 個；品相編號不重用；編輯時數量填「剩餘數量」（預填目前剩幾個、賣光預填 0，存的上限＝已下單＋剩餘，
-     填 0＝停賣）；有進行中訂單的品相不能刪；
+     最多 25 個；品項編號不重用；編輯時數量填「剩餘數量」（預填目前剩幾個、賣光預填 0，存的上限＝已下單＋剩餘，
+     填 0＝停賣）；有進行中訂單的品項不能刪；
      下架後選單與按鈕停用、標題【已下架】、鎖定，但預購截止照樣提醒。
   3. 下單：不能買自己的；一次最多 5 種；賣完、截止、超過剩餘都擋下；下單就預留（貼文上的剩餘跟著變）；
      開出只有買家與上架者的交易 thread，訂單訊息有明細、總計與訂單紀錄；同一位買家加購沿用 thread、
@@ -18,7 +18,7 @@
      封存頻道沒設定就說沒留底），不搬、不刪商品貼文、不結束其他買家的 thread——商品論壇改綁或解除也一樣
      （交易種類看交易 thread 裡的訂單紀錄，不看來源貼文在哪）；取消時把這個 thread 所有訂單（首次＋加購，
      多長的 thread 都讀完）的預留還回去。
-  5. 預購截止：截止時在含這個品相、還沒完成的交易 thread @ 雙方提醒一次；品相標成已截止、不能再買；
+  5. 預購截止：截止時在含這個品項、還沒完成的交易 thread @ 雙方提醒一次；品項標成已截止、不能再買；
      重啟後不重複提醒；一個 thread 發不出去不影響其他人、也不會每小時重複 @；沒有未截止的預購就拿掉標籤；
      已被封存的商品貼文也找得到，處理完封存回去。
   6. 置頂上架說明：綁定時發一篇並置頂、建好「預購中」標籤（建不了要告訴管理員）；已經有就不重發。
@@ -26,7 +26,7 @@
   8. 分層：商品模組不 import 指令層；介面層按鈕與選單的 custom_id 解析得回同一筆資料。
   9. 選單不會卡住：Discord 的選單選過同一項就不會再通知 bot（使用者 2026-10-03 實測：編輯一次後
      第二次編輯不了；按了取消就沒辦法重新選擇）。買家在購買選單選完、填數量的視窗一跳出，
-     商品貼文就重畫清空選單，視窗裡仍是剛選的商品；管理面板每次操作完都重畫，編輯品相先換成按鈕
+     商品貼文就重畫清空選單，視窗裡仍是剛選的商品；管理面板每次操作完都重畫，編輯品項先換成按鈕
      （面板只有上架者看得到，bot 在跳出視窗後改不了它），刪除與下架的確認換在面板上。
 """
 
@@ -286,7 +286,7 @@ class ManageTests(ShopTestCase):
         self.assertEqual(self.thread.messages[0].edits[-1]["attachments"], "unchanged")
 
     def test_at_most_25_variants(self):
-        self.add(self.thread, *[f"品相{n}｜1" for n in range(25)])
+        self.add(self.thread, *[f"品項{n}｜1" for n in range(25)])
         with self.assertRaises(ShopError):
             self.add(self.thread, "多一個｜1")
 
@@ -673,7 +673,7 @@ class PanelRedrawTests(ShopTestCase):
     def test_delete_confirmation_stays_in_the_panel(self):
         async def run():
             listing = self.listing(self.thread)
-            pick = shop_commands._panel_view(listing).children[-1]  # 刪除品相選單
+            pick = shop_commands._panel_view(listing).children[-1]  # 刪除品項選單
             pick.item._values = [pick.item.options[1].value]
             asking = self.interaction()
             await pick.callback(asking)
@@ -691,7 +691,7 @@ class PanelRedrawTests(ShopTestCase):
     def test_edit_menu_turns_into_a_button(self):
         async def run():
             listing = self.listing(self.thread)
-            pick = shop_commands._panel_view(listing).children[-2]  # 編輯品相選單
+            pick = shop_commands._panel_view(listing).children[-2]  # 編輯品項選單
             pick.item._values = [pick.item.options[0].value]
             choosing = self.interaction()
             await pick.callback(choosing)

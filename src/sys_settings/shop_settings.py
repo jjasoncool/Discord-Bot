@@ -14,7 +14,7 @@ class ShopSettings(BaseSettings):
     seller_role: str = "Trader"
     #: 幣別預設值（每篇商品可以自己改）
     default_unit: str = "NT$"
-    #: 一篇商品最多幾個品相（一個下拉選單最多 25 個選項）
+    #: 一篇商品最多幾個品項（一個下拉選單最多 25 個選項）
     max_variants: int = 25
     #: 一次最多買幾種（填數量的視窗最多 5 欄）
     max_pick: int = 5

@@ -2,9 +2,9 @@
 
 決定（使用者 2026-10-03，交接文件 TR-Q6～Q24）：
   - 入口是商品論壇置頂「上架說明」裡的「上架商品」按鈕，只有觀星者能按；bot 代發商品貼文。
-  - 一篇商品放同一系列的多個品相；買家用下拉只挑自己要的，一次最多 5 種，填數量、確認後下單。
+  - 一篇商品放同一系列的多個品項；買家用下拉只挑自己要的，一次最多 5 種，填數量、確認後下單。
   - 下單就預留數量，取消時還回去；一篇商品可以賣給很多人，每位買家一個交易 thread、加購沿用。
-  - 預購有截止時間：截止前可下單；截止時在含這個品相、還沒完成的交易 thread @ 雙方提醒交付。
+  - 預購有截止時間：截止前可下單；截止時在含這個品項、還沒完成的交易 thread @ 雙方提醒交付。
   - 不加資料表：商品資料存在商品貼文上（見 shop_listing），預購用論壇標籤「預購中」找。
 
 名字一律用伺服器暱稱（`TradeService.member`：先查快取，沒有再向 API 查）。
@@ -53,7 +53,7 @@ UNIT_EXAMPLES = "NT$、USD$、JPY¥、PY幣"
 
 
 class ShopViews(Protocol):
-    """商品相關的 Discord 元件（commands/shop_commands.py 實作）。"""
+    """商品項關的 Discord 元件（commands/shop_commands.py 實作）。"""
 
     def listing(self, listing: Listing, now: datetime) -> discord.ui.View:
         """商品貼文上的購買選單＋「⚙️ 管理商品（上架者）」。"""
@@ -80,7 +80,7 @@ class ShopService:
         self.views = views
         self.settings = settings or ShopSettings()
         self._now = now or (lambda: datetime.now(APP_TZ))
-        # 改同一篇商品（下單預留、管理品相、取消還回）要排隊：資料在同一則訊息上，先讀再寫
+        # 改同一篇商品（下單預留、管理品項、取消還回）要排隊：資料在同一則訊息上，先讀再寫
         self._locks: dict[object, asyncio.Lock] = {}
         #: 交給交易模組的來源種類（cog 載入時用 TradeService.add_source_kind 登記）
         self.source = ListingSource(self)
@@ -142,8 +142,8 @@ class ShopService:
             description=(
                 "**觀星者上架商品**\n"
                 "1. 按下方「🛒 上架商品」，填標題、說明、幣別（金額前面的符號，例 NT$），"
-                "可以附商品圖（最多 10 張）。金額在加入品相時各自填。\n"
-                "2. 到你的商品貼文按「⚙️ 管理商品（上架者）」加入品相：一次一個，或用「批次新增」一次加很多個。\n"
+                "可以附商品圖（最多 10 張）。金額在加入品項時各自填。\n"
+                "2. 到你的商品貼文按「⚙️ 管理商品（上架者）」加入品項：一次一個，或用「批次新增」一次加很多個。\n"
                 "　・沒填截止時間＝立即購買；填了＝預購。時間一律寫年份，例：2026/10/20 23:59。\n\n"
                 "**買家怎麼買**\n"
                 "在商品貼文的下拉選單只挑自己要的（一次最多 5 種）→ 填數量 → 確認下單，"
@@ -187,10 +187,10 @@ class ShopService:
         if len(title) > TITLE_LIMIT:
             raise ShopError(f"標題最多 {TITLE_LIMIT} 個字。")
         unit = (unit or "").strip() or self.settings.default_unit
-        # 幣別只是金額前面的符號，金額在各品相各自填；擋數字，免得上架者把金額填在這裡（使用者 2026-10-03）
+        # 幣別只是金額前面的符號，金額在各品項各自填；擋數字，免得上架者把金額填在這裡（使用者 2026-10-03）
         if any(ch.isdigit() for ch in unit):
             raise ShopError(f"幣別不能有數字，只填金額前面的符號，例如 {UNIT_EXAMPLES}。"
-                            "金額請在加入品相時各自填。")
+                            "金額請在加入品項時各自填。")
         if len(unit) > UNIT_LIMIT or not unit_fits(unit):
             raise ShopError(f"幣別太長，請縮短（中文大約 7 個字以內），例如 {UNIT_EXAMPLES}。")
         return title, (description or "").strip(), unit
@@ -306,7 +306,7 @@ class ShopService:
         async with self._lock(listing_id):
             thread, message, listing = await self._load_for_manage(listing_id, actor)
             if len(listing.variants) + len(drafts) > self.settings.max_variants:
-                raise ShopError(f"一篇商品最多 {self.settings.max_variants} 個品相，"
+                raise ShopError(f"一篇商品最多 {self.settings.max_variants} 個品項，"
                                 f"目前有 {len(listing.variants)} 個。")
             for draft in drafts:
                 listing = listing.add(draft)
@@ -314,13 +314,13 @@ class ShopService:
             return listing
 
     async def edit_variant(self, listing_id: int, actor: discord.Member, key: int, draft: Draft) -> Listing:
-        """編輯品相。draft.limit 是「剩餘數量」（還要賣幾個，None＝不限量）：
+        """編輯品項。draft.limit 是「剩餘數量」（還要賣幾個，None＝不限量）：
         存的上限＝已下單＋剩餘，補貨 5 個就填 5，不用自己算（使用者 2026-10-03，TR-Q27）。"""
         async with self._lock(listing_id):
             thread, message, listing = await self._load_for_manage(listing_id, actor)
             variant = listing.variant(key)
             if variant is None:
-                raise ShopError("找不到這個品相，可能已經被刪除。")
+                raise ShopError("找不到這個品項，可能已經被刪除。")
             limit = None if draft.limit is None else variant.taken + draft.limit
             # 編輯後一律重新開放：parse_draft 保證預購的截止時間在未來，改成立即購買也就沒有截止
             listing = listing.with_variant(replace(
@@ -333,7 +333,7 @@ class ShopService:
             thread, message, listing = await self._load_for_manage(listing_id, actor)
             variant = listing.variant(key)
             if variant is None:
-                raise ShopError("找不到這個品相，可能已經被刪除。")
+                raise ShopError("找不到這個品項，可能已經被刪除。")
             if any(key in picks for _, _, picks in await self._open_orders(listing_id)):
                 raise ShopError(f"還有進行中的交易買了「{variant.name}」，請先完成或取消那些交易。")
             listing = listing.without_variant(key)
@@ -389,7 +389,7 @@ class ShopService:
 
     async def check_pick(self, listing_id: int, buyer: discord.Member, keys: Sequence[int], *,
                          listing: Optional[Listing] = None) -> list[Variant]:
-        """買家在下拉選完：檢查這些品相現在能不能買，回傳要填數量的品相。
+        """買家在下拉選完：檢查這些品項現在能不能買，回傳要填數量的品項。
 
         listing 可以直接給（下拉所在的商品貼文訊息讀出來的，跟重讀一樣新），省一趟讀 Discord；
         真正下單時會在鎖裡重讀再檢查一次。"""
@@ -411,7 +411,7 @@ class ShopService:
 
     async def place_order(self, listing_id: int, buyer: discord.Member, picks: dict[int, int]) -> OpenedTrade:
         """下單：先預留數量，再開（或沿用）買家與上架者的交易 thread；開不起來就把預留還回去。"""
-        # 整段在商品鎖裡：預留之後、訂單發出之前，刪品相與預購截止都看不到這筆訂單，所以不能放掉鎖
+        # 整段在商品鎖裡：預留之後、訂單發出之前，刪品項與預購截止都看不到這筆訂單，所以不能放掉鎖
         async with self._lock(listing_id):
             thread, message, listing = await self.load(listing_id)
             self._check_buyer(buyer, listing)
@@ -521,7 +521,7 @@ class ShopService:
     # ── 預購截止（utils.due_loop 每次醒來呼叫） ──
 
     async def run_preorder_cutoffs(self, now: datetime) -> Optional[datetime]:
-        """截止的預購：在含這個品相、還沒完成的交易 thread @ 雙方，再把品相標成已截止。回傳下一個截止時間。
+        """截止的預購：在含這個品項、還沒完成的交易 thread @ 雙方，再把品項標成已截止。回傳下一個截止時間。
 
         只看掛著「預購中」標籤的商品；已封存的貼文清單本身就帶標籤，不用一篇篇打開。"""
         forum = await self._forum()
@@ -566,7 +566,7 @@ class ShopService:
                 for variant in due:
                     for trade_thread, ref, picks in trades:
                         if ref is not None and variant.key in picks:
-                            # 一個 thread 發不出去不影響其他人；不然品相一直標不成已截止，每小時重複 @ 大家
+                            # 一個 thread 發不出去不影響其他人；不然品項一直標不成已截止，每小時重複 @ 大家
                             try:
                                 await trade_thread.send(
                                     f"⏰ <@{ref.requester_id}> <@{ref.supplier_id}> 預購商品「{variant.name}」"
@@ -576,7 +576,7 @@ class ShopService:
                     listing = listing.with_variant(replace(variant, closed=True))
                 await self._save(thread, message, listing)
             elif not pending:
-                await self._sync_tag(thread, listing)  # 標籤殘留（例：品相被刪）就拿掉
+                await self._sync_tag(thread, listing)  # 標籤殘留（例：品項被刪）就拿掉
             return upcoming
 
     # ── 內部 ──

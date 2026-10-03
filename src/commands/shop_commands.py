@@ -95,7 +95,7 @@ class DiscordShopViews:
 
 
 class ShopBuySelect(discord.ui.DynamicItem[discord.ui.Select], template=BUY_TEMPLATE):
-    """商品貼文的購買下拉：選項就是品相資料（見 shop_listing）。"""
+    """商品貼文的購買下拉：選項就是品項資料（見 shop_listing）。"""
 
     def __init__(self, listing_id: int, *, options: Sequence[discord.SelectOption] = (),
                  max_values: int = 1, disabled: bool = False):
@@ -131,7 +131,7 @@ class ShopBuySelect(discord.ui.DynamicItem[discord.ui.Select], template=BUY_TEMP
 
 
 class ShopManageButton(discord.ui.DynamicItem[discord.ui.Button], template=MANAGE_TEMPLATE):
-    """「⚙️ 管理商品（上架者）」：custom_id 帶上架者、下一個品相編號、幣別。
+    """「⚙️ 管理商品（上架者）」：custom_id 帶上架者、下一個品項編號、幣別。
     大家都看得到（Discord 沒辦法依身份組隱藏），只有上架者與管理員能用。"""
 
     def __init__(self, owner_id: int, key_seq: int, unit: str, *, disabled: bool = False):
@@ -160,8 +160,8 @@ class ShopManageButton(discord.ui.DynamicItem[discord.ui.Button], template=MANAG
 # ── 管理面板（只有上架者看得到的暫時訊息） ──
 
 _PANEL_ACTIONS = {
-    # 主要動作藍、一般灰、會刪東西的紅（使用者 2026-10-03）；編輯／刪除品相是面板裡的兩個選單
-    "add": ("新增品相", discord.ButtonStyle.primary),
+    # 主要動作藍、一般灰、會刪東西的紅（使用者 2026-10-03）；編輯／刪除品項是面板裡的兩個選單
+    "add": ("新增品項", discord.ButtonStyle.primary),
     "batch": ("批次新增", discord.ButtonStyle.primary),
     "info": ("編輯商品資訊", discord.ButtonStyle.secondary),
     "close": ("下架", discord.ButtonStyle.danger),
@@ -174,7 +174,7 @@ def _panel_embed(listing: Listing) -> discord.Embed:
     now = _now()
     lines = [f"{n}. {v.name}｜{v.status(listing.unit, now)}" for n, v in enumerate(listing.variants, start=1)]
     embed = discord.Embed(title=f"管理商品：{listing.title}", color=discord.Color.gold(),
-                          description="\n".join(lines) or "還沒有品相，先按「新增品相」或「批次新增」。")
+                          description="\n".join(lines) or "還沒有品項，先按「新增品項」或「批次新增」。")
     embed.set_footer(text="這個面板只有你看得到")
     return embed
 
@@ -209,7 +209,7 @@ def _panel_view(listing: Listing) -> discord.ui.View:
     for action in _PANEL_MAIN:
         view.add_item(ShopPanelButton(action, listing.thread_id))
     if listing.variants:
-        # 選項的 value 就是品相資料：選了直接開 modal，不必再向 Discord 讀（modal 要在 3 秒內送出）
+        # 選項的 value 就是品項資料：選了直接開 modal，不必再向 Discord 讀（modal 要在 3 秒內送出）
         options = [discord.SelectOption(label=f"{n}. {v.name}", value=v.encode())
                    for n, v in enumerate(listing.variants, start=1)]
         view.add_item(ShopPickSelect("edit", listing.thread_id, options=options))
@@ -262,13 +262,13 @@ class ShopPanelButton(discord.ui.DynamicItem[discord.ui.Button],
 
 class ShopPickSelect(discord.ui.DynamicItem[discord.ui.Select],
                      template=r"shop:pick:(?P<action>edit|delete):(?P<listing>\d+)"):
-    """管理面板裡的「編輯品相」「刪除品相」選單；選項 value 是品相資料，label 是「序號. 名稱」。"""
+    """管理面板裡的「編輯品項」「刪除品項」選單；選項 value 是品項資料，label 是「序號. 名稱」。"""
 
     def __init__(self, action: str, listing_id: int, *, options: Sequence[discord.SelectOption] = ()):
         super().__init__(discord.ui.Select(
             custom_id=f"shop:pick:{action}:{listing_id}", min_values=1, max_values=1,
-            placeholder="編輯品相⋯" if action == "edit" else "刪除品相⋯",
-            options=list(options) or [discord.SelectOption(label="（沒有品相）", value="0")]))
+            placeholder="編輯品項⋯" if action == "edit" else "刪除品項⋯",
+            options=list(options) or [discord.SelectOption(label="（沒有品項）", value="0")]))
         self.action = action
         self.listing_id = listing_id
 
@@ -285,7 +285,7 @@ class ShopPickSelect(discord.ui.DynamicItem[discord.ui.Select],
         name = option.label.split(". ", 1)[-1] if option else ""
         variant = Variant.decode(value, name)
         if variant is None:
-            return await _reply(interaction, "找不到這個品相，可能已經被刪除。")
+            return await _reply(interaction, "找不到這個品項，可能已經被刪除。")
         if self.action == "edit":
             # 不直接跳出視窗：面板是只有上架者看得到的訊息，bot 在跳出視窗後改不了它，選單會卡在這一項。
             # 先換成按鈕（按鈕不會卡住），取消視窗後還能再按
@@ -323,13 +323,13 @@ class ShopEditButton(discord.ui.DynamicItem[discord.ui.Button],
             return await _reply(interaction, str(exc))
         variant = listing.variant(self.key)
         if variant is None:
-            return await _reply(interaction, "找不到這個品相，可能已經被刪除。")
+            return await _reply(interaction, "找不到這個品項，可能已經被刪除。")
         await interaction.response.send_modal(VariantModal(self.listing_id, variant))
 
 
 class ShopConfirmButton(discord.ui.DynamicItem[discord.ui.Button],
                         template=r"shop:(?P<action>del|closeok):(?P<listing>\d+)(?::(?P<key>\d+))?"):
-    """刪除品相、下架前的確認。"""
+    """刪除品項、下架前的確認。"""
 
     def __init__(self, action: str, listing_id: int, key: Optional[int] = None):
         code = "del" if action == "delete" else "closeok"
@@ -353,7 +353,7 @@ class ShopConfirmButton(discord.ui.DynamicItem[discord.ui.Button],
         try:
             if self.action == "delete":
                 listing = await shop.delete_variant(self.listing_id, interaction.user, self.key)
-                return await _show_panel(interaction, listing, "已刪除這個品相。")
+                return await _show_panel(interaction, listing, "已刪除這個品項。")
             await shop.close_listing(self.listing_id, interaction.user)
             return await interaction.edit_original_response(content="已下架。", embed=None, view=None)
         except ShopError as exc:
@@ -369,16 +369,16 @@ class ShopConfirmButton(discord.ui.DynamicItem[discord.ui.Button],
 def _batch_preview(listing_id: int, text: str, max_variants: int = 25) -> tuple[discord.Embed, discord.ui.View]:
     drafts, errors = parse_batch(text, now=_now())
     if len(drafts) > max_variants:
-        errors.append(f"一篇商品最多 {max_variants} 個品相，這次填了 {len(drafts)} 個。")
+        errors.append(f"一篇商品最多 {max_variants} 個品項，這次填了 {len(drafts)} 個。")
     view = discord.ui.View(timeout=None)
     if errors or not drafts:
         # embed 說明上限 4096 字：錯誤最多列 15 行、原文最多 3000 字（回去修改時拿得回完整的就好）
         shown = errors[:15] + ([f"……還有 {len(errors) - 15} 行有錯"] if len(errors) > 15 else [])
         embed = discord.Embed(title="格式有錯，請修改", color=discord.Color.red(),
-                              description="\n".join(shown or ["沒有填任何品相。"]) + f"\n\n你填的內容：\n```\n{text[:3000]}\n```")
+                              description="\n".join(shown or ["沒有填任何品項。"]) + f"\n\n你填的內容：\n```\n{text[:3000]}\n```")
     else:
         lines = "\n".join(d.line() for d in drafts)
-        embed = discord.Embed(title=f"預覽：要新增 {len(drafts)} 個品相", color=discord.Color.gold(),
+        embed = discord.Embed(title=f"預覽：要新增 {len(drafts)} 個品項", color=discord.Color.gold(),
                               description=f"```\n{lines}\n```\n數量空白＝不限量；截止時間空白＝立即購買。")
         view.add_item(ShopBatchButton("ok", listing_id))
     view.add_item(ShopBatchButton("fix", listing_id))
@@ -419,7 +419,7 @@ class ShopBatchButton(discord.ui.DynamicItem[discord.ui.Button],
         await interaction.response.edit_message(content="新增中……", embed=None, view=None)
         try:
             listing = await shop.add_variants(self.listing_id, interaction.user, drafts)
-            return await _show_panel(interaction, listing, f"已新增 {len(drafts)} 個品相。")
+            return await _show_panel(interaction, listing, f"已新增 {len(drafts)} 個品項。")
         except ShopError as exc:
             result = str(exc)
         except Exception:
@@ -429,25 +429,25 @@ class ShopBatchButton(discord.ui.DynamicItem[discord.ui.Button],
 
 
 _BATCH_HELP = (
-    "**每行一個品相**，四欄用「｜」隔開（半形 | 也可以）：\n"
+    "**每行一個品項**，四欄用「｜」隔開（半形 | 也可以）：\n"
     "`名稱｜價格｜數量｜預購截止`\n"
     "・**價格**：只填數字，單位用這篇商品設定的\n"
     "・**數量**：留空＝不限量；賣完會自動標「已售完」\n"
     "・**預購截止**：留空＝立即購買；要預購就寫含年份的時間，例 `2026/10/20 23:59`\n"
-    "送出後會先給你看預覽、標出格式有錯的行，按「確認新增」才會加進商品。一篇最多 25 個品相。"
+    "送出後會先給你看預覽、標出格式有錯的行，按「確認新增」才會加進商品。一篇最多 25 個品項。"
 )
 
 
 class BatchModal(discord.ui.Modal):
     def __init__(self, listing_id: int, text: str = ""):
-        super().__init__(title="批次新增品相", timeout=_MODAL_TIMEOUT)
+        super().__init__(title="批次新增品項", timeout=_MODAL_TIMEOUT)
         self.listing_id = listing_id
         self.lines = discord.ui.TextInput(
             style=discord.TextStyle.paragraph, max_length=4000, default=text or None,
             placeholder="60 月相｜30｜10｜\n6480 月相｜3000｜3｜2026/10/20 23:59")
         # 說明放在最上面（modal 支援純文字說明），輸入框本身的標題只能 45 字，寫不完
         self.add_item(discord.ui.TextDisplay(_BATCH_HELP))
-        self.add_item(discord.ui.Label(text="品相清單", description="一行一個，例：60 月相｜30｜10｜",
+        self.add_item(discord.ui.Label(text="品項清單", description="一行一個，例：60 月相｜30｜10｜",
                                        component=self.lines))
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -455,11 +455,11 @@ class BatchModal(discord.ui.Modal):
         await safe_send_interaction_message(interaction, embed=embed, view=view, ephemeral=True)
 
 
-# ── 單一品相 ──
+# ── 單一品項 ──
 
 class VariantModal(discord.ui.Modal):
     def __init__(self, listing_id: int, variant: Optional[Variant] = None):
-        super().__init__(title="編輯品相" if variant else "新增品相", timeout=_MODAL_TIMEOUT)
+        super().__init__(title="編輯品項" if variant else "新增品項", timeout=_MODAL_TIMEOUT)
         self.listing_id = listing_id
         self.variant = variant
         preorder = bool(variant and variant.preorder)
@@ -512,7 +512,7 @@ class VariantModal(discord.ui.Modal):
         except ShopError as exc:
             text = f"⚠️ {exc}"
         except Exception:
-            logger.error("商品上架：儲存品相失敗 商品=%s", self.listing_id, exc_info=True)
+            logger.error("商品上架：儲存品項失敗 商品=%s", self.listing_id, exc_info=True)
             text = "處理時發生錯誤，請截圖通知管理員。"
         await _panel_with_error(interaction, shop, self.listing_id, text)
 
@@ -535,7 +535,7 @@ class ListingInfoModal(discord.ui.Modal):
         self.add_item(self.description)
         self.add_item(discord.ui.Label(
             text="幣別",
-            description=f"只是金額前面的符號，不能有數字，例：{UNIT_EXAMPLES}（中文約 7 字內）。金額在加入品相時各自填",
+            description=f"只是金額前面的符號，不能有數字，例：{UNIT_EXAMPLES}（中文約 7 字內）。金額在加入品項時各自填",
             component=self.unit))
         self.add_item(discord.ui.Label(
             text="換商品圖（不上傳就沿用原本的圖）" if listing else "商品圖（最多 10 張，可不傳）",
@@ -566,7 +566,7 @@ class ListingInfoModal(discord.ui.Modal):
             thread = await shop.create_listing(
                 interaction.user, title=self.title_input.value, description=self.description.value,
                 unit=self.unit.value, attachments=attachments)
-            text = f"已上架：{thread.mention}\n接著到貼文按「⚙️ 管理商品（上架者）」加入品相。"
+            text = f"已上架：{thread.mention}\n接著到貼文按「⚙️ 管理商品（上架者）」加入品項。"
         except ShopError as exc:
             text = str(exc)
         except Exception:
