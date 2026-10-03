@@ -43,6 +43,7 @@ from discord.utils import snowflake_time
 from sys_settings.time_settings import APP_TZ
 from sys_settings.trade_settings import TradeSettings
 from utils.discord_content import get_forum_tags, post_to_channel
+from utils.dm_notifier import send_dm
 from utils.utils import ChannelConfig, check_role, safe_send_interaction_message
 
 logger = logging.getLogger(__name__)
@@ -446,6 +447,7 @@ class TradeService:
             except Exception:
                 logger.error("交易：取消後處理來源失敗 thread=%s ref=%s", thread.id, ref, exc_info=True)
         logger.info("交易：取消 thread=%s ref=%s", thread.id, ref)
+        await self._notify_parties(thread, ref, "交易取消", "供應方{supplier}取消了這筆交易。")
 
     async def complete(self, thread: discord.Thread, ref: TradeRef, *, auto: bool) -> None:
         kind = await self._kind_for(thread, ref)
@@ -461,12 +463,15 @@ class TradeService:
             if auto:
                 who = (f"<@{ref.requester_id}> 在 {self.settings.receipt_timeout_hours} 小時內沒有按已領收，"
                        "自動視為已領收")
+                done = f"需求方{{requester}}在 {self.settings.receipt_timeout_hours} 小時內沒有按已領收，自動視為已領收。"
             else:
                 who = f"<@{ref.requester_id}> 已領收"
+                done = "需求方{requester}已領收，交易完成。"
             # 開頭先 @ 供應方：需求方按「已領收」或自動領收時，供應方也要收到通知（使用者 2026-10-03）
             await thread.send(f"<@{ref.supplier_id}>，{who}，交易完成。{note}此 thread 將鎖定。")
             await self._close(thread, COMPLETED_PREFIX)
         logger.info("交易：完成 thread=%s ref=%s auto=%s 來源=%s", thread.id, ref, auto, result)
+        await self._notify_parties(thread, ref, "交易完成", done)
         if kind is None and result != _FOREIGN:
             # 需求貼文成交一次就結束；在鎖外處理：兩位供應方同時完成時，各自拿著自己的鎖去等對方的鎖會卡死
             await self._end_other_trades(ref, keep_thread_id=thread.id)
@@ -523,6 +528,29 @@ class TradeService:
         except Exception:
             self._closed.discard(thread.id)
             raise
+
+    async def _notify_parties(self, thread: discord.Thread, ref: TradeRef, title: str, text: str) -> None:
+        """交易結束時私訊雙方，附上交易 thread 的連結。
+
+        thread 一結束就封存、從頻道列表消失，裡面的 @ 很容易錯過（使用者 2026-10-03）；封存後點連結仍進得去。
+        私訊關閉或已離開伺服器的人就略過（send_dm 只記 log，不會丟例外）。"""
+        try:
+            names = await self.display_names(thread.guild, (ref.requester_id, ref.supplier_id))
+            requester = names.get(ref.requester_id) or str(ref.requester_id)
+            supplier = names.get(ref.supplier_id) or str(ref.supplier_id)
+            embed = discord.Embed(title=title, color=discord.Color.gold(),
+                                  description=text.format(requester=f"「{requester}」", supplier=f"「{supplier}」"))
+            embed.add_field(name="需求方", value=requester, inline=True)
+            embed.add_field(name="供應方", value=supplier, inline=True)
+            embed.add_field(name="交易對話", value=f"[點這裡查看]({thread.jump_url})", inline=False)
+            if thread.guild is not None:
+                embed.set_footer(text=getattr(thread.guild, "name", "") or "")
+            for user_id in (ref.requester_id, ref.supplier_id):
+                member = await self.member(thread.guild, user_id)
+                if member is not None:
+                    await send_dm(member, embed=embed)
+        except Exception:
+            logger.error("交易：私訊雙方失敗 thread=%s", thread.id, exc_info=True)
 
     async def _strip_buttons(self, thread: discord.Thread) -> None:
         """拿掉 thread 裡 bot 訊息上的交易按鈕（含改版前的舊按鈕）。
@@ -641,6 +669,9 @@ class TradeService:
                     await self._close(other, ENDED_PREFIX)
                 except Exception:
                     logger.error("交易：結束同一篇需求的其他交易失敗 thread=%s", other.id, exc_info=True)
+                    continue
+            if other_ref is not None:
+                await self._notify_parties(other, other_ref, "交易結束", "這篇需求已由其他供應方完成交易，這筆交易結束。")
 
     async def _archive_source(self, ref: TradeRef) -> str:
         """把需求貼文的對話複製到封存頻道（完整內容附 .txt），成功才刪除原貼文。"""

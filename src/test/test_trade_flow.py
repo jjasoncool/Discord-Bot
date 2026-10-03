@@ -10,6 +10,7 @@
      即使那個 thread 已經被 Discord 自動封存（封存後就不在 discord.py 的快取裡）。
   4. 按鈕各有其人：只有供應方能通知領收與取消，只有需求方能按已領收；別人按不改變任何狀態。
   5. 完成：先發完成訊息再鎖定（反過來 thread 會被重新打開），完成訊息 @ 雙方，標題改成【已完成】；
+     完成、取消、因別人成交而結束時都私訊雙方並附交易 thread 的連結（thread 一結束就封存，@ 容易錯過）；
      交易按鈕全部拿掉；需求貼文的對話以附檔封存後刪除原貼文（封存失敗就保留、刪除失敗要說；不在自由市場的貼文絕不刪）；同一篇的其他
      供應方 thread @ 雙方後結束，已被自動封存的也一樣。結束後再按通知不會把 thread 打開。
   6. 取消：標題【已取消】並鎖定；需求貼文保留；只清掉這位供應方的接單表情（需求貼文
@@ -201,6 +202,7 @@ class FakeThread:
         self.members = []
         self.messages = []
         self.guild = world.guild
+        self.jump_url = f"https://discord.com/channels/{GUILD_ID}/{tid}"
         self.events = []  # ("send", 內容) / ("edit", kwargs)，用來檢查先後順序
 
     async def send(self, content=None, *, embed=None, view=None):
@@ -301,11 +303,13 @@ class TradeFlowTestCase(unittest.TestCase):
             return SimpleNamespace(id=next(self.world.ids))
 
         self.ephemeral = mock.AsyncMock(name="safe_send_interaction_message")
+        self.dms = mock.AsyncMock(name="send_dm", return_value=True)
         patches = [
             mock.patch.object(trade_service.ChannelConfig, "get_configured_id", side_effect=get_configured_id),
             mock.patch.object(trade_service, "check_role", side_effect=check_role),
             mock.patch.object(trade_service, "post_to_channel", side_effect=post_to_channel),
             mock.patch.object(trade_service, "safe_send_interaction_message", self.ephemeral),
+            mock.patch.object(trade_service, "send_dm", self.dms),
         ]
         for p in patches:
             p.start()
@@ -495,6 +499,20 @@ class CompleteTests(TradeFlowTestCase):
         self.assertNotIn(REQUESTER.mention, kwargs["content"])  # 封存貼文不 @ 人
         self.assertTrue(self.post.deleted)
 
+    def dm_targets(self):
+        return [(call.args[0].id, call.kwargs["embed"]) for call in self.dms.await_args_list]
+
+    def test_both_parties_get_a_dm_with_the_link(self):
+        self.press(self.thread, REQUESTER, RECEIVE, self.ref)
+
+        mine = [(uid, embed) for uid, embed in self.dm_targets() if self.thread.jump_url in embed.fields[-1].value]
+        self.assertEqual(sorted(uid for uid, _ in mine), sorted([REQUESTER.id, SUPPLIER.id]))
+        self.assertEqual(mine[0][1].title, "交易完成")
+        # 因別人成交而結束的那一組也收到私訊，連結是他們自己的 thread
+        ended = [(uid, embed) for uid, embed in self.dm_targets() if self.other.jump_url in embed.fields[-1].value]
+        self.assertEqual(sorted(uid for uid, _ in ended), sorted([REQUESTER.id, SUPPLIER_B.id]))
+        self.assertEqual(ended[0][1].title, "交易結束")
+
     def test_other_suppliers_threads_are_ended(self):
         self.other.auto_archive()  # 另一位供應方那邊三天沒人講話
         self.press(self.thread, REQUESTER, RECEIVE, self.ref)
@@ -574,6 +592,9 @@ class CancelTests(TradeFlowTestCase):
         removed = post.messages[0].removed_reactions
         self.assertTrue(removed)
         self.assertEqual({uid for _, uid in removed}, {SUPPLIER.id})
+        dms = [(call.args[0].id, call.kwargs["embed"]) for call in self.dms.await_args_list]
+        self.assertEqual(sorted(uid for uid, _ in dms), sorted([REQUESTER.id, SUPPLIER.id]))
+        self.assertTrue(all(e.title == "交易取消" and thread.jump_url in e.fields[-1].value for _, e in dms))
 
 
 class ReceiptDeadlineTests(TradeFlowTestCase):

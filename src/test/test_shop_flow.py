@@ -169,6 +169,7 @@ class ShopTestCase(unittest.TestCase):
             mock.patch.object(trade_service, "post_to_channel", side_effect=trade_post),
             mock.patch.object(shop_service, "post_to_channel", side_effect=shop_post),
             mock.patch.object(trade_service, "safe_send_interaction_message", self.ephemeral),
+            mock.patch.object(trade_service, "send_dm", mock.AsyncMock(return_value=True)),
         ):
             p.start()
             self.addCleanup(p.stop)
