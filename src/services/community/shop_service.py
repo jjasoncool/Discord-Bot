@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 from dataclasses import replace
 from datetime import datetime
 from typing import Callable, Optional, Protocol, Sequence
@@ -40,7 +39,7 @@ from services.community.shop_listing import (
     render_embed,
     unit_fits,
 )
-from services.community.trade_service import OpenedTrade, TradeNote, TradeRef, TradeService
+from services.community.trade_service import OpenedTrade, TradeNote, TradeRef, TradeService, mentions_to_names
 from sys_settings.shop_settings import ShopSettings
 from sys_settings.time_settings import APP_TZ
 from utils.discord_content import post_to_channel
@@ -483,18 +482,16 @@ class ShopService:
             async for message in thread.history(limit=None, oldest_first=True):
                 if message.author.id == self.bot.user.id and any(
                         listing_id == ref.source_id for listing_id, _ in orders_on(message)):
-                    orders.append(_mentions_to_names(message.content, names))
+                    orders.append(mentions_to_names(message.content, names))
             summary = (f"商品：{title}（<#{ref.source_id}>）\n"
                        f"需求方：{requester}　供應方：{supplier}\n"
                        f"完成時間：{self._now().astimezone(APP_TZ):%Y-%m-%d %H:%M}\n\n"
-                       + "\n\n".join(orders) + "\n\n完整的溝通紀錄見附檔。")
-            if len(summary) > 1900:
-                summary = summary[:1900] + "\n……（下單紀錄太長，完整內容見附檔）"
+                       + "\n\n".join(orders))
+            # 放得下就整段寫在貼文、放不下才附 .txt：由 post_archive 決定（TR-Q28）
             posted = await self.trade.post_archive(
                 title=f"【市集】{title}｜{requester} 與 {supplier}"[:100],
                 summary=summary,
-                transcript=await self.trade.transcript(
-                    thread, heading=f"商品：{title}｜需求方：{requester}｜供應方：{supplier}", limit=None),
+                transcript=await self.trade.transcript(thread, limit=None),
                 filename=f"shop_{ref.source_id}_{thread.id}.txt",
             )
         except Exception:
@@ -594,11 +591,6 @@ class ShopService:
     async def _forum(self):
         forum_id = await self._forum_id()
         return self.bot.get_channel(forum_id) if forum_id is not None else None
-
-
-def _mentions_to_names(text: str, names: dict[int, str]) -> str:
-    """留底文章寫名字不寫 @：每次留底都去提醒雙方會很吵。"""
-    return re.sub(r"<@!?(\d+)>", lambda m: names.get(int(m[1])) or m[0].replace("<@", "").replace(">", ""), text or "")
 
 
 class ListingSource:

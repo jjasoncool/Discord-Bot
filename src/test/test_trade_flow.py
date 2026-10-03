@@ -11,8 +11,10 @@
   4. 按鈕各有其人：只有供應方能通知領收與取消，只有需求方能按已領收；別人按不改變任何狀態。
   5. 完成：先發完成訊息再鎖定（反過來 thread 會被重新打開），完成訊息 @ 雙方，標題改成【已完成】；
      完成、取消、因別人成交而結束時都私訊雙方並附交易 thread 的連結（thread 一結束就封存，@ 容易錯過）；
-     交易按鈕全部拿掉；需求貼文的對話以附檔封存後刪除原貼文（封存失敗就保留、刪除失敗要說；不在自由市場的貼文絕不刪）；同一篇的其他
+     交易按鈕全部拿掉；需求貼文的對話封存後刪除原貼文（封存失敗就保留、刪除失敗要說；不在自由市場的貼文絕不刪）；同一篇的其他
      供應方 thread @ 雙方後結束，已被自動封存的也一樣。結束後再按通知不會把 thread 打開。
+     封存格式（TR-Q28）：放得下 2000 字就整段寫在貼文裡、不附檔；放不下時貼文放摘要、完整對話放附檔；
+     兩種都把 @ 換成名字，發封存也不會通知任何人（對話裡的 @everyone、@身分組 也一樣）。
   6. 取消：標題【已取消】並鎖定；需求貼文保留；只清掉這位供應方的接單表情（需求貼文
      已被自動封存也清得掉）。
   7. 領收期限：通知後滿 24 小時沒確認就自動完成；期限從 Discord 上的訊息時間推算，
@@ -23,7 +25,7 @@
   8. 改版前的舊交易 thread：舊文字讀得回交易身分，舊按鈕走同一套流程。
   9. 分層：交易模組不 import 指令層；介面層的按鈕 custom_id 解析得回同一筆交易。
  10. 名字一律是伺服器暱稱：成員快取拿不到人時向 Discord API 查（2025-07 b456d91 的教訓：
-     只看快取曾經讓接單失敗）。thread 標題、封存摘要、封存附檔的對話者都一樣；查不到要留 log。
+     只看快取曾經讓接單失敗）。thread 標題、封存摘要、封存對話的發言者與被 @ 的人都一樣；查不到要留 log。
 """
 
 import ast
@@ -487,17 +489,61 @@ class CompleteTests(TradeFlowTestCase):
         # 做完了按鈕就拿掉（開單訊息、領收通知都是）
         self.assertEqual([m.components for m in self.thread.messages if m.components], [])
 
+    def say_in_post(self, author, text):
+        self.post.messages.append(FakeMessage(self.world, next(self.world.ids), author, text, thread=self.post))
+
+    def assert_silent(self, kwargs):
+        quiet = kwargs["allowed_mentions"]
+        self.assertFalse(quiet.everyone or quiet.users or quiet.roles)
+
     def test_source_is_archived_with_transcript_then_deleted(self):
+        self.say_in_post(SUPPLIER, f"{REQUESTER.mention} 收到，晚上處理")
         self.press(self.thread, REQUESTER, RECEIVE, self.ref)
 
         self.assertEqual(len(self.world.archived_posts), 1)
         channel, kwargs = self.world.archived_posts[0]
         self.assertIs(channel, self.world.archive)
         self.assertEqual([t.name for t in kwargs["tags"]], ["封存"])
-        transcript = kwargs["files"][0].fp.getvalue().decode("utf-8")
-        self.assertIn("幫我換成台幣謝謝", transcript)
-        self.assertNotIn(REQUESTER.mention, kwargs["content"])  # 封存貼文不 @ 人
+        # 短對話整段寫在貼文裡，打開就看得到，不另附檔
+        self.assertIn("需求方：需求者", kwargs["content"])
+        self.assertIn("幫我換成台幣謝謝", kwargs["content"])
+        self.assertIn("供應者甲: @需求者 收到，晚上處理", kwargs["content"])  # @ 換成名字
+        self.assertNotIn("<@", kwargs["content"])
+        self.assertFalse(kwargs.get("files"))
+        self.assert_silent(kwargs)
         self.assertTrue(self.post.deleted)
+
+    def test_long_conversation_goes_to_an_attachment(self):
+        for i in range(40):
+            self.say_in_post(REQUESTER, f"第{i}則補充：" + "交易細節說明" * 8 + f" {SUPPLIER.mention}")
+        self.press(self.thread, REQUESTER, RECEIVE, self.ref)
+
+        (_, kwargs), = self.world.archived_posts
+        # 貼文放摘要（放得進一則訊息），完整對話在附檔；附檔裡也是名字不是 @
+        self.assertLessEqual(len(kwargs["content"]), 2000)
+        self.assertIn("需求方：需求者", kwargs["content"])
+        self.assertIn("見附檔", kwargs["content"])
+        text = kwargs["files"][0].fp.getvalue().decode("utf-8")
+        self.assertIn("需求方：需求者", text)
+        self.assertIn("第0則補充", text)
+        self.assertIn("第39則補充", text)
+        self.assertIn("@供應者甲", text)
+        self.assertNotIn("<@", text)
+        self.assert_silent(kwargs)
+        self.assertTrue(self.post.deleted)
+
+    def test_oversized_summary_is_cut_but_kept_whole_in_the_attachment(self):
+        # 商品留底的摘要是所有下單紀錄，加購很多次時摘要本身就可能超過一則訊息
+        summary = "下單紀錄" + "・月相 ×1（NT$30）\n" * 200
+        self.assertTrue(self.call(self.service.post_archive(
+            title="封存", summary=summary, transcript="[時間] 需求者: 謝謝", filename="record.txt")))
+
+        (_, kwargs), = self.world.archived_posts
+        self.assertLessEqual(len(kwargs["content"]), 2000)
+        self.assertIn("見附檔", kwargs["content"])
+        text = kwargs["files"][0].fp.getvalue().decode("utf-8")
+        self.assertIn(summary, text)
+        self.assertIn("需求者: 謝謝", text)
 
     def dm_targets(self):
         return [(call.args[0].id, call.kwargs["embed"]) for call in self.dms.await_args_list]
@@ -765,9 +811,8 @@ class ServerNicknameTests(TradeFlowTestCase):
         _, kwargs = self.world.archived_posts[0]
         self.assertIn("需求方：需求者", kwargs["content"])
         self.assertIn("供應方：供應者甲", kwargs["content"])
-        transcript = kwargs["files"][0].fp.getvalue().decode("utf-8")
-        self.assertIn("需求者: 需要購買", transcript)
-        self.assertNotIn("全域名稱", transcript)
+        self.assertIn("需求者: 需要購買", kwargs["content"])
+        self.assertNotIn("全域名稱", kwargs["content"])
         self.assertIn(REQUESTER.id, self.world.api_lookups)
         self.assertIn(SUPPLIER.id, self.world.api_lookups)
 

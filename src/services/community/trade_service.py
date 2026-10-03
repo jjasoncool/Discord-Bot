@@ -179,6 +179,14 @@ def resolve_requester(starter: discord.Message, *, bot_user_id: int, supplier_id
     return starter.author.id
 
 
+_MENTION_RE = re.compile(r"<@!?(\d+)>")
+
+
+def mentions_to_names(text: str, names: dict[int, str]) -> str:
+    """把 <@id> 換成 @名字：封存與留底要看得懂是誰，也不能在發封存時又通知到人。"""
+    return _MENTION_RE.sub(lambda m: f"@{names.get(int(m[1])) or m[1]}", text or "")
+
+
 def _fit_title(head: str, source_id: int) -> str:
     """標題上限 100 字；太長時截掉前段，保住結尾的需求貼文 id（找同一篇需求的交易靠它）。"""
     tail = f" - {source_id}"
@@ -693,7 +701,7 @@ class TradeService:
                 await self.post_archive(
                     title=_fit_title(f"已封存 - {source.name}", ref.source_id),
                     summary=await self._archive_summary(source, ref),
-                    transcript=await self.transcript(source, heading=f"需求貼文：{source.name}"),
+                    transcript=await self.transcript(source),
                     filename=f"trade_{ref.source_id}.txt",
                 )
             except Exception:
@@ -707,36 +715,48 @@ class TradeService:
             return _ARCHIVED
 
     async def post_archive(self, *, title: str, summary: str, transcript: str, filename: str) -> bool:
-        """在封存頻道發一篇封存：摘要寫在貼文裡，完整內容放 .txt 附檔。
+        """在封存頻道發一篇封存。自由市場的封存與商品交易的留底都用它。
 
-        封存頻道沒設定回 False；發不出去丟例外。自由市場的封存與商品交易的留底都用它。"""
+        放得下 2000 字就把摘要＋對話整段寫在貼文裡（打開就看得到，Discord 搜尋也找得到）；
+        放不下時貼文只放摘要，完整內容放 .txt 附檔，封存才不會因為太長而失敗（使用者 2026-10-03，TR-Q28）。
+        封存頻道沒設定回 False；發不出去丟例外。"""
         archive = await self._channel(self.settings.archive_channel_key)
         if archive is None:
             return False
         tags = None
         if hasattr(archive, "available_tags"):  # 論壇才有標籤
             tags = await get_forum_tags(archive, self.settings.archive_tag_name)
-        # 內容放附檔：全部塞進一則訊息，超過 2000 字就發不出去
-        posted = await post_to_channel(
-            archive, content=summary[:2000], thread_title=title, tags=tags,
-            files=[discord.File(io.BytesIO(transcript.encode("utf-8")), filename=filename)],
-        )
+        # 對話是別人寫的，裡面的 @everyone、@身分組 不能在封存時又通知一次
+        quiet = discord.AllowedMentions.none()
+        full = f"{summary}\n\n對話紀錄：\n{transcript}" if transcript else summary
+        if len(full) <= 2000:
+            posted = await post_to_channel(archive, content=full, thread_title=title, tags=tags,
+                                           allowed_mentions=quiet)
+        else:
+            head = summary if len(summary) <= 1900 else summary[:1900] + "……"
+            posted = await post_to_channel(
+                archive, content=f"{head}\n\n對話太長，完整內容見附檔。", thread_title=title, tags=tags,
+                files=[discord.File(io.BytesIO(full.encode("utf-8")), filename=filename)],
+                allowed_mentions=quiet,
+            )
         if posted is None:
             raise RuntimeError("封存頻道沒有回傳訊息")
         return True
 
-    async def transcript(self, thread: discord.Thread, *, heading: str, limit: Optional[int] = -1) -> str:
-        """一個 thread 的對話紀錄（給封存附檔用）。limit 預設照設定；None＝整個 thread。"""
+    async def transcript(self, thread: discord.Thread, *, limit: Optional[int] = -1) -> str:
+        """一個 thread 的對話紀錄（給封存用）：每則「[時間] 名字: 內容」，@ 換成名字。
+        limit 預設照設定；None＝整個 thread。"""
         if limit == -1:
             limit = self.settings.archive_history_limit
         messages = [m async for m in thread.history(limit=limit, oldest_first=True)]
-        # 向 API 抓回來的歷史訊息，作者不在快取時只有全域名稱；名字一律從伺服器取
-        names = await self.display_names(thread.guild, (m.author.id for m in messages))
-        lines = [heading, ""]
+        # 向 API 抓回來的歷史訊息，作者不在快取時只有全域名稱；名字一律從伺服器取（被 @ 的人也一樣）
+        mentioned = {int(i) for m in messages for i in _MENTION_RE.findall(m.content or "")}
+        names = await self.display_names(thread.guild, [m.author.id for m in messages] + sorted(mentioned))
+        lines = []
         for message in messages:
             when = message.created_at.astimezone(APP_TZ).strftime("%Y-%m-%d %H:%M")
             name = names.get(message.author.id) or message.author.display_name
-            lines.append(f"[{when}] {name}: {message.content}")
+            lines.append(f"[{when}] {name}: {mentions_to_names(message.content, names)}")
             urls = [a.url for a in getattr(message, "attachments", None) or ()]
             if urls:
                 lines.append("    附件：" + " ".join(urls))
@@ -748,8 +768,7 @@ class TradeService:
         return (f"需求貼文：{source.name}\n"
                 f"需求方：{names.get(ref.requester_id) or ref.requester_id}　"
                 f"供應方：{names.get(ref.supplier_id) or ref.supplier_id}\n"
-                f"完成時間：{datetime.now(APP_TZ):%Y-%m-%d %H:%M}\n"
-                f"完整對話（最多 {self.settings.archive_history_limit} 則）見附檔。")
+                f"完成時間：{datetime.now(APP_TZ):%Y-%m-%d %H:%M}")
 
     async def _clear_supplier_reactions(self, ref: TradeRef) -> None:
         """取消後清掉這位供應方在需求貼文上的接單表情，之後要再接單可以重按。
