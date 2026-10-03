@@ -633,10 +633,7 @@ class TradeService:
 
     async def _channel_id(self, key: str) -> Optional[int]:
         # 每次重讀（有 5 分鐘快取）：頻道是使用者在 /server_manager 綁的，bot 不重啟也可能改
-        channel_id = await ChannelConfig.get_channel_id(key, caller="trade")
-        if not channel_id or channel_id == ChannelConfig.DEFAULT_ID:
-            return None
-        return int(channel_id)
+        return await ChannelConfig.get_configured_id(key, caller="trade")
 
     async def _channel(self, key: str):
         channel_id = await self._channel_id(key)

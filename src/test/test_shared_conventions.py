@@ -399,6 +399,21 @@ RULES = [
         allowed={"services/relay/article_monitor.py"},
     ),
     Rule(
+        name="頻道沒綁定的判斷（比對 ChannelConfig.DEFAULT_ID）",
+        pattern=r"[!=]=\s*ChannelConfig\.DEFAULT_ID",
+        canonical="ChannelConfig.get_configured_id()（沒綁定回 None）",
+        # 2026-10-03 收成 get_configured_id 時已有這六份，之後改到哪個檔就順手換掉、從這裡移除
+        allowed={
+            "utils/utils.py",
+            "services/community/member_welcome.py",
+            "llm/ambient/ambient_reply.py",
+            "llm/ambient/ambient_diary.py",
+            "commands/periodic_reminder_commands.py",
+            "commands/management_commands.py",
+            "commands/community_lookup_commands.py",
+        },
+    ),
+    Rule(
         name="定時排程（算出離下一次還有幾秒、睡到那時）",
         finder=_find_sleep_until,
         canonical="utils.due_loop.run_due_loop（tick 回傳下一次的時刻）",

@@ -1,3 +1,4 @@
+from typing import Optional
 import logging
 import json
 import os
@@ -158,6 +159,17 @@ class ChannelConfig:
         else:
             logger.warning(f"頻道 ID 未設定，使用預設佔位符 (鍵: {config_key}，調用者: {caller})")
         return channel_id
+
+    @staticmethod
+    async def get_configured_id(config_key, config_file="config.json", caller="unknown") -> Optional[int]:
+        """有設定才回頻道 id；沒設定（佔位符或缺 key）回 None，不記警告。
+
+        給「頻道可以不綁」的功能用：呼叫端拿到 None 就自己決定要不要記 log，
+        不用各自再比一次 DEFAULT_ID（以前全專案有八份這種比對）。"""
+        channel_id = ChannelConfig.load_config(config_file, caller).get(config_key)
+        if not channel_id or channel_id == ChannelConfig.DEFAULT_ID:
+            return None
+        return int(channel_id)
 
 async def get_trade_forum_channel_id(config_file="config.json", caller="unknown"):
     """從配置文件中讀取交易論壇頻道 ID"""

@@ -268,14 +268,14 @@ def _make_view(ref, actions):
 class TradeFlowTestCase(unittest.TestCase):
     def setUp(self):
         self.world = World()
-        config = {
+        self.config = {
             "trade_forum_channel_id": FORUM_ID,
             "cart_delivery_channel_id": CART_ID,
             "archive_channel_id": ARCHIVE_ID,
         }
 
-        async def get_channel_id(key, *args, **kwargs):
-            return config.get(key, trade_service.ChannelConfig.DEFAULT_ID)
+        async def get_configured_id(key, *args, **kwargs):
+            return self.config.get(key)
 
         async def check_role(member, role):
             return role == "Trader" and member.id in TRADERS
@@ -286,7 +286,7 @@ class TradeFlowTestCase(unittest.TestCase):
 
         self.ephemeral = mock.AsyncMock(name="safe_send_interaction_message")
         patches = [
-            mock.patch.object(trade_service.ChannelConfig, "get_channel_id", side_effect=get_channel_id),
+            mock.patch.object(trade_service.ChannelConfig, "get_configured_id", side_effect=get_configured_id),
             mock.patch.object(trade_service, "check_role", side_effect=check_role),
             mock.patch.object(trade_service, "post_to_channel", side_effect=post_to_channel),
             mock.patch.object(trade_service, "safe_send_interaction_message", self.ephemeral),
