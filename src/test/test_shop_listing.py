@@ -149,6 +149,11 @@ class BatchTests(unittest.TestCase):
         again, errors = parse_batch("\n".join(d.line() for d in drafts), now=NOW)
         self.assertEqual((again, errors), (drafts, []))
 
+    def test_editing_allows_zero_remaining(self):
+        with self.assertRaises(ShopError):
+            parse_draft("a", "1", "0", "", preorder=False, now=NOW)  # 新增至少 1
+        self.assertEqual(parse_draft("a", "1", "0", "", preorder=False, now=NOW, min_limit=0).limit, 0)
+
     def test_single_variant_type(self):
         with self.assertRaises(ShopError):
             parse_draft("預購品", "10", "", "", preorder=True, now=NOW)  # 預購一定要填截止

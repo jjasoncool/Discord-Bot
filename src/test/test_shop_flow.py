@@ -7,7 +7,8 @@
      幣別有數字（只能填符號，金額在品相）、太長（塞不進按鈕的 custom_id）、圖太大都在發文前擋下；
      還沒有品相就沒有購買選單；不是圖片、商品論壇沒綁定都說清楚原因。之後更新貼文不傳附件清單（圖才不會被刪）。
   2. 管理：只有上架者或管理員（含群主）；新增（單一、批次）後購買選單出現，有預購就掛「預購中」；
-     最多 25 個；品相編號不重用；數量不能改得比已下單少；有進行中訂單的品相不能刪；
+     最多 25 個；品相編號不重用；編輯時數量填「剩餘數量」（預填目前剩幾個、賣光預填 0，存的上限＝已下單＋剩餘，
+     填 0＝停賣）；有進行中訂單的品相不能刪；
      下架後選單與按鈕停用、標題【已下架】、鎖定，但預購截止照樣提醒。
   3. 下單：不能買自己的；一次最多 5 種；賣完、截止、超過剩餘都擋下；下單就預留（貼文上的剩餘跟著變）；
      開出只有買家與上架者的交易 thread，訂單訊息有明細、總計與訂單紀錄；同一位買家加購沿用 thread、
@@ -48,7 +49,9 @@ import discord  # noqa: E402
 from commands import shop_commands  # noqa: E402
 from commands.shop_commands import DiscordShopViews  # noqa: E402
 from services.community import shop_service, trade_service  # noqa: E402
-from services.community.shop_listing import ShopError, Variant, listing_from_message, parse_batch  # noqa: E402
+from services.community.shop_listing import (  # noqa: E402
+    ShopError, Variant, listing_from_message, parse_batch, parse_draft,
+)
 from services.community.shop_service import ListingSource, ShopService  # noqa: E402
 from services.community.trade_service import CANCEL, NOTIFY, RECEIVE, TradeService  # noqa: E402
 from sys_settings.shop_settings import ShopSettings  # noqa: E402
@@ -284,14 +287,26 @@ class ManageTests(ShopTestCase):
         with self.assertRaises(ShopError):
             self.add(self.thread, "多一個｜1")
 
-    def test_limit_cannot_go_below_orders_and_ordered_variant_cannot_be_deleted(self):
-        self.add(self.thread, "60 月相｜30｜10｜")
-        self.order(self.thread, BUYER, {1: 3})
-        draft, = parse_batch("60 月相｜30｜2｜", now=self.world.now)[0]
+    def test_editing_quantity_means_remaining(self):
+        # 編輯時填的是「還要賣幾個」：系統自動加上已下單的（TR-Q27）
+        self.add(self.thread, "60 月相｜30｜4｜")
+        self.order(self.thread, BUYER, {1: 2})
+
+        async def form_default():
+            return shop_commands.VariantModal(self.thread.id, self.listing(self.thread).variant(1)).limit.default
+
+        self.assertEqual(self.call(form_default()), "2")  # 4 件賣掉 2 件，預填 2
+        restock = parse_draft("60 月相", "30", "5", "", preorder=False, now=self.world.now, min_limit=0)
+        self.call(self.shop.edit_variant(self.thread.id, SELLER, 1, restock))
+        variant = self.listing(self.thread).variant(1)
+        self.assertEqual((variant.taken, variant.limit, variant.remaining), (2, 7, 5))  # 補貨 5 件就填 5
+
+        stop = parse_draft("60 月相", "30", "0", "", preorder=False, now=self.world.now, min_limit=0)
+        self.call(self.shop.edit_variant(self.thread.id, SELLER, 1, stop))
+        self.assertEqual(self.listing(self.thread).variant(1).remaining, 0)  # 填 0＝停賣
+        self.assertEqual(self.call(form_default()), "0")  # 賣光時預填 0
         with self.assertRaises(ShopError):
-            self.call(self.shop.edit_variant(self.thread.id, SELLER, 1, draft))
-        with self.assertRaises(ShopError):
-            self.call(self.shop.delete_variant(self.thread.id, SELLER, 1))
+            self.call(self.shop.delete_variant(self.thread.id, SELLER, 1))  # 有進行中訂單不能刪
 
     def test_deleted_numbers_are_not_reused(self):
         self.add(self.thread, "60 月相｜30｜10｜", "300 月相｜150｜｜")

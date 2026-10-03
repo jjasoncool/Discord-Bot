@@ -314,16 +314,17 @@ class ShopService:
             return listing
 
     async def edit_variant(self, listing_id: int, actor: discord.Member, key: int, draft: Draft) -> Listing:
+        """編輯品相。draft.limit 是「剩餘數量」（還要賣幾個，None＝不限量）：
+        存的上限＝已下單＋剩餘，補貨 5 個就填 5，不用自己算（使用者 2026-10-03，TR-Q27）。"""
         async with self._lock(listing_id):
             thread, message, listing = await self._load_for_manage(listing_id, actor)
             variant = listing.variant(key)
             if variant is None:
                 raise ShopError("找不到這個品相，可能已經被刪除。")
-            if draft.limit is not None and draft.limit < variant.taken:
-                raise ShopError(f"「{variant.name}」已經有 {variant.taken} 個被下單，數量不能少於這個。")
+            limit = None if draft.limit is None else variant.taken + draft.limit
             # 編輯後一律重新開放：parse_draft 保證預購的截止時間在未來，改成立即購買也就沒有截止
             listing = listing.with_variant(replace(
-                variant, name=draft.name, price=draft.price, limit=draft.limit, cutoff=draft.cutoff, closed=False))
+                variant, name=draft.name, price=draft.price, limit=limit, cutoff=draft.cutoff, closed=False))
             await self._save(thread, message, listing)
             return listing
 

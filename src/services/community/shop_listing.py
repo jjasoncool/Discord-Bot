@@ -144,8 +144,10 @@ class Draft:
 
 
 def parse_draft(name: str, price: str, limit: str, cutoff: str, *,
-                preorder: Optional[bool], now: datetime) -> Draft:
-    """檢查上架者填的品相。preorder＝None 時看有沒有填截止時間（批次新增用）。"""
+                preorder: Optional[bool], now: datetime, min_limit: int = 1) -> Draft:
+    """檢查上架者填的品相。preorder＝None 時看有沒有填截止時間（批次新增用）。
+
+    min_limit：新增時數量至少 1；編輯時填的是「剩餘數量」，可以填 0（停賣、標成已售完）。"""
     name = (name or "").strip()
     if not name:
         raise ShopError("名稱不能空白")
@@ -165,8 +167,8 @@ def parse_draft(name: str, price: str, limit: str, cutoff: str, *,
             limit_value = int(limit.strip())
         except ValueError:
             raise ShopError(f"「{name}」的數量要填整數，不限量就留空") from None
-        if limit_value < 1:
-            raise ShopError(f"「{name}」的數量至少 1，不限量就留空")
+        if limit_value < min_limit:
+            raise ShopError(f"「{name}」的數量至少 {min_limit}，不限量就留空")
         if limit_value > LIMIT_MAX:
             raise ShopError(f"「{name}」的數量最多 6 位數")
     cutoff_text = (cutoff or "").strip()

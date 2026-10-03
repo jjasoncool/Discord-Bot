@@ -431,9 +431,10 @@ class VariantModal(discord.ui.Modal):
         ])
         self.cutoff = discord.ui.TextInput(required=False, max_length=16, placeholder="2026/10/20 23:59",
                                            default=format_cutoff(variant.cutoff) if preorder else None)
+        # 編輯時填「剩餘數量」：預填目前還剩幾個（賣光＝0），補貨幾個就填幾個（使用者 2026-10-03，TR-Q27）
         self.limit = discord.ui.TextInput(
             required=False, max_length=6,
-            default=str(variant.limit) if variant and variant.limit is not None else None)
+            default=str(variant.remaining) if variant and variant.remaining is not None else None)
         # modal 最多 5 個欄位，放不下整段說明，改在每個欄位底下各寫一行
         self.add_item(discord.ui.Label(text="名稱", description="買家在購買選單看到的名字，最多 80 字",
                                        component=self.name))
@@ -443,8 +444,15 @@ class VariantModal(discord.ui.Modal):
                                        component=self.kind))
         self.add_item(discord.ui.Label(text="預購截止", description="選預購才填，要寫年份，例 2026/10/20 23:59；過了就不能再買",
                                        component=self.cutoff))
-        self.add_item(discord.ui.Label(text="數量上限", description="不限量就留空；賣完會自動標「已售完」",
-                                       component=self.limit))
+        if variant is None:
+            limit_label = discord.ui.Label(text="數量", description="總共要賣幾個；不限量就留空；賣完會自動標「已售完」",
+                                           component=self.limit)
+        else:
+            limit_label = discord.ui.Label(
+                text="剩餘數量",
+                description=f"還要賣幾個（已賣出 {variant.taken} 個不用算進去）；填 0＝停賣；不限量就留空",
+                component=self.limit)
+        self.add_item(limit_label)
 
     async def on_submit(self, interaction: discord.Interaction):
         shop = _shop(interaction)
@@ -454,7 +462,8 @@ class VariantModal(discord.ui.Modal):
         await interaction.response.defer()
         try:
             draft = parse_draft(self.name.value, self.price.value, self.limit.value, self.cutoff.value,
-                                preorder=(self.kind.values or ["instant"])[0] == "preorder", now=_now())
+                                preorder=(self.kind.values or ["instant"])[0] == "preorder", now=_now(),
+                                min_limit=0 if self.variant is not None else 1)
             if self.variant is None:
                 listing = await shop.add_variants(self.listing_id, interaction.user, [draft])
                 return await _show_panel(interaction, listing, f"已新增「{draft.name}」。")
