@@ -414,6 +414,9 @@ class TradeIntegrationTests(ShopTestCase):
 
         self.assertTrue(mine.locked)
         self.assertIn("商品貼文保留", mine.sent()[-1])
+        # 交易按鈕拿掉了，但 🧾 訂單紀錄要留著（取消還回、認出商品交易都靠它）
+        remaining = [c.custom_id for m in mine.messages for row in m.components for c in row.children]
+        self.assertTrue(remaining and all(i.startswith("shop:order:") for i in remaining))
         self.assertFalse(self.thread.deleted)
         self.assertEqual(self.world.archived_posts, [])
         self.assertFalse(theirs.locked)

@@ -73,6 +73,8 @@ _TITLE_LIMIT = 100
 
 #: 改版前開單訊息的文字。舊 thread 上的舊按鈕靠它還原交易身分；舊 thread 都結束後可刪。
 #: 舊文字裡「使用者」是按表情的人（供應方），「貼文者」是被 @ 的人（需求方）。
+#: 改版前的交易按鈕（forum_monitor.LegacyTransactionView）
+_LEGACY_BUTTON_IDS = ("forum_trade_confirm", "forum_trade_cancel")
 _LEGACY_RE = re.compile(
     r"使用者 <@!?(?P<supplier>\d+)> 對交易貼文.*?貼文者為 <@!?(?P<requester>\d+)>.*?來源貼文 ID: (?P<source>\d+)",
     re.DOTALL,
@@ -461,7 +463,8 @@ class TradeService:
                        "自動視為已領收")
             else:
                 who = f"<@{ref.requester_id}> 已領收"
-            await thread.send(f"{who}，交易完成。{note}此 thread 將鎖定。")
+            # 開頭先 @ 供應方：需求方按「已領收」或自動領收時，供應方也要收到通知（使用者 2026-10-03）
+            await thread.send(f"<@{ref.supplier_id}>，{who}，交易完成。{note}此 thread 將鎖定。")
             await self._close(thread, COMPLETED_PREFIX)
         logger.info("交易：完成 thread=%s ref=%s auto=%s 來源=%s", thread.id, ref, auto, result)
         if kind is None and result != _FOREIGN:
@@ -512,11 +515,29 @@ class TradeService:
     async def _close(self, thread: discord.Thread, prefix: str) -> None:
         self._closed.add(thread.id)
         try:
+            # 交易結束就拿掉交易按鈕（使用者 2026-10-03：做完了按鈕還在，看起來像還能按）。
+            # 要在封存前做：封存中的 thread 改不了訊息
+            await self._strip_buttons(thread)
             # 改名、鎖定、封存一次做完：改名有很嚴的限速，一筆交易只改這一次
             await thread.edit(name=closed_title(thread.name, prefix), locked=True, archived=True)
         except Exception:
             self._closed.discard(thread.id)
             raise
+
+    async def _strip_buttons(self, thread: discord.Thread) -> None:
+        """拿掉 thread 裡 bot 訊息上的交易按鈕（含改版前的舊按鈕）。
+        商品訂單的「🧾 訂單紀錄」不是交易按鈕，留著：取消還回數量、認出商品交易都靠它。"""
+        async for message in thread.history(limit=None):
+            if message.author.id != self.bot.user.id:
+                continue
+            ids = [getattr(child, "custom_id", None) or ""
+                   for row in getattr(message, "components", None) or ()
+                   for child in getattr(row, "children", None) or ()]
+            if any(i.startswith("trade:") or i in _LEGACY_BUTTON_IDS for i in ids):
+                try:
+                    await message.edit(view=None)
+                except discord.HTTPException:
+                    logger.warning("交易：拿掉按鈕失敗 thread=%s message=%s", thread.id, message.id, exc_info=True)
 
     async def open_trades_for_source(self, source_id: int) -> list[tuple[discord.Thread, Optional[TradeRef]]]:
         """同一篇來源還沒結束的交易 thread（例：商品預購截止時要提醒的那些）。"""

@@ -9,8 +9,8 @@
   3. 同一篇需求，每位供應方各開一個 thread；同一位再按不重開，只在原 thread 提醒——
      即使那個 thread 已經被 Discord 自動封存（封存後就不在 discord.py 的快取裡）。
   4. 按鈕各有其人：只有供應方能通知領收與取消，只有需求方能按已領收；別人按不改變任何狀態。
-  5. 完成：先發完成訊息再鎖定（反過來 thread 會被重新打開），標題改成【已完成】；
-     需求貼文的對話以附檔封存後刪除原貼文（封存失敗就保留、刪除失敗要說；不在自由市場的貼文絕不刪）；同一篇的其他
+  5. 完成：先發完成訊息再鎖定（反過來 thread 會被重新打開），完成訊息 @ 雙方，標題改成【已完成】；
+     交易按鈕全部拿掉；需求貼文的對話以附檔封存後刪除原貼文（封存失敗就保留、刪除失敗要說；不在自由市場的貼文絕不刪）；同一篇的其他
      供應方 thread @ 雙方後結束，已被自動封存的也一樣。結束後再按通知不會把 thread 打開。
   6. 取消：標題【已取消】並鎖定；需求貼文保留；只清掉這位供應方的接單表情（需求貼文
      已被自動封存也清得掉）。
@@ -475,10 +475,13 @@ class CompleteTests(TradeFlowTestCase):
         kinds = [kind for kind, _ in self.thread.events]
         self.assertEqual(kinds[-2:], ["send", "edit"])
         self.assertIn("交易完成", self.thread.sent()[-1])
+        self.assertIn(SUPPLIER.mention, self.thread.sent()[-1])  # 需求方領收時，供應方也收到通知
         self.assertTrue(self.thread.locked)
         self.assertTrue(self.thread.archived)
         self.assertTrue(self.thread.name.startswith("【已完成】"))
         self.assertTrue(self.thread.name.endswith(f" - {self.post.id}"))
+        # 做完了按鈕就拿掉（開單訊息、領收通知都是）
+        self.assertEqual([m.components for m in self.thread.messages if m.components], [])
 
     def test_source_is_archived_with_transcript_then_deleted(self):
         self.press(self.thread, REQUESTER, RECEIVE, self.ref)
@@ -499,6 +502,7 @@ class CompleteTests(TradeFlowTestCase):
         self.assertTrue(self.other.locked)
         self.assertTrue(self.other.archived)
         self.assertTrue(self.other.name.startswith("【已結束】"))
+        self.assertEqual([m.components for m in self.other.messages if m.components], [])
         notice = self.other.sent()[-1]
         self.assertIn(REQUESTER.mention, notice)
         self.assertIn(SUPPLIER_B.mention, notice)
@@ -565,6 +569,7 @@ class CancelTests(TradeFlowTestCase):
         self.assertEqual([kind for kind, _ in thread.events][-2:], ["send", "edit"])
         self.assertTrue(thread.locked and thread.archived)
         self.assertTrue(thread.name.startswith("【已取消】"))
+        self.assertEqual([m.components for m in thread.messages if m.components], [])
         self.assertFalse(post.deleted)
         removed = post.messages[0].removed_reactions
         self.assertTrue(removed)
@@ -592,6 +597,7 @@ class ReceiptDeadlineTests(TradeFlowTestCase):
         self.assertTrue(thread.locked)
         self.assertTrue(thread.name.startswith("【已完成】"))
         self.assertIn("自動視為已領收", thread.sent()[-1])
+        self.assertIn(SUPPLIER.mention, thread.sent()[-1])
         self.assertTrue(post.deleted)
 
     def test_auto_complete_when_the_thread_was_archived_while_the_bot_was_down(self):
