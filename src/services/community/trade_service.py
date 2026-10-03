@@ -659,22 +659,12 @@ class TradeService:
                 await source.edit(locked=True, archived=True)
                 return _LOCKED
             try:
-                transcript = await self._transcript(source)
-                summary = await self._archive_summary(source, ref)
-                tags = None
-                if hasattr(archive, "available_tags"):  # 論壇才有標籤
-                    tags = await get_forum_tags(archive, self.settings.archive_tag_name)
-                # 對話放附檔：全部塞進一則訊息，超過 2000 字就發不出去
-                posted = await post_to_channel(
-                    archive,
-                    content=summary,
-                    thread_title=_fit_title(f"已封存 - {source.name}", ref.source_id),
-                    tags=tags,
-                    files=[discord.File(io.BytesIO(transcript.encode("utf-8")),
-                                        filename=f"trade_{ref.source_id}.txt")],
+                await self.post_archive(
+                    title=_fit_title(f"已封存 - {source.name}", ref.source_id),
+                    summary=await self._archive_summary(source, ref),
+                    transcript=await self.transcript(source, heading=f"需求貼文：{source.name}"),
+                    filename=f"trade_{ref.source_id}.txt",
                 )
-                if posted is None:
-                    raise RuntimeError("封存頻道沒有回傳訊息")
             except Exception:
                 logger.error("交易：封存需求貼文 %s 失敗，保留原貼文", ref.source_id, exc_info=True)
                 return _FAILED
@@ -685,11 +675,33 @@ class TradeService:
                 return _ARCHIVED_KEPT
             return _ARCHIVED
 
-    async def _transcript(self, source: discord.Thread) -> str:
-        messages = [m async for m in source.history(limit=self.settings.archive_history_limit, oldest_first=True)]
+    async def post_archive(self, *, title: str, summary: str, transcript: str, filename: str) -> bool:
+        """在封存頻道發一篇封存：摘要寫在貼文裡，完整內容放 .txt 附檔。
+
+        封存頻道沒設定回 False；發不出去丟例外。自由市場的封存與商品交易的留底都用它。"""
+        archive = await self._channel(self.settings.archive_channel_key)
+        if archive is None:
+            return False
+        tags = None
+        if hasattr(archive, "available_tags"):  # 論壇才有標籤
+            tags = await get_forum_tags(archive, self.settings.archive_tag_name)
+        # 內容放附檔：全部塞進一則訊息，超過 2000 字就發不出去
+        posted = await post_to_channel(
+            archive, content=summary[:2000], thread_title=title, tags=tags,
+            files=[discord.File(io.BytesIO(transcript.encode("utf-8")), filename=filename)],
+        )
+        if posted is None:
+            raise RuntimeError("封存頻道沒有回傳訊息")
+        return True
+
+    async def transcript(self, thread: discord.Thread, *, heading: str, limit: Optional[int] = -1) -> str:
+        """一個 thread 的對話紀錄（給封存附檔用）。limit 預設照設定；None＝整個 thread。"""
+        if limit == -1:
+            limit = self.settings.archive_history_limit
+        messages = [m async for m in thread.history(limit=limit, oldest_first=True)]
         # 向 API 抓回來的歷史訊息，作者不在快取時只有全域名稱；名字一律從伺服器取
-        names = await self.display_names(source.guild, (m.author.id for m in messages))
-        lines = [f"需求貼文：{source.name}", ""]
+        names = await self.display_names(thread.guild, (m.author.id for m in messages))
+        lines = [heading, ""]
         for message in messages:
             when = message.created_at.astimezone(APP_TZ).strftime("%Y-%m-%d %H:%M")
             name = names.get(message.author.id) or message.author.display_name
