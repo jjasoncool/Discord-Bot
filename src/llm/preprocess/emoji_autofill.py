@@ -58,14 +58,20 @@ class Target:
 def targets(message: Any) -> list[Target]:
     """這則訊息裡需要補描述的表情與貼圖。只查字典，不連網。"""
     known = emoji_dictionary.entries()
+    guild = getattr(message, "guild", None)
+    own_emoji_ids = {str(getattr(e, "id", "")) for e in (getattr(guild, "emojis", None) or ())}
     out: dict[str, Target] = {}
-    for name, _emoji_id, url in custom_emojis(getattr(message, "content", "") or ""):
+    for name, emoji_id, url in custom_emojis(getattr(message, "content", "") or ""):
         entry = known.get(name)
+        if entry is None and emoji_id in own_emoji_ids:
+            # 本伺服器今天新增、04:00 還沒登記進字典的表情：不寫進「別的伺服器」專區，
+            # 等登記成待填行之後，下次被看到再就地補
+            continue
         if entry is None or entry.needs_description:
             out.setdefault(f"emoji:{name}", Target("emoji", f"emoji:{name}", name, url))
     for st in getattr(message, "stickers", None) or ():
         sticker_id = getattr(st, "id", 0)
-        if sticker_cache.is_known(sticker_id) or sticker_dictionary.lookup(sticker_id):
+        if sticker_cache.is_known(sticker_id, guild) or sticker_dictionary.lookup(sticker_id):
             continue
         url = sticker_image_url(st)
         if url:

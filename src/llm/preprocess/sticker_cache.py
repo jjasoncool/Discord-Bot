@@ -48,9 +48,16 @@ def get_sticker_text(sticker: discord.StickerItem) -> Optional[str]:
     return f"[貼圖：{sticker.name}]"
 
 
-def is_known(sticker_id: int) -> bool:
-    """這張貼圖是不是本伺服器的（啟動時預載過描述）。別的伺服器的貼圖不在快取裡。"""
-    return sticker_id in _sticker_cache
+def is_known(sticker_id: int, guild=None) -> bool:
+    """這張貼圖是不是本伺服器的。別的伺服器的貼圖不在快取裡。
+
+    給了 `guild`（訊息所屬伺服器）時，快取沒有就再看它自己的貼圖清單——那是連上 Discord 時就有的，
+    預載快取要等 `on_ready` 才載完。2026-10-03 實例：重啟後連上（03:31:49）到快取載完（03:31:52）之間
+    有人貼了本伺服器的 IDEA，被當成別的伺服器的寫進貼圖字典。
+    """
+    if sticker_id in _sticker_cache:
+        return True
+    return any(getattr(s, "id", None) == sticker_id for s in (getattr(guild, "stickers", None) or ()))
 
 
 def update_guild(before, after) -> None:

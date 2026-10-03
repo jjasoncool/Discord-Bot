@@ -54,9 +54,9 @@ def sticker(sid, name, fmt="png"):
                            url=f"https://media.discordapp.net/stickers/{sid}.{fmt}")
 
 
-def msg(content="", stickers=(), bot=False):
+def msg(content="", stickers=(), bot=False, guild=None):
     return SimpleNamespace(content=content, stickers=list(stickers), author=SimpleNamespace(bot=bot),
-                           mentions=[], guild=None, reference=None)
+                           mentions=[], guild=guild, reference=None)
 
 
 class FilesTestBase(unittest.TestCase):
@@ -85,7 +85,7 @@ class TargetTests(FilesTestBase):
         m = msg("<:frog_angry:1> <:let_me_see_see:2> <:pending:3> <a:worryWDYM:4> <:worryWDYM:4>",
                 [sticker(10, "本伺服器"), sticker(11, "已補過"), sticker(12, "動態", "lottie"), sticker(13, "NanaSussy")])
         sd_entries = {11: "已補過｜描述"}
-        with mock.patch.object(sticker_cache, "is_known", side_effect=lambda sid: sid == 10), \
+        with mock.patch.object(sticker_cache, "is_known", side_effect=lambda sid, guild=None: sid == 10), \
              mock.patch.object(sd, "entries", return_value=sd_entries):
             got = [(t.key, t.url) for t in af.targets(m)]
         self.assertEqual(got, [
@@ -94,6 +94,17 @@ class TargetTests(FilesTestBase):
             ("emoji:worryWDYM", "https://cdn.discordapp.com/emojis/4.gif"),        # 別的伺服器，連發兩次只算一個
             ("sticker:13", "https://media.discordapp.net/stickers/13.png"),        # 別的伺服器、還沒補
         ], "人寫過描述的表情、本伺服器的貼圖、已補過的、Lottie 都不是對象")
+
+
+    def test_this_servers_own_even_before_the_cache_is_loaded(self):
+        """10-03 實例：重啟後連上 Discord（03:31:49）到貼圖快取載完（03:31:52）之間，有人貼了本伺服器的
+        IDEA，被當成別的伺服器的寫進貼圖字典。今天新增、04:00 還沒登記進字典的本伺服器表情也是同一類。
+        → 看訊息所屬伺服器自己的清單（連上 Discord 就有），不只靠預載的快取。"""
+        guild = SimpleNamespace(stickers=[SimpleNamespace(id=20)], emojis=[SimpleNamespace(id=21, name="brand_new")])
+        m = msg("<:brand_new:21> <:other_server:22>", [sticker(20, "IDEA"), sticker(23, "別人的")], guild=guild)
+        with mock.patch.object(sticker_cache, "_sticker_cache", {}):
+            got = [t.key for t in af.targets(m)]
+        self.assertEqual(got, ["emoji:other_server", "sticker:23"])
 
 
 class ParseAnswerTests(unittest.TestCase):
@@ -168,6 +179,15 @@ class StickerDictionaryTests(FilesTestBase):
         sd.add(13, "NanaSussy", "懷疑", backup_dir=str(self.backup_dir))
         self.assertEqual(sticker_cache.get_sticker_text(sticker(13, "NanaSussy")), "[貼圖：NanaSussy｜懷疑]")
         self.assertEqual(sticker_cache.get_sticker_text(sticker(99, "沒補過")), "[貼圖：沒補過]")
+
+
+class StickerCacheKnownTests(unittest.TestCase):
+    def test_falls_back_to_the_messages_guild(self):
+        guild = SimpleNamespace(stickers=[SimpleNamespace(id=777)])
+        with mock.patch.object(sticker_cache, "_sticker_cache", {}):
+            self.assertTrue(sticker_cache.is_known(777, guild), "快取還沒載完時看伺服器自己的清單")
+            self.assertFalse(sticker_cache.is_known(778, guild))
+            self.assertFalse(sticker_cache.is_known(777), "沒給伺服器就只看快取")
 
 
 class StickerCacheUpdateTests(unittest.TestCase):
