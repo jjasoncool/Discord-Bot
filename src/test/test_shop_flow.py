@@ -21,7 +21,8 @@
   5. 預購截止：截止時在含這個品項、還沒完成的交易 thread @ 雙方提醒一次；品項標成已截止、不能再買；
      重啟後不重複提醒；一個 thread 發不出去不影響其他人、也不會每小時重複 @；沒有未截止的預購就拿掉標籤；
      已被封存的商品貼文也找得到，處理完封存回去。
-  6. 置頂上架說明：綁定時發一篇並置頂、建好「預購中」標籤（建不了要告訴管理員）；已經有就不重發。
+  6. 置頂上架說明：綁定時發一篇並置頂、建好「預購中」標籤（建不了要告訴管理員）；已經有就不重發，
+     但說明文字改過（例：品相改叫品項）時，重綁會把置頂那篇更新成最新版，按鈕留著。
   7. 名字一律是伺服器暱稱（快取拿不到就向 API 查）。
   8. 分層：商品模組不 import 指令層；介面層按鈕與選單的 custom_id 解析得回同一筆資料。
   9. 選單不會卡住：Discord 的選單選過同一項就不會再通知 bot（使用者 2026-10-03 實測：編輯一次後
@@ -585,6 +586,25 @@ class GuideTests(ShopTestCase):
         self.assertEqual(len(self.posts), 1)
         self.assertFalse(guide.archived)
         self.assertEqual([t.name for t in self.forum.available_tags], ["預購中"])
+
+    def test_rebinding_refreshes_outdated_guide_text(self):
+        self.call(self.shop.ensure_guide(self.forum))
+        guide = self.posts[-1]
+        starter = guide.messages[0]
+        starter.embed.description = "舊版說明：到商品貼文加入品相"
+        guide.auto_archive()  # 置頂文也可能被自動封存，封存中改不了訊息
+
+        note = self.call(self.shop.ensure_guide(self.forum))
+
+        self.assertEqual(len(self.posts), 1)
+        self.assertIn("品項", starter.embed.description)
+        self.assertNotIn("品相", starter.embed.description)
+        self.assertEqual(starter.components[0].children[0].custom_id, shop_commands.GUIDE_CUSTOM_ID)
+        self.assertIn("已更新", note)
+
+        edits = len(starter.edits)
+        self.call(self.shop.ensure_guide(self.forum))  # 已經是最新版就不再改
+        self.assertEqual(len(starter.edits), edits)
 
     def test_missing_tag_permission_is_reported(self):
         async def refuse(**kwargs):

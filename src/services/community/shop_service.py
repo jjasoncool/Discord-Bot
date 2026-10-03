@@ -103,7 +103,7 @@ class ShopService:
     # ── 上架說明（綁定商品論壇時） ──
 
     async def ensure_guide(self, forum: discord.ForumChannel) -> str:
-        """商品論壇置頂一篇上架說明；已經有就確認它還置頂著。回傳給管理員看的說明。"""
+        """商品論壇置頂一篇上架說明；已經有就確認它還置頂著、文字是最新的。回傳給管理員看的說明。"""
         guide = await self._find_guide(forum)
         if guide is None:
             message = await post_to_channel(
@@ -117,11 +117,29 @@ class ShopService:
             if not getattr(getattr(guide, "flags", None), "pinned", False):
                 await guide.edit(pinned=True)
             note = f"🛒 置頂的上架說明已經在了：{guide.jump_url}"
+            note += await self._refresh_guide(guide)
         # 先把「預購中」標籤建好：預購截止的提醒靠它找商品，建不了就整個不會提醒
         if await self._preorder_tag(forum, create=True) is None:
             note += (f"\n⚠️ 建不了「{self.settings.preorder_tag_name}」標籤（bot 需要這個論壇的「管理頻道」權限），"
                      "預購截止時不會提醒。")
         return note
+
+    async def _refresh_guide(self, guide: discord.Thread) -> str:
+        """說明文字改過（例：品相改叫品項）就更新已置頂的那篇，管理員重綁一次商品論壇即可。
+
+        只改 embed：按鈕不動，也不傳附件清單（傳了會把貼文上的檔案刪掉）。"""
+        want = self._guide_embed()
+        try:
+            starter = await guide.fetch_message(guide.id)  # 論壇第一則訊息 id＝thread id
+            have = starter.embeds[0] if starter.embeds else None
+            if have is not None and (have.title, have.description) == (want.title, want.description):
+                return ""
+            await starter.edit(embed=want)
+        except discord.HTTPException:
+            logger.error("商品上架：更新上架說明失敗 thread=%s", guide.id, exc_info=True)
+            return "\n⚠️ 上架說明的文字沒能更新成最新版，請查看 log。"
+        logger.info("商品上架：更新上架說明 thread=%s", guide.id)
+        return "（文字已更新成最新版）"
 
     async def _find_guide(self, forum: discord.ForumChannel) -> Optional[discord.Thread]:
         def is_guide(thread: discord.Thread) -> bool:
