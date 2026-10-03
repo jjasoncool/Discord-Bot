@@ -141,6 +141,26 @@ register_channel(
     desc="購物車交付通知頻道",
 )
 
+
+# ── 商品上架論壇：設定完自動發置頂的上架說明（行為依賴 ShopCommands cog）──
+@register_channel(
+    "商品上架論壇",
+    discord.ChannelType.forum,
+    "shop_forum_channel_id",
+    color=discord.Color.gold(),
+    desc="觀星者上架商品的論壇（綁定後自動發置頂的上架說明）",
+)
+async def _on_set_shop(ctx: ChannelSetContext) -> Optional[str]:
+    cog = ctx.bot.get_cog("ShopCommands")
+    shop = getattr(cog, "shop", None)
+    if shop is None:
+        return "\n⚠️ 商品上架模組尚未載入，置頂的上架說明沒有發"
+    try:
+        return "\n" + await shop.ensure_guide(ctx.channel)
+    except Exception as e:
+        logger.error(f"設定商品上架論壇後發置頂上架說明失敗: {e}", exc_info=True)
+        return "\n⚠️ 置頂的上架說明發送失敗，請確認 bot 在這個論壇有發文、管理貼文的權限後再綁定一次。"
+
 register_channel(
     "官方文章更新",
     discord.ChannelType.text,

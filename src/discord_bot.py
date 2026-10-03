@@ -57,6 +57,7 @@ COMMAND_MODULES = [
     'commands.music_commands',
     'commands.periodic_reminder_commands',
     'commands.rollcall_commands',
+    'commands.shop_commands',
     'commands.trade_commands',
     'commands.test_commands',
     'commands.user_commands'
