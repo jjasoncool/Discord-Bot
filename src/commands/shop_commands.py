@@ -29,12 +29,13 @@ from services.community.shop_listing import (
     format_cutoff,
     listing_from_message,
     manage_custom_id,
+    money,
     order_custom_id,
     parse_batch,
     parse_draft,
     select_options,
 )
-from services.community.shop_service import ShopService
+from services.community.shop_service import UNIT_EXAMPLES, ShopService
 from sys_settings.shop_settings import ShopSettings
 from sys_settings.time_settings import APP_TZ
 from utils.due_loop import run_due_loop
@@ -124,7 +125,7 @@ class ShopBuySelect(discord.ui.DynamicItem[discord.ui.Select], template=BUY_TEMP
 
 
 class ShopManageButton(discord.ui.DynamicItem[discord.ui.Button], template=MANAGE_TEMPLATE):
-    """「⚙️ 管理商品（上架者）」：custom_id 帶上架者、下一個品相編號、價格單位。
+    """「⚙️ 管理商品（上架者）」：custom_id 帶上架者、下一個品相編號、幣別。
     大家都看得到（Discord 沒辦法依身份組隱藏），只有上架者與管理員能用。"""
 
     def __init__(self, owner_id: int, key_seq: int, unit: str, *, disabled: bool = False):
@@ -354,14 +355,27 @@ class ShopBatchButton(discord.ui.DynamicItem[discord.ui.Button],
         await interaction.edit_original_response(content=result)
 
 
+_BATCH_HELP = (
+    "**每行一個品相**，四欄用「｜」隔開（半形 | 也可以）：\n"
+    "`名稱｜價格｜數量｜預購截止`\n"
+    "・**價格**：只填數字，單位用這篇商品設定的\n"
+    "・**數量**：留空＝不限量；賣完會自動標「已售完」\n"
+    "・**預購截止**：留空＝立即購買；要預購就寫含年份的時間，例 `2026/10/20 23:59`\n"
+    "送出後會先給你看預覽、標出格式有錯的行，按「確認新增」才會加進商品。一篇最多 25 個品相。"
+)
+
+
 class BatchModal(discord.ui.Modal):
     def __init__(self, listing_id: int, text: str = ""):
         super().__init__(title="批次新增品相", timeout=_MODAL_TIMEOUT)
         self.listing_id = listing_id
         self.lines = discord.ui.TextInput(
-            label="一行一項：名稱｜價格｜數量｜預購截止", style=discord.TextStyle.paragraph, max_length=4000,
-            default=text or None, placeholder="60 月相｜30｜10｜\n6480 月相｜3000｜3｜2026/10/20 23:59")
-        self.add_item(self.lines)
+            style=discord.TextStyle.paragraph, max_length=4000, default=text or None,
+            placeholder="60 月相｜30｜10｜\n6480 月相｜3000｜3｜2026/10/20 23:59")
+        # 說明放在最上面（modal 支援純文字說明），輸入框本身的標題只能 45 字，寫不完
+        self.add_item(discord.ui.TextDisplay(_BATCH_HELP))
+        self.add_item(discord.ui.Label(text="品相清單", description="一行一個，例：60 月相｜30｜10｜",
+                                       component=self.lines))
 
     async def on_submit(self, interaction: discord.Interaction):
         embed, view = _batch_preview(self.listing_id, self.lines.value)
@@ -376,24 +390,28 @@ class VariantModal(discord.ui.Modal):
         self.listing_id = listing_id
         self.variant = variant
         preorder = bool(variant and variant.preorder)
-        self.name = discord.ui.TextInput(label="名稱", max_length=NAME_LIMIT, default=variant.name if variant else None)
-        self.price = discord.ui.TextInput(label="價格（只填數字）", max_length=9,
-                                          default=str(variant.price) if variant else None)
+        self.name = discord.ui.TextInput(max_length=NAME_LIMIT, default=variant.name if variant else None)
+        self.price = discord.ui.TextInput(max_length=9, default=str(variant.price) if variant else None)
         self.kind = discord.ui.Select(min_values=1, max_values=1, required=True, options=[
             discord.SelectOption(label="立即購買", value="instant", default=not preorder),
             discord.SelectOption(label="預購", value="preorder", default=preorder),
         ])
-        self.cutoff = discord.ui.TextInput(
-            label="預購截止（預購才填，例 2026/10/20 23:59）", required=False, max_length=16,
-            default=format_cutoff(variant.cutoff) if preorder else None)
+        self.cutoff = discord.ui.TextInput(required=False, max_length=16, placeholder="2026/10/20 23:59",
+                                           default=format_cutoff(variant.cutoff) if preorder else None)
         self.limit = discord.ui.TextInput(
-            label="數量上限（不限量就留空）", required=False, max_length=6,
+            required=False, max_length=6,
             default=str(variant.limit) if variant and variant.limit is not None else None)
-        self.add_item(self.name)
-        self.add_item(self.price)
-        self.add_item(discord.ui.Label(text="類型", component=self.kind))
-        self.add_item(self.cutoff)
-        self.add_item(self.limit)
+        # modal 最多 5 個欄位，放不下整段說明，改在每個欄位底下各寫一行
+        self.add_item(discord.ui.Label(text="名稱", description="買家在購買選單看到的名字，最多 80 字",
+                                       component=self.name))
+        self.add_item(discord.ui.Label(text="價格", description="只填數字，單位用這篇商品設定的",
+                                       component=self.price))
+        self.add_item(discord.ui.Label(text="類型", description="選「預購」要再填下面的截止時間",
+                                       component=self.kind))
+        self.add_item(discord.ui.Label(text="預購截止", description="選預購才填，要寫年份，例 2026/10/20 23:59；過了就不能再買",
+                                       component=self.cutoff))
+        self.add_item(discord.ui.Label(text="數量上限", description="不限量就留空；賣完會自動標「已售完」",
+                                       component=self.limit))
 
     async def on_submit(self, interaction: discord.Interaction):
         shop = _shop(interaction)
@@ -428,12 +446,15 @@ class ListingInfoModal(discord.ui.Modal):
         self.description = discord.ui.TextInput(
             label="說明（交付方式、需要買家提供的資料等）", style=discord.TextStyle.paragraph, required=False,
             max_length=2000, default=(listing.description or None) if listing else None)
-        self.unit = discord.ui.TextInput(label="價格單位", required=False, max_length=UNIT_LIMIT,
+        self.unit = discord.ui.TextInput(required=False, max_length=UNIT_LIMIT,
                                          default=listing.unit if listing else default_unit)
         self.images = discord.ui.FileUpload(min_values=0, max_values=10, required=False)
         self.add_item(self.title_input)
         self.add_item(self.description)
-        self.add_item(self.unit)
+        self.add_item(discord.ui.Label(
+            text="幣別",
+            description=f"只是金額前面的符號，不能有數字，例：{UNIT_EXAMPLES}（中文約 7 字內）。金額在加入品相時各自填",
+            component=self.unit))
         self.add_item(discord.ui.Label(
             text="換商品圖（不上傳就沿用原本的圖）" if listing else "商品圖（最多 10 張，可不傳）",
             component=self.images))
@@ -492,7 +513,7 @@ class QuantityModal(discord.ui.Modal):
         except ShopError as exc:
             return await _reply(interaction, str(exc))
         embed = discord.Embed(title=f"確認下單：{listing.title}", color=discord.Color.gold(),
-                              description="\n".join(f"・{row}" for row in rows) + f"\n\n**總計 {listing.unit}{total}**")
+                              description="\n".join(f"・{row}" for row in rows) + f"\n\n**總計 {money(listing.unit, total)}**")
         embed.set_footer(text="按「確認下單」後會預留數量，並開一個只有你和上架者的交易 thread。")
         view = discord.ui.View(timeout=None)
         view.add_item(ShopConfirmOrder(self.listing_id, picks))

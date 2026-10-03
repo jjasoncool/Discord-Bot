@@ -2,7 +2,7 @@
 
 商品貼文本身就是紀錄（使用者 2026-10-03 決定不加資料表，延續交易的做法）：
   - 標題、說明、商品圖：貼文第一則訊息的 embed。
-  - 上架者 id、下一個品相編號、價格單位、是否已下架：「⚙️ 管理商品（上架者）」按鈕的 custom_id 與停用狀態。
+  - 上架者 id、下一個品相編號、幣別、是否已下架：「⚙️ 管理商品（上架者）」按鈕的 custom_id 與停用狀態。
   - 每個商品（品相）：購買下拉選單的一個選項，名稱寫在 label，其餘寫在 value（`Variant.encode`）。
     選項只有 bot 寫得進去，重啟後照樣讀得回來；embed 上的商品清單只是依它產生的顯示。
   - 下單：交易 thread 裡訂單訊息上的一顆停用按鈕，custom_id 帶「商品編號x數量」（`order_custom_id`）。
@@ -24,7 +24,7 @@ MANAGE_PREFIX = "shop:manage:"
 ORDER_PREFIX = "shop:order:"
 #: 購買下拉選單：shop:buy:商品貼文id
 BUY_TEMPLATE = r"shop:buy:(?P<listing>\d+)"
-#: 管理按鈕：shop:manage:上架者id:下一個品相編號:價格單位（URL 編碼，單位裡有冒號也不會亂）
+#: 管理按鈕：shop:manage:上架者id:下一個品相編號:幣別（URL 編碼，單位裡有冒號也不會亂）
 #: 品相編號只增不減：刪掉的編號不重用，舊訂單、舊選單才不會對到新的品相
 MANAGE_TEMPLATE = r"shop:manage:(?P<owner>\d+):(?P<seq>\d+):(?P<unit>[^:]*)"
 CUSTOM_ID_LIMIT = 100
@@ -54,6 +54,11 @@ def parse_cutoff(text: str) -> datetime:
         except ValueError:
             continue
     raise ShopError(f"預購截止時間「{text}」看不懂，請寫成 2026/10/20 23:59")
+
+
+def money(unit: str, amount: int) -> str:
+    """金額顯示：幣別＋千分位（例 NT$100,005,000）；存的資料不變。"""
+    return f"{unit}{amount:,}"
 
 
 def format_cutoff(moment: datetime) -> str:
@@ -88,7 +93,7 @@ class Variant:
         return None
 
     def status(self, unit: str, now: datetime) -> str:
-        price = f"{unit}{self.price}"
+        price = money(unit, self.price)
         if self.preorder and self.unavailable_reason(now) == "預購已截止":
             return f"{price}｜預購已截止（{format_cutoff(self.cutoff)}）"
         kind = f"預購（{format_cutoff(self.cutoff)} 截止）" if self.preorder else "立即購買"
@@ -236,7 +241,7 @@ def manage_custom_id(owner_id: int, key_seq: int, unit: str) -> str:
 
 
 def unit_fits(unit: str) -> bool:
-    """價格單位編碼後要塞得進管理按鈕的 custom_id（中文一個字編碼後佔 9 個字元）。
+    """幣別編碼後要塞得進管理按鈕的 custom_id（中文一個字編碼後佔 9 個字元）。
 
     用最長的使用者 id（20 位）與三位數的品相編號估算，規則就不會因人而異：中文大約 7 個字以內。"""
     return len(manage_custom_id(10 ** 19, 999, unit)) <= CUSTOM_ID_LIMIT
@@ -390,5 +395,5 @@ def order_summary(lines: list[tuple[Variant, int]], unit: str) -> tuple[list[str
         subtotal = variant.price * qty
         total += subtotal
         note = f"，預購 {format_cutoff(variant.cutoff)} 截止" if variant.preorder else ""
-        rows.append(f"{variant.name} ×{qty}（{unit}{variant.price}{note}）＝{unit}{subtotal}")
+        rows.append(f"{variant.name} ×{qty}（{money(unit, variant.price)}{note}）＝{money(unit, subtotal)}")
     return rows, total

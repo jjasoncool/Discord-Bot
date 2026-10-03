@@ -31,6 +31,7 @@ from services.community.shop_listing import (
     apply_order,
     format_cutoff,
     listing_from_message,
+    money,
     order_summary,
     orders_on,
     quote_order,
@@ -47,6 +48,8 @@ from utils.utils import ChannelConfig, check_role
 logger = logging.getLogger(__name__)
 
 CLOSED_PREFIX = "【已下架】"
+#: 幣別的範例：擋下來時與欄位說明都用這組（使用者 2026-10-03 指定 NT$、USD$、JPY¥；欄位名稱同日改叫「幣別」）
+UNIT_EXAMPLES = "NT$、USD$、JPY¥、PY幣"
 
 
 class ShopViews(Protocol):
@@ -138,7 +141,8 @@ class ShopService:
             color=discord.Color.gold(),
             description=(
                 "**觀星者上架商品**\n"
-                "1. 按下方「🛒 上架商品」，填標題、說明、價格單位，可以附商品圖（最多 10 張）。\n"
+                "1. 按下方「🛒 上架商品」，填標題、說明、幣別（金額前面的符號，例 NT$），"
+                "可以附商品圖（最多 10 張）。金額在加入品相時各自填。\n"
                 "2. 到你的商品貼文按「⚙️ 管理商品（上架者）」加入品相：一次一個，或用「批次新增」一次加很多個。\n"
                 "　・沒填截止時間＝立即購買；填了＝預購。時間一律寫年份，例：2026/10/20 23:59。\n\n"
                 "**買家怎麼買**\n"
@@ -183,8 +187,12 @@ class ShopService:
         if len(title) > TITLE_LIMIT:
             raise ShopError(f"標題最多 {TITLE_LIMIT} 個字。")
         unit = (unit or "").strip() or self.settings.default_unit
+        # 幣別只是金額前面的符號，金額在各品相各自填；擋數字，免得上架者把金額填在這裡（使用者 2026-10-03）
+        if any(ch.isdigit() for ch in unit):
+            raise ShopError(f"幣別不能有數字，只填金額前面的符號，例如 {UNIT_EXAMPLES}。"
+                            "金額請在加入品相時各自填。")
         if len(unit) > UNIT_LIMIT or not unit_fits(unit):
-            raise ShopError("價格單位太長，請縮短（中文大約 7 個字以內）。")
+            raise ShopError(f"幣別太長，請縮短（中文大約 7 個字以內），例如 {UNIT_EXAMPLES}。")
         return title, (description or "").strip(), unit
 
     async def _image_files(self, attachments: Sequence[discord.Attachment], guild) -> list[discord.File]:
@@ -423,7 +431,7 @@ class ShopService:
     def _order_text(self, buyer, owner, listing: Listing, rows: list[str], total: int, lines) -> str:
         text = (f"🧾 {buyer.mention} 向 {owner.mention} 下單（{listing.title}）：\n"
                 + "\n".join(f"・{row}" for row in rows)
-                + f"\n總計 {listing.unit}{total}")
+                + f"\n總計 {money(listing.unit, total)}")
         if any(variant.preorder for variant, _ in lines):
             text += "\n預購的商品會在截止後由供應方安排交付，截止時 bot 會在這裡提醒雙方。"
         return text

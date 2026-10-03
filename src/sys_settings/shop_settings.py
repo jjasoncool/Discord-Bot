@@ -12,7 +12,7 @@ class ShopSettings(BaseSettings):
     forum_channel_key: str = "shop_forum_channel_id"
     #: 能上架的身份組：`config.json` 裡 `role_mapping` 的 key（伺服器上叫觀星者）
     seller_role: str = "Trader"
-    #: 價格單位預設值（每篇商品可以自己改）
+    #: 幣別預設值（每篇商品可以自己改）
     default_unit: str = "NT$"
     #: 一篇商品最多幾個品相（一個下拉選單最多 25 個選項）
     max_variants: int = 25

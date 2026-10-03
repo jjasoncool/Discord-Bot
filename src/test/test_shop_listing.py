@@ -2,7 +2,7 @@
 
 守的底線：
   1. 品相資料寫進下拉選項的 value 再讀回來不會走樣（不限量、預購截止、已截止都一樣）；
-     商品貼文上真的 Discord 元件讀得回同一篇商品：上架者、價格單位（含冒號也行）、品相、是否下架。
+     商品貼文上真的 Discord 元件讀得回同一篇商品：上架者、幣別（含冒號也行）、品相、是否下架。
   2. 批次新增一行一項「名稱｜價格｜數量｜預購截止」：全形半形分隔都可以、空行略過；
      截止時間一定要寫年份（使用者 2026-10-03）、要在未來；錯的行標出行號。
   3. 下單檢查：已下架、品相被刪、已售完、預購截止、數量超過剩餘都擋下並說明理由；
@@ -72,7 +72,7 @@ class VariantTests(unittest.TestCase):
     def test_status_text(self):
         self.assertEqual(INSTANT.status("NT$", NOW), "NT$30｜立即購買｜剩 2")
         self.assertEqual(UNLIMITED.status("NT$", NOW), "NT$20｜立即購買｜不限量")
-        self.assertEqual(PREORDER.status("NT$", NOW), "NT$3000｜預購（2026/10/20 23:59 截止）｜剩 2")
+        self.assertEqual(PREORDER.status("NT$", NOW), "NT$3,000｜預購（2026/10/20 23:59 截止）｜剩 2")  # 千分位
         self.assertIn("已售完", SOLD_OUT.status("NT$", NOW))
         self.assertEqual(CLOSED.status("NT$", NOW), "NT$100｜預購已截止（2026/10/20 23:59）")
         after = datetime(2026, 10, 21, 0, 0, tzinfo=APP_TZ)
@@ -189,6 +189,7 @@ class OrderTests(unittest.TestCase):
     def test_summary(self):
         rows, total = order_summary(quote_order(LISTING, {1: 2, 2: 1}, NOW), "NT$")
         self.assertEqual(total, 3060)
+        self.assertIn("＝NT$3,000", rows[1])
         self.assertIn("60 月相 ×2", rows[0])
         self.assertIn("預購 2026/10/20 23:59 截止", rows[1])
 

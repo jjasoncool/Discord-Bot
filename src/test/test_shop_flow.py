@@ -4,7 +4,7 @@
 
 守的底線：
   1. 上架：只有觀星者；bot 代發商品貼文（標題、說明、上架者暱稱、商品圖換固定檔名並由 embed 引用第一張）；
-     價格單位太長（塞不進按鈕的 custom_id）、圖太大都在發文前擋下；
+     幣別有數字（只能填符號，金額在品相）、太長（塞不進按鈕的 custom_id）、圖太大都在發文前擋下；
      還沒有品相就沒有購買選單；不是圖片、商品論壇沒綁定都說清楚原因。之後更新貼文不傳附件清單（圖才不會被刪）。
   2. 管理：只有上架者或管理員（含群主）；新增（單一、批次）後購買選單出現，有預購就掛「預購中」；
      最多 25 個；品相編號不重用；數量不能改得比已下單少；有進行中訂單的品相不能刪；
@@ -237,8 +237,12 @@ class ListingCreateTests(ShopTestCase):
             self.list_item(attachments=[FakeAttachment("big.png", size=50 * 1024 * 1024)])
         self.assertIn("太大", str(caught.exception))
         with self.assertRaises(ShopError) as caught:
+            self.list_item(unit="NT$100")  # 把金額填進幣別
+        self.assertIn("不能有數字", str(caught.exception))
+        self.assertIn("USD$", str(caught.exception))  # 擋下來時附範例
+        with self.assertRaises(ShopError) as caught:
             self.list_item(unit="鳴潮遊戲內星聲幣")  # 中文編碼後塞不進按鈕的 custom_id
-        self.assertIn("單位太長", str(caught.exception))
+        self.assertIn("幣別太長", str(caught.exception))
         self.assertEqual(self.posts, [])
         self.assertEqual(self.listing(self.list_item(unit="遊戲內星聲幣")).unit, "遊戲內星聲幣")
         del self.config["shop_forum_channel_id"]
@@ -613,6 +617,28 @@ class LayeringTests(unittest.TestCase):
             self.assertEqual([p.item.custom_id for p in picks], ["shop:pick:edit:500", "shop:pick:delete:500"])
             option = picks[0].item.options[0]
             self.assertEqual(Variant.decode(option.value, option.label.split(". ", 1)[-1]), variant)
+
+        asyncio.run(check())
+
+    def test_modals_stay_within_discord_limits(self):
+        """欄位標題 45 字、欄位描述 100 字、一張 modal 最多 5 個欄位；超過的話 Discord 直接拒絕，modal 打不開。"""
+        from services.community.shop_listing import Listing
+
+        async def check():
+            variant = Variant(1, "6480 月相", 3000, limit=3)
+            listing = Listing(thread_id=500, owner_id=21, unit="NT$", title="t", description="", variants=(variant,))
+            modals = [shop_commands.BatchModal(500, "a｜1"), shop_commands.VariantModal(500),
+                      shop_commands.VariantModal(500, variant), shop_commands.ListingInfoModal(),
+                      shop_commands.ListingInfoModal(listing=listing), shop_commands.QuantityModal(500, [variant])]
+            for modal in modals:
+                rows = modal.to_components()
+                with self.subTest(type(modal).__name__):
+                    self.assertLessEqual(len(rows), 5)
+                    self.assertLessEqual(len(modal.title), 45)
+                    for row in rows:
+                        self.assertLessEqual(len(row.get("label") or ""), 45)
+                        self.assertLessEqual(len(row.get("description") or ""), 100)
+                        self.assertLessEqual(len(row.get("content") or ""), 4000)
 
         asyncio.run(check())
 
