@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from dataclasses import replace
 from datetime import datetime
 from typing import Callable, Optional, Protocol, Sequence
@@ -464,6 +465,43 @@ class ShopService:
             await self._save(thread, message, release_order(listing, picks))
         logger.info("商品上架：還回預留 商品=%s 內容=%s", listing_id, picks)
 
+    async def archive_trade(self, thread: discord.Thread, ref: TradeRef) -> str:
+        """商品交易完成時在封存頻道留底：摘要是每筆下單（下單當時的價格），附檔是整個交易 thread 的對話。
+
+        商品貼文本身不動（還要賣給別人）；自由市場是把需求貼文搬過去，這裡是另發一篇備份
+        （使用者 2026-10-03）。回傳要加在完成訊息裡的說明。"""
+        try:
+            names = await self.trade.display_names(thread.guild, (ref.requester_id, ref.supplier_id))
+            requester = names.get(ref.requester_id) or str(ref.requester_id)
+            supplier = names.get(ref.supplier_id) or str(ref.supplier_id)
+            try:
+                _, _, listing = await self.load(ref.source_id)
+                title = listing.title
+            except ShopError:
+                title = f"商品 {ref.source_id}"  # 商品貼文已經不在，仍要留底
+            orders = []
+            async for message in thread.history(limit=None, oldest_first=True):
+                if message.author.id == self.bot.user.id and any(
+                        listing_id == ref.source_id for listing_id, _ in orders_on(message)):
+                    orders.append(_mentions_to_names(message.content, names))
+            summary = (f"商品：{title}（<#{ref.source_id}>）\n"
+                       f"需求方：{requester}　供應方：{supplier}\n"
+                       f"完成時間：{self._now().astimezone(APP_TZ):%Y-%m-%d %H:%M}\n\n"
+                       + "\n\n".join(orders) + "\n\n完整的溝通紀錄見附檔。")
+            if len(summary) > 1900:
+                summary = summary[:1900] + "\n……（下單紀錄太長，完整內容見附檔）"
+            posted = await self.trade.post_archive(
+                title=f"【市集】{title}｜{requester} 與 {supplier}"[:100],
+                summary=summary,
+                transcript=await self.trade.transcript(
+                    thread, heading=f"商品：{title}｜需求方：{requester}｜供應方：{supplier}", limit=None),
+                filename=f"shop_{ref.source_id}_{thread.id}.txt",
+            )
+        except Exception:
+            logger.error("商品上架：交易留底失敗 thread=%s", thread.id, exc_info=True)
+            return "交易紀錄留底失敗，請通知管理員。"
+        return "交易紀錄已留底到封存頻道。" if posted else "封存頻道沒有設定，這筆交易沒有留底。"
+
     async def _orders_in(self, thread: discord.Thread, listing_id: int) -> dict[int, int]:
         """交易 thread 裡這篇商品的訂單加總（首次下單＋加購）。"""
         total: dict[int, int] = {}
@@ -558,6 +596,11 @@ class ShopService:
         return self.bot.get_channel(forum_id) if forum_id is not None else None
 
 
+def _mentions_to_names(text: str, names: dict[int, str]) -> str:
+    """留底文章寫名字不寫 @：每次留底都去提醒雙方會很吵。"""
+    return re.sub(r"<@!?(\d+)>", lambda m: names.get(int(m[1])) or m[0].replace("<@", "").replace(">", ""), text or "")
+
+
 class ListingSource:
     """交易模組的來源種類：商品貼文。成交後商品保留、可以賣給很多人；取消時還回預留的數量。"""
 
@@ -575,7 +618,8 @@ class ListingSource:
                 "請在這裡討論交易細節。下單明細在下面。")
 
     async def on_complete(self, thread: discord.Thread, ref: TradeRef) -> str:
-        return "商品貼文保留，其他買家不受影響。"
+        note = await self.shop.archive_trade(thread, ref)
+        return f"商品貼文保留，其他買家不受影響。{note}"
 
     def cancel_text(self, ref: TradeRef) -> str:
         return (f"<@{ref.requester_id}>，供應方 <@{ref.supplier_id}> 已取消這筆交易，"

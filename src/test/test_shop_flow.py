@@ -14,7 +14,8 @@
      開出只有買家與上架者的交易 thread，訂單訊息有明細、總計與訂單紀錄；同一位買家加購沿用 thread、
      另一位買家各開一個；交易 thread 開不起來就把預留還回去；加購會作廢原本的領收通知；
      正在取消的 thread 不再收訂單。
-  4. 接上交易模組：商品交易完成不封存、不刪商品貼文、不結束其他買家的 thread——商品論壇改綁或解除也一樣
+  4. 接上交易模組：商品交易完成時在封存頻道另發一篇留底（下單紀錄＋溝通紀錄附檔，寫名字不寫 @；
+     封存頻道沒設定就說沒留底），不搬、不刪商品貼文、不結束其他買家的 thread——商品論壇改綁或解除也一樣
      （交易種類看交易 thread 裡的訂單紀錄，不看來源貼文在哪）；取消時把這個 thread 所有訂單（首次＋加購，
      多長的 thread 都讀完）的預留還回去。
   5. 預購截止：截止時在含這個品相、還沒完成的交易 thread @ 雙方提醒一次；品相標成已截止、不能再買；
@@ -431,6 +432,7 @@ class TradeIntegrationTests(ShopTestCase):
     def test_completing_keeps_the_listing_and_other_buyers(self):
         mine = self.order(self.thread, BUYER, {1: 2}).thread
         theirs = self.order(self.thread, BUYER_B, {1: 1}).thread
+        mine.messages.append(FakeMessage(self.world, next(self.world.ids), BUYER, "什麼時候方便交易？"))
 
         self.press(mine, BUYER, RECEIVE, self.ref_of(mine))
 
@@ -440,8 +442,14 @@ class TradeIntegrationTests(ShopTestCase):
         remaining = [c.custom_id for m in mine.messages for row in m.components for c in row.children]
         self.assertTrue(remaining and all(i.startswith("shop:order:") for i in remaining))
         self.assertFalse(self.thread.deleted)
-        self.assertEqual(self.world.archived_posts, [])
         self.assertFalse(theirs.locked)
+        # 留底：另發一篇備份（不是搬商品貼文），摘要是下單紀錄，附檔是溝通紀錄；寫名字不寫 @
+        self.assertIn("已留底", mine.sent()[-1])
+        (_, post), = self.world.archived_posts
+        self.assertTrue(post["thread_title"].startswith("【市集】月相代儲｜需求者 與 供應者甲"))
+        self.assertIn("60 月相 ×2", post["content"])
+        self.assertNotIn("<@", post["content"])
+        self.assertIn("什麼時候方便交易", post["files"][0].fp.getvalue().decode("utf-8"))
         self.assertEqual(self.listing(self.thread).variant(1).taken, 3)  # 完成的算賣出，不還回
 
     def test_listing_is_safe_even_if_the_shop_forum_is_unbound(self):
@@ -453,8 +461,17 @@ class TradeIntegrationTests(ShopTestCase):
 
         self.assertIn("商品貼文保留", mine.sent()[-1])
         self.assertFalse(self.thread.deleted)
-        self.assertEqual(self.world.archived_posts, [])
+        self.assertTrue(all(post["thread_title"].startswith("【市集】") for _, post in self.world.archived_posts))
         self.assertFalse(theirs.locked)
+
+    def test_no_record_when_the_archive_channel_is_unset(self):
+        mine = self.order(self.thread, BUYER, {1: 1}).thread
+        del self.config["archive_channel_id"]
+
+        self.press(mine, BUYER, RECEIVE, self.ref_of(mine))
+
+        self.assertIn("沒有留底", mine.sent()[-1])
+        self.assertTrue(mine.locked)
 
     def test_long_threads_are_read_to_the_first_order(self):
         mine = self.order(self.thread, BUYER, {1: 2}).thread
