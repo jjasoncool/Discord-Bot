@@ -120,8 +120,14 @@ class ShopBuySelect(discord.ui.DynamicItem[discord.ui.Select], template=BUY_TEMP
             variants = await shop.check_pick(self.listing_id, interaction.user, keys,
                                              listing=listing_from_message(interaction.message))
         except ShopError as exc:
-            return await _reply(interaction, str(exc))
+            await _reply(interaction, str(exc))
+            await shop.refresh_listing(self.listing_id)
+            return
         await interaction.response.send_modal(QuantityModal(self.listing_id, variants))
+        # 回應只能有一個（跳出視窗），選單會停在剛選的項目；按取消後再選同一項，Discord 不會通知 bot。
+        # 所以視窗跳出後，bot 用自己的身分重畫商品貼文清空選單；視窗要問的商品已經決定好了，不受影響
+        # （使用者 2026-10-03：按了取消就沒辦法重新選擇）
+        await shop.refresh_listing(self.listing_id)
 
 
 class ShopManageButton(discord.ui.DynamicItem[discord.ui.Button], template=MANAGE_TEMPLATE):
@@ -281,10 +287,44 @@ class ShopPickSelect(discord.ui.DynamicItem[discord.ui.Select],
         if variant is None:
             return await _reply(interaction, "找不到這個品相，可能已經被刪除。")
         if self.action == "edit":
-            await interaction.response.send_modal(VariantModal(self.listing_id, variant))
+            # 不直接跳出視窗：面板是只有上架者看得到的訊息，bot 在跳出視窗後改不了它，選單會卡在這一項。
+            # 先換成按鈕（按鈕不會卡住），取消視窗後還能再按
+            view = discord.ui.View(timeout=None)
+            view.add_item(ShopEditButton(self.listing_id, variant.key, variant.name))
+            view.add_item(ShopPanelButton("back", self.listing_id))
+            await interaction.response.edit_message(content=f"要編輯「{variant.name}」嗎？", embed=None, view=view)
         else:
             await interaction.response.edit_message(content=f"確定要刪除「{variant.name}」嗎？", embed=None,
                                                     view=_confirm_view("delete", self.listing_id, variant.key))
+
+
+class ShopEditButton(discord.ui.DynamicItem[discord.ui.Button],
+                     template=r"shop:editv:(?P<listing>\d+):(?P<key>\d+)"):
+    """管理面板「✏️ 編輯」：按了才跳出編輯視窗，取消後可以再按。"""
+
+    def __init__(self, listing_id: int, key: int, name: str = ""):
+        super().__init__(discord.ui.Button(label=f"編輯「{name}」"[:80] if name else "編輯", emoji="✏️",
+                                           style=discord.ButtonStyle.primary,
+                                           custom_id=f"shop:editv:{listing_id}:{key}"))
+        self.listing_id = listing_id
+        self.key = key
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match, /):
+        return cls(int(match["listing"]), int(match["key"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        shop = _shop(interaction)
+        if shop is None:
+            return await _missing(interaction)
+        try:
+            listing = await shop.check_manager(self.listing_id, interaction.user)
+        except ShopError as exc:
+            return await _reply(interaction, str(exc))
+        variant = listing.variant(self.key)
+        if variant is None:
+            return await _reply(interaction, "找不到這個品相，可能已經被刪除。")
+        await interaction.response.send_modal(VariantModal(self.listing_id, variant))
 
 
 class ShopConfirmButton(discord.ui.DynamicItem[discord.ui.Button],
@@ -562,10 +602,7 @@ class QuantityModal(discord.ui.Modal):
         try:
             rows, total, listing = await shop.quote(self.listing_id, interaction.user, picks)
         except ShopError as exc:
-            await shop.refresh_listing(self.listing_id)
             return await _reply(interaction, str(exc))
-        # 重畫商品貼文：選單選過同一組就不會再通知 bot，這次取消的話下次才選得回同樣的商品
-        await shop.refresh_listing(self.listing_id)
         embed = discord.Embed(title=f"確認下單：{listing.title}", color=discord.Color.gold(),
                               description="\n".join(f"・{row}" for row in rows) + f"\n\n**總計 {money(listing.unit, total)}**")
         embed.set_footer(text="按「確認下單」後會預留數量，並開一個只有你和上架者的交易 thread。")
@@ -631,7 +668,7 @@ class GuideView(discord.ui.View):
         await interaction.response.send_modal(ListingInfoModal(default_unit=shop.settings.default_unit))
 
 
-_DYNAMIC_ITEMS = (ShopBuySelect, ShopManageButton, ShopPanelButton, ShopPickSelect, ShopConfirmButton,
+_DYNAMIC_ITEMS = (ShopBuySelect, ShopManageButton, ShopPanelButton, ShopPickSelect, ShopEditButton, ShopConfirmButton,
                   ShopBatchButton, ShopConfirmOrder, ShopAbort)
 
 

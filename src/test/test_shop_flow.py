@@ -25,8 +25,9 @@
   7. 名字一律是伺服器暱稱（快取拿不到就向 API 查）。
   8. 分層：商品模組不 import 指令層；介面層按鈕與選單的 custom_id 解析得回同一筆資料。
   9. 選單不會卡住：Discord 的選單選過同一項就不會再通知 bot（使用者 2026-10-03 實測：編輯一次後
-     第二次編輯不了）。管理面板每次操作完都重畫（編輯、新增、刪除、批次），確認畫面換在面板上；
-     買家填完數量也重畫商品貼文。
+     第二次編輯不了；按了取消就沒辦法重新選擇）。買家在購買選單選完、填數量的視窗一跳出，
+     商品貼文就重畫清空選單，視窗裡仍是剛選的商品；管理面板每次操作完都重畫，編輯品相先換成按鈕
+     （面板只有上架者看得到，bot 在跳出視窗後改不了它），刪除與下架的確認換在面板上。
 """
 
 import ast
@@ -631,6 +632,25 @@ class PanelRedrawTests(ShopTestCase):
         self.assertEqual(len(picks), 2)  # 重畫出新的選單＝回到未選取
         return kwargs
 
+    def test_buy_menu_is_cleared_as_soon_as_the_quantity_form_opens(self):
+        message = self.thread.messages[0]
+        before = len(message.edits)
+
+        async def run():
+            listing = self.listing(self.thread)
+            select = shop_commands.ShopBuySelect(self.thread.id, options=[
+                discord.SelectOption(label=v.name, value=v.encode()) for v in listing.variants], max_values=2)
+            select.item._values = [listing.variant(2).encode()]
+            interaction = self.interaction(user=BUYER, message=message)
+            await select.callback(interaction)
+            return interaction
+
+        interaction = self.call(run())
+
+        modal = interaction.response.send_modal.await_args.args[0]
+        self.assertEqual([key for key, _, _ in modal.inputs], [2])  # 視窗問的是剛選的商品
+        self.assertEqual(len(message.edits), before + 1)  # 商品貼文重畫＝選單清空，取消後還能再選
+
     def test_editing_a_variant_redraws_the_panel(self):
         async def run():
             listing = self.listing(self.thread)
@@ -666,19 +686,24 @@ class PanelRedrawTests(ShopTestCase):
         self.assert_panel_redrawn(doing, "已刪除")
         self.assertEqual([v.name for v in self.listing(self.thread).variants], ["60 月相"])
 
-    def test_filling_quantities_redraws_the_listing(self):
-        message = self.thread.messages[0]
-        before = len(message.edits)
-
+    def test_edit_menu_turns_into_a_button(self):
         async def run():
-            modal = shop_commands.QuantityModal(self.thread.id, list(self.listing(self.thread).variants[:1]))
-            modal.inputs[0][2]._value = "2"
-            await modal.on_submit(self.interaction(user=BUYER, message=message))
+            listing = self.listing(self.thread)
+            pick = shop_commands._panel_view(listing).children[-2]  # 編輯品相選單
+            pick.item._values = [pick.item.options[0].value]
+            choosing = self.interaction()
+            await pick.callback(choosing)
+            view = choosing.response.edit_message.await_args.kwargs["view"]
+            editing = self.interaction()
+            await view.children[0].callback(editing)
+            return choosing, view, editing
 
-        self.call(run())
+        choosing, view, editing = self.call(run())
 
-        self.assertEqual(len(message.edits), before + 1)  # 買家的購買選單回到未選取
-        self.sent_ephemeral.assert_awaited()  # 明細＋確認下單
+        choosing.response.send_modal.assert_not_awaited()  # 選單不直接跳視窗（跳了選單就卡住）
+        self.assertEqual([type(c).__name__ for c in view.children], ["ShopEditButton", "ShopPanelButton"])
+        modal = editing.response.send_modal.await_args.args[0]
+        self.assertEqual(modal.name.default, "60 月相")  # 按鈕才跳出編輯視窗，帶入原本的內容
 
 
 class LayeringTests(unittest.TestCase):
@@ -700,6 +725,7 @@ class LayeringTests(unittest.TestCase):
                 shop_commands.ShopConfirmButton("delete", 500, 7),
                 shop_commands.ShopConfirmButton("close", 500),
                 shop_commands.ShopBatchButton("fix", 500),
+                shop_commands.ShopEditButton(500, 3, "6480 月相"),
                 shop_commands.ShopBuySelect(500, options=[discord.SelectOption(label="x", value="1:2:::0:0")]),
             ]
             for original in cases:
