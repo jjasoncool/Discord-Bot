@@ -26,6 +26,7 @@
   9. 分層：交易模組不 import 指令層；介面層的按鈕 custom_id 解析得回同一筆交易。
  10. 名字一律是伺服器暱稱：成員快取拿不到人時向 Discord API 查（2025-07 b456d91 的教訓：
      只看快取曾經讓接單失敗）。thread 標題、封存摘要、封存對話的發言者與被 @ 的人都一樣；查不到要留 log。
+ 11. 給群友看的訊息不寫程式用語：交易 thread 一律說「對話」（使用者 2026-10-04）。
 """
 
 import ast
@@ -205,6 +206,7 @@ class FakeThread:
         self.messages = []
         self.guild = world.guild
         self.jump_url = f"https://discord.com/channels/{GUILD_ID}/{tid}"
+        self.mention = f"<#{tid}>"
         self.events = []  # ("send", 內容) / ("edit", kwargs)，用來檢查先後順序
 
     async def send(self, content=None, *, embed=None, view=None):
@@ -843,6 +845,27 @@ class NamingTests(unittest.TestCase):
         self.assertTrue(closed.startswith("【已完成】"))
         self.assertTrue(closed.endswith(" - 123"))
         self.assertLessEqual(len(closed), 100)
+
+
+class WordingTests(TradeFlowTestCase):
+
+    def test_messages_say_conversation_not_thread(self):
+        post = self.world.post(REQUESTER, "需要代儲")
+        mine = self.react(post, SUPPLIER).thread
+        other = self.react(post, SUPPLIER_B).thread
+        self.react(post, SUPPLIER)  # 同一位再按一次：提醒交易還在進行中
+        self.press(mine, REQUESTER, HELP, self.ref_of(mine))
+        self.press(mine, SUPPLIER, HELP, self.ref_of(mine))  # 群主已經在裡面
+        self.press(mine, REQUESTER, RECEIVE, self.ref_of(mine))  # 完成，另一位供應方的交易跟著結束
+        later = self.world.post(REQUESTER, "需要代練")
+        cancelled = self.react(later, SUPPLIER).thread
+        self.press(cancelled, SUPPLIER, CANCEL, self.ref_of(cancelled))
+
+        said = [text for t in (mine, other, cancelled) for text in t.sent()]
+        said += [call.args[1] for call in self.ephemeral.await_args_list]
+        self.assertTrue(any("群主已經在這個對話裡" in text for text in said))
+        self.assertTrue(any("還在進行中" in text for text in said))
+        self.assertEqual([text for text in said if "thread" in text.lower()], [])
 
 
 class LayeringTests(unittest.TestCase):

@@ -31,6 +31,7 @@
      第二次編輯不了；按了取消就沒辦法重新選擇）。買家在購買選單選完、填數量的視窗一跳出，
      商品貼文就重畫清空選單，視窗裡仍是剛選的商品；管理面板每次操作完都重畫，編輯品項選了就跳出視窗、
      跳出後重畫面板（改不了原始回應就改指定訊息，都不行只留 log、不出錯），刪除與下架的確認換在面板上。
+  10. 給群友看的訊息不寫程式用語：交易 thread 一律說「對話」（使用者 2026-10-04）。
 """
 
 import ast
@@ -442,8 +443,9 @@ class OrderTests(ShopTestCase):
 
     def test_reservation_is_returned_when_the_trade_cannot_open(self):
         del self.config["cart_delivery_channel_id"]
-        with self.assertRaises(ShopError):
+        with self.assertRaises(ShopError) as caught:
             self.order(self.thread, BUYER, {1: 2})
+        self.assertEqual(str(caught.exception), "目前無法開啟交易，請通知管理員。")  # 原因寫在 log，不給買家看
         self.assertEqual(self.listing(self.thread).variant(1).taken, 0)
 
 
@@ -519,6 +521,7 @@ class TradeIntegrationTests(ShopTestCase):
         listing = self.listing(self.thread)
         self.assertEqual((listing.variant(1).taken, listing.variant(2).taken), (0, 0))
         self.assertIn("預留的數量會還回", mine.sent()[-1])
+        self.assertNotIn("thread", mine.sent()[-1])
 
 
 class PreorderTests(ShopTestCase):
@@ -602,6 +605,7 @@ class GuideTests(ShopTestCase):
         self.assertTrue(guide.flags.pinned)
         self.assertIn(guide.jump_url, note)
         self.assertEqual(guide.messages[0].components[0].children[0].custom_id, shop_commands.GUIDE_CUSTOM_ID)
+        self.assertNotIn("thread", guide.messages[0].embed.description)
 
         guide.auto_archive()
         self.call(self.shop.ensure_guide(self.forum))
@@ -676,6 +680,13 @@ class PanelRedrawTests(ShopTestCase):
         picks = [c for c in kwargs["view"].children if isinstance(c, shop_commands.ShopPickSelect)]
         self.assertEqual(len(picks), 2)  # 重畫出新的選單＝回到未選取
         return kwargs
+
+    def test_confirming_an_order_points_to_the_conversation(self):
+        pressing = self.interaction(user=BUYER)
+        self.call(shop_commands.ShopConfirmOrder(self.thread.id, {1: 1}).callback(pressing))
+        text = pressing.edit_original_response.await_args.kwargs["content"]
+        self.assertTrue(text.startswith("已下單，請到交易對話跟上架者確認細節："), text)
+        self.assertNotIn("thread", text)
 
     def test_panel_marks_unavailable_items_like_the_listing(self):
         self.add(self.thread, "一條龍｜40｜1｜")

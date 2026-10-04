@@ -316,7 +316,7 @@ class TradeService:
                     if thread.id in self._closed or thread.locked:
                         continue
                     if note is None:
-                        await thread.send(f"{supplier.mention} 又對需求貼文按了表情；這筆交易還在這個 thread 進行中。")
+                        await thread.send(f"{supplier.mention}，這筆交易還在進行中，請在這裡繼續。")
                     else:
                         await thread.send(content=note.content, view=note.view)
                         await self._retire_requests(thread, "（有新的加購，這次通知已作廢，請供應方交付後重新通知）")
@@ -379,7 +379,7 @@ class TradeService:
                 await self.hold_receipt(thread, ref, interaction.message)
             elif action == HELP:
                 if not await self.call_owner(thread, ref, interaction.user):
-                    await safe_send_interaction_message(interaction, "群主已經在這個 thread 裡了。", ephemeral=True)
+                    await safe_send_interaction_message(interaction, "群主已經在這個對話裡了。", ephemeral=True)
             else:
                 await self.complete(thread, ref, auto=False)
         except Exception:
@@ -442,7 +442,7 @@ class TradeService:
             # 先發訊息再鎖定：對已封存的 thread 發訊息會把它重新打開
             if kind is None:
                 text = (f"<@{ref.requester_id}>，供應方 <@{ref.supplier_id}> 已取消這筆交易，"
-                        "此 thread 將鎖定。需求貼文保留，其他供應方仍可接單。")
+                        "此對話將鎖定。需求貼文保留，其他供應方仍可接單。")
             else:
                 text = kind.cancel_text(ref)
             await thread.send(text)
@@ -476,7 +476,7 @@ class TradeService:
                 who = f"<@{ref.requester_id}> 已領收"
                 done = "需求方{requester}已領收，交易完成。"
             # 開頭先 @ 供應方：需求方按「已領收」或自動領收時，供應方也要收到通知（使用者 2026-10-03）
-            await thread.send(f"<@{ref.supplier_id}>，{who}，交易完成。{note}此 thread 將鎖定。")
+            await thread.send(f"<@{ref.supplier_id}>，{who}，交易完成。{note}此對話將鎖定。")
             await self._close(thread, COMPLETED_PREFIX)
         logger.info("交易：完成 thread=%s ref=%s auto=%s 來源=%s", thread.id, ref, auto, result)
         await self._notify_parties(thread, ref, "交易完成", done)
@@ -673,7 +673,7 @@ class TradeService:
                     continue
                 try:
                     who = f"<@{other_ref.requester_id}> <@{other_ref.supplier_id}> " if other_ref else ""
-                    await other.send(f"{who}這篇需求已由其他供應方完成交易，此 thread 結束並鎖定。")
+                    await other.send(f"{who}這篇需求已由其他供應方完成，這個對話將結束並且鎖定。")
                     await self._close(other, ENDED_PREFIX)
                 except Exception:
                     logger.error("交易：結束同一篇需求的其他交易失敗 thread=%s", other.id, exc_info=True)

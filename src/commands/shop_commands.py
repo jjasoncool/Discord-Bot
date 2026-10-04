@@ -534,7 +534,7 @@ class ListingInfoModal(discord.ui.Modal):
         self.add_item(self.description)
         self.add_item(discord.ui.Label(
             text="幣別",
-            description=f"只是金額前面的符號，不能有數字，例：{UNIT_EXAMPLES}（中文約 7 字內）。金額在加入品項時各自填",
+            description=f"金額前面的符號，例：{UNIT_EXAMPLES}（金額在品項裡填）",
             component=self.unit))
         self.add_item(discord.ui.Label(
             text="換商品圖（不上傳就沿用原本的圖）" if listing else "商品圖（最多 10 張，可不傳）",
@@ -604,7 +604,7 @@ class QuantityModal(discord.ui.Modal):
             return await _reply(interaction, str(exc))
         embed = discord.Embed(title=f"確認下單：{listing.title}", color=discord.Color.gold(),
                               description="\n".join(f"・{row}" for row in rows) + f"\n\n**總計 {money(listing.unit, total)}**")
-        embed.set_footer(text="按「確認下單」後會預留數量，並開一個只有你和上架者的交易 thread。")
+        embed.set_footer(text="按「確認下單」後會預留數量，並開啟交易對話，請在裡面溝通細節。")
         view = discord.ui.View(timeout=None)
         view.add_item(ShopConfirmOrder(self.listing_id, picks))
         view.add_item(ShopAbort())
@@ -630,7 +630,7 @@ class ShopConfirmOrder(discord.ui.DynamicItem[discord.ui.Button],
         await interaction.response.edit_message(content="下單中……", embed=None, view=None)  # 先拿掉按鈕，避免連按
         try:
             opened = await shop.place_order(self.listing_id, interaction.user, self.picks)
-            text = f"已下單，請到交易 thread 跟上架者確認細節：{opened.thread.mention}"
+            text = f"已下單，請到交易對話跟上架者確認細節：{opened.thread.mention}"
         except ShopError as exc:
             text = f"沒有下單：{exc}"
         except Exception:

@@ -166,7 +166,7 @@ class ShopService:
                 "　・沒填截止時間＝立即購買；填了＝預購。時間一律寫年份，例：2026/10/20 23:59。\n\n"
                 "**買家怎麼買**\n"
                 "在商品貼文的下拉選單只挑自己要的（一次最多 5 種）→ 填數量 → 確認下單，"
-                "就會開一個只有你和上架者的私人交易 thread。\n\n"
+                "就會開一個只有你和上架者的私人交易對話。\n\n"
                 "**交易流程**\n"
                 "上架者交付後按「通知需求方領收」，買家收到後按「已領收」；還沒收到可以按「還沒領收」。"
                 "有爭議可以按「請群主協助」。"
@@ -445,7 +445,7 @@ class ShopService:
                                  view=self.views.order(listing_id, picks, money(listing.unit, total)))
                 opened = await self.trade.open_trade(thread, buyer, owner, note=note, kind=self.source)
                 if opened is None:
-                    raise ShopError("交易 thread 開不起來（購物車頻道沒有設定），請通知管理員。")
+                    raise ShopError("目前無法開啟交易，請通知管理員。")  # 原因（購物車頻道沒設定）交易模組已寫進 log
             except Exception:
                 thread, message, listing = await self.load(listing_id)
                 await self._save(thread, message, release_order(listing, picks))
@@ -635,7 +635,7 @@ class ListingSource:
 
     def cancel_text(self, ref: TradeRef) -> str:
         return (f"<@{ref.requester_id}>，供應方 <@{ref.supplier_id}> 已取消這筆交易，"
-                "此 thread 將鎖定，預留的數量會還回商品。")
+                "此對話將鎖定，預留的數量會還回商品。")
 
     async def on_cancel(self, thread: discord.Thread, ref: TradeRef) -> None:
         await self.shop.release_thread_orders(thread, ref)

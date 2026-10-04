@@ -90,7 +90,7 @@ class SelectItemFinalConfirmView(discord.ui.View):
                 logger.error(f"無法找到論壇頻道 {forum_channel_id} 或該頻道不是論壇類型")
                 await safe_send_interaction_message(
                     interaction,
-                    "無法找到設定的論壇頻道，請確認設定或重新使用 `/set_trade_forum_channel` 命令設定。",
+                    "無法找到設定的論壇頻道，請確認設定或重新使用 `/server_manager` 命令設定。",
                     ephemeral=True
                 )
         except Exception as e:
