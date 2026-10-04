@@ -21,7 +21,7 @@
 | 交易身分 | 需求貼文 id、需求方 id、供應方 id，寫在按鈕的 custom_id | `TradeRef` |
 | 領收 | 供應方按「通知需求方領收」，需求方按「已領收」。還沒收到可以按「還沒領收」暫停；24 小時都沒反應才自動完成，到期前 6 小時會 @ 需求方提醒一次 | `request_receipt`、`hold_receipt`、`complete` |
 | 請群主協助 | 有爭議時雙方都能按，bot 把群主（伺服器擁有者）加進交易 thread 並 @ 他 | `call_owner` |
-| 封存 | 需求貼文的對話複製到封存頻道，成功後刪除原貼文。放得下 2000 字就整段寫在貼文裡，放不下才把完整內容附 .txt；@ 一律換成名字，封存時不通知任何人 | `_archive_source`、`post_archive`、`transcript` |
+| 封存 | 需求貼文的對話複製到封存頻道，成功後刪除原貼文。放得下 2000 字就整段寫在貼文裡，放不下才把完整內容附 .txt；@ 一律換成名字，封存時不通知任何人 | `_archive_source`、`post_archive`、`transcript`／`render_transcript` |
 | 結束私訊 | 完成、取消、因別人成交而結束時，私訊雙方並附交易 thread 的連結（thread 一結束就封存，上面的 @ 標記會跟著看不到） | `_notify_parties` |
 
 ## 頻道與設定
@@ -183,6 +183,8 @@ flowchart LR
 
 沒有資料表，紀錄就是 Discord 本身（TR-Q1）。
 
+**讀交易 thread 只走一個地方：`TradeService.read` → `TradeThreadLog`。** 一律由舊到新讀完整串，再回答開單身分（`ref`）、目前有效的領收通知（`pending_receipt()`，最新那則才算）、所有有效通知（`active_requests()`）、帶交易按鈕的訊息（`button_messages()`，商品的訂單紀錄不算）與 bot 的訊息（`bot_messages()`，商品從這裡讀訂單）。以前七處各自翻歷史、各自決定讀幾則：商品漏讀過第一筆訂單；通知前後聊超過 100 則，交易就不會自動完成（2026-10-04 架構檢視 B 修正）。`test_shared_conventions` 擋交易與商品模組自己翻交易 thread 的歷史；自由市場需求貼文的封存對話（`transcript`）不是交易 thread，照設定最多讀 100 則。
+
 **坑：discord.py 的 thread 快取只有活躍的。** thread 一封存（沒人講話一段時間就自動封存：購物車頻道預設 3 天、自由市場 1 小時）就被移出快取，`TextChannel.threads` 看不到。所以找交易 thread 時，除了快取還會往回翻「已封存的私人 thread」（`_open_trade_threads`，需要 Manage Threads 權限）：找同一篇需求時翻到需求貼文建立時間為止，檢查領收期限時翻 30 天。新開的交易 thread 也指定 7 天才自動封存。取消時要清需求貼文上的表情，而對封存中的 thread 改反應會被拒絕，所以會先解除封存。
 
 | 資料 | 存在哪 | 怎麼讀回來 |
@@ -190,7 +192,7 @@ flowchart LR
 | 交易身分（需求貼文、需求方、供應方） | 按鈕 custom_id：`trade:動作:需求貼文id:需求方id:供應方id`；只有 bot 寫得進去 | 按下時由 `TradeButton`（DynamicItem）解析；找交易 thread 時讀開單訊息的按鈕 |
 | 進行中或已結束 | 交易 thread 是否鎖定；標題前綴【交易中】→【已完成】【已取消】【已結束】，只在結束時改一次名 | `thread.locked` |
 | 同一篇需求有哪些交易 | 交易 thread 標題結尾的需求貼文 id | 掃購物車的 thread |
-| 領收期限 | 目前有效的那則通知（還帶著「已領收」按鈕）的時間＋24 小時；按「還沒領收」或發新通知，舊通知的按鈕會拿掉，期限跟著消失 | 到期迴圈掃 thread 歷史 |
+| 領收期限 | 目前有效的那則通知（還帶著「已領收」按鈕）的時間＋24 小時；按「還沒領收」或發新通知，舊通知的按鈕會拿掉，期限跟著消失 | 到期迴圈讀整串（`TradeThreadLog.pending_receipt()`） |
 | 提醒過沒有 | bot 有沒有在那則通知上按 ⏰ | 到期迴圈看通知上的表情 |
 | 名字 | 一律用伺服器暱稱：先查成員快取，沒有再向 Discord API 查（沿用 2025-07 `b456d91`，當時只看快取讓接單失敗）。thread 標題、封存摘要、封存對話的發言者與被 @ 的人都一樣 | `TradeService.member`、`display_names` |
 | 完成紀錄 | 封存頻道的副本（摘要＋對話，太長才附 .txt）；交易 thread 鎖定後留在購物車 | 人看 |

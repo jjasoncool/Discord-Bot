@@ -82,6 +82,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 解析使用者在視窗打的日期／時間（Discord 沒有日期選擇器） | `utils.user_dates.parse_user_date`／`parse_user_datetime`（全形、`/` `-` `.`、年月日都收；讀不懂回 None，訊息與規則留給呼叫端） |
 | 定時排程（睡到下一個時刻、啟動時補做、出錯不中斷） | `utils.due_loop.run_due_loop`（tick 處理到期的事、回傳下一個時刻；到期項目途中變了就設 `wake` 讓它提早重算；週期提醒、點名、人格萃取、日記四份舊迴圈待搬） |
 | 開交易 thread、領收、取消、封存（自由市場接單、商品購買） | `services.community.trade_service.TradeService`（`open_trade` 等；流程見根目錄 `TRADE_FLOW.md`） |
+| 讀交易 thread（開單身分、有效的領收通知、交易按鈕、bot 的訊息） | `TradeService.read` → `TradeThreadLog`（一律讀完整串；交易與商品模組不自己翻歷史，守衛擋） |
 | 新增一種交易來源（完成、取消時對來源的處理不同，例：商品貼文） | 實作 `trade_service.SourceKind`，用 `TradeService.add_source_kind` 登記（參考 `shop_service.ListingSource`） |
 
 ## 程式碼
