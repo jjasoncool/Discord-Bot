@@ -8,7 +8,8 @@
   3. 下單檢查：已下架、品項被刪、已售完、預購截止、數量超過剩餘都擋下並說明理由；
      下單預留、取消還回（不會變成負的）。
   4. 訂單紀錄（停用按鈕的 custom_id）讀得回同一筆，一次 5 種也不超過 Discord 的 100 字上限。
-  5. 顯示：商品圖用 attachment://檔名 引用（改訊息時圖才不會不見）；狀態寫出價格、剩餘、截止時間。
+  5. 顯示：商品圖用 attachment://檔名 引用（改訊息時圖才不會不見）；狀態寫出價格、剩餘、截止時間；
+     全部品項都不能買時，購買選單寫出原因（已售完、預購已截止，兩種都有就說沒有可購買的品項）。
      不能買的（已售完、預購已截止）：商品貼文上價格與類型劃掉、後面接標籤；選單說明文字沒有樣式，
      狀態放最前面（TR-Q38）。
 """
@@ -43,6 +44,7 @@ from services.community.shop_listing import (  # noqa: E402
     release_order,
     render_embed,
     select_options,
+    unavailable_text,
 )
 from sys_settings.time_settings import APP_TZ  # noqa: E402
 
@@ -219,6 +221,13 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(len(embed.fields), len(LISTING.variants))
         self.assertEqual(embed.author.name, "上架者：上架者")
         self.assertEqual(embed.fields[3].value, "~~NT$40｜立即購買~~ `已售完`")  # 商品貼文用有樣式的狀態
+
+    def test_menu_text_when_nothing_can_be_bought(self):
+        from dataclasses import replace
+        self.assertIsNone(unavailable_text(LISTING, NOW))  # 還有能買的就不停用
+        self.assertEqual(unavailable_text(replace(LISTING, variants=(SOLD_OUT,)), NOW), "已售完")
+        self.assertEqual(unavailable_text(replace(LISTING, variants=(CLOSED,)), NOW), "預購已截止")
+        self.assertEqual(unavailable_text(replace(LISTING, variants=(SOLD_OUT, CLOSED)), NOW), "目前沒有可購買的品項")
 
     def test_sold_out_options_lead_with_the_status(self):
         options = {o.label: o.description for o in select_options(LISTING, NOW)}

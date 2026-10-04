@@ -34,6 +34,7 @@ from services.community.shop_listing import (
     parse_batch,
     parse_draft,
     select_options,
+    unavailable_text,
 )
 from services.community.shop_service import UNIT_EXAMPLES, ShopService
 from sys_settings.shop_settings import ShopSettings
@@ -77,9 +78,11 @@ class DiscordShopViews:
         view = discord.ui.View(timeout=None)
         if listing.variants:
             options = select_options(listing, now)
+            # 下架或全部都不能買就停用選單、原因直接寫在選單上；上架者補貨後重畫，選單自己恢復
+            blocked = "已下架" if listing.closed else unavailable_text(listing, now)
             view.add_item(ShopBuySelect(listing.thread_id, options=options,
                                         max_values=min(self.settings.max_pick, len(options)),
-                                        disabled=listing.closed))
+                                        disabled=blocked is not None, placeholder=blocked))
         view.add_item(ShopManageButton(listing.owner_id, listing.next_key(), listing.unit, disabled=listing.closed))
         return view
 
@@ -98,9 +101,9 @@ class ShopBuySelect(discord.ui.DynamicItem[discord.ui.Select], template=BUY_TEMP
     """商品貼文的購買下拉：選項就是品項資料（見 shop_listing）。"""
 
     def __init__(self, listing_id: int, *, options: Sequence[discord.SelectOption] = (),
-                 max_values: int = 1, disabled: bool = False):
+                 max_values: int = 1, disabled: bool = False, placeholder: Optional[str] = None):
         super().__init__(discord.ui.Select(
-            custom_id=buy_custom_id(listing_id), placeholder="選擇要購買的商品（可多選）",
+            custom_id=buy_custom_id(listing_id), placeholder=placeholder or "選擇要購買的商品（可多選）",
             min_values=1, max_values=max(1, max_values), disabled=disabled,
             options=list(options) or [discord.SelectOption(label="（沒有商品）", value="-")],
         ))
@@ -108,7 +111,8 @@ class ShopBuySelect(discord.ui.DynamicItem[discord.ui.Select], template=BUY_TEMP
 
     @classmethod
     async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Select, match, /):
-        return cls(int(match["listing"]), options=item.options, max_values=item.max_values, disabled=item.disabled)
+        return cls(int(match["listing"]), options=item.options, max_values=item.max_values, disabled=item.disabled,
+                   placeholder=item.placeholder)
 
     async def callback(self, interaction: discord.Interaction):
         shop = _shop(interaction)

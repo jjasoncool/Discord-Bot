@@ -320,6 +320,14 @@ def select_options(listing: Listing, now: datetime) -> list[discord.SelectOption
     ]
 
 
+def unavailable_text(listing: Listing, now: datetime) -> Optional[str]:
+    """品項全部都不能買時，購買選單要停用並寫上的原因；還有能買的回 None（使用者 2026-10-04）。"""
+    reasons = {v.unavailable_reason(now) for v in listing.variants}
+    if not reasons or None in reasons:
+        return None
+    return reasons.pop() if len(reasons) == 1 else "目前沒有可購買的品項"
+
+
 # ── 下單 ──
 
 def encode_items(picks: dict[int, int]) -> str:

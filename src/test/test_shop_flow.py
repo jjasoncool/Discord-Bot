@@ -7,6 +7,7 @@
      幣別有數字（只能填符號，金額在品項）、太長（塞不進按鈕的 custom_id）、圖太大都在發文前擋下；
      還沒有品項就沒有購買選單；不是圖片、商品論壇沒綁定都說清楚原因。之後更新貼文不傳附件清單（圖才不會被刪）。
   2. 管理：只有上架者或管理員（含群主）；新增（單一、批次）後購買選單出現，有預購就掛「預購中」；
+     全部賣完時購買選單停用並寫「已售完」，管理按鈕照常可按，補貨後選單恢復；
      最多 25 個；品項編號不重用；編輯時數量填「剩餘數量」（預填目前剩幾個、賣光預填 0，存的上限＝已下單＋剩餘，
      填 0＝停賣）；有進行中訂單的品項不能刪；
      下架後選單與按鈕停用、標題【已下架】、鎖定，但預購截止照樣提醒。
@@ -312,6 +313,24 @@ class ManageTests(ShopTestCase):
         with self.assertRaises(ShopError):
             self.call(self.shop.delete_variant(self.thread.id, SELLER, 1))  # 有進行中訂單不能刪
 
+    def buy_menu(self):
+        return next(c for c in self.thread.messages[0].components[0].children if isinstance(c, discord.ui.Select))
+
+    def test_buy_menu_is_disabled_when_everything_is_sold_out(self):
+        self.add(self.thread, "60 月相｜30｜2｜")
+        self.order(self.thread, BUYER, {1: 2})
+
+        self.assertTrue(self.buy_menu().disabled)
+        self.assertEqual(self.buy_menu().placeholder, "已售完")
+        manage = [c for c in self.thread.messages[0].components[0].children if isinstance(c, discord.ui.Button)]
+        self.assertFalse(manage[0].disabled)  # 上架者還要能補貨
+        self.assertEqual(self.listing(self.thread).variant(1).remaining, 0)  # 停用的選單照樣讀得回品項
+
+        restock = parse_draft("60 月相", "30", "3", "", preorder=False, now=self.world.now, min_limit=0)
+        self.call(self.shop.edit_variant(self.thread.id, SELLER, 1, restock))
+        self.assertFalse(self.buy_menu().disabled)
+        self.assertEqual(self.buy_menu().placeholder, "選擇要購買的商品（可多選）")
+
     def test_deleted_numbers_are_not_reused(self):
         self.add(self.thread, "60 月相｜30｜10｜", "300 月相｜150｜｜")
         self.call(self.shop.delete_variant(self.thread.id, SELLER, 2))
@@ -325,6 +344,7 @@ class ManageTests(ShopTestCase):
 
         children = self.thread.messages[0].components[0].children
         self.assertTrue(all(c.disabled for c in children))
+        self.assertEqual(self.buy_menu().placeholder, "已下架")
         self.assertTrue(self.thread.name.startswith("【已下架】"))
         self.assertTrue(self.thread.locked)
         self.assertEqual(self.thread.tag_names(), ["預購中"])  # 已成立的預購交易，截止時仍要提醒
