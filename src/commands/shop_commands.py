@@ -432,7 +432,7 @@ _BATCH_HELP = (
     "`名稱｜價格｜數量｜預購截止`\n"
     "・**價格**：只填數字，單位用這篇商品設定的\n"
     "・**數量**：留空＝不限量；賣完會自動標「已售完」\n"
-    "・**預購截止**：留空＝立即購買；要預購就寫含年份的時間，例 `2026/10/20 23:59`\n"
+    "・**預購截止**：留空＝立即購買；要預購就寫含年份的時間，例 `2026/10/20 23:59`（只寫日期＝當天 23:59）\n"
     "送出後會先給你看預覽、標出格式有錯的行，按「確認新增」才會加進商品。一篇最多 25 個品項。"
 )
 
@@ -481,7 +481,7 @@ class VariantModal(discord.ui.Modal):
                                        component=self.price))
         self.add_item(discord.ui.Label(text="類型", description="選「預購」要再填下面的截止時間",
                                        component=self.kind))
-        self.add_item(discord.ui.Label(text="預購截止", description="選預購才填，要寫年份，例 2026/10/20 23:59；過了就不能再買",
+        self.add_item(discord.ui.Label(text="預購截止", description="選預購才填，要寫年份，例 2026/10/20 23:59；只寫日期＝當天 23:59",
                                        component=self.cutoff))
         if variant is None:
             limit_label = discord.ui.Label(text="數量", description="總共要賣幾個；不限量就留空；賣完會自動標「已售完」",
@@ -502,7 +502,8 @@ class VariantModal(discord.ui.Modal):
         try:
             draft = parse_draft(self.name.value, self.price.value, self.limit.value, self.cutoff.value,
                                 preorder=(self.kind.values or ["instant"])[0] == "preorder", now=_now(),
-                                min_limit=0 if self.variant is not None else 1)
+                                min_limit=0 if self.variant is not None else 1,
+                                allow_unused_cutoff=self.variant is not None)
             if self.variant is None:
                 listing = await shop.add_variants(self.listing_id, interaction.user, [draft])
                 return await _show_panel(interaction, listing, f"已新增「{draft.name}」。")

@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, time, timedelta
 from typing import Iterator, Optional
 from urllib.parse import quote, unquote, urlparse
 
 import discord
 
 from sys_settings.time_settings import APP_TZ
+from utils.user_dates import parse_user_datetime
 
 BUY_PREFIX = "shop:buy:"
 MANAGE_PREFIX = "shop:manage:"
@@ -33,7 +34,10 @@ _ITEM_RE = re.compile(r"(\d+)x(\d+)")
 
 #: 預購截止時間一律寫年份（使用者 2026-10-03），伺服器時間
 CUTOFF_FORMAT = "%Y/%m/%d %H:%M"
-_CUTOFF_FORMATS = ("%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M")
+#: 只寫日期＝當天結束（使用者 2026-10-04，TR-Q42）
+CUTOFF_DEFAULT_TIME = time(23, 59)
+#: 截止時間最遠幾年後：擋年份打錯（例：2062），預購頂多幾年（使用者 2026-10-04 定五年）
+CUTOFF_MAX_YEARS = 5
 NAME_LIMIT = 80    # 下拉選項 label 上限 100
 PRICE_MAX = 999_999_999   # 跟單一新增的 modal 一致（9 位），選項 value 才不會超過 100 字
 LIMIT_MAX = 999_999       # 數量上限（6 位）
@@ -47,13 +51,11 @@ class ShopError(Exception):
 
 
 def parse_cutoff(text: str) -> datetime:
-    text = text.strip()
-    for fmt in _CUTOFF_FORMATS:
-        try:
-            return datetime.strptime(text, fmt).replace(tzinfo=APP_TZ)
-        except ValueError:
-            continue
-    raise ShopError(f"預購截止時間「{text}」看不懂，請寫成 2026/10/20 23:59")
+    """預購截止時間（伺服器時間）。寫法由 utils.user_dates 讀：全形、`/` `-`、只寫日期都收。"""
+    moment = parse_user_datetime(text, default_time=CUTOFF_DEFAULT_TIME)
+    if moment is None:
+        raise ShopError(f"預購截止時間「{text.strip()}」看不懂，請寫成 2026/10/20 23:59（只寫日期＝當天 23:59）")
+    return moment.replace(tzinfo=APP_TZ)
 
 
 def money(unit: str, amount: int) -> str:
@@ -145,10 +147,13 @@ class Draft:
 
 
 def parse_draft(name: str, price: str, limit: str, cutoff: str, *,
-                preorder: Optional[bool], now: datetime, min_limit: int = 1) -> Draft:
+                preorder: Optional[bool], now: datetime, min_limit: int = 1,
+                allow_unused_cutoff: bool = False) -> Draft:
     """檢查上架者填的品項。preorder＝None 時看有沒有填截止時間（批次新增用）。
 
-    min_limit：新增時數量至少 1；編輯時填的是「剩餘數量」，可以填 0（停賣、標成已售完）。"""
+    min_limit：新增時數量至少 1；編輯時填的是「剩餘數量」，可以填 0（停賣、標成已售完）。
+    allow_unused_cutoff：選立即購買卻填了截止時間時忽略它。編輯時要開：預購改成立即購買，
+    截止欄還留著預填的時間；新增時不開，免得以為是預購卻變成立即購買（使用者 2026-10-04，TR-Q42）。"""
     name = (name or "").strip()
     if not name:
         raise ShopError("名稱不能空白")
@@ -176,12 +181,16 @@ def parse_draft(name: str, price: str, limit: str, cutoff: str, *,
     if preorder is None:
         preorder = bool(cutoff_text)
     cutoff_value = None
+    if not preorder and cutoff_text and not allow_unused_cutoff:
+        raise ShopError(f"「{name}」填了預購截止時間：要預購請把類型選「預購」，要立即購買就把截止時間清空")
     if preorder:
         if not cutoff_text:
             raise ShopError(f"「{name}」是預購，要填截止時間（例：2026/10/20 23:59）")
         cutoff_value = parse_cutoff(cutoff_text)
         if cutoff_value <= now:
             raise ShopError(f"「{name}」的截止時間已經過了")
+        if cutoff_value > now + timedelta(days=round(365.25 * CUTOFF_MAX_YEARS)):
+            raise ShopError(f"「{name}」的截止時間太遠了，最多 {CUTOFF_MAX_YEARS} 年內，請檢查年份")
     return Draft(name, price_value, limit_value, cutoff_value)
 
 

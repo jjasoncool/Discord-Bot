@@ -247,6 +247,19 @@ def _find_syndication_urls(path: Path) -> list[int]:
     })
 
 
+def _find_user_date_parsing(path: Path) -> list[int]:
+    """指令層（接使用者輸入的地方）自己用 strptime／fromisoformat 解析日期。使用者在視窗打的日期一律走
+    `utils.user_dates`，全形、各種分隔符號、只寫日期這些寬鬆規則才只有一份（2026-10-04 社群稽查與預購截止合併）。
+    只看 commands/：別處的 fromisoformat 多半是讀自己存的 ISO 字串，不是人打的字。"""
+    if Path(path).relative_to(SRC_DIR).parts[0] != "commands":
+        return []
+    return sorted({
+        node.lineno for node in ast.walk(_parse(path))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr in ("strptime", "fromisoformat")
+    })
+
+
 def _string_mentions(filename: str):
     """找自己指到某個資料檔的字串（說明文字 docstring 提到檔名不算）。網址或路徑寫在字串裡，
     regex 規則看不到（字串會被遮掉），所以走 AST。"""
@@ -397,6 +410,13 @@ RULES = [
         finder=_find_hardcoded_article_urls,
         canonical="services.relay.article_monitor.official_article_url()",
         allowed={"services/relay/article_monitor.py"},
+    ),
+    Rule(
+        name="解析使用者在視窗打的日期／時間",
+        finder=_find_user_date_parsing,
+        canonical="utils.user_dates.parse_user_date / parse_user_datetime",
+        # 點名讀的是自己存在 runtime 檔的 ISO 截止時間，不是人打的字
+        allowed={"commands/rollcall_commands.py"},
     ),
     Rule(
         name="頻道沒綁定的判斷（比對 ChannelConfig.DEFAULT_ID）",

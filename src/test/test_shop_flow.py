@@ -793,6 +793,30 @@ class PanelRedrawTests(ShopTestCase):
         self.assertEqual([key for key, _, _ in modal.inputs], [2])  # 視窗問的是剛選的商品
         self.assertEqual(len(message.edits), before + 1)  # 商品貼文重畫＝選單清空，取消後還能再選
 
+    def submit_variant_form(self, variant, *, name, price, limit, cutoff, kind):
+        async def run():
+            modal = shop_commands.VariantModal(self.thread.id, variant)
+            modal.name._value, modal.price._value, modal.limit._value = name, price, limit
+            modal.cutoff._value = modal.cutoff.default if cutoff is None else cutoff
+            modal.kind._values = [kind]
+            interaction = self.interaction()
+            await modal.on_submit(interaction)
+            return interaction
+        return self.call(run())
+
+    def test_switching_a_preorder_to_instant_ignores_the_leftover_cutoff(self):
+        self.add(self.thread, f"預購品｜100｜｜{self.cutoff_text(days=3)}")
+        variant = self.listing(self.thread).variant(3)
+        # 編輯視窗的截止欄預填原本的時間，只把類型改成立即購買就送出
+        self.submit_variant_form(variant, name="預購品", price="100", limit="", cutoff=None, kind="instant")
+        self.assertIsNone(self.listing(self.thread).variant(3).cutoff)
+
+    def test_new_item_with_a_cutoff_but_instant_type_is_refused(self):
+        interaction = self.submit_variant_form(None, name="新品", price="50", limit="5",
+                                               cutoff=self.cutoff_text(days=3), kind="instant")
+        self.assertEqual(len(self.listing(self.thread).variants), 2)  # 沒有加進去
+        self.assertIn("類型選「預購」", interaction.edit_original_response.await_args.kwargs["content"])
+
     def test_editing_a_variant_redraws_the_panel(self):
         async def run():
             listing = self.listing(self.thread)
@@ -947,7 +971,8 @@ class LayeringTests(unittest.TestCase):
 
     def test_batch_preview_round_trip(self):
         async def check():
-            text = "6480 月相｜3000｜3｜2099/10/20 23:59\n寰宇電台｜20"
+            soon = (shop_commands._now() + timedelta(days=30)).strftime("%Y/%m/%d %H:%M")  # 截止時間最多五年內
+            text = f"6480 月相｜3000｜3｜{soon}\n寰宇電台｜20"
             embed, view = shop_commands._batch_preview(500, text)
             restored = shop_commands._preview_text(SimpleNamespace(embeds=[embed]))
             self.assertEqual(parse_batch(restored, now=shop_commands._now()), parse_batch(text, now=shop_commands._now()))

@@ -38,6 +38,7 @@ from services.community.community_lookup_service import (
 )
 from services.state_db import StateDB
 from utils.panel_bump import PanelBumper
+from utils.user_dates import parse_user_date
 from utils.utils import ChannelConfig, safe_send_interaction_message
 
 
@@ -620,7 +621,7 @@ def _validate_date_range(start_raw: str, end_raw: str) -> Tuple[Optional[str], O
     """L2 驗證 + 自動修正。
 
     規則：
-    - 格式必須 `YYYY-MM-DD`（date.fromisoformat），失敗 → 錯誤
+    - 寫法由 utils.user_dates 讀（`2026-04-20`、`2026/04/20`、全形都收），讀不懂 → 錯誤
     - 起始 > 今天 → 錯誤
     - 結束 > 今天 → 自動改為今天
     - 起始 > 結束 → 自動互換
@@ -628,15 +629,8 @@ def _validate_date_range(start_raw: str, end_raw: str) -> Tuple[Optional[str], O
 
     回傳 (start_iso, end_iso, error_msg)；error 非 None 時 start/end 為 None。
     """
-    from datetime import date as _date
-    def _parse(s: str):
-        try:
-            return _date.fromisoformat(s.strip())
-        except (ValueError, AttributeError):
-            return None
-
-    s = _parse(start_raw or "")
-    e = _parse(end_raw or "")
+    s = parse_user_date(start_raw or "")
+    e = parse_user_date(end_raw or "")
     if s is None:
         return None, None, "起始日格式錯誤，請使用 `YYYY-MM-DD`（例 `2026-04-20`）"
     if e is None:

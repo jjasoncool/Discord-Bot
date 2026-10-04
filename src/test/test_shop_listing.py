@@ -172,8 +172,27 @@ class BatchTests(unittest.TestCase):
     def test_single_variant_type(self):
         with self.assertRaises(ShopError):
             parse_draft("預購品", "10", "", "", preorder=True, now=NOW)  # 預購一定要填截止
-        instant = parse_draft("現貨", "10", "", "2026/10/20 23:59", preorder=False, now=NOW)
-        self.assertIsNone(instant.cutoff)  # 立即購買不看截止欄
+        # 新增時選立即購買卻填了截止：多半是忘了把類型改成預購，擋下來說清楚（TR-Q42）
+        with self.assertRaises(ShopError) as caught:
+            parse_draft("現貨", "10", "", "2026/10/20 23:59", preorder=False, now=NOW)
+        self.assertIn("類型選「預購」", str(caught.exception))
+        # 編輯時從預購改成立即購買，截止欄還留著預填的時間：忽略它
+        instant = parse_draft("現貨", "10", "", "2026/10/20 23:59", preorder=False, now=NOW, allow_unused_cutoff=True)
+        self.assertIsNone(instant.cutoff)
+
+    def test_cutoff_spellings_and_limits(self):
+        def cutoff(text):
+            return parse_draft("預購品", "10", "", text, preorder=True, now=NOW).cutoff
+        expected = datetime(2026, 10, 20, 23, 59, tzinfo=APP_TZ)
+        self.assertEqual(cutoff("２０２６／１０／２０　２３：５９"), expected)  # 全形自動轉
+        self.assertEqual(cutoff("2026/10/20"), expected)  # 只寫日期＝當天 23:59
+        self.assertEqual(cutoff("2031/10/01 12:00"), datetime(2031, 10, 1, 12, 0, tzinfo=APP_TZ))  # 五年內可以
+        with self.assertRaises(ShopError) as caught:
+            cutoff("2062/10/20 23:59")  # 年份打錯
+        self.assertIn("5 年內", str(caught.exception))
+        with self.assertRaises(ShopError) as caught:
+            cutoff("10/20 23:59")
+        self.assertIn("2026/10/20 23:59", str(caught.exception))  # 讀不懂就給範例
 
 
 class OrderTests(unittest.TestCase):
