@@ -268,7 +268,9 @@ class ShopPanelButton(discord.ui.DynamicItem[discord.ui.Button],
         elif self.action == "close":
             # 確認畫面直接換在面板上（不另開訊息），按「返回」回到面板
             await interaction.response.edit_message(
-                content="確定要下架這篇商品嗎？下架後不再接單，已成立的交易照常進行。",
+                # 下架不能恢復，提醒上架者只想暫停的話改數量就好（使用者 2026-10-04，TR-Q39）
+                content="確定要下架這篇商品嗎？下架後不能恢復，已成立的交易照常進行。"
+                        "只想暫停販售的話，把品項的剩餘數量改成 0 就好。",
                 embed=None, view=_confirm_view("close", self.listing_id))
         elif self.action == "back":
             await interaction.response.defer()
