@@ -13,15 +13,19 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import io
 import logging
 import os
 from dataclasses import replace
 from datetime import datetime
+from pathlib import Path
 from typing import Callable, Optional, Protocol, Sequence
 
 import discord
 
 from services.community.shop_listing import (
+    embed_image_name,
     Draft,
     Listing,
     ShopError,
@@ -51,6 +55,7 @@ logger = logging.getLogger(__name__)
 CLOSED_PREFIX = "【已下架】"
 #: 幣別的範例：擋下來時與欄位說明都用這組（使用者 2026-10-03 指定 NT$、USD$、JPY¥；欄位名稱同日改叫「幣別」）
 UNIT_EXAMPLES = "NT$、USD$、JPY¥、PY幣"
+_SRC_DIR = Path(__file__).resolve().parents[2]
 _RECORD_FAILED = "交易紀錄沒能自動保存，請通知管理員。"
 
 
@@ -108,8 +113,11 @@ class ShopService:
         """商品論壇置頂一篇上架說明；已經有就確認它還置頂著、文字是最新的。回傳給管理員看的說明。"""
         guide = await self._find_guide(forum)
         if guide is None:
+            image = await self._guide_image()
             message = await post_to_channel(
-                forum, embed=self._guide_embed(), thread_title=self.settings.guide_title, view=self.views.guide())
+                forum, embed=self._guide_embed(image[0] if image else None), thread_title=self.settings.guide_title,
+                files=[discord.File(io.BytesIO(image[1]), filename=image[0])] if image else None,
+                view=self.views.guide())
             guide = message.channel
             await guide.edit(pinned=True)
             note = f"🛒 已發置頂的上架說明：{guide.jump_url}"
@@ -127,21 +135,39 @@ class ShopService:
         return note
 
     async def _refresh_guide(self, guide: discord.Thread) -> str:
-        """說明文字改過（例：品相改叫品項）就更新已置頂的那篇，管理員重綁一次商品論壇即可。
+        """說明文字或橫幅圖改過（例：品相改叫品項、換了圖）就更新已置頂的那篇，管理員重綁一次商品論壇即可。
 
-        只改 embed：按鈕不動，也不傳附件清單（傳了會把貼文上的檔案刪掉）。"""
-        want = self._guide_embed()
+        按鈕不動；圖沒換就不傳附件清單（傳了會把貼文上的檔案換掉）。"""
+        image = await self._guide_image()
         try:
             starter = await guide.fetch_message(guide.id)  # 論壇第一則訊息 id＝thread id
             have = starter.embeds[0] if starter.embeds else None
-            if have is not None and (have.title, have.description) == (want.title, want.description):
+            have_image = embed_image_name(have)
+            # 圖檔讀不到時沿用貼文上原本的圖，不把它拿掉
+            want_image = image[0] if image else have_image
+            want = self._guide_embed(want_image)
+            if have is not None and (have.title, have.description, have_image) == (
+                    want.title, want.description, want_image):
                 return ""
-            await starter.edit(embed=want)
+            if image and have_image != image[0]:
+                await starter.edit(embed=want, attachments=[discord.File(io.BytesIO(image[1]), filename=image[0])])
+            else:
+                await starter.edit(embed=want)
         except discord.HTTPException:
             logger.error("商品上架：更新上架說明失敗 thread=%s", guide.id, exc_info=True)
-            return "\n⚠️ 上架說明的文字沒能更新成最新版，請查看 log。"
+            return "\n⚠️ 上架說明沒能更新成最新版，請查看 log。"
         logger.info("商品上架：更新上架說明 thread=%s", guide.id)
-        return "（文字已更新成最新版）"
+        return "（已更新成最新版）"
+
+    async def _guide_image(self) -> Optional[tuple[str, bytes]]:
+        """置頂說明的橫幅圖：（貼文上的檔名, 內容）。檔名帶內容的雜湊，換了圖重綁時才認得出要更新。"""
+        path = _SRC_DIR / self.settings.guide_image
+        try:
+            data = await asyncio.to_thread(path.read_bytes)
+        except OSError:
+            logger.warning("商品上架：讀不到上架說明的圖 %s，只發文字", path)
+            return None
+        return f"guide_{hashlib.sha1(data).hexdigest()[:8]}{path.suffix.lower()}", data
 
     async def _find_guide(self, forum: discord.ForumChannel) -> Optional[discord.Thread]:
         def is_guide(thread: discord.Thread) -> bool:
@@ -155,8 +181,8 @@ class ShopService:
                 return thread
         return None
 
-    def _guide_embed(self) -> discord.Embed:
-        return discord.Embed(
+    def _guide_embed(self, image: Optional[str] = None) -> discord.Embed:
+        embed = discord.Embed(
             title="上架說明",
             color=discord.Color.gold(),
             description=(
@@ -173,6 +199,10 @@ class ShopService:
                 "有爭議可以按「請群主協助」。"
             ),
         )
+        if image:
+            # 引用附件：圖顯示在說明裡，論壇列表的縮圖也會用它
+            embed.set_image(url=f"attachment://{image}")
+        return embed
 
     # ── 上架 ──
 

@@ -25,6 +25,7 @@
      已被封存的商品貼文也找得到，處理完封存回去。
   6. 置頂上架說明：綁定時發一篇並置頂、建好「預購中」標籤（建不了要告訴管理員）；已經有就不重發，
      但說明文字改過（例：品相改叫品項）時，重綁會把置頂那篇更新成最新版，按鈕留著。
+     說明附橫幅圖（論壇列表的縮圖也用它）：舊的置頂文重綁時補上、換了圖才重傳；圖檔不在就只發文字、不拿掉原本的圖。
   7. 名字一律是伺服器暱稱（快取拿不到就向 API 查）。
   8. 分層：商品模組不 import 指令層；介面層按鈕與選單的 custom_id 解析得回同一筆資料。
   9. 選單不會卡住：Discord 的選單選過同一項就不會再通知 bot（使用者 2026-10-03 實測：編輯一次後
@@ -39,6 +40,7 @@ import asyncio
 import itertools
 import os
 import sys
+import tempfile
 import unittest
 from datetime import timedelta
 from pathlib import Path
@@ -607,6 +609,63 @@ class PreorderTests(ShopTestCase):
 
 class GuideTests(ShopTestCase):
 
+    def setUp(self):
+        super().setUp()
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.banner = Path(folder.name) / "banner.jpg"
+        self.banner.write_bytes(b"first banner")
+        self.use_banner(self.banner)
+
+    def use_banner(self, path):
+        self.shop.settings = ShopSettings(guide_image=str(path))  # 絕對路徑：不靠 repo 裡真的那張圖
+
+    def banner_name(self, message):
+        return message.embed.image.url.removeprefix("attachment://") if message.embed.image.url else None
+
+    def test_guide_is_posted_with_the_banner(self):
+        self.call(self.shop.ensure_guide(self.forum))
+        starter = self.posts[-1].messages[0]
+        (upload,) = starter.files
+        self.assertTrue(upload.filename.startswith("guide_") and upload.filename.endswith(".jpg"))
+        self.assertEqual(self.banner_name(starter), upload.filename)  # 說明裡顯示的就是這張附件
+
+    def test_rebinding_adds_the_banner_to_an_old_guide_and_only_reuploads_a_new_one(self):
+        self.use_banner(self.banner.with_name("missing.jpg"))
+        with self.assertLogs(shop_service.logger, level="WARNING"):  # 圖檔不在：只發文字、留 log
+            self.call(self.shop.ensure_guide(self.forum))
+        starter = self.posts[-1].messages[0]
+        self.assertIsNone(self.banner_name(starter))
+
+        self.use_banner(self.banner)
+        self.call(self.shop.ensure_guide(self.forum))
+        (upload,) = starter.edits[-1]["attachments"]
+        self.assertEqual(self.banner_name(starter), upload.filename)
+        self.assertEqual(starter.components[0].children[0].custom_id, shop_commands.GUIDE_CUSTOM_ID)
+
+        edits = len(starter.edits)
+        self.call(self.shop.ensure_guide(self.forum))  # 同一張圖：不重傳
+        self.assertEqual(len(starter.edits), edits)
+
+        first = self.banner_name(starter)
+        self.banner.write_bytes(b"second banner")  # 換了圖：檔名跟著變，重傳
+        self.call(self.shop.ensure_guide(self.forum))
+        (upload,) = starter.edits[-1]["attachments"]
+        self.assertNotEqual(upload.filename, first)
+        self.assertEqual(self.banner_name(starter), upload.filename)
+
+    def test_missing_banner_keeps_the_one_already_posted(self):
+        self.call(self.shop.ensure_guide(self.forum))
+        starter = self.posts[-1].messages[0]
+        posted = self.banner_name(starter)
+        self.use_banner(self.banner.with_name("missing.jpg"))
+
+        with self.assertLogs(shop_service.logger, level="WARNING"):
+            self.call(self.shop.ensure_guide(self.forum))
+
+        self.assertEqual(starter.edits, [])
+        self.assertEqual(self.banner_name(starter), posted)
+
     def test_guide_is_posted_and_pinned_once(self):
         note = self.call(self.shop.ensure_guide(self.forum))
         guide = self.posts[-1]
@@ -635,6 +694,7 @@ class GuideTests(ShopTestCase):
         self.assertEqual(len(self.posts), 1)
         self.assertIn("品項", starter.embed.description)
         self.assertNotIn("品相", starter.embed.description)
+        self.assertEqual(starter.edits[-1]["attachments"], "unchanged")  # 圖沒換就不動附件
         self.assertEqual(starter.components[0].children[0].custom_id, shop_commands.GUIDE_CUSTOM_ID)
         self.assertIn("已更新", note)
 

@@ -259,6 +259,16 @@ def _children(message) -> Iterator[object]:
         yield from getattr(row, "children", None) or ()
 
 
+def embed_image_name(embed) -> Optional[str]:
+    """embed 引用的附件檔名。送出後 Discord 回的是 CDN 網址（…/item_1.png?ex=…），自己組的則是 attachment://item_1.png。"""
+    image_url = getattr(getattr(embed, "image", None), "url", None) if embed else None
+    if not image_url:
+        return None
+    if image_url.startswith("attachment://"):
+        return image_url[len("attachment://"):] or None
+    return urlparse(image_url).path.rsplit("/", 1)[-1] or None
+
+
 def listing_from_message(message) -> Optional[Listing]:
     """從商品貼文的第一則訊息讀回商品；不是商品貼文就回 None。"""
     owner_id = unit = None
@@ -281,14 +291,7 @@ def listing_from_message(message) -> Optional[Listing]:
     if owner_id is None:
         return None
     embed = message.embeds[0] if getattr(message, "embeds", None) else None
-    image = None
-    image_url = getattr(getattr(embed, "image", None), "url", None) if embed else None
-    if image_url:
-        # 送出後 Discord 回的是 CDN 網址（…/item_1.png?ex=…），自己組的則是 attachment://item_1.png
-        if image_url.startswith("attachment://"):
-            image = image_url[len("attachment://"):] or None
-        else:
-            image = urlparse(image_url).path.rsplit("/", 1)[-1] or None
+    image = embed_image_name(embed)
     return Listing(
         thread_id=message.channel.id, owner_id=owner_id, unit=unit,
         title=(embed.title if embed else "") or "", description=(embed.description if embed else "") or "",

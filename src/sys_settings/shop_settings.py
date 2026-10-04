@@ -24,6 +24,8 @@ class ShopSettings(BaseSettings):
     preorder_tag_name: str = "預購中"
     #: 置頂上架說明的標題（綁定商品論壇時自動發，也用它找回既有的那篇）
     guide_title: str = "📌 上架說明"
+    #: 置頂上架說明附的橫幅圖（相對 src/）。換圖就換檔案，重綁商品論壇時會更新；檔案不在就只發文字
+    guide_image: str = "static/ListingGuidelines.jpg"
     #: 商品貼文多久沒人講話才自動封存（分鐘，Discord 允許的最長值）
     listing_auto_archive_minutes: int = 10080
     #: 檢查預購截止的最長間隔（秒）
