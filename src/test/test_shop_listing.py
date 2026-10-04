@@ -37,6 +37,7 @@ from services.community.shop_listing import (  # noqa: E402
     listing_from_message,
     order_custom_id,
     order_summary,
+    order_total,
     orders_on,
     parse_batch,
     parse_draft,
@@ -204,6 +205,13 @@ class OrderTests(unittest.TestCase):
         self.assertLessEqual(len(custom_id), 100)
         message = SimpleNamespace(components=[SimpleNamespace(children=[SimpleNamespace(custom_id=custom_id)])])
         self.assertEqual(list(orders_on(message)), [(1555659153110859850, picks)])
+
+    def test_order_total_on_the_button(self):
+        def message(label):
+            button = SimpleNamespace(custom_id=order_custom_id(500, {1: 2}), label=label)
+            return SimpleNamespace(components=[SimpleNamespace(children=[button])])
+        self.assertEqual(order_total(message("總計 NT$80")), "總計 NT$80")
+        self.assertIsNone(order_total(message("訂單紀錄")))  # 改版前的訂單：總計在文字裡，不重複帶
 
     def test_summary(self):
         rows, total = order_summary(quote_order(LISTING, {1: 2, 2: 1}, NOW), "NT$")

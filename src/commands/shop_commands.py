@@ -17,6 +17,7 @@ from discord.ext import commands
 from services.community.shop_listing import (
     BUY_TEMPLATE,
     MANAGE_TEMPLATE,
+    ORDER_TOTAL_PREFIX,
     NAME_LIMIT,
     TITLE_LIMIT,
     UNIT_LIMIT,
@@ -86,10 +87,12 @@ class DiscordShopViews:
         view.add_item(ShopManageButton(listing.owner_id, listing.next_key(), listing.unit, disabled=listing.closed))
         return view
 
-    def order(self, listing_id: int, picks: dict[int, int]) -> discord.ui.View:
+    def order(self, listing_id: int, picks: dict[int, int], total: str) -> discord.ui.View:
         # 停用的按鈕只是用來記錄訂單（custom_id 帶「商品編號x數量」），取消時靠它還回預留
         view = discord.ui.View(timeout=None)
-        view.add_item(discord.ui.Button(label="訂單紀錄", emoji="🧾", style=discord.ButtonStyle.secondary,
+        # 字寫這筆的總計，像收據最底下的戳章（使用者 2026-10-04，TR-Q40）
+        view.add_item(discord.ui.Button(label=f"{ORDER_TOTAL_PREFIX}{total}"[:80], emoji="🧾",
+                                        style=discord.ButtonStyle.secondary,
                                         disabled=True, custom_id=order_custom_id(listing_id, picks)))
         return view
 

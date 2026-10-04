@@ -348,6 +348,19 @@ def order_custom_id(listing_id: int, picks: dict[int, int]) -> str:
     return f"{ORDER_PREFIX}{listing_id}:{encode_items(picks)}"
 
 
+ORDER_TOTAL_PREFIX = "總計 "
+
+
+def order_total(message) -> Optional[str]:
+    """訂單訊息按鈕上的「總計 …」（下單當時的金額）。總計只寫在按鈕上，訊息文字裡沒有
+    （使用者 2026-10-04，TR-Q40）；改版前的訂單按鈕寫「訂單紀錄」，總計在文字裡，這裡回 None。"""
+    for child in _children(message):
+        label = getattr(child, "label", None) or ""
+        if (getattr(child, "custom_id", None) or "").startswith(ORDER_PREFIX) and label.startswith(ORDER_TOTAL_PREFIX):
+            return label
+    return None
+
+
 def orders_on(message) -> Iterator[tuple[int, dict[int, int]]]:
     """交易 thread 裡一則訊息上的訂單（商品貼文id, {商品編號: 數量}）。"""
     for child in _children(message):

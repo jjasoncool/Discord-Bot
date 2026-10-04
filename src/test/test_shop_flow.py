@@ -12,7 +12,8 @@
      填 0＝停賣）；有進行中訂單的品項不能刪；
      下架後選單與按鈕停用、標題【已下架】、鎖定，但預購截止照樣提醒。
   3. 下單：不能買自己的；一次最多 5 種；賣完、截止、超過剩餘都擋下；下單就預留（貼文上的剩餘跟著變）；
-     開出只有買家與上架者的交易 thread，訂單訊息有明細、總計與訂單紀錄；同一位買家加購沿用 thread、
+     開出只有買家與上架者的交易 thread，訂單訊息有明細，總計寫在底下的訂單紀錄按鈕上（文字不重複）；
+     留底也帶上總計；同一位買家加購沿用 thread、
      另一位買家各開一個；交易 thread 開不起來就把預留還回去；加購會作廢原本的領收通知；
      正在取消的 thread 不再收訂單。
   4. 接上交易模組：商品交易完成時在封存頻道另發一篇留底（下單紀錄＋溝通紀錄，格式同自由市場封存，寫名字不寫 @；
@@ -375,7 +376,8 @@ class OrderTests(ShopTestCase):
         self.assertEqual(trade.messages[0].embed.fields[0].name, "商品貼文")
         note = trade.messages[-1]
         self.assertIn("60 月相 ×2", note.content)
-        self.assertIn("總計 NT$80", note.content)
+        self.assertNotIn("總計", note.content)  # 總計只寫在按鈕上，不重複
+        self.assertEqual(note.components[0].children[0].label, "總計 NT$80")
         self.assertTrue(note.components[0].children[0].custom_id.startswith("shop:order:"))
         self.assertTrue(note.components[0].children[0].disabled)
 
@@ -471,6 +473,7 @@ class TradeIntegrationTests(ShopTestCase):
         (_, post), = self.world.archived_posts
         self.assertTrue(post["thread_title"].startswith("【市集】月相代儲｜需求者 與 供應者甲"))
         self.assertIn("60 月相 ×2", post["content"])
+        self.assertIn("總計 NT$60", post["content"])  # 總計在按鈕上，留底要帶上
         self.assertIn("需求者: 什麼時候方便交易", post["content"])  # 整個交易 thread 的對話都在
         self.assertNotIn("<@", post["content"])
         self.assertFalse(post.get("files"))

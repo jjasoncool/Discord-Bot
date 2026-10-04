@@ -33,6 +33,7 @@ from services.community.shop_listing import (
     listing_from_message,
     money,
     order_summary,
+    order_total,
     orders_on,
     quote_order,
     release_order,
@@ -58,8 +59,8 @@ class ShopViews(Protocol):
     def listing(self, listing: Listing, now: datetime) -> discord.ui.View:
         """商品貼文上的購買選單＋「⚙️ 管理商品（上架者）」。"""
 
-    def order(self, listing_id: int, picks: dict[int, int]) -> discord.ui.View:
-        """交易 thread 裡訂單訊息上的停用按鈕（custom_id 帶訂單內容）。"""
+    def order(self, listing_id: int, picks: dict[int, int], total: str) -> discord.ui.View:
+        """交易 thread 裡訂單訊息上的停用按鈕：custom_id 帶訂單內容，字寫這筆的總計（total 已含幣別）。"""
 
     def guide(self) -> discord.ui.View:
         """置頂上架說明的「上架商品」按鈕。"""
@@ -440,8 +441,8 @@ class ShopService:
             await self._save(thread, message, apply_order(listing, picks))
             try:
                 rows, total = order_summary(lines, listing.unit)
-                note = TradeNote(content=self._order_text(buyer, owner, listing, rows, total, lines),
-                                 view=self.views.order(listing_id, picks))
+                note = TradeNote(content=self._order_text(buyer, owner, listing, rows, lines),
+                                 view=self.views.order(listing_id, picks, money(listing.unit, total)))
                 opened = await self.trade.open_trade(thread, buyer, owner, note=note, kind=self.source)
                 if opened is None:
                     raise ShopError("交易 thread 開不起來（購物車頻道沒有設定），請通知管理員。")
@@ -458,10 +459,10 @@ class ShopService:
         if buyer.id == listing.owner_id:
             raise ShopError("不能買自己上架的商品。")
 
-    def _order_text(self, buyer, owner, listing: Listing, rows: list[str], total: int, lines) -> str:
+    def _order_text(self, buyer, owner, listing: Listing, rows: list[str], lines) -> str:
+        # 總計寫在底下的按鈕上，文字裡不再寫一次（使用者 2026-10-04，TR-Q40）
         text = (f"🧾 {buyer.mention} 向 {owner.mention} 下單（{listing.title}）：\n"
-                + "\n".join(f"・{row}" for row in rows)
-                + f"\n總計 {money(listing.unit, total)}")
+                + "\n".join(f"・{row}" for row in rows))
         if any(variant.preorder for variant, _ in lines):
             text += "\n預購的商品會在截止後由供應方安排交付，截止時 bot 會在這裡提醒雙方。"
         return text
@@ -500,7 +501,8 @@ class ShopService:
             async for message in thread.history(limit=None, oldest_first=True):
                 if message.author.id == self.bot.user.id and any(
                         listing_id == ref.source_id for listing_id, _ in orders_on(message)):
-                    orders.append(mentions_to_names(message.content, names))
+                    total = order_total(message)  # 總計在按鈕上，留底要一起帶上
+                    orders.append(mentions_to_names(message.content, names) + (f"\n{total}" if total else ""))
             summary = (f"商品：{title}（<#{ref.source_id}>）\n"
                        f"需求方：{requester}　供應方：{supplier}\n"
                        f"完成時間：{self._now().astimezone(APP_TZ):%Y-%m-%d %H:%M}\n\n"
