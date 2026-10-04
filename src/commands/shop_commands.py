@@ -197,6 +197,28 @@ async def _panel_with_error(interaction: discord.Interaction, shop: ShopService,
     await _show_panel(interaction, listing, text)
 
 
+async def _clear_panel_after_modal(interaction: discord.Interaction, shop: ShopService, listing_id: int) -> None:
+    """跳出視窗之後重畫面板，選單才會回到未選取：取消視窗後再選同一項，Discord 不會通知 bot。
+
+    面板只有上架者看得到，只能透過互動改它，而 Discord 文件沒寫跳出視窗後還能不能改：
+    先改這次互動的原始回應，不行再指定這則訊息改；都不行就留 log，上架者按「返回」一樣會重畫。"""
+    try:
+        listing = await shop.check_manager(listing_id, interaction.user)
+    except ShopError:
+        return
+    panel = dict(content=None, embed=_panel_embed(listing), view=_panel_view(listing))
+    try:
+        await interaction.edit_original_response(**panel)
+        return
+    except discord.HTTPException as exc:
+        first = exc
+    try:
+        await interaction.followup.edit_message(interaction.message.id, **panel)
+        logger.info("商品上架：跳出視窗後改用訊息 id 重畫管理面板（原始回應不行：%s）", first)
+    except discord.HTTPException:
+        logger.warning("商品上架：跳出視窗後重畫管理面板失敗（原始回應：%s）", first, exc_info=True)
+
+
 def _confirm_view(action: str, listing_id: int, key: Optional[int] = None) -> discord.ui.View:
     view = discord.ui.View(timeout=None)
     view.add_item(ShopConfirmButton(action, listing_id, key))
@@ -287,44 +309,12 @@ class ShopPickSelect(discord.ui.DynamicItem[discord.ui.Select],
         if variant is None:
             return await _reply(interaction, "找不到這個品項，可能已經被刪除。")
         if self.action == "edit":
-            # 不直接跳出視窗：面板是只有上架者看得到的訊息，bot 在跳出視窗後改不了它，選單會卡在這一項。
-            # 先換成按鈕（按鈕不會卡住），取消視窗後還能再按
-            view = discord.ui.View(timeout=None)
-            view.add_item(ShopEditButton(self.listing_id, variant.key, variant.name))
-            view.add_item(ShopPanelButton("back", self.listing_id))
-            await interaction.response.edit_message(content=f"要編輯「{variant.name}」嗎？", embed=None, view=view)
+            # 選了直接跳出編輯視窗（使用者 2026-10-04：不用再多按一次），跳出後再重畫面板清空選單
+            await interaction.response.send_modal(VariantModal(self.listing_id, variant))
+            await _clear_panel_after_modal(interaction, shop, self.listing_id)
         else:
             await interaction.response.edit_message(content=f"確定要刪除「{variant.name}」嗎？", embed=None,
                                                     view=_confirm_view("delete", self.listing_id, variant.key))
-
-
-class ShopEditButton(discord.ui.DynamicItem[discord.ui.Button],
-                     template=r"shop:editv:(?P<listing>\d+):(?P<key>\d+)"):
-    """管理面板「✏️ 編輯」：按了才跳出編輯視窗，取消後可以再按。"""
-
-    def __init__(self, listing_id: int, key: int, name: str = ""):
-        super().__init__(discord.ui.Button(label=f"編輯「{name}」"[:80] if name else "編輯", emoji="✏️",
-                                           style=discord.ButtonStyle.primary,
-                                           custom_id=f"shop:editv:{listing_id}:{key}"))
-        self.listing_id = listing_id
-        self.key = key
-
-    @classmethod
-    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match, /):
-        return cls(int(match["listing"]), int(match["key"]))
-
-    async def callback(self, interaction: discord.Interaction):
-        shop = _shop(interaction)
-        if shop is None:
-            return await _missing(interaction)
-        try:
-            listing = await shop.check_manager(self.listing_id, interaction.user)
-        except ShopError as exc:
-            return await _reply(interaction, str(exc))
-        variant = listing.variant(self.key)
-        if variant is None:
-            return await _reply(interaction, "找不到這個品項，可能已經被刪除。")
-        await interaction.response.send_modal(VariantModal(self.listing_id, variant))
 
 
 class ShopConfirmButton(discord.ui.DynamicItem[discord.ui.Button],
@@ -668,7 +658,7 @@ class GuideView(discord.ui.View):
         await interaction.response.send_modal(ListingInfoModal(default_unit=shop.settings.default_unit))
 
 
-_DYNAMIC_ITEMS = (ShopBuySelect, ShopManageButton, ShopPanelButton, ShopPickSelect, ShopEditButton, ShopConfirmButton,
+_DYNAMIC_ITEMS = (ShopBuySelect, ShopManageButton, ShopPanelButton, ShopPickSelect, ShopConfirmButton,
                   ShopBatchButton, ShopConfirmOrder, ShopAbort)
 
 

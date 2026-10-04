@@ -27,8 +27,8 @@
   8. 分層：商品模組不 import 指令層；介面層按鈕與選單的 custom_id 解析得回同一筆資料。
   9. 選單不會卡住：Discord 的選單選過同一項就不會再通知 bot（使用者 2026-10-03 實測：編輯一次後
      第二次編輯不了；按了取消就沒辦法重新選擇）。買家在購買選單選完、填數量的視窗一跳出，
-     商品貼文就重畫清空選單，視窗裡仍是剛選的商品；管理面板每次操作完都重畫，編輯品項先換成按鈕
-     （面板只有上架者看得到，bot 在跳出視窗後改不了它），刪除與下架的確認換在面板上。
+     商品貼文就重畫清空選單，視窗裡仍是剛選的商品；管理面板每次操作完都重畫，編輯品項選了就跳出視窗、
+     跳出後重畫面板（改不了原始回應就改指定訊息，都不行只留 log、不出錯），刪除與下架的確認換在面板上。
 """
 
 import ast
@@ -708,24 +708,49 @@ class PanelRedrawTests(ShopTestCase):
         self.assert_panel_redrawn(doing, "已刪除")
         self.assertEqual([v.name for v in self.listing(self.thread).variants], ["60 月相"])
 
-    def test_edit_menu_turns_into_a_button(self):
+    def choose_to_edit(self, choosing):
         async def run():
-            listing = self.listing(self.thread)
-            pick = shop_commands._panel_view(listing).children[-2]  # 編輯品項選單
+            pick = shop_commands._panel_view(self.listing(self.thread)).children[-2]  # 編輯品項選單
             pick.item._values = [pick.item.options[0].value]
-            choosing = self.interaction()
             await pick.callback(choosing)
-            view = choosing.response.edit_message.await_args.kwargs["view"]
-            editing = self.interaction()
-            await view.children[0].callback(editing)
-            return choosing, view, editing
+        self.call(run())
 
-        choosing, view, editing = self.call(run())
+    def panel_picks(self, call):
+        return [c for c in call.kwargs["view"].children if isinstance(c, shop_commands.ShopPickSelect)]
 
-        choosing.response.send_modal.assert_not_awaited()  # 選單不直接跳視窗（跳了選單就卡住）
-        self.assertEqual([type(c).__name__ for c in view.children], ["ShopEditButton", "ShopPanelButton"])
-        modal = editing.response.send_modal.await_args.args[0]
-        self.assertEqual(modal.name.default, "60 月相")  # 按鈕才跳出編輯視窗，帶入原本的內容
+    def test_edit_menu_opens_the_form_and_clears_the_panel(self):
+        choosing = self.interaction()
+        # 重畫一定在跳出視窗之後：互動只能回應一次，先改面板視窗就跳不出來
+        choosing.edit_original_response.side_effect = \
+            lambda **kw: self.assertEqual(choosing.response.send_modal.await_count, 1)
+
+        self.choose_to_edit(choosing)
+
+        modal = choosing.response.send_modal.await_args.args[0]
+        self.assertEqual(modal.name.default, "60 月相")  # 選了就跳出編輯視窗，帶入原本的內容
+        self.assertEqual(len(self.panel_picks(choosing.edit_original_response.await_args)), 2)  # 選單回到未選取
+
+    def test_panel_is_cleared_through_the_message_when_the_original_response_fails(self):
+        choosing = self.interaction(message=SimpleNamespace(id=4242))
+        choosing.edit_original_response.side_effect = discord.NotFound(mock.MagicMock(status=404), "Unknown Message")
+        choosing.followup = SimpleNamespace(edit_message=mock.AsyncMock())
+
+        self.choose_to_edit(choosing)
+
+        call = choosing.followup.edit_message.await_args
+        self.assertEqual(call.args[0], 4242)
+        self.assertEqual(len(self.panel_picks(call)), 2)
+
+    def test_panel_that_cannot_be_cleared_is_only_logged(self):
+        choosing = self.interaction(message=SimpleNamespace(id=4242))
+        refused = discord.NotFound(mock.MagicMock(status=404), "Unknown Message")
+        choosing.edit_original_response.side_effect = refused
+        choosing.followup = SimpleNamespace(edit_message=mock.AsyncMock(side_effect=refused))
+
+        with self.assertLogs(shop_commands.logger, level="WARNING"):
+            self.choose_to_edit(choosing)  # 不丟例外：視窗已經跳出，上架者照常編輯
+
+        choosing.response.send_modal.assert_awaited_once()
 
 
 class LayeringTests(unittest.TestCase):
@@ -747,7 +772,6 @@ class LayeringTests(unittest.TestCase):
                 shop_commands.ShopConfirmButton("delete", 500, 7),
                 shop_commands.ShopConfirmButton("close", 500),
                 shop_commands.ShopBatchButton("fix", 500),
-                shop_commands.ShopEditButton(500, 3, "6480 月相"),
                 shop_commands.ShopBuySelect(500, options=[discord.SelectOption(label="x", value="1:2:::0:0")]),
             ]
             for original in cases:
