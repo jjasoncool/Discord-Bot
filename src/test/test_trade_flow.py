@@ -514,6 +514,7 @@ class CompleteTests(TradeFlowTestCase):
         self.assertFalse(kwargs.get("files"))
         self.assert_silent(kwargs)
         self.assertTrue(self.post.deleted)
+        self.assertIn("交易完成。需求貼文已封存。此對話將鎖定。", self.thread.sent()[-1])
 
     def test_long_conversation_goes_to_an_attachment(self):
         for i in range(40):
@@ -578,7 +579,7 @@ class CompleteTests(TradeFlowTestCase):
             self.press(self.thread, REQUESTER, RECEIVE, self.ref)
 
         self.assertFalse(self.post.deleted)
-        self.assertIn("封存失敗", self.thread.sent()[-1])
+        self.assertIn("需求貼文沒能自動封存，請通知管理員。", self.thread.sent()[-1])
         self.assertTrue(self.thread.locked)
 
     def test_post_outside_the_market_is_never_deleted(self):
@@ -600,7 +601,15 @@ class CompleteTests(TradeFlowTestCase):
         self.press(self.thread, REQUESTER, RECEIVE, self.ref)
 
         self.assertEqual(len(self.world.archived_posts), 1)
-        self.assertIn("刪除原貼文失敗", self.thread.sent()[-1])
+        self.assertIn("需求貼文沒能自動移除，請通知管理員。", self.thread.sent()[-1])
+
+    def test_archive_channel_unset_only_locks_the_source(self):
+        del self.config["archive_channel_id"]
+        self.press(self.thread, REQUESTER, RECEIVE, self.ref)
+
+        self.assertTrue(self.post.locked)
+        self.assertFalse(self.post.deleted)
+        self.assertIn("交易完成。需求貼文已鎖定。此對話將鎖定。", self.thread.sent()[-1])
 
     def test_notify_after_the_trade_ended_does_not_reopen_it(self):
         self.call(self.service.complete(self.thread, self.ref, auto=False))

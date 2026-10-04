@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 CLOSED_PREFIX = "【已下架】"
 #: 幣別的範例：擋下來時與欄位說明都用這組（使用者 2026-10-03 指定 NT$、USD$、JPY¥；欄位名稱同日改叫「幣別」）
 UNIT_EXAMPLES = "NT$、USD$、JPY¥、PY幣"
+_RECORD_FAILED = "交易紀錄沒能自動保存，請通知管理員。"
 
 
 class ShopViews(Protocol):
@@ -487,7 +488,8 @@ class ShopService:
         """商品交易完成時在封存頻道留底：摘要是每筆下單（下單當時的價格），附檔是整個交易 thread 的對話。
 
         商品貼文本身不動（還要賣給別人）；自由市場是把需求貼文搬過去，這裡是另發一篇備份
-        （使用者 2026-10-03）。回傳要加在完成訊息裡的說明。"""
+        （使用者 2026-10-03）。回傳要加在完成訊息裡的說明：成功就不說，沒保存到才請大家通知管理員，
+        原因寫在 log（使用者 2026-10-04）。"""
         try:
             names = await self.trade.display_names(thread.guild, (ref.requester_id, ref.supplier_id))
             requester = names.get(ref.requester_id) or str(ref.requester_id)
@@ -516,8 +518,11 @@ class ShopService:
             )
         except Exception:
             logger.error("商品上架：交易留底失敗 thread=%s", thread.id, exc_info=True)
-            return "交易紀錄留底失敗，請通知管理員。"
-        return "交易紀錄已留底到封存頻道。" if posted else "封存頻道沒有設定，這筆交易沒有留底。"
+            return _RECORD_FAILED
+        if not posted:
+            logger.warning("商品上架：封存頻道沒有設定，交易沒有留底 thread=%s", thread.id)
+            return _RECORD_FAILED
+        return ""
 
     async def _orders_in(self, thread: discord.Thread, listing_id: int) -> dict[int, int]:
         """交易 thread 裡這篇商品的訂單加總（首次下單＋加購）。"""
@@ -631,7 +636,7 @@ class ListingSource:
 
     async def on_complete(self, thread: discord.Thread, ref: TradeRef) -> str:
         note = await self.shop.archive_trade(thread, ref)
-        return f"商品貼文保留，其他買家不受影響。{note}"
+        return note
 
     def cancel_text(self, ref: TradeRef) -> str:
         return (f"<@{ref.requester_id}>，供應方 <@{ref.supplier_id}> 已取消這筆交易，"

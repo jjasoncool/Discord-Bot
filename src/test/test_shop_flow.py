@@ -464,14 +464,14 @@ class TradeIntegrationTests(ShopTestCase):
         self.press(mine, BUYER, RECEIVE, self.ref_of(mine))
 
         self.assertTrue(mine.locked)
-        self.assertIn("商品貼文保留", mine.sent()[-1])
+        # 成功留底就不提封存的事，只說交易完成（使用者 2026-10-04）
+        self.assertIn("交易完成。此對話將鎖定。", mine.sent()[-1])
         # 交易按鈕拿掉了，但 🧾 訂單紀錄要留著（取消還回、認出商品交易都靠它）
         remaining = [c.custom_id for m in mine.messages for row in m.components for c in row.children]
         self.assertTrue(remaining and all(i.startswith("shop:order:") for i in remaining))
         self.assertFalse(self.thread.deleted)
         self.assertFalse(theirs.locked)
         # 留底：另發一篇備份（不是搬商品貼文），摘要是下單紀錄，後面接溝通紀錄；寫名字不寫 @
-        self.assertIn("已留底", mine.sent()[-1])
         (_, post), = self.world.archived_posts
         self.assertTrue(post["thread_title"].startswith("【市集】月相代儲｜需求者 與 供應者甲"))
         self.assertIn("60 月相 ×2", post["content"])
@@ -488,7 +488,7 @@ class TradeIntegrationTests(ShopTestCase):
 
         self.press(mine, BUYER, RECEIVE, self.ref_of(mine))
 
-        self.assertIn("商品貼文保留", mine.sent()[-1])
+        self.assertIn("交易完成", mine.sent()[-1])
         self.assertFalse(self.thread.deleted)
         self.assertTrue(all(post["thread_title"].startswith("【市集】") for _, post in self.world.archived_posts))
         self.assertFalse(theirs.locked)
@@ -497,9 +497,18 @@ class TradeIntegrationTests(ShopTestCase):
         mine = self.order(self.thread, BUYER, {1: 1}).thread
         del self.config["archive_channel_id"]
 
-        self.press(mine, BUYER, RECEIVE, self.ref_of(mine))
+        with self.assertLogs(shop_service.logger, level="WARNING"):  # 原因寫在 log
+            self.press(mine, BUYER, RECEIVE, self.ref_of(mine))
 
-        self.assertIn("沒有留底", mine.sent()[-1])
+        self.assertIn("交易紀錄沒能自動保存，請通知管理員。", mine.sent()[-1])
+        self.assertTrue(mine.locked)
+
+    def test_record_failure_asks_to_tell_an_admin(self):
+        mine = self.order(self.thread, BUYER, {1: 1}).thread
+        with mock.patch.object(trade_service, "post_to_channel", side_effect=RuntimeError("boom")):
+            self.press(mine, BUYER, RECEIVE, self.ref_of(mine))
+
+        self.assertIn("交易紀錄沒能自動保存，請通知管理員。", mine.sent()[-1])
         self.assertTrue(mine.locked)
 
     def test_long_threads_are_read_to_the_first_order(self):
