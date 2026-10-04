@@ -79,7 +79,8 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 別的伺服器的表情／貼圖給 AI 看圖 | `llm.preprocess.external_emoji.external_emoji_context` |
 | 下載網址上的圖給 vision 模型 | `llm.preprocess.vision_image.download_images`（失敗跳過、限張數與大小） |
 | 改寫使用者也會手改的文字檔 | `utils.safe_write.replace_text`（暫存檔換名、每天第一次改寫前備份） |
-| 定時排程（睡到下一個時刻、啟動時補做、出錯不中斷） | `utils.due_loop.run_due_loop`（tick 處理到期的事、回傳下一個時刻；週期提醒、點名、人格萃取、日記四份舊迴圈待搬） |
+| 解析使用者在視窗打的日期／時間（Discord 沒有日期選擇器） | `utils.user_dates.parse_user_date`／`parse_user_datetime`（全形、`/` `-` `.`、年月日都收；讀不懂回 None，訊息與規則留給呼叫端） |
+| 定時排程（睡到下一個時刻、啟動時補做、出錯不中斷） | `utils.due_loop.run_due_loop`（tick 處理到期的事、回傳下一個時刻；到期項目途中變了就設 `wake` 讓它提早重算；週期提醒、點名、人格萃取、日記四份舊迴圈待搬） |
 | 開交易 thread、領收、取消、封存（自由市場接單、商品購買） | `services.community.trade_service.TradeService`（`open_trade` 等；流程見根目錄 `TRADE_FLOW.md`） |
 | 新增一種交易來源（完成、取消時對來源的處理不同，例：商品貼文） | 實作 `trade_service.SourceKind`，用 `TradeService.add_source_kind` 登記（參考 `shop_service.ListingSource`） |
 
