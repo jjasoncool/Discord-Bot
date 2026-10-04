@@ -260,6 +260,32 @@ def _find_user_date_parsing(path: Path) -> list[int]:
     })
 
 
+_TRADE_THREAD_READERS = {"read_trade_thread", "transcript"}
+
+
+def _find_trade_thread_reads(path: Path) -> list[int]:
+    """交易與商品模組自己翻交易 thread 的歷史。讀交易 thread 一律走 `TradeService.read`（`TradeThreadLog`）：
+    讀多少則、哪些訊息算通知或按鈕只在一處（2026-10-04 架構檢視 B，以前七處各讀各的、讀太少就漏）。
+    `transcript` 讀的是自由市場的需求貼文，不是交易 thread。"""
+    if Path(path).relative_to(SRC_DIR).as_posix() not in (
+            "services/community/trade_service.py", "services/community/shop_service.py"):
+        return []
+    found = []
+
+    def visit(node, owner):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                visit(child, child.name)
+                continue
+            if (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
+                    and child.func.attr == "history" and owner not in _TRADE_THREAD_READERS):
+                found.append(child.lineno)
+            visit(child, owner)
+
+    visit(_parse(path), None)
+    return sorted(found)
+
+
 def _string_mentions(filename: str):
     """找自己指到某個資料檔的字串（說明文字 docstring 提到檔名不算）。網址或路徑寫在字串裡，
     regex 規則看不到（字串會被遮掉），所以走 AST。"""
@@ -410,6 +436,12 @@ RULES = [
         finder=_find_hardcoded_article_urls,
         canonical="services.relay.article_monitor.official_article_url()",
         allowed={"services/relay/article_monitor.py"},
+    ),
+    Rule(
+        name="讀交易 thread 的歷史",
+        finder=_find_trade_thread_reads,
+        canonical="TradeService.read（services.community.trade_service.TradeThreadLog）",
+        allowed=set(),
     ),
     Rule(
         name="解析使用者在視窗打的日期／時間",

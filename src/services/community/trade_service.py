@@ -10,6 +10,8 @@
     以前寫在一段中文句子裡，四個地方各自用字串切割讀回來。
   - 狀態看交易 thread：沒鎖定＝進行中；結束時一次改名加上結果前綴並鎖定。
     標題結尾的需求貼文 id 用來找同一篇需求的其他交易。
+  - 讀交易 thread 只在 `TradeThreadLog`：一次讀完整串，再回答開單身分、有效的領收通知、哪些訊息有交易按鈕。
+    以前七個地方各自翻歷史、各自決定讀幾則，讀太少就漏（2026-10-04 架構檢視 B）。
   - 領收期限＝目前有效的那則「通知需求方領收」訊息的時間＋設定時數，不另外存。
     需求方按「還沒領收」時，bot 拿掉那則通知上的按鈕，期限就不存在了（自動領收暫停）；
     到期前的提醒做過沒有，看 bot 有沒有在那則通知上按 ⏰。都是在 Discord 上做的註記。
@@ -224,6 +226,66 @@ def _refs_on(message: discord.Message) -> Iterator[tuple[str, TradeRef]]:
                 yield parsed
 
 
+def _button_ids(message: discord.Message) -> list[str]:
+    return [getattr(child, "custom_id", None) or ""
+            for row in getattr(message, "components", None) or ()
+            for child in getattr(row, "children", None) or ()]
+
+
+def is_active_request(message: discord.Message, *, bot_user_id: int) -> bool:
+    """還有效的領收通知：bot 發的、上面還有「已領收」按鈕。"""
+    return message.author.id == bot_user_id and any(a == RECEIVE for a, _ in _refs_on(message))
+
+
+@dataclass(frozen=True)
+class TradeThreadLog:
+    """讀出來的一整串交易 thread（由舊到新）。交易的狀態都記在 Discord 上，從這裡問：
+
+    - `ref`：開單訊息上的交易身分（新格式看按鈕，舊格式讀文字）。
+    - `pending_receipt()`：目前有效的領收通知（最新那則），需求方按過「還沒領收」就沒有。
+    - `active_requests()`：所有還有效的領收通知（發新通知前要讓舊的失效）。
+    - `button_messages()`：bot 發的、帶交易按鈕的訊息（交易結束時要拿掉）。商品的「🧾 訂單紀錄」不算。
+    - `bot_messages()`：bot 發的訊息，給來源種類讀自己的紀錄（例：商品的訂單）。
+    """
+
+    messages: tuple[discord.Message, ...]
+    bot_user_id: int
+
+    def bot_messages(self) -> list[discord.Message]:
+        return [m for m in self.messages if m.author.id == self.bot_user_id]
+
+    @property
+    def ref(self) -> Optional[TradeRef]:
+        for message in self.bot_messages():
+            for _, ref in _refs_on(message):
+                return ref
+            legacy = legacy_ref_from_text(message.content)
+            if legacy is not None:
+                return legacy
+        return None
+
+    def active_requests(self) -> list[discord.Message]:
+        """由新到舊。"""
+        return [m for m in reversed(self.messages) if is_active_request(m, bot_user_id=self.bot_user_id)]
+
+    def pending_receipt(self) -> Optional[tuple[TradeRef, discord.Message]]:
+        for message in self.active_requests():
+            for action, ref in _refs_on(message):
+                if action == RECEIVE:
+                    return ref, message
+        return None
+
+    def button_messages(self) -> list[discord.Message]:
+        return [m for m in self.bot_messages()
+                if any(i.startswith("trade:") or i in _LEGACY_BUTTON_IDS for i in _button_ids(m))]
+
+
+async def read_trade_thread(thread: discord.Thread, *, bot_user_id: int) -> TradeThreadLog:
+    """讀整串交易 thread。一律讀完：第一筆訂單在最舊那端、有效的通知可能被一百則以上的對話蓋過，
+    只讀一部分都出過錯（商品漏讀第一筆訂單；超過 100 則的交易不會自動完成）。"""
+    return TradeThreadLog(tuple([m async for m in thread.history(limit=None, oldest_first=True)]), bot_user_id)
+
+
 class TradeService:
     def __init__(
         self,
@@ -403,15 +465,15 @@ class TradeService:
             )
 
     async def _retire_requests(self, thread: discord.Thread, note: str) -> None:
-        """拿掉還有效的領收通知上的按鈕（期限跟著消失）。呼叫端要先拿著這個 thread 的鎖。"""
-        async for message in thread.history(limit=None):
-            if self._is_active_request(message):
-                await message.edit(content=f"{message.content}\n{note}", view=None)
+        """拿掉還有效的領收通知上的按鈕（期限跟著消失）。呼叫端要先拿著這個 thread 的鎖，鎖內才讀，才不會漏掉剛發的通知。"""
+        for message in (await self.read(thread)).active_requests():
+            await message.edit(content=f"{message.content}\n{note}", view=None)
 
     async def hold_receipt(self, thread: discord.Thread, ref: TradeRef, message: Optional[discord.Message]) -> None:
         """需求方說還沒領收：拿掉那則通知上的按鈕（期限跟著消失），請供應方交付後再通知一次。"""
         async with self._lock(thread.id):
-            if thread.id in self._closed or message is None or not self._is_active_request(message):
+            if thread.id in self._closed or message is None or not is_active_request(
+                    message, bot_user_id=self.bot.user.id):
                 return
             await message.edit(content=f"{message.content}\n（需求方表示還沒領收，自動領收已暫停）", view=None)
             await thread.send(f"<@{ref.supplier_id}>，需求方 <@{ref.requester_id}> 表示還沒領收，自動領收已暫停。"
@@ -501,7 +563,7 @@ class TradeService:
         async for thread in self._open_trade_threads(cart, archived_since=archived_since):
             # 一個 thread 讀不到不影響其他 thread 這一輪的檢查
             try:
-                pending = await self._pending_receipt(thread)
+                pending = (await self.read(thread)).pending_receipt()
                 if pending is None:
                     continue
                 ref, request = pending
@@ -564,17 +626,11 @@ class TradeService:
     async def _strip_buttons(self, thread: discord.Thread) -> None:
         """拿掉 thread 裡 bot 訊息上的交易按鈕（含改版前的舊按鈕）。
         商品訂單的「🧾 訂單紀錄」不是交易按鈕，留著：取消還回數量、認出商品交易都靠它。"""
-        async for message in thread.history(limit=None):
-            if message.author.id != self.bot.user.id:
-                continue
-            ids = [getattr(child, "custom_id", None) or ""
-                   for row in getattr(message, "components", None) or ()
-                   for child in getattr(row, "children", None) or ()]
-            if any(i.startswith("trade:") or i in _LEGACY_BUTTON_IDS for i in ids):
-                try:
-                    await message.edit(view=None)
-                except discord.HTTPException:
-                    logger.warning("交易：拿掉按鈕失敗 thread=%s message=%s", thread.id, message.id, exc_info=True)
+        for message in (await self.read(thread)).button_messages():
+            try:
+                await message.edit(view=None)
+            except discord.HTTPException:
+                logger.warning("交易：拿掉按鈕失敗 thread=%s message=%s", thread.id, message.id, exc_info=True)
 
     async def open_trades_for_source(self, source_id: int) -> list[tuple[discord.Thread, Optional[TradeRef]]]:
         """同一篇來源還沒結束的交易 thread（例：商品預購截止時要提醒的那些）。"""
@@ -589,7 +645,7 @@ class TradeService:
         # 交易 thread 一定比需求貼文晚建立，往回翻已封存的翻到需求貼文建立時間就夠了
         async for thread in self._open_trade_threads(cart, archived_since=snowflake_time(source_id)):
             if source_id_in_title(thread.name) == source_id:
-                found.append((thread, await self._ref_in(thread)))
+                found.append((thread, (await self.read(thread)).ref))
         return found
 
     async def _open_trade_threads(
@@ -619,30 +675,9 @@ class TradeService:
         except discord.HTTPException:
             logger.warning("交易：讀不到購物車已封存的 thread（缺 Manage Threads 權限？）", exc_info=True)
 
-    async def _ref_in(self, thread: discord.Thread) -> Optional[TradeRef]:
-        """從開單訊息讀出交易身分（新格式看按鈕，舊格式讀文字）。"""
-        async for message in thread.history(limit=10, oldest_first=True):
-            if message.author.id != self.bot.user.id:
-                continue
-            for _, ref in _refs_on(message):
-                return ref
-            legacy = legacy_ref_from_text(message.content)
-            if legacy is not None:
-                return legacy
-        return None
-
-    def _is_active_request(self, message: discord.Message) -> bool:
-        """還有效的領收通知：bot 發的、上面還有「已領收」按鈕。"""
-        return message.author.id == self.bot.user.id and any(a == RECEIVE for a, _ in _refs_on(message))
-
-    async def _pending_receipt(self, thread: discord.Thread) -> Optional[tuple[TradeRef, discord.Message]]:
-        """目前有效的領收通知；需求方按過「還沒領收」就沒有（自動領收暫停）。"""
-        async for message in thread.history(limit=100):
-            if self._is_active_request(message):
-                for action, ref in _refs_on(message):
-                    if action == RECEIVE:
-                        return ref, message
-        return None
+    async def read(self, thread: discord.Thread) -> TradeThreadLog:
+        """讀一整串交易 thread（見 `TradeThreadLog`）。來源種類讀自己的紀錄也用它，不自己翻歷史。"""
+        return await read_trade_thread(thread, bot_user_id=self.bot.user.id)
 
     def _remind_at(self, due: datetime) -> Optional[datetime]:
         before = self.settings.receipt_reminder_hours_before
@@ -744,15 +779,17 @@ class TradeService:
             raise RuntimeError("封存頻道沒有回傳訊息")
         return True
 
-    async def transcript(self, thread: discord.Thread, *, limit: Optional[int] = -1) -> str:
-        """一個 thread 的對話紀錄（給封存用）：每則「[時間] 名字: 內容」，@ 換成名字。
-        limit 預設照設定；None＝整個 thread。"""
-        if limit == -1:
-            limit = self.settings.archive_history_limit
-        messages = [m async for m in thread.history(limit=limit, oldest_first=True)]
+    async def transcript(self, thread: discord.Thread) -> str:
+        """自由市場需求貼文的對話紀錄（給封存用），最多讀設定的則數。交易 thread 已經用 `read` 讀過的，
+        直接交給 `render_transcript`，不必再翻一次歷史。"""
+        messages = [m async for m in thread.history(limit=self.settings.archive_history_limit, oldest_first=True)]
+        return await self.render_transcript(thread.guild, messages)
+
+    async def render_transcript(self, guild: Optional[discord.Guild], messages: Sequence[discord.Message]) -> str:
+        """對話紀錄：每則「[時間] 名字: 內容」，@ 換成名字。"""
         # 向 API 抓回來的歷史訊息，作者不在快取時只有全域名稱；名字一律從伺服器取（被 @ 的人也一樣）
         mentioned = {int(i) for m in messages for i in _MENTION_RE.findall(m.content or "")}
-        names = await self.display_names(thread.guild, [m.author.id for m in messages] + sorted(mentioned))
+        names = await self.display_names(guild, [m.author.id for m in messages] + sorted(mentioned))
         lines = []
         for message in messages:
             when = message.created_at.astimezone(APP_TZ).strftime("%Y-%m-%d %H:%M")

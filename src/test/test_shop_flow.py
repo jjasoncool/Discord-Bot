@@ -494,6 +494,19 @@ class TradeIntegrationTests(ShopTestCase):
         self.assertFalse(post.get("files"))
         self.assertEqual(self.listing(self.thread).variant(1).taken, 3)  # 完成的算賣出，不還回
 
+    def test_record_reads_the_trade_thread_once(self):
+        mine = self.order(self.thread, BUYER, {1: 2}).thread
+        reads = []
+        original = mine.history
+
+        def counting(*args, **kwargs):
+            reads.append(kwargs)
+            return original(*args, **kwargs)
+
+        mine.history = counting
+        self.call(self.shop.archive_trade(mine, self.ref_of(mine)))
+        self.assertEqual(len(reads), 1)  # 訂單與對話從同一次讀出來
+
     def test_listing_is_safe_even_if_the_shop_forum_is_unbound(self):
         mine = self.order(self.thread, BUYER, {1: 2}).thread
         theirs = self.order(self.thread, BUYER_B, {1: 1}).thread

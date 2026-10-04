@@ -533,10 +533,10 @@ class ShopService:
                 title = listing.title
             except ShopError:
                 title = f"商品 {ref.source_id}"  # 商品貼文已經不在，仍要留底
+            log = await self.trade.read(thread)  # 訂單與對話都從這一次讀出來
             orders = []
-            async for message in thread.history(limit=None, oldest_first=True):
-                if message.author.id == self.bot.user.id and any(
-                        listing_id == ref.source_id for listing_id, _ in orders_on(message)):
+            for message in log.bot_messages():
+                if any(listing_id == ref.source_id for listing_id, _ in orders_on(message)):
                     total = order_total(message)  # 總計在按鈕上，留底要一起帶上
                     orders.append(mentions_to_names(message.content, names) + (f"\n{total}" if total else ""))
             summary = (f"商品：{title}（<#{ref.source_id}>）\n"
@@ -547,7 +547,7 @@ class ShopService:
             posted = await self.trade.post_archive(
                 title=f"【市集】{title}｜{requester} 與 {supplier}"[:100],
                 summary=summary,
-                transcript=await self.trade.transcript(thread, limit=None),
+                transcript=await self.trade.render_transcript(thread.guild, log.messages),
                 filename=f"shop_{ref.source_id}_{thread.id}.txt",
             )
         except Exception:
@@ -559,12 +559,9 @@ class ShopService:
         return ""
 
     async def _orders_in(self, thread: discord.Thread, listing_id: int) -> dict[int, int]:
-        """交易 thread 裡這篇商品的訂單加總（首次下單＋加購）。"""
+        """交易 thread 裡這篇商品的訂單加總（首次下單＋加購）。整串怎麼讀由交易模組決定（`TradeService.read`）。"""
         total: dict[int, int] = {}
-        # 整個 thread 都要讀：第一筆訂單在最舊那端，只讀最新幾則會先漏掉它
-        async for message in thread.history(limit=None):
-            if message.author.id != self.bot.user.id:
-                continue
+        for message in (await self.trade.read(thread)).bot_messages():
             for order_listing, picks in orders_on(message):
                 if order_listing == listing_id:
                     for key, qty in picks.items():

@@ -27,6 +27,9 @@
  10. 名字一律是伺服器暱稱：成員快取拿不到人時向 Discord API 查（2025-07 b456d91 的教訓：
      只看快取曾經讓接單失敗）。thread 標題、封存摘要、封存對話的發言者與被 @ 的人都一樣；查不到要留 log。
  11. 給群友看的訊息不寫程式用語：交易 thread 一律說「對話」（使用者 2026-10-04）。
+ 12. 讀交易 thread 只在 TradeThreadLog（架構檢視 B）：一律讀完整串，對話再長也找得到開單身分與有效的
+     領收通知（以前只讀 100 則，通知被蓋過就不會自動完成）；最新那則通知才算數；只認 bot 的訊息；
+     拿掉按鈕時不碰商品的訂單紀錄。
 """
 
 import ast
@@ -56,6 +59,7 @@ from services.community.trade_service import (  # noqa: E402
     RECEIVE,
     TradeRef,
     TradeService,
+    read_trade_thread,
 )
 
 GUILD_ID = 1
@@ -678,6 +682,23 @@ class ReceiptDeadlineTests(TradeFlowTestCase):
         self.assertIn(SUPPLIER.mention, thread.sent()[-1])
         self.assertTrue(post.deleted)
 
+    def test_notice_buried_under_long_chat_still_auto_completes(self):
+        # 以前只讀最新的 100 則：通知前後各聊超過 100 則，通知就找不到，交易永遠不會自動完成
+        post = self.world.post(REQUESTER, "需要代儲")
+        thread = self.react(post, SUPPLIER).thread
+        for i in range(120):
+            thread.messages.append(FakeMessage(self.world, next(self.world.ids), REQUESTER, f"聊天 {i}", thread=thread))
+        self.press(thread, SUPPLIER, NOTIFY, self.ref_of(thread))
+        for i in range(120):
+            thread.messages.append(FakeMessage(self.world, next(self.world.ids), SUPPLIER, f"再聊 {i}", thread=thread))
+
+        self.world.advance(hours=25)
+        self.call(self.new_service().run_receipt_deadlines(self.world.now))
+
+        self.assertTrue(thread.locked)
+        self.assertTrue(thread.name.startswith("【已完成】"))
+        self.assertEqual([m.components for m in thread.messages if m.components], [])  # 按鈕也都拿掉了
+
     def test_auto_complete_when_the_thread_was_archived_while_the_bot_was_down(self):
         post = self.world.post(REQUESTER, "需要代儲")
         thread = self.react(post, SUPPLIER).thread
@@ -784,6 +805,58 @@ class ReceiptProtectionTests(TradeFlowTestCase):
 
         self.assertEqual(len(self.thread.messages), count)
         self.assertIn("已經在", self.ephemeral.await_args.args[1])
+
+
+class TradeThreadLogTests(TradeFlowTestCase):
+    """直接讀一串假的交易 thread：開單身分、有效通知、要拿掉按鈕的訊息各自認得對。"""
+
+    def setUp(self):
+        super().setUp()
+        self.ref = TradeRef(500, REQUESTER.id, SUPPLIER.id)
+        self.thread = FakeThread(self.world, next(self.world.ids), "【交易中】需求者 與 供應者甲 - 500", parent_id=CART_ID)
+
+    def say(self, author, text="", actions=(), custom_ids=()):
+        view = None
+        if actions or custom_ids:
+            view = SimpleNamespace(custom_ids=[self.ref.custom_id(a) for a in actions] + list(custom_ids))
+        message = FakeMessage(self.world, next(self.world.ids), author, text, view=view, thread=self.thread)
+        self.thread.messages.append(message)
+        return message
+
+    def read(self):
+        return self.call(read_trade_thread(self.thread, bot_user_id=BOT.id))
+
+    def test_reads_what_the_trade_is_doing(self):
+        opening = self.say(BOT, "開單", (NOTIFY, CANCEL, HELP))
+        self.say(REQUESTER, "你好", (RECEIVE,))  # 不是 bot 發的：不算通知
+        older = self.say(BOT, "通知（已失效）")  # 按鈕已經拿掉
+        newer = self.say(BOT, "通知", (RECEIVE, HOLD, HELP))
+        order = self.say(BOT, "🧾 下單", custom_ids=["shop:order:500:1x2"])
+
+        log = self.read()
+
+        self.assertEqual(log.ref, self.ref)
+        self.assertEqual(log.pending_receipt(), (self.ref, newer))
+        self.assertEqual(log.active_requests(), [newer])
+        self.assertEqual(log.button_messages(), [opening, newer])  # 訂單紀錄不算交易按鈕
+        self.assertNotIn(order, log.button_messages())
+        self.assertEqual([m.content for m in log.bot_messages()], ["開單", "通知（已失效）", "通知", "🧾 下單"])
+        self.assertIsNot(older, log.pending_receipt()[1])
+
+    def test_newest_notice_wins(self):
+        self.say(BOT, "開單", (NOTIFY, CANCEL, HELP))
+        first = self.say(BOT, "第一次通知", (RECEIVE, HOLD, HELP))
+        second = self.say(BOT, "第二次通知", (RECEIVE, HOLD, HELP))
+        log = self.read()
+        self.assertEqual(log.pending_receipt()[1], second)
+        self.assertEqual(log.active_requests(), [second, first])  # 由新到舊
+
+    def test_nothing_to_find(self):
+        self.say(REQUESTER, "還沒開單的聊天")
+        log = self.read()
+        self.assertIsNone(log.ref)
+        self.assertIsNone(log.pending_receipt())
+        self.assertEqual(log.button_messages(), [])
 
 
 class LegacyTradeTests(TradeFlowTestCase):
