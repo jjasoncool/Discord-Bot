@@ -221,18 +221,18 @@ you = "你"的中文字 | neutral
 carry_me = 帶帶我 | agree
 
 # === 自動偵測 2026-05-22（待填寫） ===
-let_me_see_see = think
+let_me_see_see = 好奇、看看 | think
 
 # === 自動偵測 2026-06-17（待填寫） ===
-New_birdRRRRRRRRRRRR = laugh
+New_birdRRRRRRRRRRRR = 震驚、嚇到 | laugh
 
 # === 自動偵測 2026-06-25（待填寫） ===
 wfrog_88 = think
 
 # === 自動偵測 2026-07-24（待填寫） ===
-sui_confidence = neutral
+sui_confidence = 自信滿滿 | neutral
 wfrog_gay = laugh
-yang_confuse = think
+yang_confuse = 疑惑不解 | think
 
 # === 自動偵測 2026-07-28（待填寫） ===
 wfrog_stock_decline = agree
@@ -253,3 +253,25 @@ Dorothy_laugh = laugh
 # === 別的伺服器的表情（AI 看圖補的，可直接改） ===
 UN_PoincoWOW = 震驚、哇 | think
 ok = 呆滯、無語 | neutral
+yc_angry = 生氣、不爽 | negative
+kanna_eats_ping = 舉手、1 | neutral
+D2 = 無語、無奈 | negative
+FR05 = 誇讚、超棒 | agree
+Frog_WorryKek = 擔憂、苦笑 | negative
+E_Shark_incense = 膜拜、致敬 | neutral
+FR16 = 呆滯、無語 | neutral
+YPNG8 = 大笑、興奮 | laugh
+yc_whatever = 無所謂、隨便 | neutral
+emoji_31 = 震驚、嚇到 | think
+UN_PoincoFear = 害怕、驚慌 | negative
+WUWA_LupaPog = 震驚、驚訝 | think
+1A = 呆滯、無語 | think
+Chihuahua9 = 得意、壞笑 | laugh
+WW_Mornye = 若有所思 | think
+Cface4_eyepopping = 震驚、嚇到 | think
+PGR_SelenaOvernight = 嘿嘿偷笑 | laugh
+guack = 懷疑、不屑 | negative
+emoji_19 = 無語、震驚 | think
+nachoLookUp = 向上看、疑惑 | think
+KEKW1 = 大笑、覺得好笑 | laugh
+frog20 = 害羞否認 | negative
