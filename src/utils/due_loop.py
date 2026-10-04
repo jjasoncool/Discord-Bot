@@ -8,6 +8,7 @@
                                             wait_ready=bot.wait_until_ready))
 
 tick 收到「現在」，處理所有已到期的事，回傳下一個該醒的時刻（沒有就回 None）。
+到期項目在睡覺途中變了（例：上架者把預購截止改到一小時內），呼叫端把 `wake` 設起來，迴圈就提早醒來重算。
 啟動後會先 tick 一次：bot 停機期間錯過的到期項目就在這一次補做，所以 tick 要冪等
 （已做過的不要再做，例如靠 StateDB `sent_content` 去重，或狀態本身就記在 Discord 上）。
 
@@ -40,12 +41,15 @@ async def run_due_loop(
     retry_after: float = 300,
     now: Callable[[], datetime] = _now,
     sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
+    wake: Optional[asyncio.Event] = None,
 ) -> None:
     """一直跑到被 cancel。
 
     - `max_sleep`：單次最多睡多久。tick 沒有下一個時刻、或時刻很遠時，至少這麼久醒來重算一次，
       讓途中新增的到期項目（例如剛有人按了按鈕）不會被漏掉太久。
     - `retry_after`：tick 拋例外後隔多久重試；例外只記 log，迴圈不停。
+    - `wake`：設起來就提早醒來重算（醒來後自動清掉）。不靠它的話，途中新增的到期項目最晚要等 max_sleep
+      才會被看到（2026-10-04 實例：22:30 重啟後才把預購截止改成 22:50，提醒要到 23:30 才發）。
     """
     if wait_ready is not None:
         await wait_ready()
@@ -54,10 +58,28 @@ async def run_due_loop(
             wake_at = await tick(now())
         except Exception:
             logger.error("%s：排程執行失敗，%s 秒後重試", name, retry_after, exc_info=True)
-            await sleep(retry_after)
+            await _nap(sleep, retry_after, wake)
             continue
         delay = max_sleep
         if wake_at is not None:
             # +1 秒：避免醒得稍早、還沒到期又空轉一輪
             delay = min(max_sleep, (wake_at - now()).total_seconds() + 1)
-        await sleep(max(delay, 1))
+        await _nap(sleep, max(delay, 1), wake)
+
+
+async def _nap(sleep: Callable[[float], Awaitable[object]], seconds: float, wake: Optional[asyncio.Event]) -> None:
+    """睡 seconds 秒；wake 被設起來就提早醒。"""
+    if wake is None:
+        await sleep(seconds)
+        return
+    napping = asyncio.ensure_future(sleep(seconds))
+    poked = asyncio.ensure_future(wake.wait())
+    try:
+        await asyncio.wait({napping, poked}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in (napping, poked):
+            if not task.done():
+                task.cancel()
+    wake.clear()
+    if napping.done() and not napping.cancelled():
+        napping.result()  # sleep 本身的例外照樣往外丟

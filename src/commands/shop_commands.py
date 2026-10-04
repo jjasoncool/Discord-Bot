@@ -691,7 +691,7 @@ class ShopCommands(commands.Cog):
         self.bot.add_view(GuideView())
         self._task = asyncio.create_task(
             run_due_loop("商品預購截止", self.shop.run_preorder_cutoffs, wait_ready=self.bot.wait_until_ready,
-                         max_sleep=self.settings.cutoff_check_max_sleep_seconds),
+                         max_sleep=self.settings.cutoff_check_max_sleep_seconds, wake=self.shop.cutoffs_changed),
             name="shop_preorder_cutoffs",
         )
 

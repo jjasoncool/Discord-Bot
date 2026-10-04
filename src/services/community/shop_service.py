@@ -87,6 +87,8 @@ class ShopService:
         self.views = views
         self.settings = settings or ShopSettings()
         self._now = now or (lambda: datetime.now(APP_TZ))
+        #: 品項新增或編輯過：叫醒預購截止的排程重算（不然截止時間改到一小時內會晚提醒）
+        self.cutoffs_changed = asyncio.Event()
         # 改同一篇商品（下單預留、管理品項、取消還回）要排隊：資料在同一則訊息上，先讀再寫
         self._locks: dict[object, asyncio.Lock] = {}
         #: 交給交易模組的來源種類（cog 載入時用 TradeService.add_source_kind 登記）
@@ -361,7 +363,8 @@ class ShopService:
             for draft in drafts:
                 listing = listing.add(draft)
             await self._save(thread, message, listing)
-            return listing
+        self.cutoffs_changed.set()
+        return listing
 
     async def edit_variant(self, listing_id: int, actor: discord.Member, key: int, draft: Draft) -> Listing:
         """編輯品項。draft.limit 是「剩餘數量」（還要賣幾個，None＝不限量）：
@@ -376,7 +379,8 @@ class ShopService:
             listing = listing.with_variant(replace(
                 variant, name=draft.name, price=draft.price, limit=limit, cutoff=draft.cutoff, closed=False))
             await self._save(thread, message, listing)
-            return listing
+        self.cutoffs_changed.set()
+        return listing
 
     async def delete_variant(self, listing_id: int, actor: discord.Member, key: int) -> Listing:
         async with self._lock(listing_id):

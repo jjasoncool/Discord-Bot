@@ -5,9 +5,11 @@
   2. 睡到 tick 回傳的時刻（多 1 秒，避免醒太早又空轉），但不超過 max_sleep；
      沒有下一個時刻就睡 max_sleep；時刻已經過了也至少睡 1 秒，不會原地狂轉。
   3. tick 出錯只記 log，隔 retry_after 再試，排程不會就此停掉。
+  4. 有人叫醒（wake）就提早重算，不必等到下一個時刻；叫醒後清掉，下次還叫得醒。
 """
 
 import asyncio
+import contextlib
 import os
 import sys
 import unittest
@@ -91,6 +93,40 @@ class DueLoopTests(unittest.TestCase):
 
         self.assertEqual(len(ticks), 2)  # 出錯後還有下一輪
         self.assertEqual(sleeps[0], 300)
+
+
+
+class WakeTests(unittest.TestCase):
+
+    def test_wake_recomputes_before_the_next_due_time(self):
+        ticks = []
+
+        async def main():
+            wake = asyncio.Event()
+            ticked = asyncio.Event()
+
+            async def tick(now):
+                ticks.append(now)
+                ticked.set()
+                return T0 + timedelta(days=1)  # 下一個時刻還很遠
+
+            async def forever(seconds):
+                await asyncio.Event().wait()
+
+            task = asyncio.create_task(run_due_loop("測試", tick, now=lambda: T0, sleep=forever, wake=wake))
+            for _ in range(2):
+                await asyncio.wait_for(ticked.wait(), 1)
+                ticked.clear()
+                wake.set()  # 叫醒兩次：第一次之後要清掉，第二次才叫得醒
+            await asyncio.wait_for(ticked.wait(), 1)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            return wake.is_set()
+
+        still_set = asyncio.run(main())
+        self.assertEqual(len(ticks), 3)
+        self.assertFalse(still_set)
 
 
 if __name__ == "__main__":

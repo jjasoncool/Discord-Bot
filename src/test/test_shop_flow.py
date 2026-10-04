@@ -296,6 +296,17 @@ class ManageTests(ShopTestCase):
         with self.assertRaises(ShopError):
             self.add(self.thread, "多一個｜1")
 
+    def test_adding_or_editing_wakes_the_cutoff_check(self):
+        # 截止時間改到一小時內也要準時提醒：新增、編輯品項就叫醒排程重算（2026-10-04 實測晚了 40 分鐘）
+        self.add(self.thread, f"6480 月相｜3000｜3｜{self.cutoff_text(minutes=20)}")
+        self.assertTrue(self.shop.cutoffs_changed.is_set())
+
+        self.shop.cutoffs_changed.clear()
+        sooner = parse_draft("6480 月相", "3000", "3", self.cutoff_text(minutes=10), preorder=True,
+                             now=self.world.now, min_limit=0)
+        self.call(self.shop.edit_variant(self.thread.id, SELLER, 1, sooner))
+        self.assertTrue(self.shop.cutoffs_changed.is_set())
+
     def test_editing_quantity_means_remaining(self):
         # 編輯時填的是「還要賣幾個」：系統自動加上已下單的（TR-Q27）
         self.add(self.thread, "60 月相｜30｜4｜")
@@ -954,12 +965,16 @@ class LayeringTests(unittest.TestCase):
             bot.get_cog.return_value = SimpleNamespace(trade=trade)
             bot.wait_until_ready = mock.AsyncMock()
             cog = shop_commands.ShopCommands(bot)
-            await cog.cog_load()
+            with mock.patch.object(shop_commands, "run_due_loop", new=mock.MagicMock(
+                    side_effect=lambda *a, **k: asyncio.sleep(3600))) as loop_call:
+                await cog.cog_load()
             try:
                 self.assertIs(cog.shop.trade, trade)
                 self.assertTrue(any(isinstance(k, ListingSource) for k in trade._kinds))
                 bot.add_dynamic_items.assert_called_once()
                 bot.add_view.assert_called_once()
+                # 預購截止的排程跟著品項新增、編輯提早醒來
+                self.assertIs(loop_call.call_args.kwargs["wake"], cog.shop.cutoffs_changed)
             finally:
                 await cog.cog_unload()
 
