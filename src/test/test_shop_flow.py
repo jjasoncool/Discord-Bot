@@ -16,7 +16,8 @@
      留底也帶上總計；同一位買家加購沿用 thread、
      另一位買家各開一個；交易 thread 開不起來就把預留還回去；加購會作廢原本的領收通知；
      正在取消的 thread 不再收訂單。
-  4. 接上交易模組：商品交易完成時在封存頻道另發一篇留底（下單紀錄＋溝通紀錄，格式同自由市場封存，寫名字不寫 @；
+  4. 接上交易模組：商品交易完成時在封存頻道另發一篇留底（下單紀錄＋交易對話的連結，寫名字不寫 @；
+     對話內容不複製過去：封存頻道所有觀星者都看得到，對話裡可能有帳號、付款、地址（TR-Q44／Q45）；
      封存頻道沒設定就說沒留底），不搬、不刪商品貼文、不結束其他買家的 thread——商品論壇改綁或解除也一樣
      （交易種類看交易 thread 裡的訂單紀錄，不看來源貼文在哪）；取消時把這個 thread 所有訂單（首次＋加購，
      多長的 thread 都讀完）的預留還回去。
@@ -484,12 +485,13 @@ class TradeIntegrationTests(ShopTestCase):
         self.assertTrue(remaining and all(i.startswith("shop:order:") for i in remaining))
         self.assertFalse(self.thread.deleted)
         self.assertFalse(theirs.locked)
-        # 留底：另發一篇備份（不是搬商品貼文），摘要是下單紀錄，後面接溝通紀錄；寫名字不寫 @
+        # 留底：另發一篇（不是搬商品貼文），只有下單紀錄與交易對話的連結；寫名字不寫 @
         (_, post), = self.world.archived_posts
         self.assertTrue(post["thread_title"].startswith("【市集】月相代儲｜需求者 與 供應者甲"))
         self.assertIn("60 月相 ×2", post["content"])
         self.assertIn("總計 NT$60", post["content"])  # 總計在按鈕上，留底要帶上
-        self.assertIn("需求者: 什麼時候方便交易", post["content"])  # 整個交易 thread 的對話都在
+        self.assertNotIn("什麼時候方便交易", post["content"])  # 私人對話不公開給所有觀星者
+        self.assertIn(f"交易對話：<#{mine.id}>", post["content"])  # 對話本身就是備份，附連結
         self.assertNotIn("<@", post["content"])
         self.assertFalse(post.get("files"))
         self.assertEqual(self.listing(self.thread).variant(1).taken, 3)  # 完成的算賣出，不還回

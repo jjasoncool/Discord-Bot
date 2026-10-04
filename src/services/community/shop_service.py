@@ -519,11 +519,12 @@ class ShopService:
         logger.info("商品上架：還回預留 商品=%s 內容=%s", listing_id, picks)
 
     async def archive_trade(self, thread: discord.Thread, ref: TradeRef) -> str:
-        """商品交易完成時在封存頻道留底：摘要是每筆下單（下單當時的價格），附檔是整個交易 thread 的對話。
+        """商品交易完成時在封存頻道留底：每筆下單（下單當時的價格）＋交易對話的連結，不附對話內容。
 
-        商品貼文本身不動（還要賣給別人）；自由市場是把需求貼文搬過去，這裡是另發一篇備份
-        （使用者 2026-10-03）。回傳要加在完成訊息裡的說明：成功就不說，沒保存到才請大家通知管理員，
-        原因寫在 log（使用者 2026-10-04）。"""
+        封存頻道所有觀星者都看得到：價格公開透明，但對話裡可能有遊戲帳號、付款資料、寄送地址，
+        只留在私人交易對話裡（雙方＋管理員看得到，結束後鎖定保留，就是備份）（使用者 2026-10-05，TR-Q44／Q45）。
+        商品貼文本身不動（還要賣給別人）；自由市場是把需求方公開的貼文搬過去，這裡是另發一篇。
+        回傳要加在完成訊息裡的說明：成功就不說，沒保存到才請大家通知管理員，原因寫在 log（使用者 2026-10-04）。"""
         try:
             names = await self.trade.display_names(thread.guild, (ref.requester_id, ref.supplier_id))
             requester = names.get(ref.requester_id) or str(ref.requester_id)
@@ -533,21 +534,22 @@ class ShopService:
                 title = listing.title
             except ShopError:
                 title = f"商品 {ref.source_id}"  # 商品貼文已經不在，仍要留底
-            log = await self.trade.read(thread)  # 訂單與對話都從這一次讀出來
             orders = []
-            for message in log.bot_messages():
+            for message in (await self.trade.read(thread)).bot_messages():
                 if any(listing_id == ref.source_id for listing_id, _ in orders_on(message)):
                     total = order_total(message)  # 總計在按鈕上，留底要一起帶上
                     orders.append(mentions_to_names(message.content, names) + (f"\n{total}" if total else ""))
             summary = (f"商品：{title}（<#{ref.source_id}>）\n"
                        f"需求方：{requester}　供應方：{supplier}\n"
-                       f"完成時間：{self._now().astimezone(APP_TZ):%Y-%m-%d %H:%M}\n\n"
+                       f"完成時間：{self._now().astimezone(APP_TZ):%Y-%m-%d %H:%M}\n"
+                       # 沒參與的人點了進不去（私人 thread），管理員可以直接點進去看
+                       f"交易對話：<#{thread.id}>\n\n"
                        + "\n\n".join(orders))
-            # 放得下就整段寫在貼文、放不下才附 .txt：由 post_archive 決定（TR-Q28）
+            # 下單很多次、摘要放不下一則訊息時，post_archive 會改附 .txt
             posted = await self.trade.post_archive(
                 title=f"【市集】{title}｜{requester} 與 {supplier}"[:100],
                 summary=summary,
-                transcript=await self.trade.render_transcript(thread.guild, log.messages),
+                transcript="",
                 filename=f"shop_{ref.source_id}_{thread.id}.txt",
             )
         except Exception:

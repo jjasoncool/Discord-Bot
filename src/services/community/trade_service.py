@@ -780,16 +780,12 @@ class TradeService:
         return True
 
     async def transcript(self, thread: discord.Thread) -> str:
-        """自由市場需求貼文的對話紀錄（給封存用），最多讀設定的則數。交易 thread 已經用 `read` 讀過的，
-        直接交給 `render_transcript`，不必再翻一次歷史。"""
+        """自由市場需求貼文的對話紀錄（給封存用）：每則「[時間] 名字: 內容」，@ 換成名字，最多讀設定的則數。
+        需求貼文本來就公開；商品交易的私人對話不複製進封存頻道（TR-Q44），所以只有這裡用。"""
         messages = [m async for m in thread.history(limit=self.settings.archive_history_limit, oldest_first=True)]
-        return await self.render_transcript(thread.guild, messages)
-
-    async def render_transcript(self, guild: Optional[discord.Guild], messages: Sequence[discord.Message]) -> str:
-        """對話紀錄：每則「[時間] 名字: 內容」，@ 換成名字。"""
         # 向 API 抓回來的歷史訊息，作者不在快取時只有全域名稱；名字一律從伺服器取（被 @ 的人也一樣）
         mentioned = {int(i) for m in messages for i in _MENTION_RE.findall(m.content or "")}
-        names = await self.display_names(guild, [m.author.id for m in messages] + sorted(mentioned))
+        names = await self.display_names(thread.guild, [m.author.id for m in messages] + sorted(mentioned))
         lines = []
         for message in messages:
             when = message.created_at.astimezone(APP_TZ).strftime("%Y-%m-%d %H:%M")
