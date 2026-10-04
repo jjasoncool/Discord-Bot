@@ -9,6 +9,8 @@
      下單預留、取消還回（不會變成負的）。
   4. 訂單紀錄（停用按鈕的 custom_id）讀得回同一筆，一次 5 種也不超過 Discord 的 100 字上限。
   5. 顯示：商品圖用 attachment://檔名 引用（改訊息時圖才不會不見）；狀態寫出價格、剩餘、截止時間。
+     不能買的（已售完、預購已截止）：商品貼文上價格與類型劃掉、後面接標籤；選單說明文字沒有樣式，
+     狀態放最前面（TR-Q38）。
 """
 
 import asyncio
@@ -40,6 +42,7 @@ from services.community.shop_listing import (  # noqa: E402
     quote_order,
     release_order,
     render_embed,
+    select_options,
 )
 from sys_settings.time_settings import APP_TZ  # noqa: E402
 
@@ -73,10 +76,19 @@ class VariantTests(unittest.TestCase):
         self.assertEqual(INSTANT.status("NT$", NOW), "NT$30｜立即購買｜剩 2")
         self.assertEqual(UNLIMITED.status("NT$", NOW), "NT$20｜立即購買｜不限量")
         self.assertEqual(PREORDER.status("NT$", NOW), "NT$3,000｜預購（2026/10/20 23:59 截止）｜剩 2")  # 千分位
-        self.assertIn("已售完", SOLD_OUT.status("NT$", NOW))
-        self.assertEqual(CLOSED.status("NT$", NOW), "NT$100｜預購已截止（2026/10/20 23:59）")
+        self.assertEqual(INSTANT.status("NT$", NOW, rich=True), "NT$30｜立即購買｜剩 2")  # 能買的兩邊一樣
+        # 選單說明文字：狀態放最前面
+        self.assertEqual(SOLD_OUT.status("NT$", NOW), "已售完｜NT$40｜立即購買")
+        self.assertEqual(CLOSED.status("NT$", NOW), "預購已截止｜NT$100｜預購（2026/10/20 23:59 截止）")
         after = datetime(2026, 10, 21, 0, 0, tzinfo=APP_TZ)
-        self.assertIn("預購已截止", PREORDER.status("NT$", after))
+        self.assertTrue(PREORDER.status("NT$", after).startswith("預購已截止｜"))
+        # 商品貼文：劃掉價格與類型，後面接灰底標籤
+        self.assertEqual(SOLD_OUT.status("NT$", NOW, rich=True), "~~NT$40｜立即購買~~ `已售完`")
+        self.assertEqual(CLOSED.status("NT$", NOW, rich=True),
+                         "~~NT$100｜預購（2026/10/20 23:59 截止）~~ `預購已截止`")
+
+    def test_unit_with_markdown_characters_does_not_break_the_strike(self):
+        self.assertEqual(SOLD_OUT.status("*PY~幣", NOW, rich=True), r"~~\*PY\~幣40｜立即購買~~ `已售完`")
 
 
 class ListingOnMessageTests(unittest.TestCase):
@@ -206,6 +218,12 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(embed.image.url, "attachment://item_1.png")
         self.assertEqual(len(embed.fields), len(LISTING.variants))
         self.assertEqual(embed.author.name, "上架者：上架者")
+        self.assertEqual(embed.fields[3].value, "~~NT$40｜立即購買~~ `已售完`")  # 商品貼文用有樣式的狀態
+
+    def test_sold_out_options_lead_with_the_status(self):
+        options = {o.label: o.description for o in select_options(LISTING, NOW)}
+        self.assertTrue(options["一條龍"].startswith("已售完｜"))
+        self.assertNotIn("~~", options["一條龍"])  # 選單不吃 Markdown
 
     def test_empty_and_closed(self):
         from dataclasses import replace

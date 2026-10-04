@@ -172,7 +172,7 @@ _PANEL_MAIN = ("add", "batch", "info", "close")
 
 def _panel_embed(listing: Listing) -> discord.Embed:
     now = _now()
-    lines = [f"{n}. {v.name}｜{v.status(listing.unit, now)}" for n, v in enumerate(listing.variants, start=1)]
+    lines = [f"{n}. {v.name}｜{v.status(listing.unit, now, rich=True)}" for n, v in enumerate(listing.variants, start=1)]
     embed = discord.Embed(title=f"管理商品：{listing.title}", color=discord.Color.gold(),
                           description="\n".join(lines) or "還沒有品項，先按「新增品項」或「批次新增」。")
     embed.set_footer(text="這個面板只有你看得到")

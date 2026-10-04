@@ -92,17 +92,18 @@ class Variant:
             return "已售完"
         return None
 
-    def status(self, unit: str, now: datetime) -> str:
+    def status(self, unit: str, now: datetime, *, rich: bool = False) -> str:
+        """品項狀態。不能買的要一眼看得出來、但不突兀（使用者 2026-10-04，TR-Q38）：
+        rich＝給 embed 用，價格與類型加刪除線、後面接灰底標籤；選單的說明文字不能用 Markdown，
+        就把狀態放最前面，手機上後面被截斷也看得到。"""
         price = money(unit, self.price)
-        if self.preorder and self.unavailable_reason(now) == "預購已截止":
-            return f"{price}｜預購已截止（{format_cutoff(self.cutoff)}）"
         kind = f"預購（{format_cutoff(self.cutoff)} 截止）" if self.preorder else "立即購買"
-        if self.remaining == 0:
-            stock = "已售完"
-        elif self.remaining is None:
-            stock = "不限量"
-        else:
-            stock = f"剩 {self.remaining}"
+        reason = self.unavailable_reason(now)
+        if reason:
+            if rich:
+                return f"~~{discord.utils.escape_markdown(f'{price}｜{kind}')}~~ `{reason}`"
+            return f"{reason}｜{price}｜{kind}"
+        stock = "不限量" if self.remaining is None else f"剩 {self.remaining}"
         return f"{price}｜{kind}｜{stock}"
 
     def encode(self) -> str:
@@ -299,7 +300,7 @@ def render_embed(listing: Listing, owner_name: str, now: datetime) -> discord.Em
     embed = discord.Embed(title=listing.title, description=listing.description or None, color=discord.Color.gold())
     embed.set_author(name=f"上架者：{owner_name}")
     for number, variant in enumerate(listing.variants, start=1):
-        embed.add_field(name=f"{number}. {variant.name}", value=variant.status(listing.unit, now), inline=False)
+        embed.add_field(name=f"{number}. {variant.name}", value=variant.status(listing.unit, now, rich=True), inline=False)
     if not listing.variants:
         embed.add_field(name="商品", value="上架者還沒加入商品，暫時不能購買。", inline=False)
     if listing.closed:

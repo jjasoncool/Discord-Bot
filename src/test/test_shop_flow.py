@@ -654,6 +654,12 @@ class PanelRedrawTests(ShopTestCase):
         self.assertEqual(len(picks), 2)  # 重畫出新的選單＝回到未選取
         return kwargs
 
+    def test_panel_marks_unavailable_items_like_the_listing(self):
+        self.add(self.thread, "一條龍｜40｜1｜")
+        self.order(self.thread, BUYER, {3: 1})
+        description = shop_commands._panel_embed(self.listing(self.thread)).description
+        self.assertIn("一條龍｜~~NT$40｜立即購買~~ `已售完`", description)
+
     def test_buy_menu_is_cleared_as_soon_as_the_quantity_form_opens(self):
         message = self.thread.messages[0]
         before = len(message.edits)
