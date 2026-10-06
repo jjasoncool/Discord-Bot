@@ -259,7 +259,12 @@ async def check_role(user, required_role: str = None) -> bool:
         return False  # 如果配置文件不存在或角色未定義，則拒絕訪問
     return True
 
-async def check_guild(interaction: discord.Interaction, owner_only: bool = False, admin_only: bool = False, required_role: str = None) -> bool:
+# check_guild(permission=...) 不通過時給使用者看的權限名稱
+_PERMISSION_NAMES = {"manage_messages": "管理訊息"}
+
+
+async def check_guild(interaction: discord.Interaction, owner_only: bool = False, admin_only: bool = False,
+                      required_role: str = None, permission: str = None) -> bool:
     """
     檢查命令使用權限
 
@@ -268,6 +273,8 @@ async def check_guild(interaction: discord.Interaction, owner_only: bool = False
         owner_only: 是否僅限擁有者使用
         admin_only: 是否僅限管理員使用
         required_role: 所需的角色名稱（例如 'Trader' 或 'Moderator'）
+        permission: 所需的 Discord 權限（例如 'manage_messages'）。看的是**這個頻道**解析過覆寫的權限
+            （`interaction.permissions`，thread 繼承母頻道）；`OWNER_ID` 自動通過，跟 check_role 一致
 
     Returns:
         bool: 是否通過權限檢查
@@ -291,6 +298,15 @@ async def check_guild(interaction: discord.Interaction, owner_only: bool = False
         if not interaction.user.guild_permissions.administrator:
             await safe_send_interaction_message(interaction, "❌ 此命令僅限管理員使用！", ephemeral=True)
             logger.info(f'使用者 {interaction.user} 嘗試使用僅限管理員的命令，已被拒絕')
+            return False
+
+    # 檢查 Discord 權限
+    if permission:
+        owner_id = int(os.getenv('OWNER_ID', '0'))
+        if not (getattr(interaction.permissions, permission, False) or interaction.user.id == owner_id):
+            name = _PERMISSION_NAMES.get(permission, permission)
+            await safe_send_interaction_message(interaction, f"❌ 需要「{name}」權限才能操作。", ephemeral=True)
+            logger.info(f'使用者 {interaction.user} 沒有 {permission} 權限，已被拒絕')
             return False
 
     # 檢查角色權限
