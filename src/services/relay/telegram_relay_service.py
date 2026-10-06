@@ -25,6 +25,8 @@ from urllib.parse import quote_plus
 
 import asyncpg
 import discord
+from services.relay.telegram_filter import MediaFile, Verdict, media_kind
+from telegram_scraper.media_download import MEDIA_HOLD_NOTIFY, MEDIA_RETRY_WINDOW
 from telegram_scraper.tg_config import normalize_channel_identifier
 from utils.media_probe import probe_duration
 
@@ -405,21 +407,6 @@ class TelegramMessageRepository:
             )
             return int(first_pk) if first_pk is not None else int(row["id"])
 
-    async def is_message_published(self, message_pk: int, discord_channel_id: int) -> bool:
-        if self.pool is None:
-            raise RuntimeError("TelegramMessageRepository 尚未 connect")
-        async with self.pool.acquire() as conn:
-            exists = await conn.fetchval(
-                """
-                SELECT 1
-                FROM telegram_relay_delivery_state
-                WHERE message_pk = $1 AND discord_channel_id = $2;
-                """,
-                int(message_pk),
-                int(discord_channel_id),
-            )
-        return bool(exists)
-
     async def mark_message_published(self, message_pk: int, discord_channel_id: int) -> None:
         if self.pool is None:
             raise RuntimeError("TelegramMessageRepository 尚未 connect")
@@ -595,8 +582,11 @@ class TelegramMessageRepository:
             )
         return [(int(row["id"]), bool(row["ready"])) for row in rows]
 
-    async def get_delivered_at(self, message_pks: list[int], discord_channel_id: int) -> dict[int, datetime]:
-        """回傳這批 pk 中已送到該頻道者的 {pk: delivered_at}。"""
+    async def get_deliveries(self, message_pks: list[int]) -> dict[int, dict[int, datetime]]:
+        """這批 pk 送到過哪些頻道：{pk: {頻道 id: delivered_at}}。不含頻道 0（停止追蹤的標記，不是送出）。
+
+        認「同一則或同一本相簿送去哪裡」要看所有頻道：被隔離的送進隔離 thread，只查主頻道會當成沒送過、重判重貼。
+        """
         if self.pool is None:
             raise RuntimeError("TelegramMessageRepository 尚未 connect")
         pks = [int(pk) for pk in message_pks]
@@ -605,15 +595,16 @@ class TelegramMessageRepository:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT message_pk, delivered_at
+                SELECT message_pk, discord_channel_id, delivered_at
                 FROM telegram_relay_delivery_state
-                WHERE message_pk = ANY($1::bigint[]) AND discord_channel_id = $2;
+                WHERE message_pk = ANY($1::bigint[]) AND discord_channel_id <> 0;
                 """,
                 pks,
-                int(discord_channel_id),
             )
-        return {int(row["message_pk"]): row["delivered_at"] for row in rows}
-
+        out: dict[int, dict[int, datetime]] = {}
+        for row in rows:
+            out.setdefault(int(row["message_pk"]), {})[int(row["discord_channel_id"])] = row["delivered_at"]
+        return out
 
 class MessageRouteResolver:
     """讀取 config.json，解析 telegram_chat_id 對應 Discord channel ids。"""
@@ -1351,8 +1342,25 @@ class CustomEmojiResolver:
             return buf.getvalue()
 
 
+@dataclass
+class _RouteDeliveries:
+    """一則或一本相簿在某個主頻道的發送紀錄，依去向分開（pk → delivered_at）。"""
+    main: dict[int, datetime] = field(default_factory=dict)
+    #: 送進這個主頻道的隔離 thread（含被刪重建前的舊 thread）
+    quarantine: dict[int, datetime] = field(default_factory=dict)
+
+    @property
+    def sent(self) -> dict[int, datetime]:
+        return {**self.quarantine, **self.main}
+
+
 class MessageRelayWorker:
-    """Telegram Relay Worker：LISTEN + 補償 polling + 去重。"""
+    """Telegram Relay Worker：LISTEN + 補償 polling + 去重。
+
+    開了 LLM 過濾（`content_filter`，見 `services.relay.telegram_filter`）時，每個發送單位（單則或整本相簿）
+    送出前判一次，判成垃圾的改送主頻道底下的隔離 thread（`quarantine`），發送紀錄記 thread 的 id。
+    晚到的圖跟著同一則或同一本的去向送、不再判；被隔離的再被排進來也不會重判重貼。
+    """
 
     def __init__(
         self,
@@ -1365,6 +1373,8 @@ class MessageRelayWorker:
         dsn: str,
         notify_channel: str = "telegram_new_message",
         poll_interval_sec: int = 3600,
+        content_filter=None,
+        quarantine=None,
     ) -> None:
         self.bot = bot
         self.repository = repository
@@ -1375,6 +1385,10 @@ class MessageRelayWorker:
         self.notify_channel = notify_channel
         self.poll_interval_sec = poll_interval_sec
         self._emoji_resolver = CustomEmojiResolver(bot, repository, render_adapter.app_root)
+        #: 有 `mode`（off／dry_run／on）與 `judge(text, media, trace_id=)` 的物件；None＝不過濾（測試預設）
+        self._filter = content_filter
+        #: `QuarantineThreads`；None＝沒有隔離區（判成垃圾也照常送主頻道）
+        self._quarantine = quarantine
 
         self._running = False
         self._queue: asyncio.Queue[int] = asyncio.Queue(maxsize=5000)
@@ -1384,6 +1398,12 @@ class MessageRelayWorker:
         self._processed_set: set[int] = set()
         self._processed_order: deque[int] = deque(maxlen=5000)
         self._queued_set: set[int] = set()  # 追蹤已在 queue 中的 PK，防止重複入隊
+        # 處理中又收到通知的 PK（例如判斷途中爬蟲補到圖）：處理完再排一次，不直接丟掉。
+        # 還在佇列裡、沒開始處理的不用：輪到時本來就會讀到最新的資料
+        self._requeue: set[int] = set()
+        self._processing: set[int] = set()
+        # 開了過濾時一次只處理一則（開關每則重讀，切換不用重啟）
+        self._filtered_lock = asyncio.Lock()
         self._last_polled_pk: int = 0
 
         # 正在收集的 media group（key=(chat_id, grouped_id)）。收集期間到的組員只登記到
@@ -1524,7 +1544,11 @@ class MessageRelayWorker:
     async def _enqueue_message_pk(self, message_pk: int) -> None:
         if message_pk <= 0:
             return
-        if message_pk in self._queued_set or message_pk in self._processed_set:
+        if message_pk in self._processed_set:
+            return
+        if message_pk in self._queued_set:
+            if message_pk in self._processing:
+                self._requeue.add(message_pk)
             return
         try:
             self._queue.put_nowait(message_pk)
@@ -1666,7 +1690,7 @@ class MessageRelayWorker:
         plan = self.render_adapter.render(message, emoji_map=emoji_map)
 
         # 3. 送到該來源的路由頻道
-        route_ids = self.route_resolver.resolve_telegram_routes(message.telegram_chat_id)
+        route_ids = self._routes(message.telegram_chat_id)
         sent = 0
         channels: list[int] = []
         for channel_id in route_ids:
@@ -1769,39 +1793,147 @@ class MessageRelayWorker:
         replay_pk = await self.repository.get_pk_by_telegram_message_id(replay_msg_id, chat_id)
         return replay_pk is not None and message_pk >= replay_pk
 
+    @staticmethod
+    def _message_age(message: TelegramMessageRecord) -> Optional[timedelta]:
+        """Telegram 發文到現在多久；沒有發文時間回 None。"""
+        posted = message.message_date
+        if not isinstance(posted, datetime):
+            return None
+        if posted.tzinfo is None:
+            posted = posted.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - posted
+
     async def _advance_cursor(self, message_pk: int) -> None:
         self._last_polled_pk = max(self._last_polled_pk, message_pk)
         await self.repository.set_runtime_cursor_pk(self._last_polled_pk)
 
-    async def _group_pending_for_channel(
+    async def _route_deliveries(self, pks: list[int], route_ids: list[int]) -> dict[int, _RouteDeliveries]:
+        """每個主頻道：這批 pk 送到主頻道的、送進它的隔離 thread 的。"""
+        rows = await self.repository.get_deliveries(pks)
+        out = {route_id: _RouteDeliveries() for route_id in route_ids}
+        for pk, channels in rows.items():
+            for channel_id, delivered_at in channels.items():
+                if channel_id in out:
+                    out[channel_id].main[pk] = delivered_at
+                elif self._quarantine is not None:
+                    parent = await self._quarantine.parent_of(channel_id)
+                    if parent in out:
+                        out[parent].quarantine[pk] = delivered_at
+        return out
+
+    def _group_pending(
         self,
         grouped_id: int,
         candidate_pks: list[int],
-        group_pks: list[int],
         channel_id: int,
+        delivered: Optional[_RouteDeliveries],
         force_replay: bool,
-    ) -> tuple[list[int], bool]:
-        """回傳 (這個頻道該發的組員 pk, 是否為補圖)。
+    ) -> tuple[list[int], Optional[str]]:
+        """回傳 (這個主頻道該發的組員 pk, 補圖跟著哪裡)。
 
-        組內已有組員送到該頻道 → 這次是補晚到的圖；補圖超過時效則回傳空清單。
+        組內還沒有組員送過 → 第一次送（第二個值是 None，要過濾判斷）。已有組員送過 → 這次是補晚到的圖，
+        跟著同本的去向（"main"／"quarantine"，有主頻道紀錄就是主頻道，含從隔離區放回的）、不再判斷；
+        補圖超過時效則回傳空清單。
         """
-        if force_replay:
-            # 重送模式不看 delivery_state；這一輪已送過的（已標 processed）不再送
-            return [pk for pk in candidate_pks if not self._seen_processed(pk)], False
+        if force_replay or delivered is None:
+            # 重送模式不看 delivery_state；這一輪已送過的（已標 processed）不再送。
+            # 開了過濾時要注意：重播會重新判斷，被隔離的可能這次被放行貼進主頻道（thread 那則還在），
+            # 晚到的組員也會被當成新相簿單獨判。重播是持續生效的旗標，用完要改回 null
+            return [pk for pk in candidate_pks if not self._seen_processed(pk)], None
 
-        delivered = await self.repository.get_delivered_at(group_pks, channel_id)
-        pending = [pk for pk in candidate_pks if pk not in delivered]
-        if not pending or not delivered:
-            return pending, False
+        sent = delivered.sent
+        pending = [pk for pk in candidate_pks if pk not in sent]
+        if not pending or not sent:
+            return pending, None
 
-        first_sent = min(delivered.values())
+        kind, times = ("main", delivered.main) if delivered.main else ("quarantine", delivered.quarantine)
+        first_sent = min(times.values())
         if datetime.now(timezone.utc) - first_sent > self._GROUP_FOLLOWUP_MAX_AGE:
             logger.info(
                 "Telegram relay 相簿補圖已過時效，略過: grouped_id=%s channel_id=%s pending=%s first_sent=%s",
                 grouped_id, channel_id, pending, first_sent,
             )
-            return [], True
-        return pending, True
+            return [], kind
+        return pending, kind
+
+    def _filter_media(self, unit: TelegramMessageRecord) -> list[MediaFile]:
+        root = Path(self.render_adapter.app_root)
+        return [
+            MediaFile(root / item.file_rel_path, media_kind(item.media_type, item.mime_type, item.file_rel_path))
+            for item in unit.media_items
+        ]
+
+    async def _judge_unit(self, unit: TelegramMessageRecord, *, complete: bool) -> Optional[Verdict]:
+        """過濾一個發送單位。回傳判成垃圾、而且要真的隔離的判定；其他情況（沒開、只記錄、放行）回 None。
+
+        `complete=False`（相簿等待逾時只到齊一部分、單則的圖等太久還沒到）不判、照常送：只看到一部分就判，
+        會把「文字只有水、圖是設計稿」那種情報錯關（13649）。
+        """
+        if not self._filter_active():
+            return None
+        mode = self._filter.mode
+        if not complete:
+            logger.info("Telegram 過濾：圖還沒到齊，不判、照常送 message_pk=%s", unit.message_pk)
+            return None
+        verdict = await self._filter.judge(unit.text, self._filter_media(unit), trace_id=f"tgfilter-{unit.message_pk}")
+        logger.info(
+            "Telegram 過濾：message_pk=%s 判定=%s 標籤=%s 理由=%s 看圖=%s 秒=%.1f 由模型判=%s mode=%s",
+            unit.message_pk, "隔離" if verdict.quarantine else "放行", verdict.label or "-", verdict.reason or "-",
+            verdict.images_seen, verdict.seconds, verdict.by_model, mode,
+        )
+        if not verdict.quarantine:
+            return None
+        if mode != "on" or self._quarantine is None:
+            logger.info("Telegram 過濾（只記錄）：會隔離、照常送主頻道 message_pk=%s", unit.message_pk)
+            return None
+        return verdict
+
+    @staticmethod
+    def _verdict_header(verdict: Optional[Verdict]) -> str:
+        """隔離那則最上面一行（使用者 10-06 TF-Q4）。"""
+        if verdict is None:
+            return ""
+        return f"判定：{verdict.label}｜{verdict.reason}" if verdict.reason else f"判定：{verdict.label}"
+
+    async def _destination(self, route_id: int, quarantine: bool) -> Optional[tuple[discord.abc.Messageable, int]]:
+        """主頻道或它底下的隔離 thread →（可送的物件, 發送紀錄要記的頻道 id）；找不到回 None（這次不送、之後重試）。"""
+        channel = await self._resolve_channel(route_id)
+        if channel is None:
+            logger.warning("Telegram relay 目標頻道不存在或不可發送: channel_id=%s", route_id)
+            return None
+        if not quarantine:
+            return channel, route_id
+        thread = await self._quarantine.thread_for(channel) if self._quarantine is not None else None
+        if thread is None:
+            logger.warning("Telegram relay 隔離 thread 取不到，這次不送、之後重試: channel_id=%s", route_id)
+            return None
+        return thread, int(thread.id)
+
+    async def _send_unit(
+        self,
+        unit: TelegramMessageRecord,
+        pks: list[int],
+        channel: discord.abc.Messageable,
+        channel_id: int,
+        *,
+        title_suffix: str = "",
+        header: str = "",
+    ) -> int:
+        """把一個發送單位送到頻道（或 thread），並把這批 pk 記成送到那裡。單則、相簿、隔離共用。"""
+        logger.info(
+            "Telegram relay 發送目標: channel_id=%s guild=%r channel=%r",
+            channel_id,
+            getattr(getattr(channel, "guild", None), "name", "N/A"),
+            getattr(channel, "name", "N/A"),
+        )
+        emoji_map = await self._resolve_custom_emojis(unit.entities)
+        plan = self.render_adapter.render(unit, emoji_map=emoji_map, title_suffix=title_suffix)
+        if header and plan.operations:
+            plan.operations[0].content = header
+        count = await self.publisher.publish_to_channel(channel, plan)
+        for pk in pks:
+            await self.repository.mark_message_published(pk, channel_id)
+        return count
 
     async def _process_group_member(self, message: TelegramMessageRecord, started: float) -> None:
         """media group 組員入口：同組同時只有一個收集者，其餘組員登記後返回。"""
@@ -1836,7 +1968,7 @@ class MessageRelayWorker:
         chat_id = trigger.telegram_chat_id
         grouped_id = int(trigger.grouped_id)
 
-        route_ids = self.route_resolver.resolve_telegram_routes(chat_id)
+        route_ids = self._routes(chat_id)
         if not route_ids:
             logger.info(
                 "Telegram relay 無路由，略過: message_pk=%s chat_id=%s telegram_message_id=%s",
@@ -1851,44 +1983,43 @@ class MessageRelayWorker:
 
         # 先確認有沒有該發的：收尾複查、重啟時 reconcile 排入的舊組員多半沒有，
         # 這時不必等整組到齊的安靜期
-        needs_publish = False
+        deliveries = {} if force_replay else await self._route_deliveries(group_pks, route_ids)
+        # 待送的組員一張圖都還沒到就不等：爬蟲補到圖會再通知；在這裡等只會白等 60 秒，
+        # 開了過濾（一次只處理一則）時還會讓後面的情報一起卡住
+        ready_now = {pk for pk, ready in members if ready}
+        pending_now: set[int] = set()
         for channel_id in route_ids:
-            pending, _ = await self._group_pending_for_channel(
-                grouped_id, group_pks, group_pks, channel_id, force_replay,
+            pending_now.update(
+                self._group_pending(grouped_id, group_pks, channel_id, deliveries.get(channel_id), force_replay)[0]
             )
-            if pending:
-                needs_publish = True
-                break
-        if not needs_publish:
+        if not pending_now & ready_now:
+            # 還在等圖的組員**不能**記成處理過：爬蟲補到圖的通知會被當成重複丟掉，那張就永遠送不出去
             for pk in group_pks:
-                self._mark_processed(pk)
+                if pk not in pending_now:
+                    self._mark_processed(pk)
             await self._advance_cursor(max(group_pks))
             return
 
         members = await self._wait_group_settled(grouped_id, chat_id)
         group_pks = [pk for pk, _ in members] or group_pks
         ready_pks = [pk for pk, ready in members if ready]
+        # 等待期間可能有別的路徑送出了一部分（例如放回），送之前重查
+        deliveries = {} if force_replay else await self._route_deliveries(group_pks, route_ids)
+        complete = len(ready_pks) == len(group_pks)
 
         published_count = 0
         sent_pks: set[int] = set()
+        # 送不出去的組員也記成處理過（只在記憶體）：不然同一本的其他組員通知進來時會各自重判、重送一次，
+        # 半則訊息最多貼 N 份（開過濾一次只處理一則時一定會發生）。重試交給重啟時的補償，跟單則一致
+        failed_pks: set[int] = set()
         followup = False
+        judged: dict[str, Optional[Verdict]] = {}
         for channel_id in route_ids:
-            pending, is_followup = await self._group_pending_for_channel(
-                grouped_id, ready_pks, group_pks, channel_id, force_replay,
+            pending, follow = self._group_pending(
+                grouped_id, ready_pks, channel_id, deliveries.get(channel_id), force_replay,
             )
             if not pending:
                 continue
-
-            channel = await self._resolve_channel(channel_id)
-            if channel is None:
-                logger.warning("Telegram relay 目標頻道不存在或不可發送: channel_id=%s", channel_id)
-                continue
-            logger.info(
-                "Telegram relay 發送目標: channel_id=%s guild=%r channel=%r",
-                channel_id,
-                getattr(getattr(channel, "guild", None), "name", "N/A"),
-                getattr(channel, "name", "N/A"),
-            )
 
             merged = await self._merge_group_messages(pending)
             if merged is None:
@@ -1897,20 +2028,32 @@ class MessageRelayWorker:
                 logger.info("Telegram relay media group 無可發內容，略過: grouped_id=%s pks=%s", grouped_id, pending)
                 continue
 
-            emoji_map = await self._resolve_custom_emojis(merged.entities)
-            plan = self.render_adapter.render(
-                merged,
-                emoji_map=emoji_map,
-                title_suffix=self._GROUP_FOLLOWUP_TITLE_SUFFIX if is_followup else "",
-            )
+            if follow is None:
+                # 第一次送：整本判一次（多個路由共用同一個判定）
+                if "verdict" not in judged:
+                    judged["verdict"] = await self._judge_unit(merged, complete=complete)
+                verdict = judged["verdict"]
+                to_quarantine = verdict is not None
+            else:
+                # 補圖：跟著同本的去向，不再判
+                verdict = None
+                to_quarantine = follow == "quarantine"
+            dest = await self._destination(channel_id, to_quarantine)
+            if dest is None:
+                failed_pks.update(pending)
+                continue
+            target, target_id = dest
             try:
-                published_count += await self.publisher.publish_to_channel(channel, plan)
                 # 只標記這次實際合併送出的組員；還沒就緒的留著，到了再以補圖送出
-                for pk in pending:
-                    await self.repository.mark_message_published(pk, channel_id)
+                published_count += await self._send_unit(
+                    merged, pending, target, target_id,
+                    title_suffix=self._GROUP_FOLLOWUP_TITLE_SUFFIX if follow is not None else "",
+                    header=self._verdict_header(verdict),
+                )
                 sent_pks.update(pending)
-                followup = followup or is_followup
+                followup = followup or follow is not None
             except Exception as exc:
+                failed_pks.update(pending)
                 logger.error(
                     "Telegram relay 發送失敗: message_pk=%s channel_id=%s err=%s",
                     merged.message_pk,
@@ -1919,7 +2062,7 @@ class MessageRelayWorker:
                     exc_info=True,
                 )
 
-        for pk in sent_pks:
+        for pk in sent_pks | failed_pks:
             self._mark_processed(pk)
         await self._advance_cursor(max(group_pks))
 
@@ -1955,6 +2098,20 @@ class MessageRelayWorker:
             await self._process_group_member(message, started)
             return
 
+        # 有圖標示、但圖還沒下載到（爬蟲先寫訊息列、下載完才寫媒體列，每小時輪詢與重啟補償會撿到中間狀態）：
+        # 先不處理、也不記成處理過，等爬蟲補到圖的通知，文字和圖一起送。有文字的最多等 30 分鐘就先送文字
+        # （使用者 10-05），沒文字的等到補圖時限；時間基準跟爬蟲一樣用 Telegram 發文時間。
+        media_pending = message.has_media and not message.media_items
+        if media_pending:
+            age = self._message_age(message)
+            wait_limit = MEDIA_HOLD_NOTIFY if message.text.strip() else MEDIA_RETRY_WINDOW
+            if age is not None and age < wait_limit:
+                logger.info(
+                    "Telegram relay 圖還沒下載到，先不送: message_pk=%s 發文 %s 前",
+                    message_pk, str(age).split(".")[0],
+                )
+                return
+
         # 跳過無內容訊息（無文字且無媒體，通常是 Telegram 服務通知）
         if not message.text.strip() and not message.media_items:
             logger.info(
@@ -1965,7 +2122,7 @@ class MessageRelayWorker:
             self._mark_processed(message_pk)
             return
 
-        route_ids = self.route_resolver.resolve_telegram_routes(message.telegram_chat_id)
+        route_ids = self._routes(message.telegram_chat_id)
         if not route_ids:
             logger.info(
                 "Telegram relay 無路由，略過: message_pk=%s chat_id=%s telegram_message_id=%s",
@@ -1976,40 +2133,28 @@ class MessageRelayWorker:
             self._mark_processed(message_pk)
             return
 
-        # 先解析內嵌自訂表情 → App Emoji（best-effort，失敗不影響發文）
-        emoji_map = await self._resolve_custom_emojis(message.entities)
-        plan = self.render_adapter.render(message, emoji_map=emoji_map)
         published_count = 0
-
         force_replay = await self._is_force_replay(message.telegram_chat_id, message_pk)
-
+        # 送過主頻道或隔離 thread 的路由都不再送（隔離過的只查主頻道會被當成沒送過、重判重貼）
+        deliveries = {} if force_replay else await self._route_deliveries([message_pk], route_ids)
+        pending_routes = []
         for channel_id in route_ids:
-            channel = await self._resolve_channel(channel_id)
-            if channel is None:
-                logger.warning("Telegram relay 目標頻道不存在或不可發送: channel_id=%s", channel_id)
+            delivered = deliveries.get(channel_id)
+            if delivered is not None and delivered.sent:
+                logger.info("Telegram relay 略過已發送訊息: message_pk=%s channel_id=%s", message_pk, channel_id)
+            else:
+                pending_routes.append(channel_id)
+
+        verdict = await self._judge_unit(message, complete=not media_pending) if pending_routes else None
+        for channel_id in pending_routes:
+            dest = await self._destination(channel_id, verdict is not None)
+            if dest is None:
                 continue
-
-            # 確認實際發送目標（guild / channel 名稱）
-            guild_name = getattr(getattr(channel, "guild", None), "name", "N/A")
-            channel_name = getattr(channel, "name", "N/A")
-            logger.info(
-                "Telegram relay 發送目標: channel_id=%s guild=%r channel=%r",
-                channel_id, guild_name, channel_name,
-            )
-
-            if not force_replay:
-                already_sent = await self.repository.is_message_published(message_pk, channel_id)
-                if already_sent:
-                    logger.info(
-                        "Telegram relay 略過已發送訊息: message_pk=%s channel_id=%s",
-                        message_pk,
-                        channel_id,
-                    )
-                    continue
-
+            target, target_id = dest
             try:
-                published_count += await self.publisher.publish_to_channel(channel, plan)
-                await self.repository.mark_message_published(message_pk, channel_id)
+                published_count += await self._send_unit(
+                    message, [message_pk], target, target_id, header=self._verdict_header(verdict),
+                )
             except Exception as exc:
                 logger.error(
                     "Telegram relay 發送失敗: message_pk=%s channel_id=%s err=%s",
@@ -2039,24 +2184,43 @@ class MessageRelayWorker:
     # 同時處理訊息的並行上限（避免大檔壓縮卡住整條 pipeline）
     _PROCESS_CONCURRENCY = 3
 
+    def _routes(self, chat_id: int) -> list[int]:
+        """這個來源要送到哪些頻道；同一個頻道寫兩次只送一次（以前逐頻道查「送過沒」會擋掉第二次，
+        現在一次查完所有紀錄，要自己去重）。"""
+        return list(dict.fromkeys(self.route_resolver.resolve_telegram_routes(chat_id)))
+
+    def _filter_active(self) -> bool:
+        return self._filter is not None and self._filter.mode != "off"
+
     async def _process_loop(self) -> None:
         sem = asyncio.Semaphore(self._PROCESS_CONCURRENCY)
         bg_tasks: set[asyncio.Task] = set()
 
         async def _run(pk: int) -> None:
             async with sem:
+                self._processing.add(pk)
                 try:
-                    await self._process_one(pk)
+                    if self._filter_active():
+                        # 開了過濾就一次只處理一則（使用者 10-06 TF-Q6）：模型一次只能判一則，並行快不了多少，
+                        # 反而讓判得快的插隊、打亂 Discord 上的順序
+                        async with self._filtered_lock:
+                            await self._process_one(pk)
+                    else:
+                        await self._process_one(pk)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     logger.error("Telegram relay process loop 發生錯誤: %s", exc, exc_info=True)
                 finally:
+                    self._processing.discard(pk)
                     self._queued_set.discard(pk)
                     try:
                         self._queue.task_done()
                     except ValueError:
                         pass
+                    if pk in self._requeue:
+                        self._requeue.discard(pk)
+                        await self._enqueue_message_pk(pk)
 
         while self._running:
             try:

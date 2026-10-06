@@ -823,6 +823,9 @@ async def auto_start_telegram_relay(bot):
         adapter = TelegramRenderAdapter(app_root="/app")
         publisher = DiscordMessagePublisher()
 
+        from services.relay.telegram_filter import RelayFilter
+        from services.relay.telegram_quarantine import RUNTIME_PATH, QuarantineThreads
+
         worker = MessageRelayWorker(
             bot=bot,
             repository=repository,
@@ -832,6 +835,9 @@ async def auto_start_telegram_relay(bot):
             dsn=dsn,
             notify_channel=os.getenv("TELEGRAM_PG_NOTIFY_CHANNEL", "telegram_new_message"),
             poll_interval_sec=3600,
+            # 過濾關掉（mode=off）時也要有隔離區：之前被隔離的相簿，晚到的圖才會跟著進 thread
+            content_filter=RelayFilter(),
+            quarantine=QuarantineThreads(bot, RUNTIME_PATH),
         )
 
         await worker.start()

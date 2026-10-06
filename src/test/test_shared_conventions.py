@@ -357,6 +357,32 @@ def _find_user_date_parsing(path: Path) -> list[int]:
     })
 
 
+_RELAY_SENDERS = {"_send_unit", "resend_telegram_by_id"}
+
+
+def _find_relay_sends_outside_helper(path: Path) -> list[int]:
+    """Telegram 轉發端在共用的 `_send_unit` 以外送出或寫發送紀錄。送出前要過濾、紀錄要記實際送到的頻道
+    （主頻道或隔離 thread），各寫一份就會有一條路繞過過濾，或把隔離的記成主頻道（2026-10-06 接上 LLM 過濾）。
+    `resend_telegram_by_id` 是 /resend_article：使用者定案不過濾、也不寫紀錄。"""
+    if Path(path).relative_to(SRC_DIR).as_posix() != "services/relay/telegram_relay_service.py":
+        return []
+    found = []
+
+    def visit(node, owner):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                visit(child, child.name)
+                continue
+            if (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
+                    and child.func.attr in ("publish_to_channel", "mark_message_published")
+                    and owner not in _RELAY_SENDERS):
+                found.append(child.lineno)
+            visit(child, owner)
+
+    visit(_parse(path), None)
+    return sorted(found)
+
+
 _TRADE_THREAD_READERS = {"read_trade_thread", "transcript"}
 
 
@@ -558,6 +584,12 @@ RULES = [
         finder=_find_ffprobe_calls,
         canonical="utils.media_probe.probe_duration",
         allowed={"utils/media_probe.py"},
+    ),
+    Rule(
+        name="Telegram 轉發送出與寫發送紀錄",
+        finder=_find_relay_sends_outside_helper,
+        canonical="MessageRelayWorker._send_unit（送出前由呼叫端過濾、決定去向）",
+        allowed=set(),
     ),
     Rule(
         name="解除 thread 封存",
