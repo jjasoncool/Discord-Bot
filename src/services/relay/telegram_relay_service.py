@@ -26,6 +26,7 @@ from urllib.parse import quote_plus
 import asyncpg
 import discord
 from telegram_scraper.tg_config import normalize_channel_identifier
+from utils.media_probe import probe_duration
 
 logger = logging.getLogger(__name__)
 
@@ -959,24 +960,7 @@ class DiscordMessagePublisher:
         bufsize 設為 maxrate 的 2 倍讓動態場景有足夠緩衝，避免卡頓掉幀。
         若第一輪 CRF 23 仍超限，用更高 CRF 重試一次。
         """
-        probe_cmd = [
-            "ffprobe", "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            src,
-        ]
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *probe_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await proc.communicate()
-            duration = float(stdout.decode().strip())
-        except Exception as exc:
-            logger.warning("ffprobe 執行失敗: %s err=%s", src, exc, exc_info=True)
-            duration = 0
-
+        duration = await probe_duration(src)
         if duration <= 0:
             logger.warning("無法取得影片長度，跳過壓縮: %s", src)
             return False

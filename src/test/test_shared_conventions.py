@@ -257,6 +257,15 @@ def _find_think_block_parsing(path: Path) -> list[int]:
     })
 
 
+def _find_ffprobe_calls(path: Path) -> list[int]:
+    """找自己組 ffprobe 指令的地方。讀影片長度一律走 `utils.media_probe.probe_duration`（逾時、失敗回 0、
+    收掉子行程只有一份）。指令寫在字串裡，所以走 AST。"""
+    return sorted({
+        node.lineno for node in ast.walk(_parse(path))
+        if isinstance(node, ast.Constant) and node.value == "ffprobe"
+    })
+
+
 def _find_user_date_parsing(path: Path) -> list[int]:
     """指令層（接使用者輸入的地方）自己用 strptime／fromisoformat 解析日期。使用者在視窗打的日期一律走
     `utils.user_dates`，全形、各種分隔符號、只寫日期這些寬鬆規則才只有一份（2026-10-04 社群稽查與預購截止合併）。
@@ -453,6 +462,12 @@ RULES = [
         finder=_find_think_block_parsing,
         canonical="llm.prompt.answer_line.final_line",
         allowed={"llm/prompt/answer_line.py"},
+    ),
+    Rule(
+        name="讀影片長度（ffprobe）",
+        finder=_find_ffprobe_calls,
+        canonical="utils.media_probe.probe_duration",
+        allowed={"utils/media_probe.py"},
     ),
     Rule(
         name="官方公告原文網址",
