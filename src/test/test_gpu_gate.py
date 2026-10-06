@@ -112,11 +112,13 @@ class CrossProcessQueueTests(_GateTestCase):
              "import fcntl, sys, time\n"
              f"f = open({gate.CROSS_PROCESS_LOCK_PATH!r}, 'a')\n"
              "deadline = time.monotonic() + 5\n"
+             "print('polling', flush=True)\n"
              "while time.monotonic() < deadline:\n"
              "    try:\n"
              "        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); print('got', flush=True); sys.exit(0)\n"
              "    except BlockingIOError:\n"
-             "        time.sleep(0.1)\n"
+             # 輪詢間隔要遠小於放鎖後讓位的時間，機器忙時才不會剛好錯過
+             "        time.sleep(0.02)\n"
              "print('never', flush=True)\n"],
             stdout=subprocess.PIPE, text=True,
         )
@@ -127,7 +129,9 @@ class CrossProcessQueueTests(_GateTestCase):
                 await asyncio.sleep(hold)
 
         async with gate.stream_exclusive():
-            await asyncio.sleep(0.3)          # 本行程先佔著，外部行程開始輪詢
+            # 本行程先佔著，等外部行程真的開始輪詢才放（機器忙時另開行程要好一陣子才跑起來）
+            self.assertEqual((await asyncio.to_thread(poller.stdout.readline)).strip(), "polling")
+            await asyncio.sleep(0.1)
             follow = asyncio.create_task(job("b", 0.3))   # 緊接著還有下一件
         line = await asyncio.to_thread(poller.stdout.readline)
         order.append(line.strip())
