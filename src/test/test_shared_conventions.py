@@ -289,6 +289,52 @@ def _find_config_json_writes(path: Path) -> list[int]:
     return sorted(hits)
 
 
+# 2026-10-06 開關集中到 settings/switches.json 時已有的開關欄位：之後改到哪個功能就搬過去、從這裡移除（使用者 SW-Q2：
+# 有改到才搬）。改了要重啟或重建容器才生效，是它們該搬的原因。
+_LEGACY_SWITCH_FIELDS = {
+    "sys_settings/llm_settings.py:AskAIWebSettings.enabled",
+    "sys_settings/llm_settings.py:AmbientChatSettings.enabled",
+    "sys_settings/llm_settings.py:AmbientChatSettings.use_shared_identity",
+    "sys_settings/llm_settings.py:AmbientChatSettings.use_examples",
+    "sys_settings/llm_settings.py:AmbientChatSettings.style_refs_enabled",
+    "sys_settings/llm_settings.py:AmbientChatSettings.style_refs_debug",
+    "sys_settings/llm_settings.py:AmbientChatSettings.callback_enabled",
+    "sys_settings/llm_settings.py:AmbientChatSettings.callback_debug",
+    "sys_settings/llm_settings.py:AmbientChatSettings.followup_enabled",
+    "sys_settings/llm_settings.py:AmbientChatSettings.hook_enabled",
+    "sys_settings/llm_settings.py:AmbientChatSettings.hook_knn_enabled",
+    "sys_settings/llm_settings.py:AmbientChatSettings.hook_debug",
+    "sys_settings/llm_settings.py:AmbientChatSettings.tag_spicy_dark_launch",
+    "sys_settings/llm_settings.py:PersonaAgentSettings.enabled",
+    "sys_settings/llm_settings.py:PersonaAgentSettings.mode",
+    "sys_settings/llm_settings.py:PersonaAgentSettings.publish_mode",
+    "sys_settings/llm_settings.py:DiaryReflectionSettings.enabled",
+    "sys_settings/llm_settings.py:DiaryReflectionSettings.use_shared_identity",
+    "sys_settings/llm_settings.py:EmojiAutofillSettings.mode",
+    "sys_settings/periodic_reminder_settings.py:PeriodicReminderSettings.enabled",
+    "sys_settings/pgvector_settings.py:RetrievalSourceConfig.enabled",
+    "sys_settings/pgvector_settings.py:RetrievalSourceConfig.persist_mode",
+}
+# 名稱看得出是開關的：開／關、模式、試跑、灰度（dark_launch）、除錯輸出、use_／enable_ 開頭
+_SWITCH_FIELD = re.compile(r"^(enabled|mode|dry_run|use_.*|enable_.*|.*_enabled|.*_mode|.*_dry_run|.*_debug|.*_dark_launch)$")
+
+
+def _find_switch_fields(path: Path) -> list[int]:
+    """sys_settings 裡新加的開關欄位（enabled、mode、dry_run…）。功能開關一律放 `settings/switches.json`
+    （名稱、預設、允許的值寫在 `sys_settings.switches.Switches`）：改了就生效、不用重啟，也只有一個地方找
+    （使用者 10-06 SW-Q1～Q2）。細項參數（逾時、張數）不算開關，照舊放各自的 sys_settings 類別。"""
+    rel = Path(path).relative_to(SRC_DIR).as_posix()
+    if not rel.startswith("sys_settings/"):
+        return []
+    hits = []
+    for cls in (n for n in _parse(path).body if isinstance(n, ast.ClassDef)):
+        for st in cls.body:
+            if (isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name) and _SWITCH_FIELD.match(st.target.id)
+                    and f"{rel}:{cls.name}.{st.target.id}" not in _LEGACY_SWITCH_FIELDS):
+                hits.append(st.lineno)
+    return hits
+
+
 def _find_ffprobe_calls(path: Path) -> list[int]:
     """找自己組 ffprobe 指令的地方。讀影片長度一律走 `utils.media_probe.probe_duration`（逾時、失敗回 0、
     收掉子行程只有一份）。指令寫在字串裡，所以走 AST。"""
@@ -494,6 +540,12 @@ RULES = [
         finder=_find_think_block_parsing,
         canonical="llm.prompt.answer_line.final_line",
         allowed={"llm/prompt/answer_line.py"},
+    ),
+    Rule(
+        name="功能開關（開／關、off／dry_run／on）",
+        finder=_find_switch_fields,
+        canonical="settings/switches.json（名稱、預設、允許的值：sys_settings.switches.Switches）",
+        allowed={"sys_settings/switches.py"},
     ),
     Rule(
         name="寫 config.json",

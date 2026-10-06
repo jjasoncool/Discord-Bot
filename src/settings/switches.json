@@ -1,0 +1,4 @@
+{
+  "_說明": "功能開關。改了下一次用到就生效、不用重啟；值寫錯會記 warning 並用預設。每個開關的意思與允許的值見 src/sys_settings/switches.py。",
+  "telegram_filter_mode": "off"
+}
