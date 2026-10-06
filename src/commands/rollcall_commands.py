@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from utils.utils import ChannelConfig, ITEMS_PER_PAGE, check_guild
+from utils.utils import ChannelConfig, ConfigWriteError, ITEMS_PER_PAGE, check_guild
 from services.community.rollcall_service import (
     RollCallService,
     RESPONSE_DEADLINE_DAYS,
@@ -400,21 +400,17 @@ async def _show_role_config_menu(
                 )
 
                 async def on_add(sel_interaction: discord.Interaction):
-                    fresh = ChannelConfig.load_config(CONFIG_FILE, caller="RollCallCommands")
-                    id_list = fresh.get(config_key, [])
-                    if not isinstance(id_list, list):
-                        id_list = []
-
+                    current = ChannelConfig.load_config(CONFIG_FILE, caller="RollCallCommands").get(config_key, [])
+                    if not isinstance(current, list):
+                        current = []
+                    new_ids = [int(val) for val in role_select.values if int(val) not in current]
                     added = []
-                    for val in role_select.values:
-                        role_id = int(val)
-                        if role_id not in id_list:
-                            id_list.append(role_id)
-                            role = sel_interaction.guild.get_role(role_id)
-                            added.append(role.name if role else str(role_id))
+                    for role_id in new_ids:
+                        role = sel_interaction.guild.get_role(role_id)
+                        added.append(role.name if role else str(role_id))
 
-                    fresh[config_key] = id_list
-                    ChannelConfig.save_config(fresh, CONFIG_FILE, caller="RollCallCommands")
+                    if not await _add_role_ids(sel_interaction, config_key, new_ids):
+                        return
 
                     names = ", ".join(f"**{n}**" for n in added)
                     await sel_interaction.response.edit_message(
@@ -442,23 +438,17 @@ async def _show_role_config_menu(
                 )
 
                 async def on_add_fallback(sel_interaction: discord.Interaction):
-                    fresh = ChannelConfig.load_config(CONFIG_FILE, caller="RollCallCommands")
-                    id_list = fresh.get(config_key, [])
-                    if not isinstance(id_list, list):
-                        id_list = []
+                    current = ChannelConfig.load_config(CONFIG_FILE, caller="RollCallCommands").get(config_key, [])
+                    if not isinstance(current, list):
+                        current = []
 
-                    added = []
-                    skipped = []
-                    for role in role_select.values:
-                        if role.id not in id_list:
-                            id_list.append(role.id)
-                            added.append(role.name)
-                        else:
-                            skipped.append(role.name)
+                    new_roles = [role for role in role_select.values if role.id not in current]
+                    added = [role.name for role in new_roles]
+                    skipped = [role.name for role in role_select.values if role.id in current]
 
                     if added:
-                        fresh[config_key] = id_list
-                        ChannelConfig.save_config(fresh, CONFIG_FILE, caller="RollCallCommands")
+                        if not await _add_role_ids(sel_interaction, config_key, [role.id for role in new_roles]):
+                            return
                         names = ", ".join(f"**{n}**" for n in added)
                         msg = f"✅ 已新增 {len(added)} 個身份組：{names}"
                         if skipped:
@@ -521,10 +511,16 @@ async def _show_role_config_menu(
                     )
                     return
 
-                fresh = ChannelConfig.load_config(CONFIG_FILE, caller="RollCallCommands")
-                # 直接用保留的清單覆寫
-                fresh[config_key] = [rid for rid in fresh.get(config_key, []) if rid not in removed_ids]
-                ChannelConfig.save_config(fresh, CONFIG_FILE, caller="RollCallCommands")
+                def remove_ids(c):
+                    c[config_key] = [rid for rid in c.get(config_key, []) if rid not in removed_ids]
+                try:
+                    await ChannelConfig.update_config(remove_ids, CONFIG_FILE, caller="RollCallCommands")
+                except ConfigWriteError as e:
+                    logger.error(f"幽靈點名：移除身份組寫入設定檔失敗: {e}")
+                    await sel_interaction.response.edit_message(
+                        content="❌ 設定檔讀取失敗，這次沒有寫入，請通知管理員檢查 config.json。", embed=None, view=None,
+                    )
+                    return
 
                 removed_names = []
                 for rid in removed_ids:
@@ -559,6 +555,24 @@ async def _show_role_config_menu(
         color=discord.Color.dark_orange(),
     )
     await interaction.response.send_message(embed=embed, view=action_view, ephemeral=True)
+
+
+async def _add_role_ids(interaction: discord.Interaction, config_key: str, role_ids: list[int]) -> bool:
+    """把身份組加進設定檔（重讀最新內容、只加這幾個）；寫不進去時回覆並回 False。"""
+    def add(c):
+        ids = c.get(config_key)
+        if not isinstance(ids, list):
+            ids = c[config_key] = []
+        ids.extend(rid for rid in role_ids if rid not in ids)
+    try:
+        await ChannelConfig.update_config(add, CONFIG_FILE, caller="RollCallCommands")
+        return True
+    except ConfigWriteError as e:
+        logger.error(f"幽靈點名：新增身份組寫入設定檔失敗: {e}")
+        await interaction.response.edit_message(
+            content="❌ 設定檔讀取失敗，這次沒有寫入，請通知管理員檢查 config.json。", embed=None, view=None,
+        )
+        return False
 
 
 async def _try_refresh_admin_panel(interaction: discord.Interaction):

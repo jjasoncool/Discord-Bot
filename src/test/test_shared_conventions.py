@@ -268,6 +268,27 @@ def _find_thread_unarchive(path: Path) -> list[int]:
     })
 
 
+def _find_config_json_writes(path: Path) -> list[int]:
+    """自己寫 config.json：`open(...config.json..., "w")` 或舊的整份覆寫 `save_config`。一律走
+    `ChannelConfig.update_config`：寫入前重讀最新內容、只改這次的 key、安全寫入加備份（使用者 10-06 SW-Q4；
+    以前整份寫回快取，手改的內容會被蓋掉，檔案壞掉時會被寫成只剩一個 key）。"""
+    hits = set()
+    for node in ast.walk(_parse(path)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+        if name == "save_config":
+            hits.add(node.lineno)
+        if name == "open" and node.args:
+            target = node.args[0]
+            mode = node.args[1] if len(node.args) > 1 else next((k.value for k in node.keywords if k.arg == "mode"), None)
+            if (isinstance(target, ast.Constant) and isinstance(target.value, str) and "config.json" in target.value
+                    and isinstance(mode, ast.Constant) and isinstance(mode.value, str) and set(mode.value) & set("wax+")):
+                hits.add(node.lineno)
+    return sorted(hits)
+
+
 def _find_ffprobe_calls(path: Path) -> list[int]:
     """找自己組 ffprobe 指令的地方。讀影片長度一律走 `utils.media_probe.probe_duration`（逾時、失敗回 0、
     收掉子行程只有一份）。指令寫在字串裡，所以走 AST。"""
@@ -473,6 +494,12 @@ RULES = [
         finder=_find_think_block_parsing,
         canonical="llm.prompt.answer_line.final_line",
         allowed={"llm/prompt/answer_line.py"},
+    ),
+    Rule(
+        name="寫 config.json",
+        finder=_find_config_json_writes,
+        canonical="ChannelConfig.update_config（重讀最新內容、只改這次的 key、安全寫入加備份）",
+        allowed={"utils/utils.py"},
     ),
     Rule(
         name="讀影片長度（ffprobe）",

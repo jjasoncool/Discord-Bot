@@ -22,7 +22,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 import discord
 
-from utils.utils import ChannelConfig, safe_send_interaction_message
+from utils.utils import ChannelConfig, ConfigWriteError, safe_send_interaction_message
 from telegram_scraper.tg_config import normalize_channel_identifier
 
 logger = logging.getLogger(__name__)
@@ -34,9 +34,8 @@ class ChannelSetContext:
 
     guild: discord.Guild
     channel: discord.abc.GuildChannel
-    config: dict
+    config: dict                  # 寫入後的設定（複本；頻道已經先寫進檔案，hook 讀設定檔就拿得到新頻道）
     bot: Any                      # commands.Bot；避免額外 import 用 Any
-    save: Callable[[], None]      # 立即把目前 config 寫回磁碟（hook 需先存才讀得到時用）
 
 
 # on_set 簽名：吃 ctx，回傳要附加到成功訊息後面的 note（沒有就回 None）
@@ -208,35 +207,42 @@ class _TelegramRouteInputModal(discord.ui.Modal):
             await safe_send_interaction_message(modal_interaction, "選擇的頻道無效，請重試。", ephemeral=True)
             return
 
-        config_file = "config.json"
-        config = ChannelConfig.load_config(config_file, caller="ManagementCommands")
-        routes = config.get("telegram_channel_routes")
-        if not isinstance(routes, dict):
-            routes = {}
+        def add_route(config: dict) -> None:
+            routes = config.get("telegram_channel_routes")
+            if not isinstance(routes, dict):
+                routes = {}
 
-        raw_existing = routes.get(source_key, [])
-        if isinstance(raw_existing, list):
-            existing_ids = raw_existing
-        elif raw_existing in (None, ""):
-            existing_ids = []
-        else:
-            existing_ids = [raw_existing]
+            raw_existing = routes.get(source_key, [])
+            if isinstance(raw_existing, list):
+                existing_ids = raw_existing
+            elif raw_existing in (None, ""):
+                existing_ids = []
+            else:
+                existing_ids = [raw_existing]
 
-        normalized_ids: list[int] = []
-        for rid in existing_ids:
-            try:
-                rid_int = int(rid)
-            except (TypeError, ValueError):
-                continue
-            if rid_int > 0 and rid_int not in normalized_ids:
-                normalized_ids.append(rid_int)
+            normalized_ids: list[int] = []
+            for rid in existing_ids:
+                try:
+                    rid_int = int(rid)
+                except (TypeError, ValueError):
+                    continue
+                if rid_int > 0 and rid_int not in normalized_ids:
+                    normalized_ids.append(rid_int)
 
-        if selected_channel_id not in normalized_ids:
-            normalized_ids.append(selected_channel_id)
+            if selected_channel_id not in normalized_ids:
+                normalized_ids.append(selected_channel_id)
 
-        routes[source_key] = normalized_ids
-        config["telegram_channel_routes"] = routes
-        ChannelConfig.save_config(config, config_file, caller="ManagementCommands")
+            routes[source_key] = normalized_ids
+            config["telegram_channel_routes"] = routes
+
+        try:
+            config = await ChannelConfig.update_config(add_route, caller="ManagementCommands")
+        except ConfigWriteError as e:
+            logger.error(f"Telegram 路由寫入設定檔失敗: {e}")
+            await safe_send_interaction_message(
+                modal_interaction, "❌ 設定檔讀取失敗，這次沒有寫入，請通知管理員檢查 config.json。", ephemeral=True)
+            return
+        normalized_ids = config["telegram_channel_routes"][source_key]
 
         await safe_send_interaction_message(
             modal_interaction,
@@ -310,8 +316,7 @@ async def _on_set_community_lookup(ctx: ChannelSetContext) -> Optional[str]:
     if community_cog is None:
         return "\n⚠️ CommunityLookupCommands Cog 尚未載入，面板未自動部署"
     try:
-        # 先寫 config，讓 cog 內 get_panel_channel 讀得到新頻道
-        ctx.save()
+        # 頻道在呼叫 hook 之前就已寫進設定檔，cog 內 get_panel_channel 讀得到新頻道
         panel_message, deleted_old = await community_cog.panel.bump(ctx.channel)
         note = f"\n🤖 已自動部署社群查詢面板：{panel_message.jump_url}"
         if deleted_old:

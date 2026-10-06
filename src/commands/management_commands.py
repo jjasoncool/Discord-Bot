@@ -10,7 +10,7 @@ from discord.ext import commands
 from typing import Optional
 
 # 注意：需確保 utils 資料夾下的 utils.py 包含 create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, ChannelConfig 等定義
-from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, ChannelConfig, check_guild
+from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, ChannelConfig, ConfigWriteError, check_guild
 from utils.panel_bump import PanelBumper
 # 注意：需確保 services 資料夾下的 intro_profile_service.py 包含 IntroProfilePayload, ImpressionPayload, IntroProfileServiceProtocol, IntroProfileService 等定義
 from services.community.intro_profile_service import (
@@ -771,11 +771,16 @@ class ManagementCommands(commands.Cog):
                 selected_channel_id = int(selected_value)
                 channel = interaction.guild.get_channel(selected_channel_id)
                 if channel and channel.type == setting.channel_type:
-                    # 儲存設定到 JSON 檔案
-                    config_file = "config.json"
-                    config = ChannelConfig.load_config(config_file, caller="ManagementCommands")
-
-                    config[setting.config_key] = selected_channel_id
+                    # 先寫進設定檔（只改這個 key），後續動作（例如部署面板）才讀得到新頻道
+                    try:
+                        config = await ChannelConfig.update_config(
+                            lambda c: c.__setitem__(setting.config_key, selected_channel_id),
+                            caller="ManagementCommands",
+                        )
+                    except ConfigWriteError as e:
+                        logger.error(f"綁定頻道寫入設定檔失敗: {e}")
+                        await safe_send_interaction_message(interaction, "❌ 設定檔讀取失敗，這次沒有寫入，請通知管理員檢查 config.json。", ephemeral=True)
+                        return
 
                     auto_panel_note = ""
                     if setting.on_set is not None:
@@ -785,13 +790,10 @@ class ManagementCommands(commands.Cog):
                             channel=channel,
                             config=config,
                             bot=self.bot,
-                            save=lambda: ChannelConfig.save_config(config, config_file, caller="ManagementCommands"),
                         )
                         note = await setting.on_set(ctx)
                         if note:
                             auto_panel_note = note
-
-                    ChannelConfig.save_config(config, config_file, caller="ManagementCommands")
 
                     await interaction.response.edit_message(view=None)
                     await safe_send_interaction_message(
@@ -884,17 +886,20 @@ class ManagementCommands(commands.Cog):
                 selected_role_id = int(selected_value)
                 role = interaction.guild.get_role(selected_role_id)
                 if role and not role.is_default():
-                    config_file = "config.json"
-                    config = ChannelConfig.load_config(config_file, caller="ManagementCommands")
+                    config = ChannelConfig.load_config(caller="ManagementCommands")
+                    current = config.get("role_mapping", {}).get(selected_type, [])
 
-                    if "role_mapping" not in config:
-                        config["role_mapping"] = {}
-                    if selected_type not in config["role_mapping"]:
-                        config["role_mapping"][selected_type] = []
-
-                    if selected_role_id not in config["role_mapping"][selected_type]:
-                        config["role_mapping"][selected_type].append(selected_role_id)
-                        ChannelConfig.save_config(config, config_file, caller="ManagementCommands")
+                    if selected_role_id not in current:
+                        def add_role(c):
+                            ids = c.setdefault("role_mapping", {}).setdefault(selected_type, [])
+                            if selected_role_id not in ids:
+                                ids.append(selected_role_id)
+                        try:
+                            await ChannelConfig.update_config(add_role, caller="ManagementCommands")
+                        except ConfigWriteError as e:
+                            logger.error(f"新增角色權限寫入設定檔失敗: {e}")
+                            await safe_send_interaction_message(interaction, "❌ 設定檔讀取失敗，這次沒有寫入，請通知管理員檢查 config.json。", ephemeral=True)
+                            return
 
                         await interaction.response.edit_message(view=None)
                         await safe_send_interaction_message(
@@ -1043,8 +1048,17 @@ class ManagementCommands(commands.Cog):
                 selected_role_id = int(selected_value)
                 if selected_role_id in role_mapping[selected_type]:
                     role_mapping[selected_type].remove(selected_role_id)
-                    config["role_mapping"][selected_type] = role_mapping[selected_type]
-                    ChannelConfig.save_config(config, config_file, caller="ManagementCommands")
+
+                    def remove_role(c):
+                        ids = c.get("role_mapping", {}).get(selected_type, [])
+                        if selected_role_id in ids:
+                            ids.remove(selected_role_id)
+                    try:
+                        await ChannelConfig.update_config(remove_role, caller="ManagementCommands")
+                    except ConfigWriteError as e:
+                        logger.error(f"移除角色權限寫入設定檔失敗: {e}")
+                        await safe_send_interaction_message(interaction, "❌ 設定檔讀取失敗，這次沒有寫入，請通知管理員檢查 config.json。", ephemeral=True)
+                        return
 
                     role = interaction.guild.get_role(selected_role_id)
                     role_name = role.name if role else f"未知身份組 (ID: {selected_role_id})"

@@ -1,9 +1,14 @@
+from pathlib import Path
 from typing import Optional
+import copy
 import logging
 import json
 import os
 import asyncio
+import threading
 import discord
+
+from utils.safe_write import replace_text
 
 # 獲取 logger
 logger = logging.getLogger(__name__)
@@ -98,56 +103,83 @@ async def safe_send_interaction_message(
             )
             await asyncio.sleep(delay)
 
+class ConfigWriteError(RuntimeError):
+    """設定檔讀不到或格式壞掉，這次沒有寫入（避免把整份檔寫成只剩這次改的那一項）。"""
+
+
 class ChannelConfig:
-    """管理從配置文件中讀取頻道 ID 的類別（含記憶體快取，TTL 5 分鐘）"""
+    """讀寫 config.json（綁頻道、綁身分組、Telegram 路由等）。
+
+    **讀**：依檔案修改時間快取，手改後下一次讀就生效（以前是 5 分鐘 TTL）。回傳的是複本，呼叫端改了也不會
+    影響別人。檔案壞掉（JSON 寫錯）時沿用上一次讀到的正確內容並記 error，不會讓所有綁頻道的功能一起停。
+
+    **寫**：一律 `update_config`。寫入前重讀磁碟上最新的內容、只套用這次的變動、安全寫入（暫存檔換名，每天第一次
+    改寫前備份到 `/logs/config_backup`）。以前是拿 5 分鐘快取裡的整份設定寫回：使用者手改後 5 分鐘內有人從
+    Discord 存任何設定，手改的內容就被舊快取蓋掉；檔案壞掉時更會寫成只剩一個 key（使用者 10-06 SW-Q4）。
+    """
     DEFAULT_ID = 1234567890  # 預設佔位符 ID
-    _cache: dict = {}        # {config_file: config_dict}
-    _cache_time: dict = {}   # {config_file: timestamp}
-    _CACHE_TTL = 300         # 快取有效期（秒）
+    #: {config_file: (修改時間 ns, 設定)}
+    _cache: dict = {}
+    #: 同一個行程裡的寫入排隊（讀檔、改、寫回這三步不能交錯）
+    _write_lock = threading.Lock()
+    BACKUP_DIR = "/logs/config_backup"
+    BACKUP_KEEP = 14
 
     @staticmethod
     def load_config(config_file="config.json", caller="unknown") -> dict:
-        """讀取完整設定檔（優先從快取取，TTL 過期自動重讀），讀取失敗時回傳空 dict。"""
-        import time
-        now = time.time()
-        cached_time = ChannelConfig._cache_time.get(config_file, 0)
-        if config_file in ChannelConfig._cache and (now - cached_time) < ChannelConfig._CACHE_TTL:
-            return ChannelConfig._cache[config_file]
-
-        logger.debug(f"從磁碟讀取設定檔: {config_file} (調用者: {caller})")
-        config = {}
-        if os.path.exists(config_file):
-            try:
-                with open(config_file, 'r') as f:
-                    config = json.load(f)
-                ChannelConfig._cache[config_file] = config
-                ChannelConfig._cache_time[config_file] = now
-            except json.JSONDecodeError as e:
-                logger.error(f"無法讀取 {config_file}，JSON 解碼錯誤: {str(e)} (調用者: {caller})")
-            except Exception as e:
-                logger.error(f"讀取 {config_file} 時發生未知錯誤: {str(e)} (調用者: {caller})")
-        else:
-            logger.warning(f"配置文件 {config_file} 不存在，回傳空設定 (調用者: {caller})")
-        return config
-
-    @staticmethod
-    def save_config(config: dict, config_file="config.json", caller="unknown") -> None:
-        """寫入完整設定檔並更新快取。"""
+        """讀取完整設定檔（檔案沒改就用快取）；回傳複本。讀不到時回上次的正確內容，從來沒讀到過就回空 dict。"""
         try:
-            with open(config_file, 'w') as f:
-                json.dump(config, f, indent=2)
-            import time
-            ChannelConfig._cache[config_file] = config
-            ChannelConfig._cache_time[config_file] = time.time()
-            logger.debug(f"設定檔已寫入: {config_file} (調用者: {caller})")
+            mtime_ns = os.stat(config_file).st_mtime_ns
+        except FileNotFoundError:
+            logger.warning(f"配置文件 {config_file} 不存在，回傳空設定 (調用者: {caller})")
+            return {}
+        cached = ChannelConfig._cache.get(config_file)
+        if cached is not None and cached[0] == mtime_ns:
+            return copy.deepcopy(cached[1])
+        logger.debug(f"從磁碟讀取設定檔: {config_file} (調用者: {caller})")
+        try:
+            with open(config_file, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            if not isinstance(config, dict):
+                raise ValueError("最外層不是 JSON 物件")
         except Exception as e:
-            logger.error(f"寫入 {config_file} 失敗: {str(e)} (調用者: {caller})")
-            raise
+            logger.error(f"無法讀取 {config_file}（沿用上次讀到的內容）：{e} (調用者: {caller})")
+            return copy.deepcopy(cached[1]) if cached is not None else {}
+        ChannelConfig._cache[config_file] = (mtime_ns, config)
+        return copy.deepcopy(config)
 
     @staticmethod
-    def invalidate_cache(config_file="config.json") -> None:
-        """手動清除快取（外部修改設定檔後呼叫）。"""
-        ChannelConfig._cache.pop(config_file, None)
+    def _update_sync(apply, config_file: str, caller: str) -> dict:
+        with ChannelConfig._write_lock:
+            path = Path(config_file)
+            # 檔案不見（被刪、編輯器存檔換名的瞬間）也拒絕：當成空的寫回去，整份設定就只剩這次改的那一項
+            if not path.exists():
+                raise ConfigWriteError(f"{config_file} 不存在，沒有寫入")
+            try:
+                config = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as e:
+                raise ConfigWriteError(f"{config_file} 格式錯誤，沒有寫入：{e}") from e
+            if not isinstance(config, dict):
+                raise ConfigWriteError(f"{config_file} 最外層不是 JSON 物件，沒有寫入")
+            apply(config)
+            try:
+                replace_text(path, json.dumps(config, indent=2), backup_dir=ChannelConfig.BACKUP_DIR,
+                             keep=ChannelConfig.BACKUP_KEEP)
+            except OSError as e:
+                # 備份目錄不能寫、磁碟滿：原檔不動，讓呼叫端回覆使用者（不然按了沒反應）
+                raise ConfigWriteError(f"{config_file} 寫入失敗，沒有寫入：{e}") from e
+            ChannelConfig._cache[config_file] = (path.stat().st_mtime_ns, config)
+            logger.info(f"設定檔已寫入: {config_file} (調用者: {caller})")
+            return copy.deepcopy(config)
+
+    @staticmethod
+    async def update_config(apply, config_file="config.json", caller="unknown") -> dict:
+        """改設定檔：`apply(config)` 直接改傳進來的 dict（磁碟上最新的內容），回傳寫入後的複本。
+
+        `apply` 會在執行緒裡跑，只能改 dict，不要在裡面呼叫 Discord。檔案讀不到或格式錯誤時拋 `ConfigWriteError`，
+        檔案不動。
+        """
+        return await asyncio.to_thread(ChannelConfig._update_sync, apply, config_file, caller)
 
     @staticmethod
     async def get_channel_id(config_key, config_file="config.json", caller="unknown"):
