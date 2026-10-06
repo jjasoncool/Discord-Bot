@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -25,6 +24,7 @@ from llm.preprocess import emoji_dictionary, sticker_cache, sticker_dictionary
 from llm.preprocess.external_emoji import custom_emojis, sticker_image_url
 from llm.preprocess.vision_image import download_images
 from llm.prompt import prompt_files
+from llm.prompt.answer_line import final_line
 from sys_settings.llm_settings import EmojiAutofillSettings
 from sys_settings.time_settings import APP_TZ
 
@@ -40,8 +40,6 @@ _retry_after: dict[str, float] = {}
 #: (日期, 今天已看幾張)
 _quota: list = ["", 0]
 _LLM = None
-
-_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.S)
 
 
 @dataclass(frozen=True)
@@ -83,12 +81,9 @@ def targets(message: Any) -> list[Target]:
 def parse_answer(text: str, *, max_chars: int) -> Optional[tuple[str, Optional[str]]]:
     """模型回答 →（描述, 類別）。看不出來、格式不對、太長、只有類別字都回 None——寧可不寫。
 
-    prompt 要模型先寫一行「看到什麼」再寫字典那行（直接要字典那行時，十張有五張回「不知道」，
-    其實圖都看得清楚），所以取**最後一行**。
+    prompt 要模型先寫一行「看到什麼」再寫字典那行，所以取**最後一行**（`answer_line.final_line`）。
     """
-    text = _THINK_BLOCK.sub("", text or "")
-    lines = [ln.strip().strip("`").strip() for ln in text.splitlines()]
-    line = next((ln for ln in reversed(lines) if ln), "")
+    line = final_line(text)
     if not line or "不知道" in line:
         return None
     entry = emoji_dictionary.parse_line(f"_ = {line}")

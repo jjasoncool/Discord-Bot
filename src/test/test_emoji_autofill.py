@@ -119,6 +119,11 @@ class ParseAnswerTests(unittest.TestCase):
         self.assertEqual(self.parse("一隻青蛙雙手合十，不知道在拜託什麼。\n祈禱、拜託 | neutral"), ("祈禱、拜託", "neutral"))
         self.assertIsNone(self.parse("看不清楚。\n不知道"))
 
+    def test_copied_format_prefix_is_not_written(self):
+        """模型常照抄格式說明在結論前寫「第二行：」：不能連前綴一起寫進字典。"""
+        self.assertEqual(self.parse("一隻貓眼眶含淚。\n第二行：哭哭難過 | negative"), ("哭哭難過", "negative"))
+        self.assertEqual(self.parse("描述：偷看 | think"), ("偷看", "think"))
+
     def test_rather_write_nothing(self):
         for bad in ["不知道", "", "think", "描述 | 不是類別", "這是一個非常非常非常非常長的描述字串", "a = b | laugh"]:
             self.assertIsNone(self.parse(bad), bad)

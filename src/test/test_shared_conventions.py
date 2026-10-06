@@ -247,6 +247,16 @@ def _find_syndication_urls(path: Path) -> list[int]:
     })
 
 
+def _find_think_block_parsing(path: Path) -> list[int]:
+    """找自己去掉 `<think>` 區塊、取模型最後一行的寫法。一律走 `llm.prompt.answer_line.final_line`：
+    模型會在結論前多寫「第二行：」這類前綴，各寫一份就會有一份沒處理（看圖補字典曾把前綴寫進字典）。
+    `<think>` 寫在字串裡，regex 規則看不到，所以走 AST。"""
+    return sorted({
+        node.lineno for node in ast.walk(_parse(path))
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and "<think>" in node.value
+    })
+
+
 def _find_user_date_parsing(path: Path) -> list[int]:
     """指令層（接使用者輸入的地方）自己用 strptime／fromisoformat 解析日期。使用者在視窗打的日期一律走
     `utils.user_dates`，全形、各種分隔符號、只寫日期這些寬鬆規則才只有一份（2026-10-04 社群稽查與預購截止合併）。
@@ -437,6 +447,12 @@ RULES = [
         canonical="telegram_scraper.media_download.download_with_stall_guard",
         # Telethon 的 download_media 沒有逾時，照片曾卡 1～1.6 小時、整輪補掃跟著停；一律經過卡住偵測
         allowed={"telegram_scraper/media_download.py"},
+    ),
+    Rule(
+        name="取模型回答的最後一行結論（去思考區塊與照抄格式的前綴）",
+        finder=_find_think_block_parsing,
+        canonical="llm.prompt.answer_line.final_line",
+        allowed={"llm/prompt/answer_line.py"},
     ),
     Rule(
         name="官方公告原文網址",
