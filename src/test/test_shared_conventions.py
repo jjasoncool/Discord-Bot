@@ -257,6 +257,17 @@ def _find_think_block_parsing(path: Path) -> list[int]:
     })
 
 
+def _find_thread_unarchive(path: Path) -> list[int]:
+    """自己呼叫 `edit(archived=False)` 解封 thread。一律走 `utils.discord_threads.reopen_thread`：封存的 thread
+    改不了也刪不了訊息，失敗怎麼處理只留一份。"""
+    return sorted({
+        node.lineno for node in ast.walk(_parse(path))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "edit"
+        and any(k.arg == "archived" and isinstance(k.value, ast.Constant) and k.value.value is False
+                for k in node.keywords)
+    })
+
+
 def _find_ffprobe_calls(path: Path) -> list[int]:
     """找自己組 ffprobe 指令的地方。讀影片長度一律走 `utils.media_probe.probe_duration`（逾時、失敗回 0、
     收掉子行程只有一份）。指令寫在字串裡，所以走 AST。"""
@@ -468,6 +479,19 @@ RULES = [
         finder=_find_ffprobe_calls,
         canonical="utils.media_probe.probe_duration",
         allowed={"utils/media_probe.py"},
+    ),
+    Rule(
+        name="解除 thread 封存",
+        finder=_find_thread_unarchive,
+        canonical="utils.discord_threads.reopen_thread（取得 thread 用 fetch_thread）",
+        # 2026-10-06 抽出時已有這五份，之後改到哪個檔就順手換掉、從這裡移除
+        allowed={
+            "utils/discord_threads.py",
+            "commands/community_lookup_commands.py",
+            "services/community/trade_service.py",
+            "services/community/shop_service.py",
+            "services/relay/bahamut_monitor.py",
+        },
     ),
     Rule(
         name="官方公告原文網址",
