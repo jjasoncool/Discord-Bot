@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 import discord
 
@@ -32,9 +32,12 @@ class QuarantineThreads:
     """主頻道 → 它底下的隔離 thread。runtime 檔記 `threads`（主頻道 → 現在的 thread）與
     `thread_parents`（歷來每個隔離 thread → 主頻道）。"""
 
-    def __init__(self, bot: discord.Client, runtime_path: str) -> None:
+    def __init__(self, bot: discord.Client, runtime_path: str,
+                 on_change: Optional[Callable[[int, discord.Thread], Awaitable[None]]] = None) -> None:
         self.bot = bot
         self.runtime_path = runtime_path
+        #: 隔離區有變動（多一則、放回一則）時通知面板置底重畫：(主頻道 id, thread)
+        self.on_change = on_change
         self._state: Optional[dict] = None
         self._lock = asyncio.Lock()
         #: 問過 Discord、確定不是隔離 thread 的頻道（例如別的路由的主頻道），不再重問
@@ -73,6 +76,29 @@ class QuarantineThreads:
             return int(thread.parent_id)
         self._not_quarantine.add(key)
         return None
+
+    async def thread_ids_of(self, parent_id: int) -> list[int]:
+        """這個主頻道歷來的隔離 thread（含被刪重建前的舊 thread）。"""
+        state = await self._load()
+        return [int(t) for t, p in state["thread_parents"].items() if int(p) == int(parent_id)]
+
+    async def current_thread(self, parent_id: int) -> Optional[discord.Thread]:
+        """主頻道現在的隔離 thread；不存在就回 None（不會新開）。"""
+        state = await self._load()
+        return await fetch_thread(self.bot, state["threads"].get(str(int(parent_id))))
+
+    def changed(self, parent_id: int, thread: discord.Thread) -> None:
+        """隔離區有變動：背景通知面板，不擋呼叫端，失敗只記 log。"""
+        if self.on_change is None:
+            return
+
+        async def run() -> None:
+            try:
+                await self.on_change(parent_id, thread)
+            except Exception as exc:
+                logger.warning("通知隔離區面板失敗 parent=%s：%s", parent_id, exc)
+
+        asyncio.get_running_loop().create_task(run())
 
     async def thread_for(self, parent: discord.abc.Messageable) -> Optional[discord.Thread]:
         """主頻道底下的隔離 thread（找不到就開一個，封存的先解封）；開不了回 None。"""

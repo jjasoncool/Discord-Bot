@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -28,6 +29,7 @@ import discord
 from services.relay.telegram_filter import MediaFile, Verdict, media_kind
 from telegram_scraper.media_download import MEDIA_HOLD_NOTIFY, MEDIA_RETRY_WINDOW
 from telegram_scraper.tg_config import normalize_channel_identifier
+from utils.discord_threads import fetch_thread, reopen_thread
 from utils.media_probe import probe_duration
 
 logger = logging.getLogger(__name__)
@@ -581,6 +583,42 @@ class TelegramMessageRepository:
                 int(chat_id),
             )
         return [(int(row["id"]), bool(row["ready"])) for row in rows]
+
+    async def list_quarantined(self, thread_ids: list[int], main_channel_id: int) -> list[dict]:
+        """送進這些隔離 thread、還沒放回這個主頻道的訊息（含媒體種類），依發文時間排。"""
+        if self.pool is None:
+            raise RuntimeError("TelegramMessageRepository 尚未 connect")
+        ids = [int(t) for t in thread_ids]
+        if not ids:
+            return []
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT m.id, m.telegram_chat_id, m.telegram_message_id, m.grouped_id, m.message_date, m.text,
+                       COALESCE(array_agg(mm.media_type) FILTER (WHERE mm.media_type IS NOT NULL), '{}') AS media
+                FROM telegram_relay_delivery_state d
+                JOIN telegram_messages m ON m.id = d.message_pk
+                LEFT JOIN telegram_message_media mm ON mm.message_id = m.id
+                WHERE d.discord_channel_id = ANY($1::bigint[])
+                  AND NOT EXISTS (
+                      SELECT 1 FROM telegram_relay_delivery_state x
+                      WHERE x.message_pk = m.id AND x.discord_channel_id = $2
+                  )
+                GROUP BY m.id
+                ORDER BY m.message_date, m.telegram_message_id;
+                """,
+                ids,
+                int(main_channel_id),
+            )
+        return [
+            {
+                "pk": int(r["id"]), "chat_id": int(r["telegram_chat_id"]),
+                "telegram_message_id": int(r["telegram_message_id"]),
+                "grouped_id": int(r["grouped_id"]) if r["grouped_id"] is not None else None,
+                "message_date": r["message_date"], "text": r["text"] or "", "media": list(r["media"]),
+            }
+            for r in rows
+        ]
 
     async def get_deliveries(self, message_pks: list[int]) -> dict[int, dict[int, datetime]]:
         """這批 pk 送到過哪些頻道：{pk: {頻道 id: delivered_at}}。不含頻道 0（停止追蹤的標記，不是送出）。
@@ -1354,6 +1392,21 @@ class _RouteDeliveries:
         return {**self.quarantine, **self.main}
 
 
+@dataclass(frozen=True)
+class QuarantineItem:
+    """隔離區裡還沒放回的一個發送單位（面板的選單用）。"""
+    #: 單則本身；相簿是 Telegram 順序第一張（跟發文 footer 的 db# 一致）
+    pk: int
+    posted: Optional[datetime]
+    text: str
+    image_count: int = 0
+    video_count: int = 0
+
+
+class SentButNotRecorded(RuntimeError):
+    """已經送出，但發送紀錄沒寫上（資料庫暫時失敗）。重送會重複貼文，呼叫端不能當成「沒送出」重試。"""
+
+
 class MessageRelayWorker:
     """Telegram Relay Worker：LISTEN + 補償 polling + 去重。
 
@@ -1402,6 +1455,8 @@ class MessageRelayWorker:
         # 還在佇列裡、沒開始處理的不用：輪到時本來就會讀到最新的資料
         self._requeue: set[int] = set()
         self._processing: set[int] = set()
+        # 放回同時只做一則：兩位管理員同時按同一則時，第二位會看到「已經放回過了」
+        self._restore_lock = asyncio.Lock()
         # 開了過濾時一次只處理一則（開關每則重讀，切換不用重啟）
         self._filtered_lock = asyncio.Lock()
         self._last_polled_pk: int = 0
@@ -1931,9 +1986,158 @@ class MessageRelayWorker:
         if header and plan.operations:
             plan.operations[0].content = header
         count = await self.publisher.publish_to_channel(channel, plan)
-        for pk in pks:
-            await self.repository.mark_message_published(pk, channel_id)
+        try:
+            for pk in pks:
+                await self.repository.mark_message_published(pk, channel_id)
+        except Exception as exc:
+            raise SentButNotRecorded(f"已送到 {channel_id}，但發送紀錄沒寫上：{exc}") from exc
         return count
+
+    # ------------------------------------------------------------------
+    # 隔離區：清單與放回主頻道（使用者 10-06 TF-Q1～Q4）
+    # ------------------------------------------------------------------
+
+    async def quarantine_items(self, parent_id: int, *, current_thread_id: Optional[int] = None) -> list[QuarantineItem]:
+        """這個主頻道的隔離區裡、還沒放回的發送單位，依發文時間排（相簿算一項）。
+
+        `current_thread_id`：面板所在的 thread。runtime 檔遺失時先讓它補記回去（`parent_of` 會問 Discord），
+        不然面板會顯示「目前沒有被隔離的訊息」。
+        """
+        if self._quarantine is None:
+            return []
+        if current_thread_id is not None:
+            await self._quarantine.parent_of(current_thread_id)
+        rows = await self.repository.list_quarantined(await self._quarantine.thread_ids_of(parent_id), parent_id)
+        units: dict[tuple, list[dict]] = {}
+        for row in rows:
+            key = (row["chat_id"], row["grouped_id"]) if row["grouped_id"] is not None else ("pk", row["pk"])
+            units.setdefault(key, []).append(row)
+        items = []
+        for members in units.values():
+            members.sort(key=lambda r: r["telegram_message_id"])
+            media = [m for r in members for m in r["media"]]
+            items.append(QuarantineItem(
+                pk=members[0]["pk"],
+                posted=members[0]["message_date"],
+                text="\n".join(r["text"].strip() for r in members if r["text"].strip()),
+                image_count=sum(1 for m in media if m in ("photo", "image")),
+                video_count=sum(1 for m in media if m == "video"),
+            ))
+        items.sort(key=lambda i: (i.posted is None, i.posted or datetime.min.replace(tzinfo=timezone.utc), i.pk))
+        return items
+
+    async def restore(self, message_pk: int, restored_by: str) -> tuple[bool, str]:
+        """把隔離區裡的一則（相簿整本）照正常流程送回主頻道、記主頻道的發送紀錄，隔離那則改成「已由 X 放回」。
+
+        不判斷（使用者看過才放回的）。回傳 (有沒有放回, 給操作者看的說明)。
+        相簿放回途中算「處理中」：這段時間晚到的組員先登記，放回後再處理（那時已有主頻道紀錄，會以補圖送主頻道），
+        不然它會被當成隔離相簿的補圖送進隔離區，之後這本永遠留在選單裡放不回去。
+        """
+        async with self._restore_lock:
+            record = await self.repository.get_message_by_pk(message_pk)
+            if record is None:
+                return False, "找不到這則訊息。"
+            album_key = None
+            if record.grouped_id is not None:
+                album_key = (record.telegram_chat_id, int(record.grouped_id))
+                if album_key in self._active_groups:
+                    return False, "這本相簿正在處理中，請稍後再試。"
+                self._active_groups.add(album_key)
+            try:
+                return await self._restore_unit(record, restored_by)
+            finally:
+                if album_key is not None:
+                    self._active_groups.discard(album_key)
+                    if album_key in self._dirty_groups:
+                        self._dirty_groups.discard(album_key)
+                        asyncio.get_running_loop().create_task(self._after_restore_followup(record))
+
+    async def _after_restore_followup(self, record: TelegramMessageRecord) -> None:
+        try:
+            await self._process_group_member(record, time.perf_counter())
+        except Exception as exc:
+            logger.error("Telegram 隔離區：放回後處理晚到的組員失敗 grouped_id=%s：%s", record.grouped_id, exc,
+                         exc_info=True)
+
+    async def _restore_unit(self, record: TelegramMessageRecord, restored_by: str) -> tuple[bool, str]:
+        message_pk = record.message_pk
+        pks = [message_pk]
+        if record.grouped_id is not None:
+            members = await self.repository.get_group_member_states(int(record.grouped_id), record.telegram_chat_id)
+            pks = [pk for pk, _ in members] or pks
+        route_ids = self._routes(record.telegram_chat_id)
+        deliveries = await self._route_deliveries(pks, route_ids)
+        restored = False
+        for route_id in route_ids:
+            delivered = deliveries.get(route_id)
+            if delivered is None or delivered.main or not delivered.quarantine:
+                continue
+            q_pks = [pk for pk in pks if pk in delivered.quarantine]
+            unit = await self._merge_group_messages(q_pks) if record.grouped_id is not None else record
+            dest = await self._destination(route_id, False)
+            if unit is None or dest is None:
+                return False, "主頻道現在送不出去，請稍後再試。"
+            channel, channel_id = dest
+            note = ""
+            try:
+                await self._send_unit(unit, q_pks, channel, channel_id)
+            except SentButNotRecorded as exc:
+                # 主頻道已經有了：不能回報失敗（再按一次會貼兩則），照樣標成已放回
+                logger.error("Telegram 隔離區放回：%s", exc)
+                note = "（發送紀錄沒寫上，請不要再按一次）"
+            except Exception as exc:
+                logger.error("Telegram 隔離區放回失敗: message_pk=%s err=%s", message_pk, exc, exc_info=True)
+                return False, "送回主頻道失敗，請稍後再試。"
+            logger.info("Telegram 隔離區：%s 把 message_pk=%s 放回主頻道 %s", restored_by, q_pks, channel_id)
+            restored = True
+            # 主頻道已經送出：之後的標示、通知面板失敗只記 log，不能讓操作者以為沒放回
+            try:
+                await self._mark_restored(q_pks, restored_by)
+                thread = await self._quarantine.current_thread(route_id)
+                if thread is not None:
+                    self._quarantine.changed(route_id, thread)
+            except Exception as exc:
+                logger.warning("Telegram 隔離區：已放回，但標示隔離那則或更新面板失敗 message_pk=%s：%s",
+                               message_pk, exc)
+        if not restored:
+            return False, "這則已經放回過了，或不在隔離區。"
+        return True, f"已放回主頻道。{note}"
+
+    async def find_quarantine_messages(self, pks: list[int]) -> list[discord.Message]:
+        """隔離 thread 裡、footer 的 db# 是這批 pk 的 bot 訊息（相簿第一次送出與補圖各一則）。"""
+        if self._quarantine is None:
+            return []
+        wanted = {int(pk) for pk in pks}
+        rows = await self.repository.get_deliveries(list(wanted))
+        thread_ids = {ch for channels in rows.values() for ch in channels
+                      if await self._quarantine.parent_of(ch) is not None}
+        me = getattr(getattr(self.bot, "user", None), "id", None)
+        found = []
+        for thread_id in thread_ids:
+            thread = await fetch_thread(self.bot, thread_id)
+            if thread is None:
+                continue
+            async for message in thread.history(limit=self._QUARANTINE_SCAN_LIMIT):
+                if getattr(message.author, "id", None) != me:
+                    continue
+                footers = [getattr(getattr(e, "footer", None), "text", "") or "" for e in message.embeds]
+                if any(int(m) in wanted for f in footers for m in re.findall(r"db#(\d+)", f)):
+                    found.append(message)
+        return found
+
+    async def _mark_restored(self, pks: list[int], restored_by: str) -> None:
+        """隔離那則（含補圖）最上面加一行「已由 X 放回主頻道」；改不了只記 log（主頻道已經送出）。"""
+        note = f"✅ 已由 {restored_by} 放回主頻道"
+        for message in await self.find_quarantine_messages(pks):
+            try:
+                await reopen_thread(message.channel)
+                content = (message.content or "").strip()
+                await message.edit(content=f"{content}\n{note}" if content else note)
+            except Exception as exc:
+                logger.warning("隔離那則改成已放回失敗 message_id=%s：%s", getattr(message, "id", None), exc)
+
+    # 放回時往回翻隔離 thread 找原貼文的則數上限（一天約一則，翻得到幾個月）
+    _QUARANTINE_SCAN_LIMIT = 500
 
     async def _process_group_member(self, message: TelegramMessageRecord, started: float) -> None:
         """media group 組員入口：同組同時只有一個收集者，其餘組員登記後返回。"""
@@ -2052,6 +2256,8 @@ class MessageRelayWorker:
                 )
                 sent_pks.update(pending)
                 followup = followup or follow is not None
+                if target_id != channel_id:
+                    self._quarantine.changed(channel_id, target)
             except Exception as exc:
                 failed_pks.update(pending)
                 logger.error(
@@ -2155,6 +2361,8 @@ class MessageRelayWorker:
                 published_count += await self._send_unit(
                     message, [message_pk], target, target_id, header=self._verdict_header(verdict),
                 )
+                if target_id != channel_id:
+                    self._quarantine.changed(channel_id, target)
             except Exception as exc:
                 logger.error(
                     "Telegram relay 發送失敗: message_pk=%s channel_id=%s err=%s",

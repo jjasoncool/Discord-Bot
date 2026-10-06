@@ -58,6 +58,7 @@ COMMAND_MODULES = [
     'commands.periodic_reminder_commands',
     'commands.rollcall_commands',
     'commands.shop_commands',
+    'commands.telegram_quarantine_commands',
     'commands.trade_commands',
     'commands.test_commands',
     'commands.user_commands'
@@ -826,6 +827,11 @@ async def auto_start_telegram_relay(bot):
         from services.relay.telegram_filter import RelayFilter
         from services.relay.telegram_quarantine import RUNTIME_PATH, QuarantineThreads
 
+        # 隔離區面板（commands.telegram_quarantine_commands）：隔離區有變動時置底重畫，放回也經過它
+        panel_cog = bot.get_cog("TelegramQuarantineCommands")
+        quarantine = QuarantineThreads(
+            bot, RUNTIME_PATH, on_change=panel_cog.on_quarantine_change if panel_cog is not None else None,
+        )
         worker = MessageRelayWorker(
             bot=bot,
             repository=repository,
@@ -837,8 +843,10 @@ async def auto_start_telegram_relay(bot):
             poll_interval_sec=3600,
             # 過濾關掉（mode=off）時也要有隔離區：之前被隔離的相簿，晚到的圖才會跟著進 thread
             content_filter=RelayFilter(),
-            quarantine=QuarantineThreads(bot, RUNTIME_PATH),
+            quarantine=quarantine,
         )
+        if panel_cog is not None:
+            panel_cog.worker = worker
 
         await worker.start()
         bot.telegram_relay_worker = worker

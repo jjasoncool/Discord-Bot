@@ -28,3 +28,4 @@ src/settings/rollcall_runtime.json
 src/settings/community_panel_runtime.json
 src/settings/periodic_reminder_runtime.json
 src/settings/telegram_quarantine_runtime.json
+src/settings/telegram_quarantine_panel_runtime.json
