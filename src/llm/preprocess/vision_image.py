@@ -8,14 +8,25 @@
 **為什麼挑「變化大」的幀而不是等距抽樣**：反應 gif 常常幾十幀都在原地抖，等距抽樣會拿到
 一疊幾乎一樣的圖，白白吃掉 context。改成比較相鄰幀的平均像素差，只留變化超過門檻的。
 
-**為什麼用 PIL 不用 ffmpeg/OpenCV**：Pillow 已經在 image 裡（相依帶進來的），ffmpeg 要另外
-裝、OpenCV 更肥。灰階縮圖算差值這種程度用不到那些。缺 Pillow 時整條路退回「原圖照送」，
-不會因此丟掉圖。
+**為什麼挑幀用 PIL 不用 OpenCV**：Pillow 已經在 image 裡（相依帶進來的），OpenCV 更肥，灰階縮圖
+算差值這種程度用不到。缺 Pillow 時整條路退回「原圖照送」，不會因此丟掉圖。影片（mp4、webm）PIL
+解不開，由 ffmpeg 先解出一些畫格（`video_key_frames`），再交給同一套挑幀規則（`select_key_frames`）——
+挑幀規則全專案只有一份。
+
+**為什麼要縮圖（`fit_for_vision`）**：靜圖原本原樣送出，Telegram 有 4100×4080、13.8 MB 的 PNG，動圖拆出來
+也是原解析度；縮到長邊上限、轉 JPEG，模型看得一樣清楚，請求小很多，也不會撞到後端不吃的格式。
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import shutil
+import tempfile
 from io import BytesIO
+from pathlib import Path
+from typing import Iterable
+
+from utils.media_probe import probe_duration
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +59,21 @@ def is_universal_image(data: bytes) -> bool:
     return bool(data) and (data.startswith(_JPEG_MAGIC) or data.startswith(_PNG_MAGIC))
 
 
+def _flatten(im):
+    """轉 RGB；有透明度的先鋪白底。直接 convert 會把透明的地方變成黑色，透明背景上的深色線稿就整張黑掉。"""
+    if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
+        from PIL import Image
+
+        rgba = im.convert("RGBA")
+        background = Image.new("RGB", rgba.size, (255, 255, 255))
+        background.paste(rgba, mask=rgba.getchannel("A"))
+        return background
+    return im.convert("RGB")
+
+
 def _to_png(im) -> bytes:
     buf = BytesIO()
-    im.convert("RGB").save(buf, format="PNG")
+    _flatten(im).save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -65,56 +88,141 @@ def _mean_abs_diff(a, b) -> float:
     return sum(value * count for value, count in enumerate(hist)) / total
 
 
-def extract_key_frames(data: bytes, max_frames: int = 4) -> list[bytes]:
-    """動圖 → 變化夠大的關鍵幀（PNG）；靜圖、非動圖、或拆不動時回 `[原圖]`。
+def select_key_frames(frames: Iterable, max_frames: int = DEFAULT_MAX_FRAMES) -> tuple[list, list[int]]:
+    """一串依時間排好的幀（PIL Image）→ 變化夠大的關鍵幀（RGB）與它們的位置。挑幀規則全專案只有這一份。
 
-    一定會收第一幀；末幀在還有名額時補進來，讓「最後長什麼樣」不會漏掉——
-    很多梗圖的笑點就在最後一幀。
+    一定會收第一幀；末幀在還有名額時補進來，讓「最後長什麼樣」不會漏掉——很多梗圖的笑點就在最後一幀。
+    `frames` 可以是邊解邊給的 iterator：名額滿了就不再往下讀。
     """
+    kept: list = []
+    kept_indices: list[int] = []
+    if max_frames < 1:
+        return kept, kept_indices
+    prev_small = None
+    last = None
+    for idx, frame in enumerate(frames):
+        # convert 一次拿到合成後的完整幀（partial frame 的 gif 直接取會破圖）
+        full = _flatten(frame)
+        small = full.convert("L").resize(_COMPARE_SIZE)
+        last = (idx, full, small)
+        if prev_small is not None and (
+            idx - kept_indices[-1] < _MIN_FRAME_GAP
+            or _mean_abs_diff(small, prev_small) <= _DIFF_THRESHOLD
+        ):
+            continue
+        kept.append(full)
+        kept_indices.append(idx)
+        prev_small = small
+        # 收完就檢查：名額只有 1 張時只收第一幀
+        if len(kept) >= max_frames:
+            break
+
+    # 末幀補課：還有名額、它本來沒被選中、而且跟最後收的那張不一樣 → 補上（梗圖的結果常在最後）。
+    # 一樣的不補：影片只有一個關鍵畫格時，解出來的每格都是同一張，補了只是讓模型看兩次
+    if (last is not None and len(kept) < max_frames and kept_indices[-1] != last[0]
+            and _mean_abs_diff(last[2], prev_small) > _DIFF_THRESHOLD):
+        kept.append(last[1])
+        kept_indices.append(last[0])
+    return kept, kept_indices
+
+
+def extract_key_frames(data: bytes, max_frames: int = 4) -> list[bytes]:
+    """動圖 → 變化夠大的關鍵幀（PNG）；靜圖、非動圖、或拆不動時回 `[原圖]`。挑法見 `select_key_frames`。"""
     if not data or max_frames <= 1:
         return [data]
     try:
-        from PIL import Image
+        from PIL import Image, ImageSequence
 
         with Image.open(BytesIO(data)) as im:
             n_frames = getattr(im, "n_frames", 1)
             if n_frames <= 1:
                 return [data]
-
-            kept: list[bytes] = []
-            kept_indices: list[int] = []
-            prev_small = None
-            for idx in range(n_frames):
-                im.seek(idx)
-                # convert 一次拿到合成後的完整幀（partial frame 的 gif 直接取會破圖）
-                full = im.convert("RGB")
-                small = full.convert("L").resize(_COMPARE_SIZE)
-                if prev_small is None:
-                    kept.append(_to_png(full))
-                    kept_indices.append(idx)
-                elif (
-                    idx - kept_indices[-1] >= _MIN_FRAME_GAP
-                    and _mean_abs_diff(small, prev_small) > _DIFF_THRESHOLD
-                ):
-                    kept.append(_to_png(full))
-                    kept_indices.append(idx)
-                    if len(kept) >= max_frames:
-                        break
-                else:
-                    continue
-                prev_small = small
-
-            # 末幀補課：還有名額、且它本來沒被選中 → 補上（梗圖的結果常在最後）
-            if len(kept) < max_frames and kept_indices[-1] != n_frames - 1:
-                im.seek(n_frames - 1)
-                kept.append(_to_png(im.convert("RGB")))
-                kept_indices.append(n_frames - 1)
+            kept, kept_indices = select_key_frames(ImageSequence.Iterator(im), max_frames)
+            out = [_to_png(f) for f in kept]
     except Exception as exc:
         logger.debug("動圖拆幀失敗，原圖照送：%s", exc)
         return [data]
 
     logger.info("動圖拆幀：%d 幀 → 取 %s", n_frames, kept_indices)
-    return kept
+    return out
+
+
+def fit_for_vision(data: bytes, *, max_side: int = 1280, quality: int = 85) -> bytes | None:
+    """縮到長邊不超過 `max_side`、轉成 JPEG（動圖取第一幀）。打不開回 None，由呼叫端決定要不要跳過這張。
+
+    JPEG 是所有 vision 後端都吃的格式（`llm_service` 也一律標成 `image/jpeg` 送出），體積比 PNG 小 5～10 倍。
+    """
+    if not data:
+        return None
+    try:
+        from PIL import Image
+
+        with Image.open(BytesIO(data)) as im:
+            im.seek(0)
+            rgb = _flatten(im)
+        rgb.thumbnail((max_side, max_side))
+        buf = BytesIO()
+        rgb.save(buf, format="JPEG", quality=quality)
+        return buf.getvalue()
+    except Exception as exc:
+        logger.debug("vision 縮圖失敗：%s", exc)
+        return None
+
+
+async def video_key_frames(path: str | Path, max_frames: int = DEFAULT_MAX_FRAMES, *, max_side: int = 1280,
+                           sample_frames: int = 12, timeout: float = 60) -> list[bytes]:
+    """影片 → 關鍵幀（PNG，長邊不超過 `max_side`）；解不開、逾時回空清單。
+
+    ffmpeg 只解關鍵畫格（`-skip_frame nokey`）、在整支影片平均取 `sample_frames` 格再交給 `select_key_frames`：
+    完整解碼 4K 影片要 40 秒，只解關鍵畫格 2 秒。ffmpeg 直接輸出動態 PNG 到管線會產生壞檔（被當成單張），
+    所以先輸出成一張張 PNG 再讀回來。CPU 工作（讀檔、挑幀）與暫存資料夾的建立、刪除丟到執行緒，不卡 event loop。
+
+    fps 濾鏡要 `eof_action=pass`：預設會在結尾丟掉最後一個輸入幀，只有一個關鍵畫格的短片（Telegram 的 GIF 轉
+    mp4 多半如此，約一成影片）會一張都抽不出來，多個關鍵畫格的也可能漏掉最後一段。
+    """
+    if max_frames < 1:
+        return []
+    duration = await probe_duration(str(path))
+    if duration <= 0:
+        return []
+    tmp = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="vision_video_"))
+    try:
+        cmd = [
+            "ffmpeg", "-v", "error", "-nostdin", "-skip_frame", "nokey", "-i", str(path),
+            "-vf", f"fps={sample_frames}/{duration:.3f}:eof_action=pass,scale='min({max_side},iw)':-2",
+            "-frames:v", str(sample_frames), str(tmp / "frame_%03d.png"),
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout)
+        except asyncio.TimeoutError:
+            logger.warning("影片抽幀逾時（%s 秒）：%s", timeout, path)
+            return []
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+        if proc.returncode != 0:
+            logger.warning("影片抽幀失敗（rc=%s）：%s %s", proc.returncode, path, stderr.decode(errors="replace")[-300:])
+            return []
+        return await asyncio.to_thread(_pick_from_dir, tmp, max_frames)
+    finally:
+        await asyncio.to_thread(shutil.rmtree, tmp, True)
+
+
+def _pick_from_dir(folder: Path, max_frames: int) -> list[bytes]:
+    from PIL import Image
+
+    def frames():
+        for file in sorted(folder.glob("frame_*.png")):
+            with Image.open(file) as im:
+                yield im.convert("RGB")
+
+    kept, kept_indices = select_key_frames(frames(), max_frames)
+    logger.info("影片抽幀：取 %s", kept_indices)
+    return [_to_png(f) for f in kept]
 
 
 def to_png_first_frame(data: bytes) -> bytes:

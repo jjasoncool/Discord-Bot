@@ -18,7 +18,13 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from llm.preprocess.vision_image import extract_key_frames, is_universal_image, to_png_first_frame
+from llm.preprocess.vision_image import (
+    extract_key_frames,
+    fit_for_vision,
+    is_universal_image,
+    select_key_frames,
+    to_png_first_frame,
+)
 from services.llm_service import _convert_messages_for_openai, _downgrade_images
 
 try:
@@ -157,6 +163,64 @@ class DowngradeTests(unittest.TestCase):
             _downgrade_images([{"role": "user", "images": [base64.b64encode(junk).decode()]}])
         )
 
+
+
+
+@unittest.skipUnless(HAS_PIL, "需要 Pillow")
+class FitForVisionTests(unittest.TestCase):
+    """給 vision 模型前縮圖：長邊不超過上限、一律 JPEG，打不開回 None。"""
+
+    def test_large_image_is_downscaled_to_jpeg(self):
+        buf = BytesIO()
+        Image.new("RGB", (4100, 2000), (10, 200, 10)).save(buf, format="PNG")
+        out = fit_for_vision(buf.getvalue(), max_side=1280)
+        with Image.open(BytesIO(out)) as im:
+            self.assertEqual(im.format, "JPEG")
+            self.assertEqual(max(im.size), 1280)
+
+    def test_small_image_keeps_its_size(self):
+        with Image.open(BytesIO(fit_for_vision(_png(), max_side=1280))) as im:
+            self.assertEqual(im.size, (64, 64))
+
+    def test_garbage_returns_none(self):
+        self.assertIsNone(fit_for_vision(b"not an image"))
+        self.assertIsNone(fit_for_vision(b""))
+
+
+@unittest.skipUnless(HAS_PIL, "需要 Pillow")
+class SelectKeyFramesTests(unittest.TestCase):
+    """挑幀規則吃一串 PIL 幀（影片解出來的畫格走這裡），跟動圖拆幀是同一套。"""
+
+    def test_same_choice_as_gif(self):
+        # 每幀都不同：第一幀一定收、隔兩幀才收下一張、末幀補課 → [0, 2, 3]，跟同樣內容的 GIF 拆幀一致
+        colours = [(220, 20, 20), (20, 220, 20), (20, 20, 220), (220, 220, 20)]
+        frames = [Image.new("RGB", (64, 64), c) for c in colours]
+        _, indices = select_key_frames(iter(frames), 4)
+        self.assertEqual(indices, [0, 2, 3])
+        self.assertEqual(len(extract_key_frames(_gif(colours), 4)), len(indices))
+
+    def test_identical_last_frame_is_not_added_again(self):
+        # 影片只有一個關鍵畫格時，解出來的每一格都一樣：末幀補課不能再補一張一樣的
+        frames = [Image.new("RGB", (64, 64), (40, 40, 40)) for _ in range(5)]
+        _, indices = select_key_frames(iter(frames), 4)
+        self.assertEqual(indices, [0])
+
+    def test_single_slot_keeps_only_the_first_frame(self):
+        frames = [Image.new("RGB", (64, 64), c) for c in [(220, 20, 20), (20, 220, 20), (20, 20, 220)]]
+        kept, indices = select_key_frames(iter(frames), 1)
+        self.assertEqual(indices, [0])
+        self.assertEqual(select_key_frames(iter(frames), 0), ([], []))
+
+    def test_stops_reading_when_full(self):
+        consumed = []
+
+        def frames():
+            for n in range(40):
+                consumed.append(n)
+                yield Image.new("RGB", (64, 64), ((n * 60) % 256, (n * 110) % 256, (n * 170) % 256))
+        kept, _ = select_key_frames(frames(), 3)
+        self.assertEqual(len(kept), 3)
+        self.assertLess(len(consumed), 40, "名額滿了就不再往下解")
 
 if __name__ == "__main__":
     unittest.main()

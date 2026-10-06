@@ -79,6 +79,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 別的伺服器的表情／貼圖給 AI 看圖 | `llm.preprocess.external_emoji.external_emoji_context` |
 | Telegram 爬蟲下載媒體 | `telegram_scraper.media_download.download_with_stall_guard`（太久沒進度就取消；時限常數：補掃重試與補發通知 `MEDIA_RETRY_WINDOW`、新訊息圖沒到先不通知 `MEDIA_HOLD_NOTIFY`） |
 | 下載網址上的圖給 vision 模型 | `llm.preprocess.vision_image.download_images`（失敗跳過、限張數與大小） |
+| 本機的圖與影片給 vision 模型（縮圖、動圖與影片挑幀） | `llm.preprocess.vision_image.fit_for_vision`（縮到長邊上限、轉 JPEG）、`extract_key_frames`（動圖）、`video_key_frames`（影片）；挑幀規則只有 `select_key_frames` 一份 |
 | 讀影片長度 | `utils.media_probe.probe_duration`（ffprobe；失敗、逾時回 0） |
 | 取模型回答的最後一行結論 | `llm.prompt.answer_line.final_line`（去思考區塊與「第二行：」這類照抄格式的前綴；prompt 讓模型先寫理由、最後一行才寫結論） |
 | 改寫使用者也會手改的文字檔 | `utils.safe_write.replace_text`（暫存檔換名、每天第一次改寫前備份） |
