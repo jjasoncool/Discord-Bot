@@ -23,6 +23,7 @@ from services.relay.telegram_relay_service import (
     TelegramMediaRecord,
     TelegramMessageRecord,
 )
+from telegram_scraper.media_download import MEDIA_RETRY_WINDOW
 
 # 刻意用不存在的假 id：logger 會寫進正式 log，用真實 id 會和線上相簿的合併紀錄混在一起
 CHAT = -1009990000001
@@ -167,6 +168,13 @@ def make_worker():
 
 def media_of(*pks):
     return [f"media/{pk}.jpg" for pk in pks]
+
+
+class ScraperAgreementTests(unittest.TestCase):
+    def test_followup_age_matches_scraper_retry_window(self):
+        """爬蟲補掃重試、補到圖再通知都只做到發文後這段時間；轉發端補圖的時限若比它長，等不到圖，
+        比它短，爬蟲補到圖的通知會被轉發端丟掉。兩邊在不同容器，只能靠這裡守住一致。"""
+        self.assertEqual(MessageRelayWorker._GROUP_FOLLOWUP_MAX_AGE, MEDIA_RETRY_WINDOW)
 
 
 class MediaGroupCollectTests(unittest.IsolatedAsyncioTestCase):

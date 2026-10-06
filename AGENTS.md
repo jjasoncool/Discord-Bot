@@ -77,6 +77,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 讀寫別的伺服器的貼圖描述（`settings/sticker_dictionary.txt`） | `llm.preprocess.sticker_dictionary.lookup()`／`add()`；本伺服器的貼圖描述在 Discord 上，走 `sticker_cache` |
 | 沒描述的表情／貼圖讓 AI 看圖補字典 | `llm.preprocess.emoji_autofill.observe`（`on_message` 呼叫；設定 `EmojiAutofillSettings`） |
 | 別的伺服器的表情／貼圖給 AI 看圖 | `llm.preprocess.external_emoji.external_emoji_context` |
+| Telegram 爬蟲下載媒體 | `telegram_scraper.media_download.download_with_stall_guard`（太久沒進度就取消；時限常數：補掃重試與補發通知 `MEDIA_RETRY_WINDOW`、新訊息圖沒到先不通知 `MEDIA_HOLD_NOTIFY`） |
 | 下載網址上的圖給 vision 模型 | `llm.preprocess.vision_image.download_images`（失敗跳過、限張數與大小） |
 | 改寫使用者也會手改的文字檔 | `utils.safe_write.replace_text`（暫存檔換名、每天第一次改寫前備份） |
 | 解析使用者在視窗打的日期／時間（Discord 沒有日期選擇器） | `utils.user_dates.parse_user_date`／`parse_user_datetime`（全形、`/` `-` `.`、年月日都收；讀不懂回 None，訊息與規則留給呼叫端） |

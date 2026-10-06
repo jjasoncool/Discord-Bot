@@ -388,6 +388,34 @@ class TelegramDatabase:
             )
         return {int(row["telegram_message_id"]) for row in rows}
 
+    async def get_message_ids_missing_media(
+        self, telegram_chat_id: int, min_message_id: int, max_message_id: int, posted_after
+    ) -> set[int]:
+        """區間內「標示有圖、卻還沒有媒體列、而且發文時間在 posted_after 之後」的 telegram_message_id。
+
+        給週期性補掃重試下載用：補掃本來看到「訊息已在 DB」就跳過，下載失敗的訊息只有重啟時的
+        歷史掃描會再試；從 known_ids 扣掉這些，它們就會在下一輪補掃重新走一次處理流程。
+        """
+        if self.pool is None:
+            raise RuntimeError("資料庫尚未 connect")
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT m.telegram_message_id FROM telegram_messages m
+                WHERE m.telegram_chat_id = $1
+                  AND m.telegram_message_id BETWEEN $2 AND $3
+                  AND m.has_media
+                  AND m.message_date >= $4
+                  AND NOT EXISTS (SELECT 1 FROM telegram_message_media mm WHERE mm.message_id = m.id);
+                """,
+                int(telegram_chat_id),
+                int(min_message_id),
+                int(max_message_id),
+                posted_after,
+            )
+        return {int(row["telegram_message_id"]) for row in rows}
+
     async def has_media_records(self, message_pk: int) -> bool:
         """確認此訊息是否已有媒體記錄。"""
         if self.pool is None:

@@ -1,5 +1,7 @@
+import asyncio
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +12,7 @@ from filters import (
     is_forward_source_in_whitelist,
     should_skip_forward,
 )
+from media_download import MEDIA_HOLD_NOTIFY, MEDIA_RETRY_WINDOW, download_with_stall_guard
 from tg_config import TelegramConfig, TelegramRuntimeConfigWatcher, add_identifier_to_forward_whitelist
 
 logger = logging.getLogger(__name__)
@@ -275,7 +278,7 @@ async def _download_custom_emojis(
         is_animated = mime == "application/x-tgsticker" or mime.startswith("video/")
         target_path = os.path.join(media_dir, f"emoji_{doc_id}{_ext_from_mime(mime)}")
         try:
-            file_path = await client.download_media(doc, file=target_path)
+            file_path = await download_with_stall_guard(client, doc, file=target_path)
         except Exception as exc:
             logger.warning(f"[{log_prefix}] 下載自訂表情失敗 doc_id={doc_id}: {exc}")
             continue
@@ -291,6 +294,49 @@ async def _download_custom_emojis(
             logger.warning(f"[{log_prefix}] 寫入自訂表情記錄失敗 doc_id={doc_id}: {exc}")
         else:
             logger.info(f"[{log_prefix}] 自訂表情已下載 doc_id={doc_id} animated={is_animated} path={rel_path}")
+
+
+#: Telethon 挑照片尺寸時會先去掉這兩種：空殼，和只有輪廓向量的 PhotoPathSize（只剩它時下載會出錯）
+_UNDOWNLOADABLE_PHOTO_SIZES = frozenset({"PhotoSizeEmpty", "PhotoPathSize"})
+
+
+def _usable_photo(photo: Any) -> bool:
+    """照片要有至少一個真的能下載的尺寸（PhotoEmpty 沒有尺寸）。"""
+    sizes = getattr(photo, "sizes", None) or []
+    return any(type(size).__name__ not in _UNDOWNLOADABLE_PHOTO_SIZES for size in sizes)
+
+
+def _usable_document(document: Any) -> bool:
+    """文件要有大小（DocumentEmpty 這類空殼沒有）。"""
+    return getattr(document, "size", None) is not None
+
+
+def _downloadable_media(message: Any) -> Any | None:
+    """這則訊息裡「download_media 真的會下載到檔案」的媒體物件；沒有就回 None。
+
+    照 Telethon download_media 依外層型別分派：照片、文件、網頁預覽（取 `document or photo`）；
+    其他型別（帳單、投票、地點……）一律不算。聯絡人 Telethon 會產生 vCard 檔，這裡刻意不算：
+    轉發到 Discord 沒有意義。只有 video_sizes、沒有一般尺寸的照片也不算（極少見）。以前用 `bool(message.media)` 判斷有沒有圖，
+    沒附圖的網頁預覽、過期照片、投票等也被標成有圖，卻永遠下載不到；資料庫的「有圖」只會由否變是，
+    轉發端的相簿就一直等這張圖（2026-10-05 查到 24 筆）。
+    """
+    media = getattr(message, "media", None)
+    if media is None:
+        return None
+    kind = type(media).__name__
+    if kind == "MessageMediaPhoto":
+        photo = getattr(media, "photo", None)
+        return photo if _usable_photo(photo) else None
+    if kind == "MessageMediaDocument":
+        document = getattr(media, "document", None)
+        return document if _usable_document(document) else None
+    if kind == "MessageMediaWebPage":
+        page = getattr(media, "webpage", None)
+        # Telethon 取 `document or photo`：文件是空殼（DocumentEmpty 也算真值）時不會改抓照片
+        target = getattr(page, "document", None) or getattr(page, "photo", None)
+        if target is not None and (_usable_document(target) or _usable_photo(target)):
+            return target
+    return None
 
 
 _chat_title_cache: dict[int, str | None] = {}
@@ -310,6 +356,37 @@ async def _resolve_chat_title(client: Any, chat_id: int | None) -> str | None:
         pass
     _chat_title_cache[chat_id] = title
     return title
+
+
+def _message_age(message: Any) -> timedelta:
+    """發文到現在多久。沒有時間的當作剛發。"""
+    date = getattr(message, "date", None)
+    if date is None:
+        return timedelta(0)
+    if date.tzinfo is None:
+        date = date.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - date
+
+
+def _within_retry_window(message: Any) -> bool:
+    """發文時間在補圖時限內（見 media_download.MEDIA_RETRY_WINDOW）。"""
+    return _message_age(message) <= MEDIA_RETRY_WINDOW
+
+
+#: 「先壓著」的訊息已經在滿 30 分鐘時通知過的 pk（每則只放行一次；有上限，爬蟲重啟就清空，
+#: 重啟後最多多通知一次，轉發端有去重）
+_hold_released: dict[int, None] = {}
+_HOLD_RELEASED_MAX = 5000
+
+
+def _mark_hold_released(message_pk: int) -> bool:
+    """記下這則已放行；回傳是不是第一次。"""
+    if message_pk in _hold_released:
+        return False
+    _hold_released[message_pk] = None
+    if len(_hold_released) > _HOLD_RELEASED_MAX:
+        _hold_released.pop(next(iter(_hold_released)))
+    return True
 
 
 async def _process_message(
@@ -362,7 +439,12 @@ async def _process_message(
             logger.info(f"[{log_prefix}] 已自動加入 forward 白名單來源 chat_id={source_chat_id}")
 
     text = raw_text or ""
-    has_media = bool(message.media)
+    has_media = _downloadable_media(message) is not None
+    if message.media is not None and not has_media:
+        media_type = type(message.media).__name__
+        # 沒附圖的網頁預覽很常見，記 INFO；其他看不懂的型別記 WARNING，下次再出現時才知道是什麼
+        level = logging.INFO if media_type == "MessageMediaWebPage" else logging.WARNING
+        logger.log(level, f"[{log_prefix}] 媒體沒有可下載的檔案，當成純文字 message_id={message.id} type={media_type}")
 
     # 解析頻道顯示名稱（title 或 username），供 relay 端作為 embed title
     resolved_chat_title = await _resolve_chat_title(client, chat_id)
@@ -394,18 +476,44 @@ async def _process_message(
     )
 
     # 2. 媒體下載（僅在需要時：新訊息 或 尚無媒體記錄）
+    # media_landed：這次真的補進了媒體列。訊息早就存在、這次才補到圖時，要再通知轉發端（見步驟 3）
+    # download_failed：這次有試著下載、卻沒拿到圖（步驟 3 決定要不要先壓著不通知）
+    media_landed = False
+    download_failed = False
     if has_media and runtime_snapshot.download_media:
         need_download = inserted_new or not await db.has_media_records(message_pk)
         if need_download:
             # 使用穩定檔名（依 photo/document ID），避免重啟產生 (N) 後綴
             target_path = _build_stable_media_path(message, runtime_snapshot.media_dir)
-            file_path = await client.download_media(message, file=target_path or runtime_snapshot.media_dir)
-            logger.info(f"[{log_prefix}] 媒體已下載: {file_path}")
+            file_path = None
+            try:
+                file_path = await download_with_stall_guard(
+                    client, message, file=target_path or runtime_snapshot.media_dir)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # 攔下來、不往外拋：訊息照樣入庫（要不要通知轉發端見步驟 3：新訊息先壓著）；補掃會在發文後 12 小時內重試。
+                # 以前沒攔，即時事件只留下沒圖的訊息列，啟動的歷史掃描則會讓整個爬蟲當掉、陷入重啟迴圈。
+                # dc_id：同一個資料中心連續卡住時，多半是那條連線壞了（Telethon 不會自己換），要重啟爬蟲
+                logger.warning(
+                    f"[{log_prefix}] 媒體下載失敗（補掃會在 12 小時內重試）"
+                    f"message_id={message.id} type={type(message.media).__name__} "
+                    f"dc_id={getattr(_downloadable_media(message), 'dc_id', None)}: {exc!r}"
+                )
+            else:
+                if file_path:
+                    logger.info(f"[{log_prefix}] 媒體已下載: {file_path}")
+                else:
+                    logger.warning(
+                        f"[{log_prefix}] 媒體下載沒有拿到檔案 message_id={message.id} type={type(message.media).__name__}"
+                    )
             media_items: list[dict] = []
             if file_path:
                 file_rel_path = _to_shared_media_rel_path(str(file_path), runtime_snapshot.media_dir)
                 media_items.append(_build_media_item(message, file_rel_path))
             await db.upsert_media_items(message_pk, media_items)
+            media_landed = bool(media_items)
+            download_failed = not media_landed
         else:
             logger.info(f"[{log_prefix}] 媒體已存在，略過下載 message_pk={message_pk}")
             # 檔案在就不重抓，但 spoiler 旗標仍要校正——早期版本讀錯欄位（media_unread），
@@ -429,10 +537,42 @@ async def _process_message(
         except Exception as exc:
             logger.exception(f"[{log_prefix}] 處理自訂表情時發生例外 message_pk={message_pk}: {exc}")
 
-    # 3. 通知（僅新訊息才 NOTIFY）
-    if inserted_new:
+    # 3. 通知轉發端
+    # /resend_article 的重抓（Refetch）只照舊「新訊息才通知」：它自己會送，這裡多通知會重複貼文
+    age = _message_age(message)
+    hold = (
+        download_failed and log_prefix != "Refetch"
+        and runtime_snapshot.catchup_interval_min > 0 and age < MEDIA_HOLD_NOTIFY
+    )
+    if inserted_new and hold:
+        # 新訊息的圖第一次沒下載到：先不通知，等補掃（每輪重試）補到圖再通知，文字和圖一起送成一則。
+        # 轉發端的單則不等圖，這裡就通知的話文字會先送出、之後補到的圖再也送不出去。
+        # 補掃關掉時不壓（沒有人會再試）；發文已超過 30 分鐘的（漏收後才補進來的）也不壓，等待時間已經過了。
+        logger.info(
+            f"[{log_prefix}] 圖還沒下載到，先不通知轉發端（補到圖才通知；有文字的單則發文滿 30 分鐘先送文字）"
+            f"message_pk={message_pk}"
+        )
+    elif inserted_new:
         await db.notify_new_message(message_pk)
         logger.info(f"[{log_prefix}] DB 新增訊息成功 message_pk={message_pk}")
+        if download_failed:
+            # 沒圖就已經通知過（沒壓）：之後重試又失敗時不必再「放行」通知一次
+            _mark_hold_released(message_pk)
+    elif log_prefix != "Refetch" and _within_retry_window(message) and media_landed:
+        # 訊息早就在、這次才補到圖：以前不通知，轉發端只有重啟時才知道（圖因此沒送出）。
+        # 只在發文後 12 小時內通知（超過轉發端本來就不補送）；重掃本來就完整的訊息不會走到這裡。
+        await db.notify_new_message(message_pk)
+        logger.info(f"[{log_prefix}] 補到媒體，通知轉發端 message_pk={message_pk}")
+    elif (
+        log_prefix != "Refetch" and _within_retry_window(message) and download_failed
+        and age >= MEDIA_HOLD_NOTIFY and text.strip() and grouped_id is None
+        and _mark_hold_released(message_pk)
+    ):
+        # 壓著的「有文字的單則」發文滿 30 分鐘還是沒補到圖：通知一次，讓文字先送；之後補到圖仍會再通知。
+        # 沒文字的單則和相簿組員不放行：轉發端會把沒文字的當空訊息略過並記成處理過（之後補到的圖要等
+        # bot 重啟才送），相簿只送已經有圖的組員（放行只會讓它白等）——它們繼續壓著，等補到圖再通知。
+        await db.notify_new_message(message_pk)
+        logger.info(f"[{log_prefix}] 圖等滿 30 分鐘還沒下載到，先通知轉發端送文字 message_pk={message_pk}")
     else:
         logger.info(f"[{log_prefix}] DB 已存在訊息（略過重複）message_pk={message_pk}")
 

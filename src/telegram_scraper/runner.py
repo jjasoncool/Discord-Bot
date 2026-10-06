@@ -14,6 +14,7 @@ from handlers import (
     handle_new_message,
     handle_refetch_message,
 )
+from media_download import MEDIA_RETRY_WINDOW
 from message_lock import KeyedLock, message_lock_key
 from tg_config import TelegramConfig, TelegramRuntimeConfigWatcher
 
@@ -91,6 +92,43 @@ async def _resolve_catchup_chat_id(client, source_channel: str) -> int | None:
     return chat_id
 
 
+async def _prime_update_state(client, listen_channels: list[str], *, startup: bool) -> bool:
+    """讀一次對話清單，讓 Telethon 對好各頻道的「更新起點」。回傳監聽的頻道是否都在對話清單裡。
+
+    **為什麼**：Telethon 要先知道每個頻道「目前收到第幾號」（pts），才看得出中間少了訊息、自己去補。
+    我們用預設的 catch_up=False 建 client、也從沒讀過對話清單，所以每次啟動各頻道都沒有起點，起點要等
+    「啟動後第一則推送」才臨時建立；在那之前沒推到的訊息、編號比起點小的（相簿開頭幾張）都被當成已處理
+    而無聲略過（2026-10-05 根因分析：啟動後各頻道第一則即時漏收 53%，相簿只缺開頭、從不缺結尾）。
+    讀對話清單時 Telethon 會記下各頻道的 access hash 並設好起點（已有起點的不會被覆蓋）。
+
+    失敗只記 WARNING、不擋啟動：退回現況，靠補掃撿回漏收的訊息。
+    """
+    try:
+        dialogs = await client.get_dialogs()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning(f"[Telegram] 讀取對話清單失敗，頻道的更新起點沒有對好（漏收的訊息改靠補掃）: {exc}")
+        return False
+
+    dialog_ids = {getattr(dialog, "id", None) for dialog in dialogs}
+    missing = []
+    for source_channel in listen_channels:
+        chat_id = await _resolve_catchup_chat_id(client, source_channel)
+        if chat_id is None or chat_id not in dialog_ids:
+            missing.append(source_channel)
+    if missing:
+        logger.warning(
+            f"[Telegram] 對話清單裡沒有這些監聽頻道：{', '.join(missing)}。"
+            "Telegram 不會即時推送它們，只能靠補掃"
+        )
+    logger.log(
+        logging.INFO if startup else logging.DEBUG,
+        f"[Telegram] 已讀取對話清單（{len(dialogs)} 個），對好各頻道的更新起點",
+    )
+    return not missing
+
+
 async def _catch_up_channel(
     source_channel: str,
     client,
@@ -120,10 +158,21 @@ async def _catch_up_channel(
     window_start = max(last_id - CATCHUP_GAP_WINDOW, 0)
     # 視窗內已在 DB 的 id 一次撈成 set：迴圈裡只做記憶體比對，不逐則查 DB
     known_ids = await db.get_existing_message_ids(chat_id, window_start, last_id)
+    # 下載失敗、還沒有圖的訊息不算「已知」：發文後 12 小時內每輪重試下載（補到會通知轉發端）。
+    # 以前看到訊息在 DB 就跳過，只有重啟時的歷史掃描會再試，晚了 1～2 天的圖因此一直沒送出。
+    # 只涵蓋這個視窗（最近 CATCHUP_GAP_WINDOW 則）；視窗外的缺圖列要等爬蟲重啟時的歷史掃描。
+    # 下載功能關掉時不重試：重跑也不會下載，只是每輪白做一次。
+    retry_ids: set[int] = set()
+    if runtime_watcher.get_snapshot().download_media:
+        retry_ids = await db.get_message_ids_missing_media(
+            chat_id, window_start, last_id, datetime.now(timezone.utc) - MEDIA_RETRY_WINDOW
+        )
+    known_ids -= retry_ids
 
     fetched = 0
     skipped = 0
     accepted = 0
+    retried = 0
     # reverse=True 時 Telethon 會把 offset_id 當「從此 id 之後開始」（內部 +1，不含基準本身），
     # 且回傳順序為舊 → 新，正好讓 BIGSERIAL 與訊息時序一致，relay 才能照時序發。
     #
@@ -147,14 +196,20 @@ async def _catch_up_channel(
             if await handle_catchup_message(
                 msg, client, config, runtime_watcher, db, source_label=source_channel
             ):
-                accepted += 1
+                if msg.id in retry_ids:
+                    retried += 1
+                else:
+                    accepted += 1
 
-    if accepted or fetched > skipped:
+    # 重試下載分開算：缺圖的訊息 12 小時內每輪都會被重跑，混在「補回漏收」裡查漏收時會誤導
+    if accepted:
         logger.info(
             f"[CatchUp] {source_channel} 補回漏收訊息："
             f"視窗 {window_start}~{last_id} 撈到 {fetched} 筆、"
             f"已存在略過 {skipped} 筆、收下 {accepted} 筆"
         )
+    if retried:
+        logger.info(f"[CatchUp] {source_channel} 重試下載缺圖的訊息 {retried} 筆")
     if fetched >= CATCHUP_GAP_WINDOW + CATCHUP_MAX_PER_CYCLE:
         logger.info(
             f"[CatchUp] {source_channel} 已達單輪上限"
@@ -185,17 +240,33 @@ async def _catch_up_loop(
             continue
 
         await asyncio.sleep(interval_min * 60)
+        await _catch_up_round(client, config, runtime_watcher, db, listen_channels, message_locks)
 
-        for source_channel in listen_channels:
-            try:
-                await _catch_up_channel(
-                    source_channel, client, config, runtime_watcher, db, message_locks
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                # 單一頻道失敗（FloodWait、暫時性網路問題等）不能拖垮整個補掃迴圈
-                logger.warning(f"[CatchUp] {source_channel} 補掃失敗（下一輪重試）: {exc}")
+
+async def _catch_up_round(
+    client,
+    config: TelegramConfig,
+    runtime_watcher: TelegramRuntimeConfigWatcher,
+    db: TelegramDatabase,
+    listen_channels: list[str],
+    message_locks: KeyedLock,
+) -> None:
+    """一輪補掃：先再對一次各頻道的更新起點，再逐頻道補掃。
+
+    起點在缺 access hash 時會被 Telethon 無聲刪掉（之後又回到「等第一則推送」的狀態），這裡每輪補回；
+    中間漏掉的訊息由同一輪的視窗回看補進來。
+    """
+    await _prime_update_state(client, listen_channels, startup=False)
+    for source_channel in listen_channels:
+        try:
+            await _catch_up_channel(
+                source_channel, client, config, runtime_watcher, db, message_locks
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # 單一頻道失敗（FloodWait、暫時性網路問題等）不能拖垮整個補掃迴圈
+            logger.warning(f"[CatchUp] {source_channel} 補掃失敗（下一輪重試）: {exc}")
 
 
 async def run_telegram_scraper(config: TelegramConfig) -> None:
@@ -271,6 +342,9 @@ async def run_telegram_scraper(config: TelegramConfig) -> None:
         else:
             logger.info("[Telegram] Forward 白名單未設定")
 
+        # 歷史掃描之前先對好起點：起點之前的訊息由歷史掃描補，之後的由 Telethon 自己補，中間不留空窗
+        await _prime_update_state(client, listen_channels, startup=True)
+
         logger.info(f"[Telegram] 已連線，開始抓取來源頻道: {', '.join(listen_channels)}")
         cutoff_dt = None
         if runtime_snapshot.history_hours is not None:
@@ -297,9 +371,12 @@ async def run_telegram_scraper(config: TelegramConfig) -> None:
 
             accepted_history_count = 0
             for msg in pending_msgs:
-                accepted = await handle_history_message(
-                    msg, client, config, runtime_watcher, db, source_label=source_channel
-                )
+                # 即時事件在 start 之後就開始收；起點對好後 Telethon 還會在掃描期間主動補抓並派發，
+                # 會撞到同一則——跟即時事件、補掃一樣上單則鎖，避免同一則被並行處理、重複下載
+                async with message_locks.hold(message_lock_key(msg)):
+                    accepted = await handle_history_message(
+                        msg, client, config, runtime_watcher, db, source_label=source_channel
+                    )
                 if accepted:
                     accepted_history_count += 1
             logger.info(f"[Telegram] {source_channel} 歷史訊息抓取完成（收下 {accepted_history_count} 筆）")

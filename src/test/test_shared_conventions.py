@@ -432,6 +432,13 @@ RULES = [
         allowed={"scraper/", "scripts/"},
     ),
     Rule(
+        name="爬蟲下載 Telegram 媒體（卡住偵測）",
+        pattern=r"\.download_media\(",
+        canonical="telegram_scraper.media_download.download_with_stall_guard",
+        # Telethon 的 download_media 沒有逾時，照片曾卡 1～1.6 小時、整輪補掃跟著停；一律經過卡住偵測
+        allowed={"telegram_scraper/media_download.py"},
+    ),
+    Rule(
         name="官方公告原文網址",
         finder=_find_hardcoded_article_urls,
         canonical="services.relay.article_monitor.official_article_url()",

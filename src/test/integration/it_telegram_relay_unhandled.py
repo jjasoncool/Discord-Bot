@@ -6,8 +6,9 @@
 頻道 0 的 delivered_at 是標記時間、不是送出時間，所以判斷「同組已送」時排除它。
 
 執行（容器內）：
-    docker exec -w /app discord-bot python -m test.integration.it_telegram_relay_unhandled [分鐘，預設 10]
-只看進來超過 N 分鐘的訊息，避開正在處理中的。
+    docker exec -w /app discord-bot python -m test.integration.it_telegram_relay_unhandled [分鐘，預設 60]
+只看進來超過 N 分鐘的訊息，避開正在處理中的：爬蟲在圖還沒下載到時會先壓著不通知（最久約 45 分鐘），
+門檻太短會把這些當成漏送。
 """
 import asyncio
 import sys
@@ -59,4 +60,4 @@ async def main(min_age_minutes: int) -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main(int(sys.argv[1]) if len(sys.argv) > 1 else 10))
+    asyncio.run(main(int(sys.argv[1]) if len(sys.argv) > 1 else 60))
