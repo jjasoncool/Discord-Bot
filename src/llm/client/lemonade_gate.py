@@ -21,6 +21,20 @@
   RAG 用的 embedding（/askai 內 retriever）不掛這個 gate；因為它在 chat
   前就完成，本來就是序列的，不會跟同一個 /askai 的 chat 撞。
 
+── 跨行程排隊（2026-10-06）────────────────────────────────────────
+  asyncio.Lock 只管同一個行程。在 discord-bot 容器裡另開的行程（`docker exec` 跑的手動抽查腳本、
+  之後的 MCP server）打模型時不會排隊，會跟插話、/askai 直接搶：10-06 跑 Telegram 過濾的歷史樣本時，
+  插話一次花了 106 秒。使用者：「我希望跑判斷還是要排隊的」。
+  所以拿到行程內的鎖之後，再拿一把**鎖檔**（`fcntl.flock`，同一個容器的行程共用 /tmp）。
+  - 用非阻塞嘗試＋短暫 sleep 輪詢，不丟到執行緒裡等：等的途中被取消（逾時放行、租約到期）時，
+    不會留下一個之後才拿到鎖、卻沒人放的執行緒。
+  - 關檔就放鎖；行程當掉時作業系統也會放，不會有死鎖殘留。
+  - 開不了鎖檔就只在本行程排隊（記 warning），不擋 LLM。
+  - **輪流**：剛放掉鎖的行程，下一次先讓一拍（比別人的輪詢間隔長）再搶。不然同一行程連續的工作交棒是立刻的，
+    另一個行程每 0.1 秒才試一次，幾乎永遠插不進去，只做到「不同時打模型」，沒做到排隊輪流。
+  - **等太久**：等別的行程超過 `_CROSS_PROCESS_WARN_S` 記 warning（之後每 5 分鐘再記），超過
+    `_CROSS_PROCESS_MAX_WAIT_S` 就不等鎖檔、記 error 照常打模型——別的行程卡住時，bot 的 AI 不能整個靜默停擺。
+
 ── 租約：為什麼不用固定 timeout、也不用 checker task ──────────────
   短工作（chat / embedding）持鎖幾秒到幾分鐘，不需要保護。長工作不同：
   ComfyUI 卡死的話裸 Lock 永遠不放，**bot 的 LLM 功能會全部靜默死掉**
@@ -45,7 +59,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fcntl
 import logging
+import os
 import time
 
 
@@ -58,6 +74,19 @@ _holder: str | None = None
 
 #: watchdog 的檢查間隔上限；租約剩餘時間比這短時會提早醒來。
 _WATCHDOG_TICK_S = 5.0
+
+#: 跨行程的鎖檔（同一個容器的行程共用 /tmp）。單元測試由 test/__init__.py 用環境變數換成暫存檔，不跟執行中的 bot 搶
+CROSS_PROCESS_LOCK_PATH = os.getenv("LEMONADE_GPU_LOCK_PATH", "/tmp/lemonade_gpu.lock")
+#: 別的行程拿著鎖時，多久再試一次
+_CROSS_PROCESS_POLL_S = 0.1
+#: 剛放掉鎖後讓一拍的長度（要比別人的輪詢間隔長，別的行程才碰得到空檔）
+_CROSS_PROCESS_YIELD_S = 2 * _CROSS_PROCESS_POLL_S
+_CROSS_PROCESS_WARN_S = 30.0
+_CROSS_PROCESS_MAX_WAIT_S = 15 * 60.0
+#: 本行程上次放掉鎖檔的時刻（monotonic）
+_last_release = 0.0
+#: 等滿上限放行後，這個時刻（monotonic）之前不再等鎖檔：不然每個呼叫都從頭等 15 分鐘，排在後面的要等 N 倍
+_skip_until = 0.0
 
 
 class GpuLease:
@@ -107,6 +136,46 @@ async def _watch_lease(lease: GpuLease, holder: asyncio.Task | None) -> None:
 
 
 @contextlib.asynccontextmanager
+async def _cross_process_lock():
+    """拿鎖檔（別的行程拿著就輪詢等）；離開時關檔放鎖。開不了鎖檔就只在本行程排隊。"""
+    global _last_release, _skip_until
+    try:
+        fd = os.open(CROSS_PROCESS_LOCK_PATH, os.O_RDWR | os.O_CREAT, 0o666)
+    except OSError as exc:
+        logger.warning("開不了跨行程 GPU 鎖檔，只在本行程排隊：%s", exc)
+        yield
+        return
+    try:
+        since_release = time.monotonic() - _last_release
+        if since_release < _CROSS_PROCESS_YIELD_S:
+            await asyncio.sleep(_CROSS_PROCESS_YIELD_S - since_release)
+        started = time.monotonic()
+        next_warn = _CROSS_PROCESS_WARN_S
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _skip_until = 0.0
+                break
+            except BlockingIOError:
+                if time.monotonic() < _skip_until:
+                    break      # 剛等滿上限放行過：別的行程還卡著，這段時間不再等
+                waited = time.monotonic() - started
+                if waited >= _CROSS_PROCESS_MAX_WAIT_S:
+                    logger.error("等別的行程放 GPU 鎖檔超過 %d 秒，不等了、照常打模型（接下來 %d 秒都不等）（%s）",
+                                 _CROSS_PROCESS_MAX_WAIT_S, _CROSS_PROCESS_MAX_WAIT_S, CROSS_PROCESS_LOCK_PATH)
+                    _skip_until = time.monotonic() + _CROSS_PROCESS_MAX_WAIT_S
+                    break
+                if waited >= next_warn:
+                    logger.warning("別的行程佔著 GPU（鎖檔 %s），已等 %d 秒", CROSS_PROCESS_LOCK_PATH, waited)
+                    next_warn += 300
+                await asyncio.sleep(_CROSS_PROCESS_POLL_S)
+        yield
+    finally:
+        os.close(fd)
+        _last_release = time.monotonic()
+
+
+@contextlib.asynccontextmanager
 async def gpu_exclusive(owner: str = "llm", lease_seconds: float | None = None):
     """獨佔 GPU 的區段；其他競爭者（chat / embedding / 產圖）必須等。
 
@@ -122,7 +191,7 @@ async def gpu_exclusive(owner: str = "llm", lease_seconds: float | None = None):
     會死鎖。要在區段內打後端就直接用 `LlmHttpClient`。
     """
     global _holder
-    async with _GPU_LOCK:
+    async with _GPU_LOCK, _cross_process_lock():
         _holder = owner
         lease = GpuLease(owner, lease_seconds)
         watchdog = (

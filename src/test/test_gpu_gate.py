@@ -15,8 +15,12 @@
 
 import asyncio
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC_DIR = os.path.dirname(HERE)
@@ -39,6 +43,122 @@ class _GateTestCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         gate._GPU_LOCK = asyncio.Lock()
         gate._holder = None
+        gate._last_release = 0.0
+        gate._skip_until = 0.0
+        # 每個測試用自己的鎖檔：不跟同一個容器裡執行中的 bot 搶，也不互相影響
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        patcher = mock.patch.object(gate, "CROSS_PROCESS_LOCK_PATH", os.path.join(tmp, "gpu.lock"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class CrossProcessQueueTests(_GateTestCase):
+    """同一個容器裡另開的行程（手動抽查腳本、MCP server）也要跟 bot 一起排隊，不能直接搶模型。"""
+
+    def hold_in_other_process(self) -> subprocess.Popen:
+        proc = subprocess.Popen(
+            [sys.executable, "-c",
+             "import fcntl, sys, time\n"
+             f"f = open({gate.CROSS_PROCESS_LOCK_PATH!r}, 'a')\n"
+             # 最多等 5 秒：鎖沒被放掉時讓測試直接失敗，不要卡住啟動檢查
+             "deadline = time.monotonic() + 5\n"
+             "while True:\n"
+             "    try:\n"
+             "        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); break\n"
+             "    except BlockingIOError:\n"
+             "        if time.monotonic() > deadline: print('busy', flush=True); sys.exit(1)\n"
+             "        time.sleep(0.05)\n"
+             "print('locked', flush=True)\n"
+             "sys.stdin.readline()\n"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        )
+        if proc.stdout.readline().strip() != "locked":
+            proc.kill()
+            self.fail("鎖一直沒被放掉，別的行程拿不到")
+        return proc
+
+    async def test_waits_while_another_process_holds_the_gpu(self):
+        other = self.hold_in_other_process()
+        entered = asyncio.Event()
+
+        async def job():
+            async with gate.stream_exclusive():
+                entered.set()
+
+        task = asyncio.create_task(job())
+        await asyncio.sleep(0.3)
+        self.assertFalse(entered.is_set(), "別的行程在用，要排隊")
+        other.communicate("\n")          # 對方用完
+        await asyncio.wait_for(task, 2)
+        self.assertTrue(entered.is_set())
+
+    async def test_lock_is_released_after_use_and_after_cancel(self):
+        async with gate.stream_exclusive():
+            pass
+        other = self.hold_in_other_process()   # 用完有放，別的行程拿得到
+        waiting = asyncio.create_task(gate.stream_exclusive().__aenter__())
+        await asyncio.sleep(0.15)
+        waiting.cancel()                        # 等的途中被取消（例如逾時放行）
+        await asyncio.gather(waiting, return_exceptions=True)
+        other.communicate("\n")
+        self.hold_in_other_process().communicate("\n")   # 取消的不會留著鎖
+
+    async def test_takes_turns_with_another_process(self):
+        """本行程有一串工作時，別的行程也要插得進來（輪流用，不是等整串做完）。"""
+        order = []
+        poller = subprocess.Popen(
+            [sys.executable, "-c",
+             "import fcntl, sys, time\n"
+             f"f = open({gate.CROSS_PROCESS_LOCK_PATH!r}, 'a')\n"
+             "deadline = time.monotonic() + 5\n"
+             "while time.monotonic() < deadline:\n"
+             "    try:\n"
+             "        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); print('got', flush=True); sys.exit(0)\n"
+             "    except BlockingIOError:\n"
+             "        time.sleep(0.1)\n"
+             "print('never', flush=True)\n"],
+            stdout=subprocess.PIPE, text=True,
+        )
+
+        async def job(tag, hold):
+            async with gate.stream_exclusive():
+                order.append(tag)
+                await asyncio.sleep(hold)
+
+        async with gate.stream_exclusive():
+            await asyncio.sleep(0.3)          # 本行程先佔著，外部行程開始輪詢
+            follow = asyncio.create_task(job("b", 0.3))   # 緊接著還有下一件
+        line = await asyncio.to_thread(poller.stdout.readline)
+        order.append(line.strip())
+        await follow
+        poller.wait()
+        self.assertEqual(order[0], "got", f"外部行程要在下一件之前插進來：{order}")
+
+    async def test_long_wait_is_logged_and_capped(self):
+        other = self.hold_in_other_process()
+        try:
+            with mock.patch.object(gate, "_CROSS_PROCESS_WARN_S", 0.2), \
+                 mock.patch.object(gate, "_CROSS_PROCESS_MAX_WAIT_S", 0.5):
+                with self.assertLogs("llm.client.lemonade_gate", "WARNING") as logs:
+                    async with gate.stream_exclusive():
+                        pass
+            self.assertTrue(any("已等" in line for line in logs.output), logs.output)
+            self.assertTrue(any("不等了" in line for line in logs.output), "別的行程卡住時不能讓 bot 的 AI 整個停住")
+            # 等滿上限放行後，下一個呼叫不能又從頭等（排在後面的會等 N 倍）
+            started = asyncio.get_running_loop().time()
+            with mock.patch.object(gate, "_CROSS_PROCESS_MAX_WAIT_S", 0.5):
+                async with gate.stream_exclusive():
+                    pass
+            self.assertLess(asyncio.get_running_loop().time() - started, 0.4)
+        finally:
+            other.communicate("\n")
+
+    async def test_unopenable_lock_file_still_queues_in_process(self):
+        with mock.patch.object(gate, "CROSS_PROCESS_LOCK_PATH", "/proc/nope/gpu.lock"):
+            with self.assertLogs("llm.client.lemonade_gate", "WARNING"):
+                async with gate.stream_exclusive():
+                    self.assertTrue(gate.stream_busy())
 
 
 class StreamExclusiveRegressionTests(_GateTestCase):
