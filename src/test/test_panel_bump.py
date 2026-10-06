@@ -3,7 +3,8 @@
 守的底線：
 - 有紀錄：只刪紀錄那一則（一次 API），發新面板後把頻道＋訊息 id 寫回 runtime 檔
 - 寫 runtime 檔時不動檔案裡的其他欄位（週期提醒的 role_id 跟面板位置放同一個檔）
-- 沒有完整紀錄：翻最近訊息，只刪「bot 自己發、custom_id 精確屬於這個面板」的殘留面板
+- 沒有完整紀錄：翻最近訊息，只刪「bot 自己發、custom_id 精確屬於這個面板」的殘留面板；
+  沒有成員快取（只走 HTTP 的一次性腳本）時不清、照樣發
 - 連發合併：一口氣來很多次置底請求，最多只會一次在跑、一次排隊
 
 執行：
@@ -142,6 +143,17 @@ class BumpWithoutRecordTests(BumperTestBase):
 
         stray.delete.assert_awaited_once()
         self.assertEqual(load_runtime(self.path)["intro_panel_channel_id"], 500)
+
+    async def test_without_member_cache_still_posts(self):
+        # 一次性腳本只走 HTTP、沒有成員快取（guild.me 是 None）：不清殘留，但面板照發、位置照記
+        channel = _channel(history=[_history_message(10, custom_ids=("panel:a",))])
+        channel.guild.me = None
+
+        message, deleted_old = await self.bumper().bump(channel)
+
+        self.assertFalse(deleted_old)
+        channel.history.assert_not_called()
+        self.assertEqual(load_runtime(self.path)["panel_message_id"], message.id)
 
 
 class RequestBumpTests(BumperTestBase):

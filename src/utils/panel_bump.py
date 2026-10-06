@@ -109,7 +109,11 @@ class PanelBumper:
 
     async def _delete_strays(self, channel) -> bool:
         """沒有紀錄時：翻最近的訊息，刪掉 bot 自己發的同款面板。"""
-        me = channel.guild.me
+        me = getattr(channel.guild, "me", None)
+        if me is None:
+            # 沒有成員快取（一次性腳本只走 HTTP、沒連 gateway）：認不出哪些是自己發的，不清
+            logger.info("沒有成員快取，略過清殘留面板 (%s)", self.runtime_path)
+            return False
         deleted = False
         async for message in channel.history(limit=self._scan_limit):
             if message.author.id != me.id or not self._is_panel(message):
