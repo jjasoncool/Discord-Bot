@@ -357,14 +357,20 @@ def _find_user_date_parsing(path: Path) -> list[int]:
     })
 
 
-_RELAY_SENDERS = {"_send_unit", "resend_telegram_by_id", "_move_unit"}
+# 每種送出／寫紀錄各自只准哪些函式呼叫（審查 10-07：共用一份白名單時，搬移那段直接送出或寫主頻道紀錄也擋不到）
+_RELAY_SENDERS = {
+    "publish_to_channel": {"_send_unit", "resend_telegram_by_id"},
+    "mark_message_published": {"_send_unit"},
+    "moving_deliveries": {"_move_unit", "_record_after_deleted"},
+}
 
 
 def _find_relay_sends_outside_helper(path: Path) -> list[int]:
     """Telegram 轉發端在共用的 `_send_unit` 以外送出或寫發送紀錄。送出前要過濾、紀錄要記實際送到的頻道
     （主頻道或隔離 thread），各寫一份就會有一條路繞過過濾，或把隔離的記成主頻道（2026-10-06 接上 LLM 過濾）。
-    `resend_telegram_by_id` 是 /resend_article：使用者定案不過濾、也不寫紀錄。`_move_unit` 把已在主頻道的搬進
-    隔離區：經 `_send_unit` 送、原貼文刪掉後才改紀錄（`moving_deliveries`），改紀錄只有它一處。"""
+    - `resend_telegram_by_id` 是 /resend_article：使用者定案不過濾、也不寫紀錄，所以只准它送、不准寫紀錄。
+    - 搬移（把已在主頻道的移進隔離區）經 `_send_unit` 送；改紀錄（`moving_deliveries`）只准 `_move_unit` 與
+      原貼文全刪後重試的 `_record_after_deleted`。"""
     if Path(path).relative_to(SRC_DIR).as_posix() != "services/relay/telegram_relay_service.py":
         return []
     found = []
@@ -375,8 +381,8 @@ def _find_relay_sends_outside_helper(path: Path) -> list[int]:
                 visit(child, child.name)
                 continue
             if (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
-                    and child.func.attr in ("publish_to_channel", "mark_message_published", "moving_deliveries")
-                    and owner not in _RELAY_SENDERS):
+                    and child.func.attr in _RELAY_SENDERS
+                    and owner not in _RELAY_SENDERS[child.func.attr]):
                 found.append(child.lineno)
             visit(child, owner)
 
