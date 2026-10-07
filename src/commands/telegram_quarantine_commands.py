@@ -196,6 +196,11 @@ class TelegramQuarantineCommands(commands.Cog):
         await reopen_thread(thread)
         self._panel(parent_id).request_bump(thread)
 
+    async def post_panel(self, parent_id: int, thread: discord.Thread) -> None:
+        """馬上置底並等它完成（一次性腳本搬移完用；腳本結束前背景工作來不及跑）。"""
+        await reopen_thread(thread)
+        await self._panel(parent_id).bump(thread)
+
     async def _allowed(self, interaction: discord.Interaction) -> bool:
         return await check_guild(interaction, permission=_PERMISSION)
 
