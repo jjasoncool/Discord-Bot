@@ -2201,13 +2201,25 @@ class MessageRelayWorker:
         return [pk for pk, _ in members] or [record.message_pk]
 
     async def judge_existing(self, message_pk: int) -> Optional[Verdict]:
-        """直接判一則已經在資料庫的（相簿整本），不看開關、不送；沒接過濾或找不到回 None。一次性搬移用。"""
+        """直接判一則已經在資料庫的（相簿整本），不看開關、不送；沒接過濾或找不到回 None。一次性搬移用。
+
+        圖還沒到齊的不判、回放行，跟轉發端 `complete=False` 一樣：只看到一部分就判，會把「文字只有水、
+        圖是設計稿」那種情報錯關（13649）。
+        """
         record = await self.repository.get_message_by_pk(message_pk)
         if self._filter is None or record is None:
             return None
-        unit = await self._merge_group_messages(await self.unit_pks(record)) if record.grouped_id is not None else record
+        if record.grouped_id is not None:
+            members = await self.repository.get_group_member_states(int(record.grouped_id), record.telegram_chat_id)
+            complete = all(ready for _, ready in members)
+            unit = await self._merge_group_messages([pk for pk, _ in members] or [message_pk])
+        else:
+            complete = not (record.has_media and not record.media_items)
+            unit = record
         if unit is None:
             return None
+        if not complete:
+            return Verdict(False, reason="圖還沒到齊，不判", by_model=False)
         return await self._filter.judge(unit.text, self._filter_media(unit), trace_id=f"tgfilter-{message_pk}")
 
     async def relay_posts(self, channel, *, after: Optional[datetime] = None) -> dict[int, list[discord.Message]]:
@@ -2222,13 +2234,14 @@ class MessageRelayWorker:
                 out.setdefault(pk, []).append(message)
         return out
 
-    async def move_to_quarantine(self, message_pk: int, verdict: Verdict,
-                                 posts: dict[int, list[discord.Message]]) -> tuple[bool, str]:
+    async def move_to_quarantine(self, message_pk: int, verdict: Verdict, posts: dict[int, list[discord.Message]],
+                                 *, apply: bool = True) -> tuple[bool, str]:
         """把已經在主頻道的一則（相簿整本，含補圖）移進隔離區，之後跟新判的一樣能從面板放回。
 
         順序：照正常流程貼進隔離 thread（帶判定那行）→ 刪主頻道原貼文 → 發送紀錄的頻道從主頻道改成 thread。
         原貼文一則都沒刪掉就不改紀錄、收回 thread 那份：不然面板會列出它，放回後主頻道變兩份。
-        `posts`：`relay_posts` 掃主頻道的結果。回傳 (有沒有搬, 說明)。
+        `posts`：`relay_posts` 掃主頻道的結果。`apply=False`：只做同樣的檢查、回報會刪幾則（腳本的預覽）。
+        回傳 (有沒有搬（預覽：會不會搬）, 說明)。
         """
         async with self._quarantine_lock:
             record = await self.repository.get_message_by_pk(message_pk)
@@ -2237,27 +2250,51 @@ class MessageRelayWorker:
             pks = await self.unit_pks(record)
             route_ids = self._routes(record.telegram_chat_id)
             deliveries = await self._route_deliveries(pks, route_ids)
-            notes = []
+            # 每個主頻道都檢查過才動手，不會搬了一邊才發現另一邊不能搬
+            plans = []
             for route_id in route_ids:
                 delivered = deliveries.get(route_id)
                 if delivered is None or not delivered.main or delivered.quarantine:
                     continue   # 沒送到這個主頻道，或已經在隔離區（含放回過的）
                 main_pks = [pk for pk in pks if pk in delivered.main]
-                ok, note = await self._move_unit(record, main_pks, route_id, verdict, posts)
+                originals, problem = self._move_originals(record, main_pks, route_id, delivered, posts)
+                if problem:
+                    return False, f"{problem}，沒搬（db#{message_pk}）。"
+                plans.append((route_id, main_pks, originals))
+            if not plans:
+                return False, f"不在主頻道（沒送過或已經在隔離區），沒搬（db#{message_pk}）。"
+            if not apply:
+                return True, "；".join(f"會刪主頻道 {len(originals)} 則" for _, _, originals in plans)
+            notes = []
+            for route_id, main_pks, originals in plans:
+                ok, note = await self._move_unit(record, main_pks, route_id, verdict, originals)
                 if not ok:
                     return False, note
                 notes.append(note)
-            if not notes:
-                return False, f"不在主頻道（沒送過或已經在隔離區），沒搬（db#{message_pk}）。"
             return True, "；".join(notes)
 
-    async def _move_unit(self, record: TelegramMessageRecord, main_pks: list[int], route_id: int, verdict: Verdict,
-                         posts: dict[int, list[discord.Message]]) -> tuple[bool, str]:
-        # 照貼出的順序刪（Discord 的訊息 id 依時間遞增）：中途失敗時留下的是後半段，看得出是不完整的一則
+    def _move_originals(self, record: TelegramMessageRecord, main_pks: list[int], route_id: int,
+                        delivered: _RouteDeliveries, posts: dict[int, list[discord.Message]]) -> tuple[list, str]:
+        """這個主頻道要刪的原貼文（照貼出的相反順序）；不能搬時回 ([], 原因)。"""
+        if record.grouped_id is not None:
+            first_sent = min(delivered.main.values())
+            if datetime.now(timezone.utc) - first_sent < self._GROUP_FOLLOWUP_MAX_AGE:
+                # 補圖時效內，線上 bot（另一個行程，這裡的鎖管不到）還可能把晚到的圖補進主頻道：搬到一半補進來的
+                # 會留在主頻道，這本在面板上也放不回去
+                hours = int(self._GROUP_FOLLOWUP_MAX_AGE.total_seconds() // 3600)
+                return [], f"相簿第一次送出還不到 {hours} 小時，晚到的圖還可能補進主頻道"
+        # 相反順序刪（Discord 的訊息 id 依時間遞增）：本文那則（帶 db#）最後刪，中途失敗時它還在，重跑認得出來、補得完
         originals = sorted({m.id: m for pk in main_pks for m in posts.get(pk, [])
-                            if getattr(m.channel, "id", None) == route_id}.values(), key=lambda m: m.id)
+                            if getattr(m.channel, "id", None) == route_id}.values(), key=lambda m: m.id, reverse=True)
         if not originals:
-            return False, f"主頻道找不到原貼文，沒搬（db#{record.message_pk}）。"
+            return [], "主頻道找不到原貼文"
+        if not any(_footer_pks(m) & set(main_pks) for m in originals):
+            # 2026-07-25 以前 footer 只有「msg #…」沒有 db#：本文那則（垃圾內容本身）認不出來，只刪得到後面的圖、影片
+            return [], "認不出主頻道的本文那則（07-25 以前的舊格式沒有 db#）"
+        return originals, ""
+
+    async def _move_unit(self, record: TelegramMessageRecord, main_pks: list[int], route_id: int, verdict: Verdict,
+                         originals: list[discord.Message]) -> tuple[bool, str]:
         unit = await self._merge_group_messages(main_pks) if record.grouped_id is not None else record
         dest = await self._destination(route_id, True)
         if unit is None or dest is None:
@@ -2276,22 +2313,49 @@ class MessageRelayWorker:
                         pass   # 已經不在了
                     deleted += 1
         except Exception as exc:
-            if deleted:
-                # 原貼文刪了（全部或一部分）：thread 那份不能收回；紀錄沒改，重跑這則會補完（thread 會多一份）
-                logger.error("Telegram 隔離區搬移：主頻道原貼文刪了 %s/%s 則，但發送紀錄沒改 pks=%s 主頻道=%s "
-                             "thread=%s：%s", deleted, len(originals), main_pks, route_id, thread_id, exc, exc_info=True)
-                return False, f"原貼文刪了 {deleted}/{len(originals)} 則、發送紀錄沒改（db#{record.message_pk}，詳見 log）。"
-            logger.error("Telegram 隔離區搬移失敗，沒搬 db#%s：%s", record.message_pk, exc, exc_info=True)
-            for copy in copies:
-                try:
-                    await copy.delete()
-                except Exception as cleanup_exc:
-                    logger.warning("收回 thread 那份失敗 message_id=%s：%s", getattr(copy, "id", None), cleanup_exc)
-            return False, f"搬移失敗，沒搬（db#{record.message_pk}）：{exc}"
+            if deleted < len(originals):
+                return await self._abandon_move(record, main_pks, originals, copies, deleted, exc)
+            rows = await self._record_after_deleted(main_pks, route_id, thread_id, exc)
+            if rows is None:
+                return False, f"原貼文已全刪、發送紀錄改不上（db#{record.message_pk}，log 有要手動執行的 SQL）。"
         logger.info("Telegram 隔離區：已搬移 db#%s 主頻道 %s → thread %s；刪原貼文 %s 則；發送紀錄（列 id, pk）=%s",
                     record.message_pk, route_id, thread_id, len(originals), rows)
         self._quarantine.changed(route_id, thread)
         return True, f"已搬進隔離區、刪主頻道 {len(originals)} 則（db#{record.message_pk}）。"
+
+    async def _abandon_move(self, record: TelegramMessageRecord, main_pks: list[int], originals: list,
+                            copies: list, deleted: int, exc: Exception) -> tuple[bool, str]:
+        """原貼文沒刪完就失敗：紀錄沒改（交易回滾）。一則都沒刪就收回 thread 那份，跟沒搬一樣。"""
+        if deleted:
+            # 刪了一部分：thread 那份不能收回（主頻道只剩本文那則）；重跑這則會刪掉剩下的並改紀錄（thread 會多一份）
+            logger.error("Telegram 隔離區搬移：主頻道原貼文刪了 %s/%s 則，發送紀錄沒改 pks=%s：%s",
+                         deleted, len(originals), main_pks, exc, exc_info=True)
+            return False, f"原貼文刪了 {deleted}/{len(originals)} 則、發送紀錄沒改，重跑這則會補完（db#{record.message_pk}）。"
+        logger.error("Telegram 隔離區搬移失敗，沒搬 db#%s：%s", record.message_pk, exc, exc_info=True)
+        for copy in copies:
+            try:
+                await copy.delete()
+            except Exception as cleanup_exc:
+                logger.warning("收回 thread 那份失敗 message_id=%s：%s", getattr(copy, "id", None), cleanup_exc)
+        return False, f"搬移失敗，沒搬（db#{record.message_pk}）：{exc}"
+
+    async def _record_after_deleted(self, main_pks: list[int], route_id: int, thread_id: int,
+                                    exc: Exception) -> Optional[list[tuple[int, int]]]:
+        """原貼文全刪了才失敗（多半是寫入資料庫時）：這時改紀錄已經安全（主頻道不會變兩份），交易外再試一次。
+        不改的話重跑會因為主頻道找不到原貼文而不搬，這則就卡在面板外面。還是失敗就在 log 留要手動執行的 SQL。"""
+        try:
+            async with self.repository.moving_deliveries(main_pks, route_id, thread_id) as rows:
+                pass
+        except Exception as retry_exc:
+            logger.error(
+                "Telegram 隔離區搬移：主頻道原貼文已全刪，發送紀錄改不上（%s；第一次：%s）。要手動執行："
+                "UPDATE telegram_relay_delivery_state SET discord_channel_id = %s "
+                "WHERE message_pk = ANY('{%s}'::bigint[]) AND discord_channel_id = %s;",
+                retry_exc, exc, thread_id, ",".join(str(pk) for pk in main_pks), route_id, exc_info=True,
+            )
+            return None
+        logger.warning("Telegram 隔離區搬移：改紀錄第一次失敗（%s），原貼文已全刪，重試成功", exc)
+        return rows
 
     async def _process_group_member(self, message: TelegramMessageRecord, started: float) -> None:
         """media group 組員入口：同組同時只有一個收集者，其餘組員登記後返回。"""

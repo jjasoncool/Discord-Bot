@@ -6,9 +6,12 @@
 - 發送紀錄只改頻道（主頻道 → thread），送出時間不動；相簿每張都改
 - 搬過去的：面板列得出來、放回後跟新判的一樣；轉發重啟後不會再貼回主頻道
 - 原貼文一則都沒刪掉（刪不掉、資料庫一開始就失敗）：紀錄不改、thread 那份收回，跟沒搬一樣
-- 原貼文已經刪了（全部或一部分）之後才失敗：thread 那份留著（不能讓內容兩邊都沒有），紀錄不改
-- 主頻道找不到原貼文、已經在隔離區的、放回過的（管理員看過）：不搬、不貼
-- 搬之前的判斷：相簿整本一起判、不看開關（開關是給新訊息的）
+- 刪了一部分才失敗：thread 那份留著（不能讓內容兩邊都沒有），紀錄不改；本文那則最後刪，重跑認得出來、補得完
+- 全部刪完才失敗（寫入資料庫時）：再試一次改紀錄；還是失敗就在 log 留要手動執行的 SQL（重跑已找不到原貼文）
+- 不搬、不貼：主頻道找不到原貼文、認不出本文那則（07-25 以前的舊格式沒有 db#）、已經在隔離區的、
+  放回過的（管理員看過）、第一次送出未滿 12 小時的相簿（晚到的圖還可能被線上 bot 補進主頻道）
+- 預覽（apply=False）做同樣的檢查，什麼都不動
+- 搬之前的判斷：相簿整本一起判、不看開關（開關是給新訊息的）；圖還沒到齊的不判、放行
 
 執行：
     cd src && python -m unittest test.test_telegram_quarantine_move -v
@@ -18,6 +21,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -63,8 +67,13 @@ class MoveTestBase(unittest.IsolatedAsyncioTestCase):
             self.repo.add_ready(pk, 500 + pk, grouped_id=gid, text=text if n == 0 else "")
         await self.worker._process_one(pks[0])
 
-    async def move(self, pk, verdict=SPAM):
-        return await self.worker.move_to_quarantine(pk, verdict, await self.worker.relay_posts(self.bot.main))
+    def age(self, *pks, hours=13):
+        """把這幾則的主頻道發送時間往前推：相簿過了補圖時效才搬得動。"""
+        for pk in pks:
+            self.repo.delivered[(pk, CHANNEL)] = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    async def move(self, pk, verdict=SPAM, **kwargs):
+        return await self.worker.move_to_quarantine(pk, verdict, await self.worker.relay_posts(self.bot.main), **kwargs)
 
 
 class MoveTests(MoveTestBase):
@@ -93,6 +102,7 @@ class MoveTests(MoveTestBase):
         await self.post_single(9, "別則情報")
         human = FakeMessage(self.bot.main, self.bot.next_id(), "db#1", attachments=["tg_1_9.jpg"], author_id=42)
         self.bot.main.messages.append(human)
+        self.age(1, 2, 3, 4)
         album_posts = [m for m in self.main_messages() if m is not human and relay_post_pks(m) & {1, 2, 3, 4}]
         self.assertEqual(len(album_posts), 3, "embed＋第 2 張起另一則＋補圖")
 
@@ -161,25 +171,75 @@ class MoveFailureTests(MoveTestBase):
         self.assertFalse(ok)
         await self.assert_not_moved(9, original)
 
-    async def test_failure_after_deleting_keeps_thread_copy(self):
+    async def test_all_deleted_then_write_fails_once_is_retried(self):
+        await self.post_single(9)
+        self.repo.fail_move, self.repo.fail_move_once = "commit", True
+        ok, note = await self.move(9)
+        self.assertTrue(ok, note)
+        self.assertEqual(self.repo.channels_of(9), {self.thread().id}, "原貼文已全刪，改紀錄已經安全，再試一次")
+        self.assertEqual([i.pk for i in await self.worker.quarantine_items(CHANNEL)], [9])
+
+    async def test_all_deleted_but_record_never_written_logs_sql(self):
         await self.post_single(9)
         self.repo.fail_move = "commit"
-        ok, note = await self.move(9)
+        with self.assertLogs("services.relay.telegram_relay_service", "ERROR") as logs:
+            ok, note = await self.move(9)
         self.assertFalse(ok)
-        self.assertIn("1/1", note)
+        self.assertIn("手動", note)
+        self.assertTrue(any("UPDATE telegram_relay_delivery_state SET discord_channel_id" in line
+                            and "{9}" in line for line in logs.output))
         self.assertEqual(self.main_messages(), [])
         self.assertEqual(len(self.thread().messages), 1, "主頻道已經沒了，thread 那份是唯一一份")
         self.assertEqual(self.repo.channels_of(9), {CHANNEL}, "紀錄沒改")
 
-    async def test_partly_deleted_keeps_thread_copy(self):
+    async def test_partly_deleted_keeps_thread_copy_and_rerun_completes(self):
         await self.post_album([1, 2])
-        first, second = self.main_messages()
-        second.delete_error = discord.HTTPException(SimpleNamespace(status=500, reason="Server Error"), "掛了")
+        self.age(1, 2)
+        body, more_images = self.main_messages()
+        body.delete_error = discord.HTTPException(SimpleNamespace(status=500, reason="Server Error"), "掛了")
         ok, note = await self.move(1)
         self.assertFalse(ok)
         self.assertIn("1/2", note)
-        self.assertTrue(first.deleted)
-        self.assertEqual(len(self.thread().messages), 2)
+        self.assertTrue(more_images.deleted, "後面的先刪")
+        self.assertFalse(body.deleted, "本文那則最後刪，還在")
+        self.assertEqual(len(self.publisher.to(self.thread().id)), 1, "thread 那份留著")
+        self.assertEqual(self.repo.channels_of(1), {CHANNEL})
+
+        body.delete_error = None
+        ok, note = await self.move(1)
+        self.assertTrue(ok, note)
+        self.assertEqual(self.main_messages(), [])
+        self.assertEqual(self.repo.channels_of(1), {self.thread().id})
+
+    async def test_new_album_is_not_moved(self):
+        await self.post_album([1, 2])
+        ok, note = await self.move(1)
+        self.assertFalse(ok)
+        self.assertIn("12 小時", note)
+        self.assertEqual(self.bot.main.all_threads, [])
+        self.assertEqual(len(self.main_messages()), 2)
+
+    async def test_old_format_without_db_tag_is_not_moved(self):
+        # 07-25 以前：本文那則 footer 只有「msg #…」，只認得出後面那則影片
+        self.repo.add_row(9, 209, grouped_id=None, text="水", has_media=True)
+        self.repo.mark(9)
+        body = await self.bot.main.send(footer="msg #209")
+        video = await self.bot.main.send(attachments=["tg_9_1.mp4"])
+        ok, note = await self.move(9)
+        self.assertFalse(ok)
+        self.assertIn("認不出", note)
+        self.assertEqual(self.main_messages(), [body, video], "一則都不刪")
+        self.assertEqual(self.bot.main.all_threads, [])
+        self.assertEqual(self.repo.channels_of(9), {CHANNEL})
+
+    async def test_preview_changes_nothing(self):
+        await self.post_album([1, 2])
+        self.age(1, 2)
+        ok, note = await self.move(1, apply=False)
+        self.assertTrue(ok, note)
+        self.assertIn("會刪主頻道 2 則", note)
+        self.assertEqual(len(self.main_messages()), 2)
+        self.assertEqual(self.bot.main.all_threads, [])
         self.assertEqual(self.repo.channels_of(1), {CHANNEL})
 
     async def test_no_original_found(self):
@@ -220,6 +280,16 @@ class JudgeExistingTests(MoveTestBase):
         self.assertEqual((verdict.quarantine, verdict.label), (True, "無關圖片"))
         [call] = self.worker._filter.calls
         self.assertEqual((call["text"], call["media"]), ("說明", ["1.jpg", "2.jpg", "3.jpg"]))
+
+    async def test_incomplete_unit_is_not_judged(self):
+        self.repo.add_ready(1, 501, grouped_id=77, text="說明")
+        self.repo.add_row(2, 502, grouped_id=77)          # 第 2 張一直沒下載到
+        self.repo.add_row(9, 209, grouped_id=None, text="水", has_media=True)
+        self.worker._filter = FakeFilter("on")
+        for pk in (1, 9):
+            verdict = await self.worker.judge_existing(pk)
+            self.assertEqual((verdict.quarantine, verdict.by_model), (False, False))
+        self.assertEqual(self.worker._filter.calls, [], "只看到一部分不判")
 
     async def test_without_filter_or_message(self):
         await self.post_single(9)

@@ -39,8 +39,9 @@ class FakeRepository:
         self.replay_pk = None
         self.reads: list[int] = []
         self.read_delay = 0.0
-        #: 改紀錄（搬移）要出錯的時機："start"＝一開始、"commit"＝區塊做完要寫入時
+        #: 改紀錄（搬移）要出錯的時機："start"＝一開始、"commit"＝區塊做完要寫入時；`fail_move_once` 只錯一次
         self.fail_move: str | None = None
+        self.fail_move_once = False
 
     def add_row(self, pk: int, msg_id: int, *, grouped_id=GID, text: str = "", has_media: bool = True,
                 date: datetime | None = None) -> None:
@@ -114,6 +115,7 @@ class FakeRepository:
     async def moving_deliveries(self, message_pks, from_channel_id, to_channel_id):
         """跟真的一樣是一筆交易：只改頻道、時間不動；區塊內出錯（或寫入失敗）就整批還原。"""
         if self.fail_move == "start":
+            self._failed_move()
             raise RuntimeError("資料庫斷線")
         if any((pk, from_channel_id) in self.delivered and (pk, to_channel_id) in self.delivered for pk in message_pks):
             raise RuntimeError("唯一鍵衝突（同一則已有 to 那列）")   # 跟真的一樣：(pk, 頻道) 是唯一鍵
@@ -126,10 +128,15 @@ class FakeRepository:
         try:
             yield moved
             if self.fail_move == "commit":
+                self._failed_move()
                 raise RuntimeError("寫入失敗")
         except BaseException:
             self.delivered = before
             raise
+
+    def _failed_move(self) -> None:
+        if self.fail_move_once:
+            self.fail_move = None
 
     async def set_runtime_cursor_pk(self, pk):
         pass
