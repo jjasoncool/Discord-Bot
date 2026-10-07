@@ -25,6 +25,7 @@
 > 4. 保留可追溯來源，避免之後重複討論同一件事
 
 最後盤點紀錄（只保留近期；過往詳見 `TODO-completed.md` 各歸檔 entry）：
+- 2026-10-07 08:0x（Telegram 舊垃圾訊息搬移，**已 commit・bot 不用重啟**）：搬移功能與一次性腳本完成，db#14095 實際搬過一次並查證（資料庫、主頻道、thread、面板）。使用者：「我確定 commit 但只能跟你修改相關的」——同時有另一個 session 在改插話，只 commit 搬移相關檔案，本檔只帶搬移那段。獨立審查在背景跑，有成立的問題另外補 commit。細節見 telegram-llm-filter-quarantine 區塊的「搬移實作完成」。
 - 2026-10-07 03:3x（Telegram LLM 過濾整批 commit，使用者：「依據功能還有修改進行commit 各個commit 最好是單一小功能」）：拆成 13 個 commit，每個 commit 的快照都在容器 `/tmp` 跑完整測試全過（985→1090 項）：`8e8e4bc` 取模型最後一行 → `28b25f1` ffprobe 共用 → `92bc363` 抽幀與縮圖 → `ccb9f66` GPU 跨行程排隊 → `ff4359f` thread 取得與解封存 → `e80c4e5` config.json 安全寫入 → `b642411` switches.json → `1a9d403` 判斷模組 → `cff413d` 轉發端接隔離 thread → `b808f1d` check_guild 權限 → `7b7d62f` 放回面板 → `23292a2` 表情／貼圖字典 → 本 docs。中間版本只寫進 git index（工作目錄沒動，bot 即時掛載不受影響）。沒 commit：根目錄 `HANDOFF_MCP_TELEGRAM_FILTER.md`、`it_comfyui_image.py`。**線上狀態**：01:39 重啟後才改的（面板 4 項修正、啟動測試不穩修正）要再重啟才生效；`switches.json` 目前 `off`。
 - 2026-10-07 00:4x（審查修正＋開關整合＋config.json 安全寫入，**已改 `./src`・完整全過・未 commit・未重啟**）：第一、二階段審查成立的項目全修；使用者 SW-Q1～Q4 定案並實作 `switches.json`（過濾開關搬進來、改了就生效）與 `ChannelConfig.update_config`；第三階段放回面板完成。待：第三階段＋開關＋config.json 的獨立審查、使用者決定重啟時的模式。細節見 telegram-llm-filter-quarantine 區塊。
 - 2026-10-06 22:4x（Telegram LLM 過濾第一、二階段，**已改 `./src`・完整 1031 過・未 commit・未重啟・mode 預設 off**）：判斷模組、轉發端整合（等圖、跨頻道去重、補圖跟去向、隔離 thread、重排、開過濾一次一則）、GPU 閘門跨行程鎖（使用者：「我希望跑判斷還是要排隊的」）；離線樣本第 1 輪 6 則誤關（純文字），prompt 已改、等重啟後重跑；刪舊函式時誤刪三個類別已補回（完整測試抓到）。獨立審查進行中。細節見 telegram-llm-filter-quarantine 區塊。
@@ -723,6 +724,41 @@ affects: Telegram relay、config.json
   - **TF-Q10 開關放哪（10-06 使用者問「開關怎麼會放這？」，待回覆；前提已依清查更正：總開關只在啟動讀、路由才每則讀，config.json 手改有被 Discord 存檔蓋掉的風險，建議改為 C）**：現在是 `sys_settings/telegram_relay_settings.py` 的 `mode`（照 AGENTS「設定放 sys_settings」與看圖補字典的前例；只吃 class 預設值，切換要重啟）。缺點：要切三次（off → dry_run → on）、bot 長時間不重啟；Telegram 轉發的路由在 `config.json`、轉發端每則重讀。選項：A 放 `config.json`（`telegram_filter_mode`，與 `telegram_relay_enabled` 並排、每則重讀、改了就生效；細項留 sys_settings）——建議；B 維持現狀；C 做成 `/server_manager` 的選項（寫進 config.json，可等放回面板時一起做）。
   - **使用者 10-06 問「現在可以把開關打開嗎、過往發文會不會被收進去」** → 回答：不會，過濾只在第一次送出時判；已送出的都有紀錄（唯讀查：沒有任何紀錄的 0 則、重播設定是空的），只有開重播才會重送並判。現在還不能開：程式沒上線（等審查完、修好、重啟）、`on` 要等放回面板；可以在重啟那次直接設 `dry_run`。使用者再問「想重新跑過往的發文」→ 三種做法：A 指定日期範圍只判斷、列清單、不動 Discord（建議，順便取代第 2 輪樣本，重啟後跑）；B 把主頻道過往垃圾真的搬進 thread；C 重播（會在主頻道重複貼，不建議）。
   - **使用者 10-06：「搬過去還好吧」→ grill 舊訊息搬移輪（待回覆）**：說明搬＝在 thread 重貼＋刪主頻道原貼文（Discord 不能移動訊息）；原貼文的表情、回覆引用、連結會失效，通知收不回；一個單位可能是好幾則（相簿分批、影片、長文分段），靠 footer `db#` 與送出順序整組找齊；要改發送紀錄（刪主頻道那筆、記 thread）＝改 pgvector 資料，要備份與同意。建議流程：做法 A 產清單 → 使用者確認要搬哪些 → 備份 → 搬並逐則記 log → 搬錯用面板放回。題目：MV-Q1 範圍（最近 30 天約 420 則［建議］／全部約 4,700 則／指定日期起）；MV-Q2 誰決定（使用者逐則確認［建議］／模型判隔離就搬）；MV-Q3 原貼文（刪除＝真的搬［建議］／不刪只留副本）；MV-Q4 時機（面板做好後再搬［建議］／先搬）。
+  - **使用者 10-07 03:3x：「我要你用我的LLM跑判斷跟移動文章，有沒有要寫資料庫？」→ 搬移第 2 輪（待回覆）**：
+    - 事實（唯讀查）：發送紀錄在 Telegram 爬蟲的資料庫（`build_telegram_pg_dsn_from_env`，不是 pgvector；上一輪寫錯），全表 4,773 筆；主頻道只有一個（`1276423699851116544`）。還在主頻道的發送單位：近 30 天 414 個（669 則）、90 天 1,276 個、全部 3,247 個（03-19 起）。主頻道舊貼文的 footer 一直都有 `db#`，對得回資料庫。
+    - 已開跑（唯讀）：用使用者的模型判近 30 天、還在主頻道的 414 個，新到舊，結果逐行寫容器 `/tmp/mv_judge_30d.jsonl`（腳本在 session scratchpad `judge_main.py`）；不送訊息、不寫資料庫。每次呼叫跟 bot 排同一個跨行程的隊，04:00 起會拖慢維護作業。
+    - 資料庫要寫：面板列的是「有 thread 紀錄、沒有主頻道紀錄」的單位，所以每個搬走的單位要記一筆 thread、刪掉主頻道那筆；只記 thread 不刪主頻道那筆＝面板不列、放不回；只刪不記＝轉發端會當成沒送過重送。順序：送進 thread → 記 thread → 刪主頻道貼文（照 `db#` 找整組）→ 刪主頻道紀錄；刪貼文失敗就保留主頻道紀錄，免得之後放回貼兩份。搬之前把整張發送紀錄表匯出成檔案備份，搬錯可以匯回；Discord 上刪掉的原貼文（表情、回覆引用）救不回，但 thread 裡的副本可以用面板放回（新貼一則）。
+    - 要寫的程式：搬移功能還沒有（只有反方向的放回）。建議在 worker 加「移進隔離區」（跟 `restore` 對稱、共用 `_send_unit` 的發送與標頭、加測試），用一次性腳本在容器裡以 bot 身分只走 HTTP（不另開 gateway 連線、bot 照常跑）呼叫；搬完貼面板（面板是持久元件，bot 接得到按鈕；bot 下次置底會清掉多的那則）。搬完重啟 bot，讓轉發端重讀隔離 thread 紀錄（重啟本來就要做：01:39 之後的修正）。
+    - 題目：MV-Q1 範圍（A 近 30 天 414 個［建議，判斷已在跑］／B 90 天／C 全部，約 11 小時）；MV-Q2 誰決定（A 判完列出要搬的、使用者劃掉判錯的再搬［建議］／B 判隔離就搬）；MV-Q3 原貼文（A 刪除＝真的搬［建議］／B 不刪）；MV-Q4 執行（A 一次性腳本、我執行，執行前再確認一次清單與備份［建議］／B 做成管理員按鈕，要重啟）。
+  - **使用者 10-07 03:4x：「判垃圾搬到 thread、原本頻道的貼文刪除，這樣單純的概念有需要那麼複雜嗎？原理是什麼」→ 第 3 輪：簡化（待回覆）**：
+    - 定案的概念（使用者）：判成垃圾 → 在 thread 重貼 → 刪主頻道原貼文；MV-Q3＝刪除。
+    - 必要的只有三件：Discord 不能移動訊息（重貼＋刪）；一個單位在主頻道可能是好幾則（相簿分批、長文拆段、影片另一則），靠每則 footer 的 `db#` 整組刪；先貼再刪（中途失敗頂多兩邊都有，不會兩邊都沒有）。
+    - 資料庫的原理：發送紀錄是 bot 記「這則 Telegram 訊息送到哪個頻道」，只用在兩件事——不重送、放回面板列出可放回的（條件：有 thread 紀錄、沒有主頻道紀錄）。不改資料庫：不會重送，但搬過去的不會出現在面板、判錯不能用面板放回。要能放回只要每個單位兩句 SQL（記 thread、刪主頻道那筆）；備份只需先存這些單位的紀錄。
+    - 更正上一輪：**不需要重啟**——轉發端找隔離 thread 時，紀錄裡沒有就照名字「垃圾訊息」找（含封存的），會找到腳本開的那個，不會開第二個；面板列項目時用的是當下所在的 thread。面板：腳本搬完貼一次（同一段程式），或等過濾開了第一則隔離時自然出現。
+    - 題目：MV-Q5 要不要能放回（A 改兩句 SQL、可以用面板放回［建議：模型會判錯，例如 14053、14070］／B 只貼＋刪、不動資料庫，判錯要另外處理）。
+  - **MV-Q5＝A（使用者 10-07 03:5x：「A 要，但具體來說我要知道資料庫會改什麼欄位」）→ 資料庫改動規格（已告知使用者）**：
+    - 只動 `telegram_relay_delivery_state`（Telegram 爬蟲的資料庫）；欄位 `id`、`message_pk`、`discord_channel_id`、`delivered_at`，唯一鍵 (`message_pk`, `discord_channel_id`)。
+    - **改法定為「改一個欄位」，取代上一輪說的「記一筆、刪一筆」**（效果相同、更單純）：搬走的單位裡每則 Telegram 訊息那一列，`discord_channel_id` 由主頻道 `1276423699851116544` 改成「垃圾訊息」thread 的 id；`id`、`message_pk`、`delivered_at` 不動，不新增、不刪列。相簿每張圖是一列（例：14077～14086 共 10 列）。
+    - `delivered_at` 保留原值的理由：相簿補圖看「第一次送出多久了」決定還收不收（`_GROUP_FOLLOWUP_MAX_AGE`）；改成現在會讓舊相簿重新開一段收補圖的時間。
+    - 其他表（`telegram_messages`、`telegram_message_media`、`telegram_relay_runtime_state`）不動。第一次開 thread 時新建 `settings/telegram_quarantine_runtime.json`（記 thread id；新檔，不覆寫）。
+    - 備份與回復：改之前把要改的列（四個欄位）存成檔案；要復原就照 `id` 把 `discord_channel_id` 改回主頻道。Discord 上刪掉的原貼文不靠資料庫復原，用面板放回（新貼一則）；放回時另記一列（主頻道、當下時間），thread 那列留著，面板就不再列它（現有行為）。
+    - ~~寫 thread 時若同一則已有 thread 那列，改成只把主頻道那列刪掉~~（10-07 07:xx 實作時取消：已有 thread 那列＝在隔離區或放回過，一律不搬，不會撞唯一鍵）。
+  - **使用者 10-07 06:4x：「資料庫新增的欄位可以讓刪除垃圾訊息跟還原都正常運作嗎？我不需要備份訊息，因為 telegram 可以重抓」→ 第 4 輪（已回覆、對照程式確認）**：
+    - 不是新增欄位，是改既有那列 `discord_channel_id` 的值。對照程式：轉發端 `_route_deliveries` 經 `parent_of` 把 thread 那列算成「已送進隔離區」→ 不重送；`list_undelivered_message_pks` 看到有紀錄 → 不補送；面板 `list_quarantined`（有 thread 列、沒有主頻道列）→ 列出；`_restore_unit` 見主頻道沒有、隔離區有 → 用資料庫內容與本機圖檔重貼主頻道、記主頻道列，`_mark_restored` 照 footer `db#` 找 thread 那則標「已放回」。
+    - 成立條件（實作時要守）：① 相簿每列都改（只改首張：面板會列，按放回卻回「已經放回過了」）；② 順序改成「貼進 thread → 刪主頻道原貼文 → 改資料庫」（取代上一輪的「記 thread → 刪貼文」）：刪失敗就不改，否則面板會列、放回後主頻道兩份；改資料庫失敗重跑同一句即可；③ 腳本用 bot 身分開 thread 與貼文：bot 認隔離 thread 靠「名稱『垃圾訊息』＋bot 自己開的」（`parent_of` 問 Discord 的後備），thread 那則要帶 `db#` footer。
+    - **備份定案（使用者）**：不另外備份。訊息內容與圖檔本來就不動，放回直接用資料庫內容重貼；搬移時在 log 逐筆記 `db#` 與列 `id`，要整批復原照清單把頻道改回主頻道。
+    - **搬移實作完成（10-07 07:5x，使用者：「你程式改好了嗎」「改好之後用改好的程式直接評斷 db#14095，然後實際執行一次」；已改 `./src`・完整 1,130 全過・突變 18 種全紅・未 commit・bot 不用重啟）**：
+      - 轉發端 `MessageRelayWorker`：`relay_posts`（掃頻道一次，bot 的轉發貼文依 pk 分組）、`move_to_quarantine`／`_move_unit`（貼 thread `record=False` → 交易內改紀錄並刪原貼文，照訊息 id 順序刪）、`judge_existing`（相簿整本判、不看開關）、`unit_pks`（放回、搬移、判斷共用）；模組層 `relay_post_pks`（footer `db#` 或附件檔名 `tg_<pk>_<n>`，含 `SPOILER_`；相簿第 2 批起的圖、影片那則沒有 embed 只能靠檔名）。`_restore_lock` 改名 `_quarantine_lock`（放回、搬移共用）。
+      - 失敗處理：一則都沒刪 → 紀錄不改、收回 thread 那份；刪了（全部或一部分）才失敗 → thread 那份留著、紀錄不改、log 記 pk（重跑該則會補完，thread 會多一份）。放回過的不再搬（管理員看過）。
+      - 資料庫：`TelegramMessageRepository.moving_deliveries`（交易，`UPDATE … SET discord_channel_id` 只改頻道，`RETURNING id, message_pk` 寫進 log 供復原）。發文 `publish_to_channel(sent=)`、`_send_unit(record=, sent=)` 收集送出的訊息。
+      - 共用元件：`PanelBumper._delete_strays` 沒有成員快取（只走 HTTP）時不清殘留、照發；面板 cog 加 `post_panel`（等置底完成）。守衛「Telegram 轉發送出與寫發送紀錄」加 `moving_deliveries`，只准 `_move_unit`。
+      - 一次性腳本 `src/scripts/telegram_move_to_quarantine.py`：bot 身分只走 HTTP（線上 bot 照常跑）、預設只預覽、`--apply` 才搬、`--file` 整批；檔案上限改用另外查到的伺服器上限（只走 HTTP 時伺服器資料不完整，會被當成 10 MB 而壓縮大影片）；判斷等待放寬到 600 秒（跟維護排隊）。
+      - 測試 `test_telegram_quarantine_move.py`（16 項）、`test_panel_bump.py` 加 1 項；假物件：附件檔名、刪除失敗、分則送圖、資料庫交易與唯一鍵。
+      - 順手修：`test_gpu_gate` 的「跟別的行程輪流」在機器忙時會失敗（外部行程還沒開始輪詢就放鎖、輪詢 0.1 秒可能錯過 0.2 秒讓位）→ 等外部行程回報開始輪詢才放、輪詢改 0.02 秒；4 個空轉行程壓測下過。會擋啟動檢查，所以一起修。
+      - **實際執行 db#14095（07:50）**：模型判「隔離｜無關圖片｜小雞梗圖，非鳴潮內容」；開了「垃圾訊息」thread `1557178355504390207`（bot 開的、開著）；thread 裡那則帶判定那行、footer `msg #10822 · db#14095`、圖在 embed 裡（跟主頻道一樣不列在附件）；主頻道 db#14095 已刪；資料庫列 4866 頻道改成 thread、`delivered_at` 仍是 10-06 13:44:44 UTC；面板已貼（`tgq:date`）；照面板條件查會列出 [14095]。新建 `settings/telegram_quarantine_runtime.json`、`telegram_quarantine_panel_runtime.json`。
+      - 線上 bot（01:39 起的程式）沒用過隔離區，第一次用會讀上面的 runtime 檔，認得這個 thread；面板的按鈕是持久元件，由線上 bot 處理。**放回還沒在線上實測**（要有人按）；14095 放回後就不會再被搬（放回過的不搬），要再隔離得手動刪主頻道那則。
+      - 同時有另一個 agent 在改插話（`ambient_*`、`switches.py`、`utils.py`、`discord_bot.py`、`AGENTS.md` 等），已避開；他們改到一半時完整測試曾出現 12 個錯誤，之後重跑全過。
+    - 30 天判斷已跑完（03:37～約 06:40，跟維護作業排隊，平均 26.3 秒）：414 個中 75 個會被隔離（閒聊 30、無關圖片 24、灌水 15、罵人 6）、2 個圖沒下載到略過、1 個（13476）含語音／壓縮檔直接放行。結果在 session scratchpad `mv_judge_30d.jsonl`（容器 `/tmp` 也有一份）。下一輪：清單給使用者劃掉判錯的。
   - **功能開關清查（10-06 使用者「幫我清查目前開關都分散在哪」，唯讀 workflow 6＋1 個 agent；全文 25k 字在 session scratchpad `switch_inventory.md`，依功能分 20 組表格）**：開關分散在六種地方——`config.json`（綁頻道、Telegram 總開關／路由／重送、`event_schedule_dry_run`）、`sys_settings` 的 class 預設值（插話、日記、persona、看圖補字典、Telegram 過濾，改了要重啟）、環境變數（`ASKAI_WEB_ENABLED`、`PERIODIC_REMINDER_ENABLED`、`TRADE_*`、`LOG_LEVEL`…，要重建容器，`docker restart` 不會套用）、runtime JSON（爬蟲 `runtime_config.json` 每 2 秒熱更新、`llm_runtime_config.json` 依 mtime、`article_runtime.json` 部分只在啟動讀、點名 runtime 手改會被覆寫）、Discord 指令／面板（/server_manager、/article_manager 停止只在記憶體）、寫死的常數（scraper 排程、PTT 輪詢沒有停止鍵）。觀察重點：
     - **更正 TF-Q10 的前提**：`telegram_relay_enabled` 只在 worker 啟動時讀（執行中改 false 不會停），只有路由與「這則要不要強制重送」每則讀；照 A 放 config.json 要另外寫每則讀取，並行數（迴圈開始時決定）也要一起處理。
     - **config.json 手改會被蓋掉**：`load_config` 回傳快取物件本身、`save_config` 整份 `open('w')` 覆寫、沒有備份、守衛沒擋；手改後 5 分鐘內有人從 Discord 存任何設定，就用舊快取整份寫回。JSON 寫錯一個字時所有綁頻道功能停、Telegram 略過訊息（重啟補發）。
