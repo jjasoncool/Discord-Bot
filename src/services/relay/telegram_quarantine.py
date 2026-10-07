@@ -134,6 +134,15 @@ class QuarantineThreads:
         for t in getattr(parent, "threads", None) or []:
             if mine(t):
                 return t
+        if not getattr(parent, "threads", None):
+            # 快取是空的（只走 HTTP 的一次性腳本沒有快取；或真的沒有活躍 thread）：問 Discord 活躍中的。
+            # 不問的話腳本看不到 bot 開著的那個，會再開一個
+            try:
+                for t in await parent.guild.active_threads():
+                    if getattr(t, "parent_id", None) == parent.id and mine(t):
+                        return t
+            except (discord.HTTPException, AttributeError) as exc:
+                logger.info("查活躍的 thread 失敗 parent=%s：%s", getattr(parent, "id", None), exc)
         try:
             async for t in parent.archived_threads(limit=None):
                 if mine(t):
@@ -154,7 +163,16 @@ class QuarantineThreads:
         """記住這個 thread 是哪個主頻道的隔離區（歷來的都留著）。"""
         state = await self._load()
         state["thread_parents"][str(thread_id)] = parent_id
-        await asyncio.to_thread(
-            update_runtime, self.runtime_path,
-            threads=dict(state["threads"]), thread_parents=dict(state["thread_parents"]),
-        )
+        current = state["threads"].get(str(parent_id))
+        await asyncio.to_thread(self._write, parent_id, thread_id, current)
+
+    def _write(self, parent_id: int, thread_id: int, current: Optional[int]) -> None:
+        """只把這次的變動合併進檔案：先重讀檔案、只改這個主頻道與這個 thread。一次性搬移腳本跟 bot 是兩個
+        行程、各有一份記憶體；拿記憶體整份寫回，會把對方剛記的 thread 蓋回舊的。"""
+        data = load_runtime(self.runtime_path)
+        threads = dict(data.get("threads") or {})
+        parents = dict(data.get("thread_parents") or {})
+        parents[str(thread_id)] = parent_id
+        if current == thread_id:
+            threads[str(parent_id)] = thread_id
+        update_runtime(self.runtime_path, threads=threads, thread_parents=parents)

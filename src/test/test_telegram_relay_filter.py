@@ -11,6 +11,7 @@
   沒文字的等到補圖時限
 - 隔離 thread 開在主頻道底下、7 天才封存，之後一直用同一個（重啟也是）；封存的先解封；開不了就這次不送、
   不寫紀錄（之後重試），主頻道也不送
+- 一次性搬移腳本（只走 HTTP、沒有 thread 快取）也找得到開著的那個；腳本與 bot 各自記 thread 時不互相蓋掉
 - 開了過濾一次只處理一則（模型一次只能判一則，並行只會打亂順序）；排隊或處理中又收到的通知，處理完再排一次
 
 執行：
@@ -25,12 +26,14 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
+from services.relay.telegram_quarantine import QuarantineThreads
 from test.telegram_relay_fakes import CHANNEL, FakeBot, FakeFilter, make_worker, media_of
 
 
@@ -299,6 +302,33 @@ class ThreadTests(FilterTestBase):
         await self.worker._process_one(10)
         self.assertEqual(len(self.bot.main.created), 1, "依名稱找回封存的 thread，不重開")
         self.assertEqual(len(self.publisher.to(thread.id)), 1)
+
+    async def test_without_thread_cache_finds_the_active_thread(self):
+        # 一次性腳本只走 HTTP：頻道的 thread 快取永遠是空的，開著的 thread 要另外問 Discord
+        self.repo.add_row(9, 200, grouped_id=None, text="今日首水", has_media=False)
+        self.repo.add_row(10, 201, grouped_id=None, text="今天还水吗", has_media=False)
+        self.filter.quarantine(9)
+        self.filter.quarantine(10)
+        await self.worker._process_one(9)
+        thread = self.thread()
+        Path(self.runtime).unlink()
+        self.restart()
+        self.bot.main.guild.active_threads = mock.AsyncMock(return_value=[thread])
+        with mock.patch.object(type(self.bot.main), "threads", new_callable=mock.PropertyMock, return_value=[]):
+            await self.worker._process_one(10)
+        self.assertEqual(len(self.bot.main.created), 1, "開著的那個找得到，不重開")
+        self.assertEqual(len(self.publisher.to(thread.id)), 1)
+
+    async def test_two_processes_keep_each_others_thread(self):
+        # bot 先讀過 runtime 檔（那時還沒有 thread），之後腳本開了 thread 並記下；bot 認出它時不能拿舊記憶體整份蓋回去
+        bot_side = self.worker._quarantine
+        await bot_side.parent_of(123)
+        script_side = QuarantineThreads(self.bot, self.runtime)
+        thread = await script_side.thread_for(self.bot.main)
+        self.assertEqual(await bot_side.parent_of(thread.id), CHANNEL)
+        saved = json.loads(Path(self.runtime).read_text(encoding="utf-8"))
+        self.assertEqual(saved["threads"], {str(CHANNEL): thread.id})
+        self.assertEqual(saved["thread_parents"], {str(thread.id): CHANNEL})
 
 
 class ProcessLoopTests(FilterTestBase):
