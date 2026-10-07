@@ -35,7 +35,8 @@ _MAX_OPTIONS = 25
 _PERMISSION = "manage_messages"
 
 PANEL_TEXT = (
-    "🗑️ **垃圾訊息**：Telegram 轉發時被判成沒有遊戲資訊的訊息放在這裡，每則最上面寫著判定理由。\n"
+    # 給群友看的：不寫訊息從哪裡、怎麼來（使用者 10-07：「這邊可以不要寫出 telegram 轉發」）
+    "🗑️ **垃圾訊息**：被判成沒有遊戲資訊的訊息放在這裡，每則最上面寫著判定理由。\n"
     "判錯的可以放回主頻道：選日期 → 選訊息 → 確認。需要「管理訊息」權限。"
 )
 
@@ -92,7 +93,7 @@ def _current_options(interaction: discord.Interaction) -> list[discord.SelectOpt
 
 
 async def _not_running(interaction: discord.Interaction) -> None:
-    await safe_send_interaction_message(interaction, "Telegram 轉發目前沒有在運作，請通知管理員。", ephemeral=True)
+    await safe_send_interaction_message(interaction, "放回功能目前沒有在運作，請通知管理員。", ephemeral=True)
 
 
 class QuarantinePanelView(discord.ui.View):
