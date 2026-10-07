@@ -9,6 +9,7 @@
 檔名不能用 test_ 開頭（discover 會當成測試收），也不能跟 src 的套件或爬蟲的裸模組同名。
 """
 import asyncio
+import contextlib
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -38,6 +39,8 @@ class FakeRepository:
         self.replay_pk = None
         self.reads: list[int] = []
         self.read_delay = 0.0
+        #: 改紀錄（搬移）要出錯的時機："start"＝一開始、"commit"＝區塊做完要寫入時
+        self.fail_move: str | None = None
 
     def add_row(self, pk: int, msg_id: int, *, grouped_id=GID, text: str = "", has_media: bool = True,
                 date: datetime | None = None) -> None:
@@ -107,6 +110,27 @@ class FakeRepository:
     async def mark_message_published(self, pk, discord_channel_id):
         self.delivered[(pk, discord_channel_id)] = datetime.now(timezone.utc)
 
+    @contextlib.asynccontextmanager
+    async def moving_deliveries(self, message_pks, from_channel_id, to_channel_id):
+        """跟真的一樣是一筆交易：只改頻道、時間不動；區塊內出錯（或寫入失敗）就整批還原。"""
+        if self.fail_move == "start":
+            raise RuntimeError("資料庫斷線")
+        if any((pk, from_channel_id) in self.delivered and (pk, to_channel_id) in self.delivered for pk in message_pks):
+            raise RuntimeError("唯一鍵衝突（同一則已有 to 那列）")   # 跟真的一樣：(pk, 頻道) 是唯一鍵
+        before = dict(self.delivered)
+        moved = []
+        for pk in message_pks:
+            if (pk, from_channel_id) in self.delivered:
+                self.delivered[(pk, to_channel_id)] = self.delivered.pop((pk, from_channel_id))
+                moved.append((len(moved) + 1, pk))
+        try:
+            yield moved
+            if self.fail_move == "commit":
+                raise RuntimeError("寫入失敗")
+        except BaseException:
+            self.delivered = before
+            raise
+
     async def set_runtime_cursor_pk(self, pk):
         pass
 
@@ -158,15 +182,22 @@ class FakePublisher:
         self.delay = 0.0
         self.on_publish = None
         self.fail_channels: set[int] = set()
+        #: 跟真的一樣分則送：第一則 embed 帶第一張圖，其餘的圖另外一則、沒有 embed（只有檔名 tg_<pk>_<n>）
+        self.split_media = False
 
-    async def publish_to_channel(self, channel, plan):
+    async def publish_to_channel(self, channel, plan, *, sent=None):
         if channel.id in self.fail_channels:
             raise RuntimeError("Discord 送出失敗")
         self.plans.append(plan)
         self.sent.append((channel.id, plan))
+        files = [f"tg_{plan['pks']}_{n}.jpg" for n in range(1, len(plan["media"]) + 1)] if self.split_media else []
         # 跟真的一樣：第一則帶隔離那行（content）與 embed footer「msg #… · db#…」
-        await channel.send(content=plan.header or None,
-                           footer=f"msg #{plan['pks']} · db#{plan['pks']}")
+        messages = [await channel.send(content=plan.header or None,
+                                       footer=f"msg #{plan['pks']} · db#{plan['pks']}", attachments=files[:1])]
+        if files[1:]:
+            messages.append(await channel.send(attachments=files[1:]))
+        if sent is not None:
+            sent.extend(messages)
         if self.on_publish is not None:
             self.on_publish()
         if self.delay:
@@ -178,11 +209,16 @@ class FakePublisher:
 
 
 class FakeMessage:
-    def __init__(self, channel, mid: int, content=None, *, footer=None, view=None) -> None:
+    def __init__(self, channel, mid: int, content=None, *, footer=None, view=None, attachments=(),
+                 author_id: int = BOT_ID) -> None:
         self.channel = channel
         self.id = mid
         self.content = content
-        self.author = SimpleNamespace(id=BOT_ID)
+        self.author = SimpleNamespace(id=author_id)
+        self.attachments = [SimpleNamespace(filename=name) for name in attachments]
+        self.created_at = datetime.now(timezone.utc)
+        #: 設了就在 delete() 時拋出（模擬 Discord 刪不掉）
+        self.delete_error: Exception | None = None
         self.embeds = [SimpleNamespace(footer=SimpleNamespace(text=footer))] if footer else []
         self.components = [SimpleNamespace(children=list(view.children))] if view is not None else []
         self.view = view
@@ -200,6 +236,10 @@ class FakeMessage:
     async def delete(self):
         if getattr(self.channel, "archived", False):
             raise discord.HTTPException(SimpleNamespace(status=400, reason="Bad Request"), "Thread is archived")
+        if self.delete_error is not None:
+            raise self.delete_error
+        if self.deleted:
+            raise discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), "Unknown Message")
         self.deleted = True
         if self in self.channel.messages:
             self.channel.messages.remove(self)
@@ -208,15 +248,19 @@ class FakeMessage:
 class _MessageHolder:
     """頻道與 thread 共用：送訊息、翻歷史、用 id 拿訊息。"""
 
-    async def send(self, content=None, *, footer=None, view=None, **kwargs):
+    async def send(self, content=None, *, footer=None, view=None, attachments=(), **kwargs):
         if hasattr(self, "archived"):
             self.archived = False   # 跟 Discord 一樣：對封存的 thread 發訊息會把它打開
-        message = FakeMessage(self, self.bot.next_id(), content, footer=footer, view=view)
+        message = FakeMessage(self, self.bot.next_id(), content, footer=footer, view=view, attachments=attachments)
         self.messages.append(message)
         return message
 
-    async def history(self, *, limit=100):
-        for message in list(reversed(self.messages))[:limit]:
+    async def history(self, *, limit=100, after=None):
+        # 跟 discord.py 一樣：沒給 after 時新到舊；給了 after 時舊到新、只回之後的
+        messages = list(self.messages) if after is not None else list(reversed(self.messages))
+        if after is not None:
+            messages = [m for m in messages if m.created_at > after]
+        for message in messages[:limit]:
             yield message
 
     def get_partial_message(self, mid):

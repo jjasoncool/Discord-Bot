@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -423,6 +424,28 @@ class TelegramMessageRepository:
                 int(message_pk),
                 int(discord_channel_id),
             )
+
+    @contextlib.asynccontextmanager
+    async def moving_deliveries(self, message_pks: list[int], from_channel_id: int, to_channel_id: int):
+        """把這批 pk 的發送紀錄從 from 頻道改記成 to 頻道：只改頻道欄位，`delivered_at` 不動（相簿補圖看第一次
+        送出多久了，改成現在會讓舊相簿重新收補圖）。區塊內出錯就整批不改——搬移時區塊內刪主頻道原貼文，
+        刪不掉就不能改紀錄。產出被改的（列 id, pk），寫進 log 供整批復原。"""
+        if self.pool is None:
+            raise RuntimeError("TelegramMessageRepository 尚未 connect")
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                rows = await conn.fetch(
+                    """
+                    UPDATE telegram_relay_delivery_state
+                    SET discord_channel_id = $3
+                    WHERE message_pk = ANY($1::bigint[]) AND discord_channel_id = $2
+                    RETURNING id, message_pk;
+                    """,
+                    [int(pk) for pk in message_pks],
+                    int(from_channel_id),
+                    int(to_channel_id),
+                )
+                yield [(int(r["id"]), int(r["message_pk"])) for r in rows]
 
     async def get_delivery_state_count(self) -> int:
         if self.pool is None:
@@ -1164,11 +1187,18 @@ class DiscordMessagePublisher:
 
     # ------------------------------------------------------------------
 
-    async def publish_to_channel(self, channel: discord.abc.Messageable, plan: RenderPlan) -> int:
+    async def publish_to_channel(self, channel: discord.abc.Messageable, plan: RenderPlan, *,
+                                 sent: Optional[list] = None) -> int:
+        """`sent`：給了就把送出的每則 Discord 訊息放進去（搬移失敗時要收回剛貼的那份）。"""
         published_count = 0
         tmp_dir: Optional[str] = None
         file_limit = self._get_file_limit(channel)
         logger.debug("Discord 檔案上限: %s bytes (guild=%s)", file_limit, getattr(getattr(channel, "guild", None), "name", "N/A"))
+
+        async def send(**kwargs) -> None:
+            message = await channel.send(**kwargs)
+            if sent is not None:
+                sent.append(message)
 
         try:
             for operation in plan.operations:
@@ -1199,7 +1229,7 @@ class DiscordMessagePublisher:
                 chunks = self._chunk_attachments(sized_attachments, chunk_size=10)
 
                 if not chunks:
-                    await channel.send(content=operation.content or None, embed=operation.embed)
+                    await send(content=operation.content or None, embed=operation.embed)
                     published_count += 1
                     continue
 
@@ -1229,7 +1259,7 @@ class DiscordMessagePublisher:
                     image_items = image_items[1:]
 
                 send_files = [first_image_file] if first_image_file else []
-                await channel.send(content=operation.content or None, embed=embed, files=send_files or None)
+                await send(content=operation.content or None, embed=embed, files=send_files or None)
                 published_count += 1
 
                 # 剩餘圖片分批發送
@@ -1243,7 +1273,7 @@ class DiscordMessagePublisher:
                             )
                             for item in chunk
                         ]
-                        await channel.send(files=files)
+                        await send(files=files)
                         published_count += 1
 
                 # 非圖片附件（影片等）在 embed 之後發送
@@ -1257,7 +1287,7 @@ class DiscordMessagePublisher:
                             )
                             for item in chunk
                         ]
-                        await channel.send(files=files)
+                        await send(files=files)
                         published_count += 1
         finally:
             # 清理暫存壓縮檔
@@ -1407,6 +1437,23 @@ class SentButNotRecorded(RuntimeError):
     """已經送出，但發送紀錄沒寫上（資料庫暫時失敗）。重送會重複貼文，呼叫端不能當成「沒送出」重試。"""
 
 
+# 轉發貼文認回 Telegram 那則（`TelegramRenderAdapter.render`）：embed footer「msg #… · db#<pk>」，或附件檔名
+# tg_<pk>_<n>。相簿第 2 批起的圖、影片是另外一則、沒有 embed，只認得出檔名；有雷的附件 Discord 會在檔名前加 SPOILER_
+_FOOTER_PK = re.compile(r"db#(\d+)")
+_ATTACHMENT_PK = re.compile(r"^(?:SPOILER_)?tg_(\d+)_\d+\.")
+
+
+def _footer_pks(message) -> set[int]:
+    footers = [getattr(getattr(e, "footer", None), "text", "") or "" for e in getattr(message, "embeds", None) or []]
+    return {int(pk) for text in footers for pk in _FOOTER_PK.findall(text)}
+
+
+def relay_post_pks(message) -> set[int]:
+    """bot 轉發的一則 Discord 訊息屬於哪幾則 Telegram 訊息（pk）；不是轉發的回空集合。"""
+    names = [getattr(a, "filename", "") or "" for a in getattr(message, "attachments", None) or []]
+    return _footer_pks(message) | {int(m.group(1)) for name in names if (m := _ATTACHMENT_PK.match(name))}
+
+
 class MessageRelayWorker:
     """Telegram Relay Worker：LISTEN + 補償 polling + 去重。
 
@@ -1455,8 +1502,8 @@ class MessageRelayWorker:
         # 還在佇列裡、沒開始處理的不用：輪到時本來就會讀到最新的資料
         self._requeue: set[int] = set()
         self._processing: set[int] = set()
-        # 放回同時只做一則：兩位管理員同時按同一則時，第二位會看到「已經放回過了」
-        self._restore_lock = asyncio.Lock()
+        # 放回、搬移同時只做一則：兩位管理員同時按同一則時，第二位會看到「已經放回過了」
+        self._quarantine_lock = asyncio.Lock()
         # 開了過濾時一次只處理一則（開關每則重讀，切換不用重啟）
         self._filtered_lock = asyncio.Lock()
         self._last_polled_pk: int = 0
@@ -1973,8 +2020,13 @@ class MessageRelayWorker:
         *,
         title_suffix: str = "",
         header: str = "",
+        record: bool = True,
+        sent: Optional[list] = None,
     ) -> int:
-        """把一個發送單位送到頻道（或 thread），並把這批 pk 記成送到那裡。單則、相簿、隔離共用。"""
+        """把一個發送單位送到頻道（或 thread），並把這批 pk 記成送到那裡。單則、相簿、隔離共用。
+
+        `record=False`：不寫紀錄，由呼叫端改（搬移：主頻道原貼文刪掉後才改）；`sent`：收集送出的 Discord 訊息。
+        """
         logger.info(
             "Telegram relay 發送目標: channel_id=%s guild=%r channel=%r",
             channel_id,
@@ -1985,7 +2037,9 @@ class MessageRelayWorker:
         plan = self.render_adapter.render(unit, emoji_map=emoji_map, title_suffix=title_suffix)
         if header and plan.operations:
             plan.operations[0].content = header
-        count = await self.publisher.publish_to_channel(channel, plan)
+        count = await self.publisher.publish_to_channel(channel, plan, sent=sent)
+        if not record:
+            return count
         try:
             for pk in pks:
                 await self.repository.mark_message_published(pk, channel_id)
@@ -2033,7 +2087,7 @@ class MessageRelayWorker:
         相簿放回途中算「處理中」：這段時間晚到的組員先登記，放回後再處理（那時已有主頻道紀錄，會以補圖送主頻道），
         不然它會被當成隔離相簿的補圖送進隔離區，之後這本永遠留在選單裡放不回去。
         """
-        async with self._restore_lock:
+        async with self._quarantine_lock:
             record = await self.repository.get_message_by_pk(message_pk)
             if record is None:
                 return False, "找不到這則訊息。"
@@ -2061,10 +2115,7 @@ class MessageRelayWorker:
 
     async def _restore_unit(self, record: TelegramMessageRecord, restored_by: str) -> tuple[bool, str]:
         message_pk = record.message_pk
-        pks = [message_pk]
-        if record.grouped_id is not None:
-            members = await self.repository.get_group_member_states(int(record.grouped_id), record.telegram_chat_id)
-            pks = [pk for pk, _ in members] or pks
+        pks = await self.unit_pks(record)
         route_ids = self._routes(record.telegram_chat_id)
         deliveries = await self._route_deliveries(pks, route_ids)
         restored = False
@@ -2120,8 +2171,7 @@ class MessageRelayWorker:
             async for message in thread.history(limit=self._QUARANTINE_SCAN_LIMIT):
                 if getattr(message.author, "id", None) != me:
                     continue
-                footers = [getattr(getattr(e, "footer", None), "text", "") or "" for e in message.embeds]
-                if any(int(m) in wanted for f in footers for m in re.findall(r"db#(\d+)", f)):
+                if _footer_pks(message) & wanted:
                     found.append(message)
         return found
 
@@ -2138,6 +2188,110 @@ class MessageRelayWorker:
 
     # 放回時往回翻隔離 thread 找原貼文的則數上限（一天約一則，翻得到幾個月）
     _QUARANTINE_SCAN_LIMIT = 500
+
+    # ------------------------------------------------------------------
+    # 隔離區：把已經貼在主頻道的移進來（使用者 10-07：「判垃圾搬到 thread、原本頻道的貼文刪除」）
+    # ------------------------------------------------------------------
+
+    async def unit_pks(self, record: TelegramMessageRecord) -> list[int]:
+        """一個發送單位的 pk：單則是自己，相簿是同一本全部（依 Telegram 順序）。"""
+        if record.grouped_id is None:
+            return [record.message_pk]
+        members = await self.repository.get_group_member_states(int(record.grouped_id), record.telegram_chat_id)
+        return [pk for pk, _ in members] or [record.message_pk]
+
+    async def judge_existing(self, message_pk: int) -> Optional[Verdict]:
+        """直接判一則已經在資料庫的（相簿整本），不看開關、不送；沒接過濾或找不到回 None。一次性搬移用。"""
+        record = await self.repository.get_message_by_pk(message_pk)
+        if self._filter is None or record is None:
+            return None
+        unit = await self._merge_group_messages(await self.unit_pks(record)) if record.grouped_id is not None else record
+        if unit is None:
+            return None
+        return await self._filter.judge(unit.text, self._filter_media(unit), trace_id=f"tgfilter-{message_pk}")
+
+    async def relay_posts(self, channel, *, after: Optional[datetime] = None) -> dict[int, list[discord.Message]]:
+        """頻道裡 bot 轉發的貼文，依 Telegram 那則的 pk 分組。一個發送單位可能是好幾則 Discord 訊息
+        （長文分段、相簿分批、影片另一則、補圖），要整組刪才不會留半則。整批搬移時掃一次給每則用。"""
+        me = getattr(getattr(self.bot, "user", None), "id", None)
+        out: dict[int, list[discord.Message]] = {}
+        async for message in channel.history(limit=None, after=after):
+            if getattr(message.author, "id", None) != me:
+                continue
+            for pk in relay_post_pks(message):
+                out.setdefault(pk, []).append(message)
+        return out
+
+    async def move_to_quarantine(self, message_pk: int, verdict: Verdict,
+                                 posts: dict[int, list[discord.Message]]) -> tuple[bool, str]:
+        """把已經在主頻道的一則（相簿整本，含補圖）移進隔離區，之後跟新判的一樣能從面板放回。
+
+        順序：照正常流程貼進隔離 thread（帶判定那行）→ 刪主頻道原貼文 → 發送紀錄的頻道從主頻道改成 thread。
+        原貼文一則都沒刪掉就不改紀錄、收回 thread 那份：不然面板會列出它，放回後主頻道變兩份。
+        `posts`：`relay_posts` 掃主頻道的結果。回傳 (有沒有搬, 說明)。
+        """
+        async with self._quarantine_lock:
+            record = await self.repository.get_message_by_pk(message_pk)
+            if record is None:
+                return False, f"找不到這則訊息（db#{message_pk}）。"
+            pks = await self.unit_pks(record)
+            route_ids = self._routes(record.telegram_chat_id)
+            deliveries = await self._route_deliveries(pks, route_ids)
+            notes = []
+            for route_id in route_ids:
+                delivered = deliveries.get(route_id)
+                if delivered is None or not delivered.main or delivered.quarantine:
+                    continue   # 沒送到這個主頻道，或已經在隔離區（含放回過的）
+                main_pks = [pk for pk in pks if pk in delivered.main]
+                ok, note = await self._move_unit(record, main_pks, route_id, verdict, posts)
+                if not ok:
+                    return False, note
+                notes.append(note)
+            if not notes:
+                return False, f"不在主頻道（沒送過或已經在隔離區），沒搬（db#{message_pk}）。"
+            return True, "；".join(notes)
+
+    async def _move_unit(self, record: TelegramMessageRecord, main_pks: list[int], route_id: int, verdict: Verdict,
+                         posts: dict[int, list[discord.Message]]) -> tuple[bool, str]:
+        # 照貼出的順序刪（Discord 的訊息 id 依時間遞增）：中途失敗時留下的是後半段，看得出是不完整的一則
+        originals = sorted({m.id: m for pk in main_pks for m in posts.get(pk, [])
+                            if getattr(m.channel, "id", None) == route_id}.values(), key=lambda m: m.id)
+        if not originals:
+            return False, f"主頻道找不到原貼文，沒搬（db#{record.message_pk}）。"
+        unit = await self._merge_group_messages(main_pks) if record.grouped_id is not None else record
+        dest = await self._destination(route_id, True)
+        if unit is None or dest is None:
+            return False, f"隔離 thread 取不到，沒搬（db#{record.message_pk}）。"
+        thread, thread_id = dest
+        copies: list[discord.Message] = []
+        deleted = 0
+        try:
+            await self._send_unit(unit, main_pks, thread, thread_id, header=self._verdict_header(verdict),
+                                  record=False, sent=copies)
+            async with self.repository.moving_deliveries(main_pks, route_id, thread_id) as rows:
+                for message in originals:
+                    try:
+                        await message.delete()
+                    except discord.NotFound:
+                        pass   # 已經不在了
+                    deleted += 1
+        except Exception as exc:
+            if deleted:
+                # 原貼文刪了（全部或一部分）：thread 那份不能收回；紀錄沒改，重跑這則會補完（thread 會多一份）
+                logger.error("Telegram 隔離區搬移：主頻道原貼文刪了 %s/%s 則，但發送紀錄沒改 pks=%s 主頻道=%s "
+                             "thread=%s：%s", deleted, len(originals), main_pks, route_id, thread_id, exc, exc_info=True)
+                return False, f"原貼文刪了 {deleted}/{len(originals)} 則、發送紀錄沒改（db#{record.message_pk}，詳見 log）。"
+            logger.error("Telegram 隔離區搬移失敗，沒搬 db#%s：%s", record.message_pk, exc, exc_info=True)
+            for copy in copies:
+                try:
+                    await copy.delete()
+                except Exception as cleanup_exc:
+                    logger.warning("收回 thread 那份失敗 message_id=%s：%s", getattr(copy, "id", None), cleanup_exc)
+            return False, f"搬移失敗，沒搬（db#{record.message_pk}）：{exc}"
+        logger.info("Telegram 隔離區：已搬移 db#%s 主頻道 %s → thread %s；刪原貼文 %s 則；發送紀錄（列 id, pk）=%s",
+                    record.message_pk, route_id, thread_id, len(originals), rows)
+        self._quarantine.changed(route_id, thread)
+        return True, f"已搬進隔離區、刪主頻道 {len(originals)} 則（db#{record.message_pk}）。"
 
     async def _process_group_member(self, message: TelegramMessageRecord, started: float) -> None:
         """media group 組員入口：同組同時只有一個收集者，其餘組員登記後返回。"""
