@@ -223,6 +223,11 @@ async def get_forum_article_channel_id(config_file="config.json", caller="unknow
     """從配置文件中讀取論壇文章頻道 ID"""
     return await ChannelConfig.get_channel_id('forum_article_channel_id', config_file, caller)
 
+def bot_owner_id() -> int:
+    """擁有者（群主）的 Discord 使用者 ID：環境變數 `OWNER_ID`；沒設是 0，誰都不是擁有者。"""
+    return int(os.getenv('OWNER_ID', '0'))
+
+
 async def check_role(user, required_role: str = None) -> bool:
     """
     檢查使用者是否具有特定角色
@@ -235,7 +240,7 @@ async def check_role(user, required_role: str = None) -> bool:
         bool: 使用者是否具有所需角色
     """
     if required_role:
-        owner_id = int(os.getenv('OWNER_ID', '0'))
+        owner_id = bot_owner_id()
         if user.id == owner_id:
             logger.info(f'使用者 {user.name} 是 owner，自動通過角色權限檢查')
             return True
@@ -287,7 +292,7 @@ async def check_guild(interaction: discord.Interaction, owner_only: bool = False
 
     # 檢查擁有者權限（最高優先級）
     if owner_only:
-        owner_id = int(os.getenv('OWNER_ID', '0'))
+        owner_id = bot_owner_id()
         if interaction.user.id != owner_id:
             await safe_send_interaction_message(interaction, "❌ 此命令僅限指定擁有者使用！", ephemeral=True)
             logger.info(f'使用者 {interaction.user} 嘗試使用僅限擁有者的命令，已被拒絕')
@@ -302,7 +307,7 @@ async def check_guild(interaction: discord.Interaction, owner_only: bool = False
 
     # 檢查 Discord 權限
     if permission:
-        owner_id = int(os.getenv('OWNER_ID', '0'))
+        owner_id = bot_owner_id()
         if not (getattr(interaction.permissions, permission, False) or interaction.user.id == owner_id):
             name = _PERMISSION_NAMES.get(permission, permission)
             await safe_send_interaction_message(interaction, f"❌ 需要「{name}」權限才能操作。", ephemeral=True)
