@@ -1,10 +1,14 @@
 """一次性：已經貼在主頻道的 Telegram 轉發，用 LLM 判斷，判成垃圾的移進「垃圾訊息」thread（使用者 2026-10-07）。
 
 每個 pk（相簿給哪一張都行，整本一起判、一起搬）：
-1. 用跟轉發同一套的判斷（`MessageRelayWorker.judge_existing`；不看 switches.json，開關是給新訊息的）
+1. 判斷：清單檔有寫判定的照清單（使用者看過的，不重判：模型每次判的不一定一樣）；沒寫的用跟轉發同一套的判斷
+   （`MessageRelayWorker.judge_existing`；不看 switches.json，開關是給新訊息的；圖沒到齊的不判）
 2. 判成垃圾才搬（`MessageRelayWorker.move_to_quarantine`）：在 thread 照正常流程重貼（最上面「判定：…」）
    → 刪主頻道原貼文 → 發送紀錄的頻道欄位改成 thread（送出時間不動）
 3. 搬完在 thread 貼放回面板；判錯的用面板放回
+
+不搬的（會印出原因）：認不出本文那則（2026-07-25 以前的舊格式 footer 沒有 db#）、第一次送出未滿 12 小時的相簿、
+已經在隔離區或放回過的、主頻道找不到原貼文。
 
 用 bot 的身分只走 HTTP、不連 gateway：線上的 bot 照常跑、不用重啟。模型跟 bot 排同一個隊。
 
@@ -13,11 +17,12 @@
     docker exec -w /app discord-bot python scripts/telegram_move_to_quarantine.py 14095
     # 實際搬
     docker exec -w /app discord-bot python scripts/telegram_move_to_quarantine.py 14095 --apply
-    # 很多則：pk 寫在檔案裡，一行一個（# 之後是註解）
+    # 很多則：清單檔一行一則「pk 標籤 理由」（只寫 pk 的用模型判；# 之後是註解）
     docker exec -w /app discord-bot python scripts/telegram_move_to_quarantine.py --file /tmp/move.txt --apply
 
 復原：log 記了每則改了哪幾列（列 id, pk）；要整批改回，照列 id 把 discord_channel_id 改回主頻道。
-放回單則用面板（重新貼回主頻道）。
+放回單則用面板（重新貼回主頻道）。刪了一部分才失敗的，重跑同一則會補完；全刪了才寫不進資料庫的，
+log 會留要手動執行的 SQL。
 """
 from __future__ import annotations
 
@@ -27,6 +32,7 @@ import os
 import sys
 from datetime import timedelta
 from pathlib import Path
+from typing import Optional
 
 SRC_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SRC_DIR))
@@ -38,7 +44,7 @@ import discord  # noqa: E402
 
 from commands.telegram_quarantine_commands import TelegramQuarantineCommands  # noqa: E402
 from services.relay import telegram_filter  # noqa: E402
-from services.relay.telegram_filter import RelayFilter  # noqa: E402
+from services.relay.telegram_filter import RelayFilter, Verdict  # noqa: E402
 from services.relay.telegram_quarantine import RUNTIME_PATH, QuarantineThreads  # noqa: E402
 from services.relay.telegram_relay_service import (  # noqa: E402
     DiscordMessagePublisher,
@@ -65,17 +71,19 @@ class _Publisher(DiscordMessagePublisher):
         return self._file_limit
 
 
-def _read_pks(args) -> list[int]:
-    pks = list(args.pks)
+def _read_targets(args) -> dict[int, Optional[Verdict]]:
+    """pk → 清單給的判定（None＝用模型判）。清單檔一行「pk 標籤 理由」，只寫 pk 也行。"""
+    targets: dict[int, Optional[Verdict]] = {pk: None for pk in args.pks}
     if args.file:
         for line in Path(args.file).read_text(encoding="utf-8").splitlines():
-            line = line.split("#", 1)[0].strip()
-            if line:
-                pks.append(int(line))
-    return list(dict.fromkeys(pks))
+            fields = line.split("#", 1)[0].split()
+            if fields:
+                label, reason = (fields[1], " ".join(fields[2:])) if len(fields) > 1 else (None, "")
+                targets[int(fields[0])] = Verdict(True, label=label, reason=reason) if label else None
+    return targets
 
 
-async def run(pks: list[int], apply: bool) -> None:
+async def run(targets: dict[int, Optional[Verdict]], apply: bool) -> None:
     telegram_filter._SETTINGS = telegram_filter._SETTINGS.model_copy(update={"wait_seconds": _WAIT_SECONDS})
     client = discord.Client(intents=discord.Intents.none())
     await client.login(os.environ["DISCORD_TOKEN"])
@@ -84,7 +92,7 @@ async def run(pks: list[int], apply: bool) -> None:
     try:
         resolver = MessageRouteResolver(config_path="config.json")
         records = {}
-        for pk in pks:
+        for pk in targets:
             record = await repo.get_message_by_pk(pk)
             if record is None:
                 print(f"db#{pk}：找不到，略過")
@@ -114,22 +122,17 @@ async def run(pks: list[int], apply: bool) -> None:
 
         moved_routes: set[int] = set()
         for pk, record in records.items():
-            verdict = await worker.judge_existing(pk)
+            given = targets[pk]
+            verdict = given or await worker.judge_existing(pk)
             if verdict is None or not verdict.quarantine:
                 why = "判斷失敗" if verdict is None else ("放行" if verdict.by_model else "沒判（放行）")
                 print(f"db#{pk}：{why}｜{getattr(verdict, 'reason', '')}，不搬")
                 continue
-            unit = await worker.unit_pks(record)
-            originals = {m.id for p in unit for m in posts.get(p, [])}
-            head = f"db#{pk}：隔離｜{verdict.label}｜{verdict.reason}（相簿 {len(unit)} 張）" if len(unit) > 1 else \
-                f"db#{pk}：隔離｜{verdict.label}｜{verdict.reason}"
-            if not apply:
-                print(f"{head}；會刪主頻道 {len(originals)} 則")
-                continue
-            ok, note = await worker.move_to_quarantine(pk, verdict, posts)
+            head = f"db#{pk}：隔離｜{verdict.label}｜{verdict.reason}（{'清單' if given else '模型'}）"
+            ok, note = await worker.move_to_quarantine(pk, verdict, posts, apply=apply)
             print(f"{head}；{note}")
-            if ok:
-                moved_routes.update(r for r in resolver.resolve_telegram_routes(record.telegram_chat_id))
+            if ok and apply:
+                moved_routes.update(resolver.resolve_telegram_routes(record.telegram_chat_id))
 
         # 搬完貼放回面板（bot 之後置底時會照 runtime 檔刪掉這則再發）
         panel = TelegramQuarantineCommands(client)
@@ -147,13 +150,13 @@ async def run(pks: list[int], apply: bool) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="判斷已在主頻道的 Telegram 轉發，垃圾移進隔離 thread")
     parser.add_argument("pks", nargs="*", type=int, help="Telegram 訊息的 db# 編號")
-    parser.add_argument("--file", help="pk 清單檔，一行一個")
+    parser.add_argument("--file", help="清單檔，一行「pk 標籤 理由」（只寫 pk 的用模型判）")
     parser.add_argument("--apply", action="store_true", help="實際搬（沒加只預覽）")
     args = parser.parse_args()
-    pks = _read_pks(args)
-    if not pks:
+    targets = _read_targets(args)
+    if not targets:
         parser.error("要給 pk 或 --file")
-    asyncio.run(run(pks, args.apply))
+    asyncio.run(run(targets, args.apply))
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@
 執行：
     cd src && python -m unittest test.test_telegram_quarantine_move -v
 """
+import importlib.util
 import os
 import shutil
 import sys
@@ -296,6 +297,29 @@ class JudgeExistingTests(MoveTestBase):
         self.assertIsNone(await self.worker.judge_existing(9))
         self.worker._filter = FakeFilter("on")
         self.assertIsNone(await self.worker.judge_existing(404))
+
+
+class ScriptListFileTests(unittest.TestCase):
+    def test_list_file_with_and_without_verdicts(self):
+        # 使用者看過的清單照清單搬、不重判（模型每次判的不一定一樣）；只寫 pk 的才用模型判
+        cwd = os.getcwd()
+        self.addCleanup(os.chdir, cwd)   # 腳本 import 時會切到 src
+        spec = importlib.util.spec_from_file_location(
+            "telegram_move_script", Path(SRC_DIR) / "scripts" / "telegram_move_to_quarantine.py")
+        script = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(script)
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        path = Path(tmp) / "move.txt"
+        path.write_text("14093 罵人 設定 拉黑規則  # 看過了\n14095\n\n# 註解\n", encoding="utf-8")
+
+        targets = script._read_targets(SimpleNamespace(pks=[13342], file=str(path)))
+
+        self.assertEqual(set(targets), {13342, 14093, 14095})
+        self.assertIsNone(targets[13342])
+        self.assertIsNone(targets[14095])
+        self.assertEqual((targets[14093].quarantine, targets[14093].label, targets[14093].reason),
+                         (True, "罵人", "設定 拉黑規則"))
 
 
 class RelayPostPksTests(unittest.TestCase):
