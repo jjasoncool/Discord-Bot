@@ -1,5 +1,14 @@
 {
-  "_說明": "功能開關。改了下一次用到就生效、不用重啟；值寫錯會記 warning 並用預設。每個開關的意思與允許的值見 src/sys_settings/switches.py。",
-  "telegram_filter_mode": "off",
+  "_說明": "功能開關。改了下一次用到就生效、不用重啟；值寫錯會記 warning 並用預設。每個開關上面列著可以填的值。",
+  "_telegram_filter_mode 可以填": [
+    "off：不判斷，全部送主頻道",
+    "dry_run：會判斷、寫 log，但照常送主頻道（試跑用）",
+    "on：判成垃圾的送進主頻道底下的「垃圾訊息」thread"
+  ],
+  "telegram_filter_mode": "on",
+  "_ambient_insult_mode 可以填": [
+    "off：被點名罵時不按表情、不記人（模型照樣不會回嘴，等於不回）",
+    "on：按一個嘲諷表情、記下這個人，之後 7 天不主動接他的話（他點名照回）"
+  ],
   "ambient_insult_mode": "on"
 }
