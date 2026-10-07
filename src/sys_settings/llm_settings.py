@@ -419,6 +419,10 @@ class AmbientChatSettings(BaseSettings):
     # 模型回此 sentinel（或空字串）代表「沒梗」→ 不發送
     silence_sentinel: str = "[PASS]"
 
+    # ── 被點名罵（llm/ambient/ambient_insult.py；開關是 settings/switches.json 的 ambient_insult_mode）──
+    insult_cold_days: int = 7            # 罵過它的人，幾天內不主動接他的話（期間再罵就從那天重算）
+    insult_reaction_emoji: str = "sointeresting"   # 按的表情：本伺服器自訂表情的名稱（真有趣・反諷）；找不到用 🙄
+
     # ── 看圖（ambient 模型需具 vision）──
     image_max_count: int = 9             # 一次請求最多帶幾張圖（含動圖拆出來的幀），硬上限
     image_max_bytes: int = 5 * 1024 * 1024

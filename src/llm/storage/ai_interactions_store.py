@@ -2,6 +2,7 @@
 
 記每次「真的開口」的插話：被 @ 還是自發、什麼觸發的、它回的那段對話、它說了什麼。
 獨立表 + 軟連結（存 id、不設 FK），日記與未來的好感度都讀這張表。
+另一張 `ai_insults` 記誰點名罵過它（它對罵人不回文字，見 `llm/ambient/ambient_insult.py`）。
 
 psycopg2 是同步——async caller（ambient/diary）請用 `asyncio.to_thread` 包，避免阻塞
 event loop。所有函式 best-effort：失敗只記 log、不拋（互動紀錄不該拖垮插話/日記主流程）。
@@ -15,11 +16,13 @@ from collections import deque
 from typing import Any, Optional
 
 
-from sys_settings.llm_settings import LLMServiceSettings
+from sys_settings import switches
+from sys_settings.llm_settings import AmbientChatSettings, LLMServiceSettings
 
 logger = logging.getLogger(__name__)
 
 _TABLE = "ai_interactions"
+_INSULT_TABLE = "ai_insults"
 _settings: Optional[LLMServiceSettings] = None
 
 # 共用 embedding 實例（與 RAG/印象卡同一顆 embed model）；lazy 初始化，sync 路徑用。
@@ -80,10 +83,26 @@ ALTER TABLE {_TABLE} ADD COLUMN IF NOT EXISTS explore_sample     BOOLEAN NOT NUL
 -- followup：這筆是不是「有人接它的話 → 它再回一句」。接續在 code 裡借用 directed 的回覆路徑，
 -- 若不獨立記一欄，DB 裡就分不出「被 @」和「接續」。舊資料 FALSE 天然正確（當時沒這功能）。
 ALTER TABLE {_TABLE} ADD COLUMN IF NOT EXISTS followup           BOOLEAN NOT NULL DEFAULT FALSE;
+-- insulted：這句話換來被點名罵（「閉嘴」「腦殘AI」）。被罵＝不受歡迎：got_reply 記成 FALSE（鉤子的反例），
+-- 也不當 style_refs 範例。舊資料 FALSE（當時沒偵測）。
+ALTER TABLE {_TABLE} ADD COLUMN IF NOT EXISTS insulted           BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS idx_ai_interactions_ts         ON {_TABLE} (ts DESC);
 CREATE INDEX IF NOT EXISTS idx_ai_interactions_channel_ts ON {_TABLE} (channel_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_ai_interactions_author     ON {_TABLE} (trigger_author_id);
 CREATE INDEX IF NOT EXISTS idx_ai_interactions_replymsg   ON {_TABLE} (reply_message_id);
+-- 誰點名罵過它（見 llm/ambient/ambient_insult.py）。它不回文字、不寫上面那張表，只記在這裡：
+-- 「幾天內不主動接這個人的話」與「這個人按的讚不算」都從這裡算，不另存狀態檔。
+CREATE TABLE IF NOT EXISTS {_INSULT_TABLE} (
+  id                    BIGSERIAL PRIMARY KEY,
+  ts                    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  guild_id              TEXT NOT NULL,
+  channel_id            TEXT NOT NULL,
+  author_id             TEXT NOT NULL,
+  message_id            TEXT NOT NULL UNIQUE,
+  text                  TEXT,
+  replied_to_message_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ai_insults_guild_author_ts ON {_INSULT_TABLE} (guild_id, author_id, ts DESC);
 """
 
 # embedding 欄需要 vector extension，獨立一段執行：缺 extension 時不該拖垮基礎建表。
@@ -245,31 +264,111 @@ def mark_got_reply(
     例外，不重試就永遠標不到、而且無聲無息。本函式跑在 to_thread 裡，sleep 不阻塞 event loop。
 
     回傳有沒有真的標到（caller 可忽略；失敗只影響一筆訓練樣本，不影響行為）。
+    被罵過的不翻（`insulted`）：罵人那則若剛好被當成接話，標籤要留在「不受歡迎」。
     """
+    return _update_with_retry(
+        f"""UPDATE {_TABLE} SET got_reply = TRUE
+            WHERE reply_message_id = %s AND got_reply IS NOT NULL AND NOT insulted""",
+        reply_message_id, what="got_reply", attempts=attempts, retry_delay=retry_delay,
+    )
+
+
+def mark_insulted(
+    reply_message_id: str, *, attempts: int = 4, retry_delay: float = 2.5
+) -> bool:
+    """標記「它這句話換來被點名罵」：`insulted`，而且已納入觀測的 `got_reply` 改成 FALSE。
+
+    被罵＝不受歡迎，是鉤子的反例；不改的話，罵人前後那個人剛好又講了一句，那次插話就被記成
+    「有人接」（2026-10-06、10-07 實際發生）。sync；async caller 用 to_thread。
+    不是插話（例如 bot 的其他訊息）就標不到，只在追蹤得到的才重試（理由同 `mark_got_reply`）。
+    """
+    return _update_with_retry(
+        f"""UPDATE {_TABLE}
+            SET insulted = TRUE,
+                got_reply = CASE WHEN got_reply IS NULL THEN NULL ELSE FALSE END
+            WHERE reply_message_id = %s""",
+        reply_message_id, what="insulted",
+        attempts=attempts if is_tracked_reply(str(reply_message_id)) else 1,
+        retry_delay=retry_delay,
+    )
+
+
+def _update_with_retry(
+    sql: str, reply_message_id: str, *, what: str, attempts: int, retry_delay: float
+) -> bool:
+    """對某則插話跑一句 UPDATE，0 列就等一下再試（插話紀錄可能還在算 embedding、還沒寫進去）。"""
     for attempt in range(max(1, attempts)):
         try:
             conn = _get_conn()
             try:
                 with conn:
                     with conn.cursor() as cur:
-                        cur.execute(
-                            f"""UPDATE {_TABLE} SET got_reply = TRUE
-                                WHERE reply_message_id = %s AND got_reply IS NOT NULL""",
-                            (str(reply_message_id),),
-                        )
+                        cur.execute(sql, (str(reply_message_id),))
                         if cur.rowcount > 0:
                             return True
             finally:
                 conn.close()
         except Exception as exc:
-            logger.debug("ai_interactions got_reply 標記失敗 mid=%s：%s", reply_message_id, exc)
+            logger.debug("ai_interactions %s 標記失敗 mid=%s：%s", what, reply_message_id, exc)
         if attempt < attempts - 1:
             time.sleep(retry_delay)  # 等 INSERT（含 embedding）落地
     logger.info(
-        "ai_interactions got_reply 標記不到 mid=%s（重試 %d 次；該筆可能未納入觀測或寫入失敗）",
-        reply_message_id, attempts,
+        "ai_interactions %s 標記不到 mid=%s（重試 %d 次；該筆可能未納入觀測或寫入失敗）",
+        what, reply_message_id, attempts,
     )
     return False
+
+
+def record_insult(
+    *,
+    guild_id: str,
+    channel_id: str,
+    author_id: str,
+    message_id: str,
+    text: Optional[str],
+    replied_to_message_id: Optional[str],
+) -> None:
+    """記一則點名罵它的訊息（同一則只記一次）。sync；async caller 用 to_thread。"""
+    try:
+        conn = _get_conn()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""INSERT INTO {_INSULT_TABLE}
+                              (guild_id, channel_id, author_id, message_id, text, replied_to_message_id)
+                            VALUES (%s,%s,%s,%s,%s,%s)
+                            ON CONFLICT (message_id) DO NOTHING""",
+                        (guild_id, channel_id, author_id, message_id, text, replied_to_message_id),
+                    )
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("ai_insults 寫入失敗 message=%s：%s", message_id, exc)
+
+
+def recent_insults(guild_id: str, days: int) -> dict[str, tuple[Any, int]]:
+    """這個伺服器 days 天內點名罵過它的人 → {author_id: (最後一次的時間, 次數)}。
+
+    查不到回空 dict（＝照舊對待所有人）。sync；async caller 用 to_thread。
+    """
+    try:
+        conn = _get_conn()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""SELECT author_id, max(ts), count(*) FROM {_INSULT_TABLE}
+                            WHERE guild_id = %s AND ts > now() - make_interval(days => %s)
+                            GROUP BY author_id""",
+                        (guild_id, int(days)),
+                    )
+                    return {r[0]: (r[1], int(r[2])) for r in cur.fetchall()}
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("ai_insults 讀取失敗 guild=%s：%s", guild_id, exc)
+        return {}
 
 
 def fetch_reply_rate_stats(
@@ -317,11 +416,16 @@ def fetch_reply_rate_stats(
     return (len(rows), sum(1 for r in rows if r[0]) / len(rows))
 
 
-def note_reaction(message_id: str, emoji_name: str, emoji_id: Any, action: str) -> None:
+def note_reaction(
+    message_id: str, emoji_name: str, emoji_id: Any, action: str, user_id: Any = None
+) -> None:
     """某則 bot 插話收到/移除反應 → 依 emoji 分類更新該筆的正/負向計數。
 
     caller 應先用 is_tracked_reply() 確認是 bot 插話再呼叫（避免對非 bot 訊息打 DB）。
     正向＝agree/laugh、負向＝negative、其餘只計入 reaction_count。sync；async caller 用 to_thread。
+    user_id＝按的人：最近點名罵過它的人按的正向不算（被讚的插話會變成 style_refs 範例，
+    不能讓罵它的人決定它學什麼）。跟記仇的其他效果一樣只在開關 on 時生效；名單查不到就照常計入。
+    按下與收回各自當下判斷，名單在兩者之間變了會差一個。
     """
     try:
         from llm.persona.reaction_classifier import classify_reaction
@@ -336,6 +440,22 @@ def note_reaction(message_id: str, emoji_name: str, emoji_id: Any, action: str) 
         try:
             with conn:
                 with conn.cursor() as cur:
+                    if pos and user_id is not None and switches.current().ambient_insult_mode == "on":
+                        try:
+                            cur.execute("SAVEPOINT insulter_check")
+                            cur.execute(
+                                f"""SELECT 1 FROM {_INSULT_TABLE}
+                                    WHERE author_id = %s AND ts > now() - make_interval(days => %s)
+                                    LIMIT 1""",
+                                (str(user_id), AmbientChatSettings().insult_cold_days),
+                            )
+                            if cur.fetchone() is not None:
+                                pos = 0
+                            cur.execute("RELEASE SAVEPOINT insulter_check")
+                        except Exception as exc:
+                            # 查不到名單就照常計入（反應計數比名單重要）；savepoint 讓下面的 UPDATE 還能跑
+                            cur.execute("ROLLBACK TO SAVEPOINT insulter_check")
+                            logger.warning("ai_insults 名單查詢失敗，照常計入 msg=%s：%s", message_id, exc)
                     cur.execute(
                         f"""UPDATE {_TABLE}
                             SET reaction_count     = GREATEST(reaction_count + %s, 0),
@@ -391,7 +511,7 @@ def fetch_recent(
 def fetch_similar_positive(
     situation_text: str, *, k: int = 8, max_distance: float = 0.45, min_positive: int = 1
 ) -> list[dict[str, Any]]:
-    """撈與當下情境語意相近、且被群裡按過正向反應（且無負向）的舊插話＝「打中過的好回答」。
+    """撈與當下情境語意相近、且被群裡按過正向反應（且無負向、沒被罵）的舊插話＝「打中過的好回答」。
 
     回 [{trigger_text, context_snippet, reply_text, reply_message_id, positive_reactions,
         directed, distance}]，按 cosine 距離由近到遠、且只留 distance <= max_distance 的。sync。
@@ -414,6 +534,7 @@ def fetch_similar_positive(
                         WHERE embedding IS NOT NULL
                           AND positive_reactions >= %s
                           AND negative_reactions = 0
+                          AND NOT insulted
                         ORDER BY embedding <=> %s::vector
                         LIMIT %s
                         """,

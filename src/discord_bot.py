@@ -643,7 +643,8 @@ async def on_raw_reaction_add(payload):
         mid = str(payload.message_id)
         if is_tracked_reply(mid):
             await asyncio.to_thread(
-                note_reaction, mid, payload.emoji.name, payload.emoji.id, "add"
+                note_reaction, mid, payload.emoji.name, payload.emoji.id, "add",
+                payload.user_id,
             )
     except Exception as _exc:
         logger.debug("ai_interactions 反應記錄略過(add): %s", _exc)
@@ -667,7 +668,8 @@ async def on_raw_reaction_remove(payload):
         mid = str(payload.message_id)
         if is_tracked_reply(mid):
             await asyncio.to_thread(
-                note_reaction, mid, payload.emoji.name, payload.emoji.id, "remove"
+                note_reaction, mid, payload.emoji.name, payload.emoji.id, "remove",
+                payload.user_id,
             )
     except Exception as _exc:
         logger.debug("ai_interactions 反應記錄略過(remove): %s", _exc)

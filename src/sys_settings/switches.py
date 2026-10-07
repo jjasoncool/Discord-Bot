@@ -36,6 +36,9 @@ class Switches(BaseModel):
     #: Telegram 轉發的 LLM 過濾（services.relay.telegram_filter）：off＝不判；dry_run＝判斷、寫 log、照常送主頻道；
     #: on＝判成垃圾的送進主頻道底下的「垃圾訊息」thread。開著（dry_run／on）時轉發一次只處理一則
     telegram_filter_mode: Literal["off", "dry_run", "on"] = "off"
+    #: 插話頻道被點名、模型判斷是惡意辱罵（輸出 [INSULT]，llm.ambient.ambient_insult）：on＝按一個嘲諷表情、記下這個人，
+    #: 之後幾天不主動接他的話；off＝不按、不記（標記照樣不送出去，等於不回）
+    ambient_insult_mode: Literal["off", "on"] = "off"
 
 
 def _parse(raw: str) -> Switches:

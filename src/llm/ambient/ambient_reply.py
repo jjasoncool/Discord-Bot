@@ -17,6 +17,7 @@
 被有判斷依據的鉤子閘完全取代，已移除。）
 
 特例：被 @ 或 reply 機器人 → must-reply，覆蓋冷卻（但仍走同一條 Lemonade 單流）。
+模型判定被惡意辱罵的例外：不回文字、按個表情，之後幾天不主動接那個人的話（`ambient_insult`）。
 
 模型協調（對齊「只有 P0 才換大模型」共識）：
     - 生成走 `LLMService.generate_reply(model=ambient_model)`，內部經 `chat_raw` 持 `stream_exclusive()`，
@@ -48,6 +49,7 @@ from llm.storage.ai_interactions_store import (
     mark_got_reply,
     record_interaction,
 )
+from llm.ambient import ambient_insult
 from llm.ambient.ambient_hooks import evaluate as evaluate_hook
 from llm.ambient.ambient_memory import enqueue_for_memory, recall_lines, recall_signature_tags
 from llm.preprocess.chat_line import (
@@ -840,6 +842,9 @@ async def maybe_ambient_reply(bot, message: discord.Message) -> None:
         state["burst"].append(message)          # 內容閘改看整段 burst
         state["typing_at"].pop(message.author.id, None)  # 送出了 → 清掉他的打字戳記
         if _is_directed(bot, message):
+            # 被點名也算「它發言後的第一則真人訊息」，接話判定的機會用掉——否則對方用回覆罵完、
+            # 下一句跟別人聊，會被當成在接它的話，被罵的那次插話反而記成「有人接」（10-06 實際發生）。
+            state["followup_armed"] = False
             state["directed"] = message
             state["directed_kind"] = "directed"
         elif _is_followup_to_bot(state, message):   # 它剛回的那個人接話了
@@ -1181,6 +1186,14 @@ async def _run_one_ambient_pass(
                 _log_skip(cid, f"已達每小時上限（{_SETTINGS.hourly_cap}），接續收手")
                 return
 
+    # 最近點名罵過它的人（記仇中）：不主動接他的話——這裡擋「最新一則是他的」，生成後再擋「模型選了
+    # 他的那一則來接」。他點名照回，但帶著心情（下面疊進 system prompt）。見 ambient_insult。
+    grudges = await ambient_insult.grudges(message.guild.id)
+    cold_ids = set(grudges)
+    if (not directed or followup) and message.author.id in cold_ids:
+        _log_skip(cid, f"最新一則是最近罵過它的人（{_SETTINGS.insult_cold_days} 天內），不主動接")
+        return
+
     # ── 生成（走 generate_reply → chat_raw 持 stream_exclusive）──
     # 帶 #XXXX 錨點（與 chat_history 裡 bot 自己的行 name_with_anchor 一致）→ 讓模型能精準
     # 認出 chat_history 裡哪幾行是自己講的。guild.me 是 discord.py 即時提供的 bot Member（動態暱稱）。
@@ -1219,6 +1232,10 @@ async def _run_one_ambient_pass(
             return
 
     system_prompt = _load_ambient_prompt()
+    grudge = grudges.get(message.author.id) if (directed and not followup) else None
+    if grudge is not None:
+        # 記仇中的人點名：照回，但帶著心情（怎麼回寫在插話 prompt 的「被 @ 或被回覆時」）
+        system_prompt = f"{system_prompt}\n\n{ambient_insult.mood_note(grudge, datetime.now(timezone.utc))}"
     trace_id = f"amb-{message.channel.id}-{int(time.time() * 1000)}"
 
     # 看圖：有圖就準備 vision payload（插話模型本身支援 vision，不必換模型）
@@ -1311,12 +1328,12 @@ async def _run_one_ambient_pass(
     # debug 摘要（discord_bot.log）：一眼看出各層 context 各抓到幾筆 + 有沒有圖 + 有沒有接到被回覆訊息
     logger.info(
         "ambient 生成 trace=%s directed=%s model=%s | chat=%d persona=%d memory=%d "
-        "callback=%d style=%d signals=%d img=%d reply_to=%d",
+        "callback=%d style=%d signals=%d img=%d reply_to=%d mood=%d",
         trace_id, directed, ambient_model,
         len(chat_context or []), len(persona_cards or []), len(memory_lines or []),
         len(callback_lines or []), len(style_ref_lines or []),
         len(hook.signals) if hook is not None else 0,
-        len(image_payload or []), 1 if replied_to_text else 0,
+        len(image_payload or []), 1 if replied_to_text else 0, 1 if grudge is not None else 0,
     )
 
     result = await _get_llm().generate_reply(
@@ -1349,6 +1366,11 @@ async def _run_one_ambient_pass(
         outcome = f"error:{result.error_kind}"
     elif _is_silence(reply, sentinel):
         outcome = "pass"
+    elif ambient_insult.is_marker(reply):
+        outcome = "insult"
+    elif ambient_insult.mentions_marker(reply):
+        outcome = "pass"   # 標記夾在文字裡：拿不定主意 → 不送、不按表情、不記仇
+        logger.info("ambient 回答夾著 [INSULT] 標記，整則不送 trace=%s", trace_id)
     else:
         outcome = "reply"
 
@@ -1365,9 +1387,22 @@ async def _run_one_ambient_pass(
     if outcome == "pass":
         # 模型自判「沒梗」→ 不發送（Phase C 之後在此轉傾聽/抽記憶）
         return
+    if outcome == "insult":
+        # 模型判定被惡意辱罵 → 不回文字，按嘲諷表情、記下這個人（見 ambient_insult）。
+        # 規則只講被點名的情況；自發、接續時冒出這個標記，或開關沒開，一樣不把它當文字送出去。
+        if directed and not followup and ambient_insult.enabled():
+            to_bot = (replied_msg is not None and bot.user is not None
+                      and replied_msg.author.id == bot.user.id)
+            await ambient_insult.respond(message, insulted_reply_id=str(replied_msg.id) if to_bot else None)
+        return
 
     sent_msg = None
     anchor = None   # 自發時模型選的那則（reply 錨點）；directed 時維持 None
+    if not directed and line_choice is not None:
+        anchor = thread_map.get(line_choice)
+        if anchor is not None and anchor.author.id in cold_ids:
+            _log_skip(cid, f"模型選了 #{line_choice}，是最近罵過它的人的話 → 不送")
+            return
     try:
         if directed:
             try:
@@ -1386,7 +1421,6 @@ async def _run_one_ambient_pass(
             # 自發插話錨定到它宣告要接的那一則（`#N`）。生成要 ~120 秒，活躍頻道早已翻頁，
             # 裸送必然像亂入；用 reply 指出「我在回這句」，遲到兩分鐘也讀得懂——這正是
             # 真人在忙碌群裡的做法。錨點失效（訊息被刪/沒給編號）就退回原本的裸送。
-            anchor = thread_map.get(line_choice) if line_choice is not None else None
             if anchor is not None:
                 try:
                     sent_msg = await anchor.reply(reply, mention_author=False)
