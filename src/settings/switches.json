@@ -15,5 +15,10 @@
     "off：情報搜尋（MCP 的 search 工具）只用關鍵字",
     "on：關鍵字加上向量（語意）搜尋，名次合併；向量那邊壞掉時會自動退回只用關鍵字"
   ],
-  "search_vector_mode": "on"
+  "search_vector_mode": "on",
+  "_search_rerank_mode 可以填": [
+    "off：不重排，照關鍵字＋向量合併後的名次",
+    "on：合併後的前 30 篇再讓 reranker 讀過、重新排序（每次搜尋多約 1.6 秒；顯示卡被 bot 佔著時最多等 10 秒，等不到就照原本的名次）"
+  ],
+  "search_rerank_mode": "on"
 }

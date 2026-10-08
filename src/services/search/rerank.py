@@ -6,6 +6,7 @@
 
   - 模型：`llm_runtime_config.json` 的 `rerank_model`（Lemonade 載入；和主模型、embedding 各佔一個位置）
   - 送什麼：標題＋文件裡和問題最相關的那一段（切段規則同向量；挑和問題重疊的兩字組最多的那段）
+  - 問題用哪個：呼叫端給了使用者的原句就用原句（reranker 是拿自然語言問句訓練的），沒給才用查詢字
   - 排 GPU 的隊（`lemonade_gate.gpu_exclusive_sync`），最多等 `query_gpu_wait_seconds`；
     等不到或出錯就丟例外，搜尋照原本的名次（見 `index.SearchIndex._rerank`）
 """

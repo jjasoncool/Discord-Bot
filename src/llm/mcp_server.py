@@ -47,6 +47,8 @@ server = MCPServer(
     "搜不到時換同義詞或拆短再搜。"
     f"sources 可選，不給就全部搜：{_SOURCE_HELP}。"
     "since、until 是 YYYY-MM-DD，起訖都含當天。"
+    "question 可選：使用者原本問的整句話（例：「卜靈是什麼身分？」）；給了的話，最後排序會用它判斷哪篇真的在回答，"
+    "比只看關鍵字準。換關鍵字重搜時也照樣帶同一句。"
     "每種來源各取前幾筆，每筆標明來源與是否官方；要看全文用 fetch 帶 id。"
 ))
 def search(
@@ -55,13 +57,15 @@ def search(
     since: Optional[str] = None,
     until: Optional[str] = None,
     limit: int = 10,
+    question: Optional[str] = None,
 ) -> dict[str, Any]:
     index: SearchIndex = index_provider()
     try:
-        hits = index.search(query, sources=sources, since=since, until=until, limit=limit)
+        hits = index.search(query, sources=sources, since=since, until=until, limit=limit, question=question)
     except _READABLE_ERRORS as exc:
         raise ToolError(str(exc)) from exc
-    logger.info("search query=%r sources=%s since=%s until=%s → %d 筆", query, sources, since, until, len(hits))
+    logger.info("search query=%r question=%r sources=%s since=%s until=%s → %d 筆",
+                query, question, sources, since, until, len(hits))
     return {"results": [
         {
             "id": h.doc_id,

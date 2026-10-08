@@ -8,7 +8,8 @@
      一個字的關鍵字（走 LIKE）三路各撈一批
   2. 重排：先比「含了幾個關鍵字」，同分再比兩字組那一路的 BM25 名次，最後新的在前
   3. 有向量（P3）時，關鍵字的名次再和向量（語意）的名次用 RRF 合併，見 `vectors.py`
-  4. 有 reranker（P4）時，合併後的前幾十篇再讓 reranker 逐篇讀過、重新排序，見 `rerank.py`
+  4. 有 reranker（P4）時，合併後的前幾十篇再讓 reranker 逐篇讀過、重新排序，見 `rerank.py`；
+     呼叫端給了使用者的原句（`question`）就用原句判斷，不用拆成關鍵字的查詢字
 兩份索引分工：三字組（trigram）擅長整段比對長詞；兩字組讓沒有空格的中文句子也能靠 BM25
 自動壓低常見詞、拉高少見詞（2026-10-08 加，原句模式的評估從這裡開始改善，見 AI_HANDOFF_AND_TODO.md 的 mcp-search-tools 區塊）。
 """
@@ -338,7 +339,12 @@ class SearchIndex:
         return (start.isoformat() if start else "", end_text)
 
     def search(self, query: str, *, sources: Optional[Iterable[str]] = None, since: Optional[str] = None,
-               until: Optional[str] = None, limit: Optional[int] = None) -> list[SearchHit]:
+               until: Optional[str] = None, limit: Optional[int] = None,
+               question: Optional[str] = None) -> list[SearchHit]:
+        """`query` 是查詢字（關鍵字或整句都可以）；`question` 是使用者的原句，只給重新排序用。
+
+        為什麼分開：關鍵字適合找（全詞、BM25），reranker 是拿自然語言的問句訓練的，拿「卜靈 身分」這種
+        斷片去判斷哪篇在回答，反而排不準（2026-10-08 評估：關鍵字模式加上重排，MRR 0.559 → 0.483）。"""
         keys = self.resolve_sources(sources)
         start, end = self._date_range(since, until)
         limit = max(1, min(int(limit or self.max_limit), self.max_limit))
@@ -415,7 +421,7 @@ class SearchIndex:
                 weights=self.fusion_weights, k=self.rrf_k)
             ordered = [by_doc[doc_id] for doc_id in fused]
         # 重排在來源上限之前：先決定誰最相關，再每種來源取前幾筆
-        ordered = self._rerank(query, ordered)
+        ordered = self._rerank(query, ordered, question=question)
 
         hits: list[SearchHit] = []
         per_source: dict[str, int] = {}
@@ -433,15 +439,16 @@ class SearchIndex:
                 break
         return hits
 
-    def _rerank(self, query: str, rows: list) -> list:
+    def _rerank(self, query: str, rows: list, *, question: Optional[str] = None) -> list:
         """前 `rerank_candidates` 篇照 reranker 的分數重排，其餘照舊接在後面。
+        有原句就讓 reranker 讀原句；每篇挑哪一段還是看查詢字（關鍵字就是要找的詞，原句多了「是什麼」這類虛字）。
         reranker 壞掉、GPU 等太久、回傳筆數不對，都照原本的名次（搜尋本身不能因此失敗）。"""
         if self.reranker is None or len(rows) < 2 or not self.rerank_enabled():
             return rows
         head, tail = rows[:self.rerank_candidates], rows[self.rerank_candidates:]
         passages = [best_passage(query, row["search_text"], self.rerank_passage_chars) for row in head]
         try:
-            scores = self.reranker.rerank(normalize(query), passages)
+            scores = self.reranker.rerank(normalize((question or "").strip() or query), passages)
         except Exception as exc:
             logger.warning("重新排序失敗，這次照原本的名次：%s", exc)
             return rows

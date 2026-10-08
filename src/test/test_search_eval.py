@@ -4,6 +4,7 @@
   - 名次是「第一篇正確答案」的位置；考卷裡任何一篇正確答案都算，「只答一半」的不算
   - Hit@k＝前 k 名有正確答案的題目比例；MRR@10＝名次倒數的平均，前 10 名以外與沒找到都算 0
   - 排名看搜尋實際回傳的那一串（含來源上限），查詢字是群友原句
+  - 關鍵字模式也把原句交給重新排序（模擬 MCP 客戶端拆關鍵字時附上使用者原句）
   - 只考使用者確認過的題目
 
 執行：
@@ -118,6 +119,19 @@ class EvaluateTests(SearchIndexTestBase):
         self.assertEqual(original.query, "家主當主C的話聲骸要穿哪套")
         self.assertEqual(keyword.query, "坎特蕾拉 主C 聲骸")
         self.assertEqual(keyword.rank, 1)
+
+    def test_keyword_mode_still_gives_the_reranker_the_original_question(self):
+        from services.search.text import normalize
+        from test.test_search_rerank import StubReranker
+
+        self.db.ptt("M.1.A.001", "[鳴潮] 坎特蕾拉主C聲骸", "坎特蕾拉主C用沉日劫明")
+        self.db.ptt("M.1.A.002", "[鳴潮] 坎特蕾拉聲骸心得", "坎特蕾拉聲骸怎麼配")
+        stub = StubReranker()
+        questions = [{"qid": "q01", "question": "家主當主C的話聲骸要穿哪套", "relevant": ["ptt:M.1.A.001"]}]
+
+        evaluate(self.make_index(reranker=stub), questions, {"q01": "坎特蕾拉 聲骸"})
+
+        self.assertEqual(stub.queries, [normalize("家主當主C的話聲骸要穿哪套")])
 
     def test_marks_whether_the_answer_has_vectors(self):
         self.db.ptt("M.1.A.001", "[鳴潮] 文", "深塔海墟每兩週重置")

@@ -7,7 +7,8 @@
 
 兩種模式（預設兩種都考）：
   - 原句：群友怎麼問就怎麼搜，整句丟進去——沒有人幫忙改寫時，搜尋本身找不找得到
-  - 關鍵字：用 `eval/keyword_queries.json` 裡的關鍵字搜——模擬呼叫搜尋的 LLM 先把問題改寫成關鍵字
+  - 關鍵字：用 `eval/keyword_queries.json` 裡的關鍵字搜——模擬呼叫搜尋的 LLM 先把問題改寫成關鍵字，
+    並附上原句（MCP `search` 的 `question`，只給重新排序用；2026-10-08 起，之前的報告重排用的是關鍵字）
 排名看的是搜尋實際回傳的那一串（含每種來源的筆數上限），也就是模型真正會看到的結果。
 「只答一半」的文件不算命中（考卷的 `partial`）。
 """
@@ -99,13 +100,14 @@ def summarize(results: list[QuestionResult]) -> dict:
 def evaluate(index: SearchIndex, questions: list[dict], queries: Optional[dict[str, str]] = None,
              embedded: Optional[set[str]] = None) -> list[QuestionResult]:
     """`queries` 給了就用它（題號 → 查詢字，關鍵字模式），沒給就用原句。
+    兩種模式都把原句當 `question` 傳進去（只有重新排序會用）：MCP 的客戶端拆關鍵字搜尋時，也會附上使用者的原句。
     `embedded` 是已算過向量的文件 id；給了就標出每題的正確答案在不在向量範圍內。"""
     index.sync()
     results = []
     for q in questions:
         query = queries[q["qid"]] if queries is not None else q["question"]
         started = time.perf_counter()
-        hits = index.search(query, limit=index.max_limit)
+        hits = index.search(query, limit=index.max_limit, question=q["question"])
         elapsed = (time.perf_counter() - started) * 1000
         returned = [h.doc_id for h in hits]
         results.append(QuestionResult(

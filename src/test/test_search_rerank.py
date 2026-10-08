@@ -5,6 +5,7 @@
   - 重排在「每種來源最多幾筆」之前：先決定誰最相關，再套上限
   - reranker 壞掉、GPU 等太久、回傳筆數不對、開關關著：都照原本的名次，搜尋不能失敗
   - 每篇送給 reranker 的是標題＋和問題最相關的那一段，不是整篇
+  - 呼叫端給了使用者的原句，reranker 讀原句（它是拿自然語言問句訓練的）；挑段落還是看查詢字
   - 打 reranker 要排 GPU 的隊，而且有等待上限；沒設定模型時不打
   - 後端回的分數依 index 放回原位（後端回傳的是依分數排好的）
 
@@ -24,16 +25,19 @@ if SRC_DIR not in sys.path:
 
 from llm.client.http_client import LlmHttpClient  # noqa: E402
 from services.search.rerank import LemonadeReranker, best_passage  # noqa: E402
+from services.search.text import normalize  # noqa: E402
 from test.test_search_index import SearchIndexTestBase  # noqa: E402
 
 
 class StubReranker:
-    """依段落裡有沒有指定的字給分；`error` 給了就丟出來；記下收到的段落。"""
+    """依段落裡有沒有指定的字給分；`error` 給了就丟出來；記下收到的問題與段落。"""
 
     def __init__(self, favourite="", error=None, wrong_count=False):
         self.favourite, self.error, self.wrong_count, self.calls = favourite, error, wrong_count, []
+        self.queries = []
 
     def rerank(self, query, passages):
+        self.queries.append(query)
         self.calls.append(list(passages))
         if self.error:
             raise self.error
@@ -92,6 +96,26 @@ class RerankInSearchTests(SearchIndexTestBase):
         passage = next(p for p in stub.calls[0] if p.startswith("3.7 版本說明"))
         self.assertIn("深塔海墟每兩週重置一次", passage)
         self.assertLessEqual(len(passage), 500 + len("3.7 版本說明\n"))
+
+
+    def test_reranker_reads_the_original_question_but_passages_follow_the_query(self):
+        # 切成兩段：第一段全是「版本更新的其他說明」，第二段才有答案
+        long_body = "\n".join(["版本更新的其他說明。" * 49, "深塔海墟每兩週重置一次。" + "其他無關內容。" * 30])
+        self.db.article(1, "3.7 版本說明", f"<p>{long_body}</p>")
+        stub = StubReranker()
+        # 原句和第一段重疊的兩字組比較多：挑段落若改看原句，會把沒有答案的那段送去重排
+        question = "請問多久一次？版本更新的其他說明裡有寫嗎"
+        self.make_index(reranker=stub).search("深塔海墟 重置", question=question)
+
+        self.assertEqual(stub.queries, [normalize(question)])
+        passage = next(p for p in stub.calls[0] if p.startswith("3.7 版本說明"))
+        self.assertIn("深塔海墟每兩週重置一次", passage)
+
+    def test_blank_question_falls_back_to_the_query(self):
+        stub = StubReranker()
+        self.make_index(reranker=stub).search("深塔海墟", question="  ")
+
+        self.assertEqual(stub.queries, [normalize("深塔海墟")])
 
 
 class BestPassageTests(unittest.TestCase):

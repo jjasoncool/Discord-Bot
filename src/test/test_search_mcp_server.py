@@ -5,6 +5,7 @@
   - `sources` 能選的值由來源登記表產生，跟 `services.search.SOURCES` 永遠一致
   - 每筆結果都標明來源、是否官方、連結，模型才能分開講官方與玩家說法並附連結
   - 參數錯（不認得的來源、沒有的 id）要把**可讀的原因**送回模型，讓它改參數重試
+  - 模型給了使用者的原句（`question`），重新排序要讀到原句，不是拆過的關鍵字
 
 執行：
     cd src && python -m unittest test.test_search_mcp_server -v
@@ -23,7 +24,9 @@ from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError  # no
 
 from llm import mcp_server  # noqa: E402
 from services.search import SOURCES  # noqa: E402
+from services.search.text import normalize  # noqa: E402
 from test.test_search_index import SearchIndexTestBase  # noqa: E402
+from test.test_search_rerank import StubReranker  # noqa: E402
 
 
 def _find_enums(schema) -> list[list]:
@@ -97,6 +100,16 @@ class McpServerTests(SearchIndexTestBase, unittest.IsolatedAsyncioTestCase):
     async def test_unknown_source_is_rejected_before_searching(self):
         with self.assertRaises(ToolError):
             await mcp_server.server.call_tool("search", {"query": "演唱會", "sources": ["telegram"]})
+
+    async def test_question_reaches_the_reranker(self):
+        stub = StubReranker()
+        index = self.make_index(reranker=stub)
+        mcp_server.index_provider = lambda: index
+
+        await mcp_server.server.call_tool("search", {"query": "桃園會展中心", "question": "演唱會在哪裡辦？"})
+        await mcp_server.server.call_tool("search", {"query": "桃園會展中心"})
+
+        self.assertEqual(stub.queries, [normalize("演唱會在哪裡辦？"), normalize("桃園會展中心")])
 
 
 if __name__ == "__main__":
