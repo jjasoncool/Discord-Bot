@@ -25,6 +25,7 @@
 > 4. 保留可追溯來源，避免之後重複討論同一件事
 
 最後盤點紀錄（只保留近期；過往詳見 `TODO-completed.md` 各歸檔 entry）：
+- 2026-10-08 17:xx（情報搜尋 P1～P4 完成並 commit `dd89c58`／`539686f`／`998b687`，未推送）：使用者要 markdown 收成一份 → `eval/RESULTS.md`、根目錄 `CONTEXT.md` 併進 `mcp-search-tools` 區塊後刪除、評估報告只留 JSON、`EVAL_DRAFT.md` 刪除；搜尋區塊的討論過程（R2～R12）歸檔到 `TODO-completed.md`；KV cache 另立 `llm-inference-kv` 區塊。R12（MCP 常駐、索引搬家、每日補向量、重排改用原始問句）實作中。
 - 2026-10-08 11:5x（Telegram 過濾改排隊＋補判，**已上線・已 commit**）：使用者「為什麼那張圖過了 db14106」→ 原因是排 90 秒就放行；改成排隊、30 分鐘才放行、模型掛了每則只問一次；沒判到就送的記 `needs_recheck`（使用者自己加欄）、之後補判、垃圾自動搬進 thread。11:08 重啟上線，14107～14109 都由模型判放行、要補判 0。另一個 session 同時在做情報搜尋 MCP，commit 只帶這輪檔案。細節見 telegram-llm-filter-quarantine 區塊的「TF-Q7 改定案」。
 - 2026-10-07 08:0x（Telegram 舊垃圾訊息搬移，**已 commit・bot 不用重啟**）：搬移功能與一次性腳本完成，db#14095 實際搬過一次並查證（資料庫、主頻道、thread、面板）。使用者：「我確定 commit 但只能跟你修改相關的」——同時有另一個 session 在改插話，只 commit 搬移相關檔案，本檔只帶搬移那段。獨立審查在背景跑，有成立的問題另外補 commit。細節見 telegram-llm-filter-quarantine 區塊的「搬移實作完成」。
 - 2026-10-07 08:2x（RB 收尾並上線：使用者定案門檻「明顯敵意就算」、RB-Q7 不回補、從重啟後開始記；使用者 08:13 重啟、驗收建表正常；使用者要求 commit → `40737ea` refactor(utils)、`0f71b6d` feat(ambient)、本 docs，各快照在容器 /tmp 跑完整測試全過；`emoji_dictionary.txt` 是 bot 看圖補的、不在範圍）。
@@ -294,7 +295,8 @@ last_confirmed: 2026-10-02
 | 點歌機器人（Music Bot） | 已上線運作 | 85% | [點歌機器人](#點歌機器人專區) |
 | Telegram relay 可靠性 | 補掃、媒體防雷、相簿漏圖修正都已上線並驗證（9/29 起合併與補圖符合設計） | 98% | [Telegram 補掃](#telegram-漏收補掃與相簿漏圖已上線) |
 | 程式結構整理 | **主要整理已完成並上線**（`llm/` 與 `services/` 分群、點名去除反向依賴）；剩 P2 拆檔（未決）、P3 `discord_bot.py` 瘦身（暫停）、N3（延後）、命名慣例未寫進 AGENTS.md | 90% | [程式結構整理](#程式結構整理2026-09-29-起主要整理已完成剩-p2p3n3) |
-| MCP／搜尋工具化（網頁、公告、論壇） | **構想（2026-09-29）**，grill 第 2 輪；已定先做 MCP、LLM 決定何時查、位置（`services/search/`＋`llm/mcp_server.py`）、關鍵字全文搜尋、論壇索引範圍、`search`＋`fetch` 兩個工具；**設計已全部定案**，待實作 | 15% | [MCP／搜尋工具化](#mcp搜尋工具化2026-09-29-構想grill-中) |
+| 情報搜尋（MCP）：公告、FB、PTT、巴哈 | **P1～P4 已完成並 commit（10-08，未推送）**：全文索引＋向量（RRF）＋reranker、42 題評估（原句 Hit@5 21%→55%）；待做：MCP 改常駐服務＋索引移出 src＋每日補向量、重排改用原始問句 | 85% | [情報搜尋（MCP）](#情報搜尋mcp官網公告官方-fbptt巴哈p1p4-已完成常駐化實作中) |
+| LLM 推論：KV cache 與 GPU | 查證完成、`llm_usage` 已上線；待調 prompt 順序、`--parallel` 實驗 | 30% | [LLM 推論](#llm-推論kv-cacheprompt-快取與-gpu2026-10-08-查證) |
 | Telegram 訊息 LLM 過濾 + 隔離區 | **構想（2026-09-28）**，討論中 | 0% | [Telegram 過濾](#telegram-訊息-llm-過濾--隔離區2026-09-28-構想討論中) |
 | 週期活動提醒（深塔海墟矩陣） | **已上線**：9/29 20:00 矩陣結束前提醒實發、手機通知確認正常；待 10/7 矩陣開放與自介面板置底驗證 | 95% | [週期活動提醒](#週期活動提醒深塔海墟矩陣已上線) |
 | scraper 抓網頁機制＋IT 就地補內文 | **已上線**：IT 補內文已驗證（10/01 補 11 則）；HKEPC 10/01 03:46 後 0 次 403；巴哈每輪仍約 80 分鐘待查；SC-Q6 觀察 | 95% | [scraper 抓網頁機制](#scraper-抓網頁機制檢查2026-10-01-已上線) |
@@ -505,89 +507,127 @@ affects: src/ 全部資料夾、mcp-search-tools（R2-Q5 程式放哪）、test_
 
 ---
 
-## MCP／搜尋工具化（2026-09-29 構想，grill 中）
+## 情報搜尋（MCP）：官網公告、官方 FB、PTT、巴哈（P1～P4 已完成，常駐化實作中）
 
 <!-- @meta
 id: mcp-search-tools
-type: TODO
-status: draft
-last_confirmed: 2026-09-29
-affects: /askai、網頁查詢、官網公告、論壇（PTT／巴哈）
+type: STATE
+status: confirmed
+last_confirmed: 2026-10-08
+affects: services/search、llm/mcp_server.py、.mcp.json、pgvector data_search_chunks、Lemonade（embedding、reranker）、之後的 /askai
 -->
 
-**需求（使用者 2026-09-29 提出）**
-- 想把現有服務改成 MCP server。例子：① 網頁查詢（現在要先過固定字詞過濾，才會在 /askai 底下查）；② 官方公告搜尋（現在沒有搜尋功能）；③ 論壇搜尋（現在是寫死日期區間給 Discord，希望機器人也能自己搜）。
+> 2026-09-29～10-08 每一輪的討論與查證（R2～R12）原文在 `TODO-completed.md`「MCP／搜尋工具化：討論與實作紀錄」。本區只放現況、定案、數字與待辦；評估紀錄（原 `eval/RESULTS.md`）與用語（原根目錄 `CONTEXT.md`）也併在這裡。
 
-**機制本質**：MCP 是把工具包成標準介面、讓任何 LLM 客戶端都能找到並呼叫的協定。三個例子的共同點是「讓 bot 的 LLM 自己決定要不要查、查什麼」，也就是 tool calling。MCP 值不值得做，要看 bot 以外有沒有第二個客戶端。
+**現況（2026-10-08）**
+- 用途：讓 LLM 自己決定要不要查、查什麼；來源是官網公告、官方 FB、PTT、巴哈（Telegram 內鬼頻道、依 ID 查人不納入）。先做成 MCP server 給這台的 Claude Code 用；bot 之後直接 import `services.search`，不當 MCP 客戶端。
+- 已 commit（未推送）：`dd89c58` refactor（共用網址、RRF、同步 GPU 閘門、側行程 log）、`539686f` feat(search)、`998b687` feat(llm)（逐筆 LLM 用量 log）。完整測試 1,248 項全過，新測試都做過突變驗證。
+- 運作中：MCP 走 stdio（`.mcp.json` 用 `docker exec -i discord-bot python -m llm.mcp_server`）；`settings/switches.json` 的 `search_vector_mode: on`、`search_rerank_mode: off`（重排在關鍵字模式變差，待修）。
+- 索引：11.2 萬份文件（公告 543、FB 874、PTT 5.5k、巴哈 10.5 萬樓）；向量：2026 年起的 1.8 萬段（巴哈只做攻略、心得、情報、問題四類討論串）。
 
-**查證事實（2026-09-29，唯讀調查）**
-- **`/askai` 流程**：`commands/llm_commands.py` `askai_cmd`（約 291 行）→ 全域排隊、單一 worker → `_handle_askai_request` 組 prompt（固定兩則 message：system＋一則帶標籤區塊的 user，沒有多輪）→ `LLMService.generate_reply` → 自寫的 httpx 客戶端打 OpenAI 相容 API（`/v1/chat/completions`，不串流）。用主模型、開思考。每人冷卻 180 秒（管理員例外），排隊沒有上限。
-- **網頁查詢**：自架 SearXNG（compose 的 `searxng`，bing＋duckduckgo），**只用搜尋結果摘要，不抓內文**。觸發是 `llm/retrievers/web/intent.py` `should_search()` 的純 regex：先排除（短句、招呼語），再看硬關鍵字（金融、天氣、版本／更新、公告、體育、今天／最新、幫我查…），最後看軟規則（「最近…發生／新／更」）。命中後依類別決定搜新聞或一般、時間範圍、語言；結果少於 3 筆就放寬再搜一次，最多 5 筆，塞進 `<web_context>`。只有 `/askai` 用，插話、日記、persona agent 都不用。
-- **tool calling 已經有一份實作**：persona agent（04:00 維護步驟 ④）用 `LLMService.chat_with_tools` 跑自寫的多輪迴圈（最多 8 步、token 預算、工具錯誤轉成 `{"error":…}` 回給模型、最後一步用嚴格 `json_schema` 輸出）；4 個唯讀 SQL 工具（`llm/persona/agent/tools.py`）。在 Lemonade 11.5.0＋27B 實測過 tool call、`role:"tool"` 往返與 json_schema；**Lemonade 已升到 11.9.0，沒有重測**。persona agent 是關思考跑的，**開思考＋tool calling 沒驗證過**。`chat_with_tools` 不支援 `tool_choice`，也不回傳思考內容。
-- **GPU 鎖只在單一行程內有效**（`lemonade_gate` 是 `asyncio.Lock`）。獨立的 MCP 行程如果要呼叫 LLM，就不受這把鎖管；純搜尋工具（SQL、SearXNG）不碰 GPU，不受影響。
-- **吞吐量**：總共約 22～33 tok/s，並行時均分（1 個請求 33、2 個各約 11～12）。tool calling 每多一輪，就是多一次完整的 LLM 呼叫。
-- **scraper 容器已經有唯讀 HTTP API**（FastAPI，內網 8000）：`/api/{articles,fb_posts,ptt_posts,bahamut,it_articles}/recent`、依 id 查詢；只能用 `days`、`limit` 篩選，**沒有關鍵字搜尋**。bot 也會直接唯讀開 `/app/scraper/articles.db`（`services/community/community_lookup_service.py`）。
-- **bot 內已有 aiohttp 伺服器**（`services/notify_server.py`，內網 5000：`/health`、`/notify/{source}`）。
-- **repo 裡沒有任何 MCP 相關程式或套件**；requirements 也沒有 openai SDK。
-- **資料都已經在 `articles.db`，而且是全文、永久保留**（scraper 沒有任何清除程式；巴哈刪文是軟刪除、改文保留舊版）。都沒有做搜尋索引：
-  - 官網公告：540 篇（公告 503、新聞 37，2024-01 起）；`article_details.article_content` 是**完整內文，但存的是 HTML**（平均約 4,160 字），要先轉純文字才能搜。沒有網址欄位，網址用 id 組（`services/relay/article_monitor.py` `OFFICIAL_ARTICLE_URL`）。
-  - FB：847 篇，`fb_posts.text` 是純文字全文（2025-11 起）。
-  - PTT：5,182 篇，**只有 C_Chat 板、用「鳴潮」搜到的文章**（2025-01 起），有全文和全部推文。
-  - 巴哈：主文 15,989 篇（含回覆共 102,958 列）、留言 693,917 則，2022-06 起，有全文。
-- **「寫死日期區間給 DC」指的是轉發**，不是 `/askai`：巴哈、PTT、公告的轉發都只看最近 3 天（FB 看 7 天），以 StateDB 去重。所以論壇搜尋是**另外新增的能力**，轉發本身不用改。
-- **現有查詢只有**：scraper API 的「最近 N 天」、社群 ID 查詢面板的「依作者查」（`services/community/community_lookup_service.py`，已有 bot 直接唯讀查 `articles.db`、p95 < 30ms 的前例），以及 `VersionDateResolver` 寫死的 `LIKE`。**沒有任何關鍵字或主題搜尋**。
-- **搜尋基礎設施現況**：SQLite 沒有 FTS 表；Postgres 只裝了 `vector`，沒有 pg_trgm 或中文斷詞；pgvector 只存 Discord 聊天（31 萬筆）和成員檔案，**公告、FB、論壇都沒有做 embedding**；embedding 欄位沒有向量索引（全表掃描）。可以沿用的：`llm/preprocess/tokenization.py` 自製的中文 BM25 斷詞（CJK 2-gram／3-gram）。
-- **舊規劃**：`TODO-completed.md`「Bahamut 專區」第三階段規劃過巴哈 RAG（分段、metadata、混合搜尋），沒做；`askai-vague-news-query` 決定過「新聞搜不到就放寬」，「用 LLM 依聊天紀錄改寫查詢」留作之後的升級。
-- **順便發現**：① `/askai` 回覆沒有處理 Discord 2000 字上限（沒切段，長回答可能送出失敗，未實測）；② 引用網址上限不一致：`askai_system_prompt.txt` 寫最多 3 個，`<web_context_directive>` 寫 5 個。
+**架構**
+- `llm/mcp_server.py`：MCP 協定層，只有 `search(query, sources?, since, until, limit)` 與 `fetch(id, page)` 兩個工具；參數錯把原因原文回給模型（`ToolError`）。
+- `services/search/`：`index.py`（索引同步、召回、排序、RRF 合併、重排、讀全文）、`sources.py`（來源登記表；加來源＝寫一個 `Source`）、`text.py`（HTML 轉文字、NFKC＋簡轉繁、兩字組切詞）、`chunking.py`、`vectors.py`（pgvector＋HNSW、問句向量）、`embed.py`（批次算向量）、`rerank.py`、`evaluate.py`；`eval/`（`questions.json` 考卷、`keyword_queries.json`、`reports/*.json`、`private/` 證據句不進 git）；`data/search_index.db`（SQLite＋WAL，不進 git，可刪掉重建約 3.5 分鐘）。
+- 設定 `sys_settings/search_settings.py`；開關 `settings/switches.json`；模型 `sys_settings/llm_runtime_config.json` 的 `embed_model`、`rerank_model` 與 `model_load_options`（reranker：`-sm none -mg 0 -ub 1024 -b 1024`）。
+- 依賴單向：MCP 層 → 搜尋本體 → 共用元件（`services.source_urls`、`utils.rank_fusion`、`lemonade_gate.gpu_exclusive_sync`）。搜尋本體不 import discord 與 mcp；bot 程式沒有 import 搜尋。
+- 搜尋流程：全詞（FTS5 trigram，每個長關鍵字整段出現）＋兩字組 BM25（FTS5 contentless，整句也能用）＋一個字的詞走 LIKE → 依「含幾個關鍵字 → 兩字組 BM25 名次 → 新舊」排 → 向量（餘弦距離 ≤ 0.35）與關鍵字名次 RRF（k=60）合併 →（開關開時）前 30 篇 reranker 重排 → 每種來源最多 5 筆、總共最多 20 筆。
+- 同步：游標 (updated_at, 列 id)＋內容 hash（巴哈每天約兩萬列只是「最後看到時間」變了）；索引版本只升不降（舊行程遇到新索引丟 `IndexTooNew`，不會把它砍回舊版）；`articles.db` 一律 `mode=ro`。
+- GPU：所有 embedding、rerank 都走 `gpu_exclusive_sync`，和 bot 排同一個隊；問句向量與重排最多等 10 秒（`query_gpu_wait_seconds`），等不到這次跳過那一步；批次一直等。向量或重排壞掉都退回關鍵字結果，搜尋本身不會失敗。
 
-- **效能實測（2026-09-29，唯讀查 Lemonade `/api/v1/stats`）**：最近一次請求讀入 3,924 tokens、沒命中 prompt cache，第一個字出來前等了 11.7 秒（讀 prompt 約 335 tok/s）；產生速度 33 tok/s。累計 prompt cache 命中約 55%。
-- **容器環境**：discord-bot 的 SQLite 是 3.46.1，支援 FTS5 trigram 全文索引；沒有安裝 `mcp` 套件。
+**用語**
+- **來源**：官網公告、官方 FB（官方）；PTT、巴哈（玩家說法）。
+- **文件**：搜尋結果與評分的單位，可以直接給人連結的一篇：公告一篇、FB 一則、PTT 一篇、**巴哈一個樓層**（不是整串，最大的串有 11,234 樓）。id：`article:<article_id>`、`fb:<fb_posts.id>`、`ptt:<article_id>`、`bahamut:<sn>`（`post_id#position` 有重複，不能當 id）。
+- **段落**：文件切出來算向量的片段（約 500 字、重疊 80 字，每段帶標題）；命中任一段就算命中那份文件。
+- **評估集（考卷）**、**正確答案**（讀了就能回答；一題可有好幾篇）、**只答一半**（預設不算對）。
 
-**已定案（2026-09-29）**
-- **社群稽查（依巴哈／PTT ID 查人）不納入工具**（使用者：「其實也能不要，主要希望查情報用」）。理由：技術上很容易包（`community_lookup_service.py` 本來就是乾淨的查詢函式），但工具一旦交給 LLM，任何成員都能在 `/askai` 叫它查某個人的發言紀錄；用途是管理稽查，繼續留在管理面板。
-- **用途＝查情報；Telegram 內鬼頻道排除**（使用者拍板）。來源：官方公告、論壇（PTT、巴哈）、網頁。每筆結果都標來源類型，回答時分開講「官方」與「玩家說法」。
-- **改由 LLM 決定要不要查、查什麼**（Q3，使用者確認痛點是「該查沒查」＋「要記觸發字」，而且關鍵字沒辦法從語意上穩定判斷）。
-- **先做 MCP server**（Q2，使用者選）。搜尋函式（工具本體）只寫一份；MCP server、bot 的 tool calling、斜線指令都是外面的殼，殊途同歸。先做 MCP 的好處：用外部的強模型當客戶端先驗證搜尋品質，不必重啟 discord-bot，也不碰 GPU。bot 之後直接 import 工具本體，不當 MCP 客戶端（同一份程式碼，多一層網路只是多一個會壞的地方）。
-- **MCP 客戶端只有這台 Linux 上的 Claude Code，採放法 ②**（R2-Q1，使用者 2026-09-29：「不會有別的電腦連接」）：MCP server 是 discord-bot container 裡的另一個行程，走 stdio，由 Claude Code 用 `docker exec -i discord-bot python -m llm.mcp_server` 啟動；不開 port、不用 token。理由：放進 bot 行程要常重啟 bot、建索引會搶 bot 的 event loop；新 container 的好處（網路常駐連線）用不到。代價：`mcp` 套件寫進 requirements、重建 image，**discord-bot 要重啟一次**（避開 04:00～07:30）；之後改 MCP 程式都不用重啟 bot。
+**常用指令**（容器裡；`AGENTS.md` 的 Docker 例外允許 agent 直接執行）
+- `python -m services.search`：手動同步索引。
+- `python -m services.search.embed [--dry-run] [--limit N] [--since YYYY-MM-DD]`：補算向量（增量、排 GPU 隊）。
+- `python -m services.search.evaluate --label 名稱 [--vector on|off] [--rerank on|off] [--split 全部|A|B] [--vector-weight W] [--max-distance X|inf] [--diagnose-vectors]`：報告寫到 `eval/reports/<時間>-<名稱>.json`。
 
-**bot 接工具的成本估算**（回答使用者 Q1「會不會拖效能」；等到 bot 階段再定案）
-- 搜尋本身不是瓶頸：查 SQLite 是毫秒級，SearXNG 最多 4 秒。慢的是 LLM 多跑一輪：第 1 輪決定查什麼，第 2 輪看結果回答。
-- 估算：第 1 輪如果**關掉思考**，只產生幾十個 token 的工具呼叫（約 1～2 秒）；第 2 輪前面的 prompt 命中 cache，只需多讀搜尋結果（約 1,500 tokens，約 5 秒）。每次搜尋大約多 5～10 秒。現在開思考的回答常常要 30～100 秒。
-- 風險：第 1 輪如果開著思考，會多 10～45 秒；兩輪中間有別的請求插隊，cache 會被洗掉，要整份重讀（多 12～15 秒）。建議：決策輪關思考、最多 2 輪搜尋，只有最後回答那一輪開思考。「開思考＋tool calling」與 Lemonade 11.9.0 都還沒實測。
+**評估方法**
+- 考卷 `eval/questions.json`：42 題（情報 30：公告、活動、兌換碼；攻略 12：配隊、倍率、聲骸各 4），使用者逐題確認過。正確答案直接查資料庫找，沒用受測的搜尋；證據句與標題是論壇原文，放 `eval/private/`（不進 git）。
+- 原句模式＝群友原句直接搜（沒人幫忙改寫的最差情況）；關鍵字模式＝由沒看過答案的子 agent 改寫成關鍵字再搜（模擬 LLM 客戶端），存 `keyword_queries.json`。
+- 指標：Hit@k（前 k 名有正確答案的題目比例）、MRR@10（第一篇正確答案名次倒數的平均，前 10 名外算 0）、Recall@10（前 10 名找回幾成正確答案）、nDCG@10（所有正確答案依名次打折加總，除以理想值）。排名看搜尋實際回傳的那一串（含來源上限）。
+- 調參防過度擬合：考卷依分類交錯固定拆 A、B 兩半；事先定好規則，在 A 選設定、選定後才看 B；兩半方向一致才採用。
 
-**待決問題（grill 第 2 輪，2026-09-29；每題附建議）**
-- **R2-Q1 MCP 客戶端是誰、跑在哪**（已回答，見已定案）：A 只有這台 Linux 上的 Claude Code／B 再加上 Windows 那台（Lemonade 所在的 192.168.56.1）的 Claude Desktop／C 連 claude.ai 網頁、手機都要能用（得對外網公開 HTTPS）。建議 A＋B：新開一個 compose 服務，走 HTTP 傳輸、資料唯讀掛載，只綁本機與內部網段、加 token；不對外網公開；部署時不必重啟 discord-bot。
-  - **使用者追問（2026-09-29）：一定要另開 container 嗎？** 關鍵是「跟 bot 同不同一個行程」，不是同不同一個 container。三種放法：
-    - ① **塞進 bot 行程**（開 HTTP port）：不多一個服務、可直接用 bot 的設定與斷詞。缺點：MCP 程式每改一次就要重啟 bot；建索引（十幾萬篇 HTML 轉文字）的 CPU 工作會跟音樂、Discord 心跳搶同一個 event loop 與 GIL；對網路開 port 的行程握有 Discord token；MCP SDK 是 ASGI（uvicorn），bot 現有的是 aiohttp，要在 bot 裡再塞一套網頁框架。
-    - ② **同一個 container、另一個行程**（stdio，由 Claude Code 用 `docker exec -i discord-bot python -m llm.mcp_server` 啟動）：不開 port、不用 token、不多服務；獨立行程，不搶 bot 的 event loop；改 MCP 程式不用重啟 bot。缺點：只有能跑 `docker exec` 的地方連得到（Windows 的 Claude Desktop 要透過 ssh 遠端執行同一行指令）；裝 `mcp` 套件要重建 image，**bot 至少要重啟一次**才會用到新 image；沒有常駐行程，索引同步要在每次啟動或每次搜尋時做增量。
-    - ③ **新 container**（HTTP）：可沿用 discord-bot 的 image，只換啟動指令、唯讀掛載 `./src`，不用新寫 Dockerfile；完全不動 bot；常駐，可以定時同步索引；網路 port 開在沒有 Discord token 的 container 上。缺點：compose 多一個服務要維護；要處理 port 與 token。
-    - 建議：①不採用。只有這台的 Claude Code 用（或 Windows 願意走 ssh）→ ②最省事；要讓其他機器透過網路常態連線 → ③。
-- **R2-Q2 工具怎麼切、回傳什麼**：A 一個 `search` 工具，用參數選來源／B 依來源分：`search_official`（公告＋FB）、`search_forum`（PTT＋巴哈），再加一個 `read_document(id)` 讀全文。建議 B：工具範圍窄，本機模型比較選得準；搜尋只回標題、日期、來源類型、網址、約 200 字摘要，要全文再呼叫 `read_document`（分頁），讓 prompt 保持短（每多 1,000 tokens 約多 3 秒）。網頁搜尋不放進 MCP（Claude Code／Desktop 自己就會上網查），只做成 bot 用的工具（沿用 SearXNG）。
-- **R2-Q3 搜尋方式**：A 關鍵字全文搜尋（SQLite FTS5 trigram，另開索引檔，從 `articles.db` 唯讀同步）／B 向量搜尋（算 embedding 存 pgvector）／C 兩者混合。建議第一版 A：角色名、活動名都是固定字串，查詢字交給 LLM 寫，搜不到它可以換詞再搜。坑：trigram 查不到少於 3 個字的詞（例如兩個字的角色名）→ 短詞改用 `LIKE`（巴哈 10 萬列要實測速度）。向量之後再加：十幾萬篇要先全部算一遍 embedding，會佔 GPU 好幾個小時。
-- **R2-Q4 論壇要搜到哪一層**：巴哈有主文、回覆樓層（共 10 萬列）、留言（69 萬則）；PTT 有內文、推文。建議索引巴哈主文＋回覆樓層、PTT 內文；推文與巴哈留言第一版不索引（短、雜、量大），但 `read_document` 會一起顯示。
+**評估結果**（數字以這裡為準，每次評估加一列；報告在 `eval/reports/`）
 
-- **R2-Q5 程式放哪**（使用者 2026-09-29 提出：不想跟其他程式混在一起）：A 一個資料夾 `src/search_mcp/` 全放／B 分兩個：`src/search/`（搜尋本體：索引同步、各來源搜尋、讀全文；索引檔放 `src/search/data/`）＋ `src/mcp_server/`（只有 MCP 這層殼：登記工具、`python -m mcp_server` 啟動）。建議 B：之後 bot 要 import 的是搜尋本體，放在叫 mcp 的資料夾裡名稱會誤導；殼保持很薄，以後要開放別的工具也是往 `mcp_server/` 加。
-  - **定案（2026-09-29 第 8 輪，取代上面 A／B 兩案）**：搜尋本體放 `services/search/`（搜尋是給指令、/askai、MCP 共用的服務，不只給 LLM；索引檔放 `services/search/data/`）；MCP 殼放 `llm/mcp_server.py`（給 LLM 客戶端的橋接，`python -m llm.mcp_server` 啟動；不取名 `llm/mcp/` 以免跟 `mcp` 套件混淆）；網頁搜尋留在 `llm/retrievers/web/`（含 /askai 專用的觸發判斷與 prompt 格式化）。討論經過見 [程式結構整理](#程式結構整理2026-09-29-起主要整理已完成剩-p2p3n3) 的 L4a／L4b。
-  - **使用者追問：MCP server 不就取代 search 了？** 不會。MCP server 只負責協定（告訴客戶端有哪些工具、把呼叫轉進來、把結果包回去），真正查 SQLite、同步索引、HTML 轉文字的程式一定要有；問題只是放在哪個資料夾。對照專案現有分工：`commands/`（斜線指令＝殼）呼叫 `services/`（做事）。分開的理由是 bot 之後直接 import 搜尋程式、不走 MCP；如果全放在 `mcp_server/`，功能一樣能用，只是名稱誤導，而且要注意搜尋程式不能 import `mcp` 套件（不然 bot 也被拖著載入）。A 的變體：`src/mcp_server/` 裡放一個不依賴 MCP 套件的 `search/` 子資料夾，也可接受。
-  - **不能取名 `src/mcp/`**：容器工作目錄是 `/app`，會蓋掉安裝的 `mcp` 套件，`import mcp` 會載到自己的資料夾。
-  - **照專案規則仍放在外面的**：測試放 `src/test/test_search_*.py`（啟動 gate 只掃 `test/`）；設定放 `sys_settings/search_settings.py`（AGENTS.md 規定）；`.mcp.json` 放 repo 根目錄（Claude Code 從那裡讀）。
-  - **log 要分檔**：`settings/logging.json` 加 `llm.mcp_server`、`services.search` 前綴的 logger 寫自己的檔、不往 root 傳。原因：兩個行程寫同一個輪替 log 檔，輪替時會互相蓋掉；也符合「不混在一起」。已確認 console handler 預設輸出到 stderr，不會弄壞走 stdout 的 MCP 協定。
+| 版本 | 改了什麼 | 模式 | Hit@1 | Hit@5 | Hit@10 | MRR@10 | Recall@10 | nDCG@10 | 情報 Hit@5 | 攻略 Hit@5 | 報告 |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| P1 | 三字組全文索引＋2 字詞 LIKE＋簡轉繁 | 原句 | 14% | 21% | 36% | 0.195 | — | — | 30% | 0% | `1203-P1-FTS5基準線` |
+| P1 | 同上（事後補量，見下） | 關鍵字 | 33% | 60% | 62% | 0.439 | — | — | 70% | 33% | `1238-P1-補量` |
+| P1.5 | 加兩字組索引做 BM25；只有一個字才走 LIKE | 原句 | 29% | 38% | 52% | 0.336 | — | — | 53% | 0% | `1236-P1.5-兩字組` |
+| P1.5 | 同上 | 關鍵字 | 43% | 71% | 74% | 0.530 | — | — | 80% | 50% | `1236-P1.5-兩字組` |
+| P3 | 加向量（2026 年起 1.8 萬段）與 RRF；門檻 0.35 | 原句 | 36% | 55% | 67% | 0.446 | 38% | 0.336 | 63% | 33% | `1554-P3-不重排-新指標` |
+| P3 | 同上 | 關鍵字 | 45% | 74% | 79% | 0.559 | 55% | 0.476 | 77% | 67% | `1554-P3-不重排-新指標` |
+| P4 | 合併後前 30 篇 reranker 重排 | 原句 | 48% | 67% | 71% | 0.555 | 46% | 0.433 | 73% | 50% | `1609-P4-重排前30篇` |
+| P4 | 同上 | 關鍵字 | 31% | 74% | 76% | 0.483 | 46% | 0.389 | 77% | 67% | `1609-P4-重排前30篇` |
 
-**使用者回覆（2026-09-29，第 3 輪）**
-- **R2-Q3 定案：A 關鍵字全文搜尋**（SQLite FTS5 trigram，索引檔在 `services/search/data/`，從 `articles.db` 唯讀同步；少於 3 個字的詞改用 `LIKE`；向量之後再加）。
-- **R2-Q4 定案：照建議**（索引巴哈主文＋回覆樓層、PTT 內文；PTT 推文與巴哈留言第一版不索引，讀全文時一起顯示）。
-- **R2-Q2 使用者質疑**：「照來源命名，之後每加一個來源都要加一堆工具名稱？這樣可行、符合業界用法嗎？」→ 查證後**撤回原建議 B**：
-  - Anthropic〈Writing effective tools for agents〉：工具要把相關操作合併成少數幾個（例：用 `schedule_event` 取代 `list_users`＋`list_events`＋`create_event`），減少模型選錯；依服務加前綴（`asana_search`、`jira_search`）是用在工具很多、且來自不同系統時。我們的來源查同一個索引、參數與回傳格式都一樣，應該合併。
-  - OpenAI MCP 文件：`search`（一個查詢字串 → 帶 id、標題、網址的結果）＋`fetch`（id → 全文、網址、metadata）是標準的一組，ChatGPT 深度研究要求 MCP server 提供這兩個工具。
-- **R2-Q2 定案（使用者 2026-09-29 第 10 輪確認「不是同意了嗎」）**：只開兩個工具——`search(query, sources=可選, since, until, limit)` 與 `fetch(id, page)`。`sources` 是可選的來源清單（官網公告、官方 FB、PTT、巴哈），不給就全部搜，每種來源各取前幾筆，避免論壇的量把官方公告淹掉；每筆結果標明來源。**來源清單由 `services/search/` 的登記表自動產生**：之後加來源＝寫一個來源模組並登記，工具名稱與介面都不變。在 Claude Code 裡工具會自動加上 server 名稱當前綴（例：`mcp__<server>__search`），不會跟內建的網頁工具撞名。之後 /askai 的工具呼叫也用同一組，工具少，本機模型也比較不會選錯。
+（報告檔名前面都是 `20261008-`；P1、P1.5 當時還沒有 Recall／nDCG。P3 與 `1341-P3-門檻0.35` 的數字完全相同，後者是第一次跑的。）
 
-**不反對就照做的預設**：MCP 設定放 repo 的 `.mcp.json`（在這個 repo 開的 Claude Code 都能用這些工具）；索引檔放 `services/search/data/` 並加進 `.gitignore`，**標明是可重建的衍生資料、不算使用者資料**；R2-Q3 若選 A，索引在 MCP 啟動時與每次搜尋前做增量同步（沒有常駐行程；之後 bot 搜尋也走同一個同步函式），兩個行程同時同步時用 SQLite 寫入鎖排隊；實作時在 `AGENTS.md`「Docker 只做唯讀查詢」加註這個例外（這個 MCP server 由 `docker exec` 啟動、只寫自己的索引檔）；官方 FB 粉專算「官方」來源；所有工具唯讀；結果預設依日期新到舊，可以篩日期範圍；公告 HTML 在建索引時轉純文字；索引檔由搜尋模組自己擁有，不改 `articles.db`。
+- **P1 → P1.5**：兩字組讓原句 +17、關鍵字 +11 個百分點（搜尋端）；關鍵字改寫 +33～39 個百分點（客戶端，影響更大）。代價：原句模式平均 23 → 87 ms、索引 242 → 299 MB、整份重建 55 → 204 秒。「P1 關鍵字」是事後補量：在容器暫存區把程式還原成 P1 另建暫時索引，同一份程式量原句得到 21%／0.195，和當初的基準線完全一致。
+- **P3 門檻怎麼選**：第一次挑候選門檻用了全部 42 題的距離分布（B 半參與了選擇，程式碼審查抓到），照規則重做——只用 A 半的分布，候選＝正確答案距離的中位數與第 90 百分位（0.35、0.43），A 半選出 0.35（MRR 平均 0.403，只用關鍵字 0.391，差距可能是雜訊），**B 半驗收 0.476 → 0.602**，兩半一致才採用。調參報告在 `reports/調參過程/`。
+- **P3 的觀察**：向量幫最多的是原句模式與攻略題（攻略題原句 0% → 33%）；正確答案有向量的 22 題原句 Hit@5 77%、沒有向量的（2025 年以前）30%——舊資料補向量是最直接的改進。只有 1,000 份有向量的預覽版整體反而變差（原句 38 → 29%）：向量那一路涵蓋不全時，會把不相關的新文章與關鍵字找對的結果平分名次；混合檢索的兩路要涵蓋同一批資料、向量要有門檻。
+- **P4 的觀察**：只比一種設定、沒有挑參數。原句模式明顯變好（MRR 0.446 → 0.555；A 半 0.335 → 0.561、B 半 0.557 → 0.549）；**關鍵字模式變差**（0.559 → 0.483；A 半 0.471 → 0.487、B 半 0.647 → 0.478）。推測 reranker 是用自然語言問句訓練的，「卜靈 身分」這種斷片判不準 → 改用原始問句（待做）。第一次 P4 評估約三分之一請求失敗（llama.cpp 的物理批次預設 512 token，段落＋問題到 530～569 token），已作廢（`調參過程/*P4-重排前30篇-作廢-批次上限`），加 `-ub 1024 -b 1024` 後重跑零失敗。
+- 速度：向量化約 4,600 字／秒（今年 1.8 萬段 16 分鐘，含讓路 4 分鐘）；reranker 30 篇約 1.6 秒（第一次載入 24 秒）。
 
-**之後（bot 階段）再問**：`/askai` 決策輪要不要關思考、最多幾輪；舊的關鍵字觸發要不要留著當保底；插話能不能用搜尋；搜尋與 `/askai` 排隊、GPU 鎖怎麼配合；要不要抓網頁內文（現在只用摘要）。
+**已定案的設計決定**（理由）
+- 只開 `search`、`fetch` 兩個工具：工具少模型選得準；來源由登記表產生，加來源不加工具。
+- 每種來源最多 5 筆、每筆標來源與是否官方：論壇的量不能淹掉官方；回答分開講官方與玩家說法。
+- 三字組＋兩字組兩份全文索引、不用斷詞詞典：角色名與暱稱一直增加；BM25 自動壓低常見詞。
+- 巴哈以樓層為文件單位（R6-Q1）；切段約 500 字、重疊 80 字、每段帶標題（contextual chunk header）；聊天紀錄一則一段不切。
+- pgvector＋HNSW（不另架向量資料庫）：已有 Postgres、量在十萬級；有篩選時開 `iterative_scan`，結果先照距離排序再去重。
+- 查詢加任務說明、文件不加（這類 embedding 模型的用法）；RRF 只看名次不看分數。
+- 向量門檻 0.35（A／B 拆半選出）；重排前 30 篇、在來源上限之前做、段落＝標題＋和問題重疊最多的那段。
+- 先做 2026 年起的向量（比例原則，使用者 R10-Q2），舊資料之後補；巴哈只做四類討論串。
+- 開關放 `switches.json`（預設關）；考卷留在 git（只有問題與文件 id），論壇原文不進 git（R5-Q3）。
+- 2026-10-08 程式碼審查（5 個面向的 agent 找、每個發現再由懷疑者反駁，29 個成立 13 個）修掉：批次向量沒走 GPU 閘門、新舊行程輪流重建索引、評估挑門檻用到 B 半、只刪結尾時舊段沒刪、`relaxed_order` 沒排序就去重、`until=9999-12-31` 溢位、共用元件表漏列。
 
-**狀態**：設計已全部定案（R2-Q1～Q5），未動 code；下一步是實作（先加 `mcp` 套件 → 重建 image → 重啟一次 bot）。`llm/` 重組已上線，MCP 直接寫在新位置。
+**待做**
+1. **R12 實作**（使用者 10-08 同意）：
+   - MCP 常駐：新增 compose 服務 `search-mcp`（沿用 discord-bot 映像、不改 Dockerfile、`restart: always`、不帶 Discord token），`mcp_server.py` 加 HTTP 模式，`.mcp.json` 改連網址；port：`expose: 8765` 加 `ports: "127.0.0.1:8765:8765"`（只綁本機；只有 `expose` 的話 Claude Code 在主機上連不到）。容器裡要聽 0.0.0.0，MCP 套件的 DNS rebinding 保護要允許 localhost 與服務名稱。
+   - 索引移出 `src/`：repo 根目錄 `search_data/`（不進 git），只掛給需要的容器。
+   - 每日 03:00（避開 04:00～07:30 維護時段）在 `search-mcp` 服務同步索引、補算新文章向量；bot 不改。
+   - 重排改用原始問句：MCP `search` 加可選 `question`，重排時優先用它；評估的關鍵字模式把原句一起傳，改完重量 P4。
+2. 舊資料（2025 年以前）補向量；之後再量一次。
+3. 暱稱對照表（查詢擴展；家主＝坎特蕾拉、汐汐＝今汐、水母＝坎特蕾拉、里哥／要哥＝相里要…），前後都要量。
+4. 向量的模型指紋（分支事項，使用者「先記起來」）：向量表沒記是哪個模型算的、hash 只看文字，換 embedding 模型會新舊座標系混用且不報錯；要補時一個模型一張表、用考卷比較後切換。pgvector 的維數是欄位型別的一部分不能直接改；HNSW 上限 2,000 維（更大用 `halfvec`）。
+5. 考卷擴充到 100 題以上，分調參用與驗收用。
+6. 選配：微調 reranker 或 embedding（考卷不能拿來訓練；用 LLM 從段落合成問題、搜尋結果裡的錯誤答案當難負例；AMD＋Windows 訓練環境麻煩，可能要租雲端 GPU，訓練完轉 GGUF）。
+7. bot 接搜尋工具時再問：決策輪關不關思考、最多幾輪、舊的關鍵字觸發要不要留、插話能不能用、要不要抓網頁內文。
+8. 小毛病：FB 的標題是內文第一行（摘要重複）；巴哈討論串標題改了舊樓層不更新；長期更新的整理串日期停在建立日（日期篩選要考慮 `updated_at`）；3.1 版本內容說明爬蟲漏抓；有些官網公告內文只在圖片裡（之後可用 VLM 抽字）。
 
-- **給之後寫 MCP 的提醒**：`mcp` 2.x 把 `FastMCP` 改名為 `MCPServer`（`from mcp.server.mcpserver import MCPServer`）；它帶進來的 `httpx2` 不會蓋掉我們用的 `httpx` 0.28.1。
+## LLM 推論：KV cache、prompt 快取與 GPU（2026-10-08 查證）
+
+<!-- @meta
+id: llm-inference-kv
+type: STATE
+status: draft
+last_confirmed: 2026-10-08
+affects: Lemonade（Windows 主機）、services/llm_service.py（llm_usage log）、插話與 /askai 的 prompt 順序
+-->
+
+> 討論過程（R7、R8）原文在 `TODO-completed.md`「MCP／搜尋工具化：討論與實作紀錄」。
+
+**現況**
+- 硬體：Windows 主機、2 張 AMD Radeon RX 9060 XT（各 16 GB）、Ryzen 7 5800X、128 GB RAM、沒有 NPU。這台 Linux 是跑在同一台上的 VM（7.7 GB）。Lemonade 用 llama.cpp（Vulkan）：主模型 `--device Vulkan0,Vulkan1`、ctx 32,768、`--spec-type draft-mtp`、`--parallel 1`（Lemonade 自動補的預設，可從 `llamacpp_args` 改；不是保留旗標）。
+- 主模型是混合注意力：64 層裡 16 層完整注意力、48 層線性注意力。KV cache 每 token 64 KiB（F16）→ 32k 約 2 GiB、131k 約 8 GiB、262k 約 16 GiB；線性注意力層每槽另有固定大小的狀態（估約 150 MB）。
+- 速度：讀 prompt 約 330 tok/s，產生 22～35 tok/s（單張卡頻寬約 320 GB/s、權重 17.5 GB，接力跑的理論上限約 18 tok/s，超過的部分靠 MTP 推測解碼）。
+- prompt 快取：Lemonade 累計命中約 60%，平均每個請求約 10 秒花在重算。bot 每個 LLM 請求記一行 `llm_usage`（功能、prompt、命中、重算、讀 prompt 毫秒、tok/s、MTP 猜中），插話 prompt 約 1.04～1.14 萬 tokens、前 8,139 每次命中、重算 2,200～3,300。llama.cpp 把被擠掉的快取存到系統 RAM（`--cache-ram` 預設 8 GiB，每份約 0.9～1.1 GB）：工作管理員 7.7 GB 的那個 llama-server 就是它。
+- `--parallel N`：權重只有一份；context 會被各槽均分（除非 `--kv-unified` 共用一塊）；檢查點每槽各自存在 RAM。
+- 物理批次（`-ub`）：embedding 與 reranker 的「整段輸入」要放進同一個物理批次（預設 512 token），超過整次請求失敗；產生文字時長 prompt 可以分批讀，不受限。
+- 顯示卡：使用者截圖一張卡 11.8 GB、另一張 0 GB，說「一直如此、運作正常」；但 17.56 GB 權重放不進一張卡，原因未明，做 `--parallel` 實驗時順便量。系統 RAM 72%（約 92 GB）中，處理程序清單只加得到約 16 GB，其餘未查。
+- **顯示卡斷線事件（10-08）**：Lemonade log 出現 `vk::Queue::submit: ErrorDeviceLost`——10:24 一次（embedding 大量寫入與一個長回答同時在跑）、10:39～10:56 主模型每個請求都失敗（bot 6 次插話失敗、群友看不到），11:01 重新載入後恢復。原因未定（Windows GPU 逾時重置、兩個 llama-server 同時用同一張卡、驅動）。之後的批次向量化都走 GPU 閘門。
+- 讀 Lemonade log 的方法：主 port 13305 的 `/logs/stream` 接受 websocket，送 `{"type":"logs.subscribe"}` 會先回最近 5,000 行；llama-server 啟動時的配置行被過濾、看不到。
+
+**已定案（R7、R8）**：先顧「回應快」（常用的長 prompt 不被洗掉）；KV 維持 F16；要測 131k 的極限；順序＝先量現況（`llm_usage` 已上線）→ 調 prompt 順序（不變的放前面）→ 固定槽放進實驗量 → RAM 快取上限等 RAM 調查後再定；實驗腳本在 VM 經 Lemonade 跑、使用者看工作管理員記 VRAM／RAM。
+
+**待做**
+1. 用 `llm_usage` 找出誰洗掉誰，調插話與 `/askai` 的 prompt 順序。
+2. `--parallel` 實驗六組：①現況 1 槽 32k ②4 槽均分 ③4 槽 `--kv-unified` ④1 槽 131k ⑤KV q8_0 ⑥2 槽、兩種長 prompt 輪流送、比較帶不帶 `id_slot` 的第一個字出來前等多久；①～③各測同時 1／2／4 個請求，量第一個字的等待時間、單一與總 tok/s、命中、兩張卡 VRAM、RAM。動正式載入參數前先問使用者，避開維護時段。
+3. 主模型的 `-ub` 也影響讀 prompt 的速度，可以放進同一個實驗。
+
 ---
 
 ## Telegram 訊息 LLM 過濾 + 隔離區（2026-09-28 構想，討論中）
