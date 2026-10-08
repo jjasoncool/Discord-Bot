@@ -2,7 +2,10 @@
 
 守的底線：
 - 只有模型明確回「隔離」才隔離；回「放行」、看不懂、只寫了理由都放行（拿不準放行，使用者 10-05）
-- 模型不能用就放行、不擋轉發：產圖佔著 GPU（不叫模型）、排隊加回答超過時限、出錯、讀不到 prompt
+- 模型忙就排隊、不放行（使用者 10-08：「不能 90 秒沒回應就處理，應該排隊」）：產圖佔著 GPU 時等它做完才叫模型
+  （不然會把 LLM 載回去搶 VRAM）；模型逾時、連不上就隔一陣子再排
+- 排滿 30 分鐘還判不到才放行，並認定模型掛了：之後每則只問一次、失敗就放行（不再每則等滿）；問到一次就恢復排隊
+- 判不了的放行、不擋轉發：模型回錯誤、讀不到 prompt
 - 一定要看圖：該看的圖或影片有任何一個沒看到（檔案讀不到、抽幀失敗）就放行、不叫模型——只憑其他部分判
   會把「水」配角色設計稿那種情報錯關（13649）；附語音、壓縮檔（模型看不了）的也放行（語音爆料常常沒有文字）
 - 回答不合格式就放行：只寫「隔離」沒有標籤、好幾行結論互相矛盾、思考區塊沒收尾
@@ -60,6 +63,8 @@ FOUR_COLOURS = [(220, 20, 20), (20, 220, 20), (20, 20, 220), (220, 220, 20), (20
 class FakeLLM:
     def __init__(self, answer="看到一張圖。\n放行｜有角色", delay=0.0, error=None):
         self.answer, self.delay, self.error = answer, delay, error
+        #: 依序先拋這些錯（例如模型逾時），拋完才照常回答
+        self.errors: list[Exception] = []
         self.calls = []
 
     def resolve_request_model(self):
@@ -69,6 +74,8 @@ class FakeLLM:
         self.calls.append(kwargs)
         if self.delay:
             await asyncio.sleep(self.delay)
+        if self.errors:
+            raise self.errors.pop(0)
         if self.error:
             raise self.error
         return self.answer
@@ -80,7 +87,10 @@ class FilterTestBase(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         prompt = self.tmp / "prompt.txt"
         prompt.write_text("判斷有沒有鳴潮的資訊。", encoding="utf-8")
-        self.settings = tf._SETTINGS.model_copy(update={"prompt_path": str(prompt), "wait_seconds": 2})
+        self.settings = tf._SETTINGS.model_copy(update={
+            "prompt_path": str(prompt), "retry_initial_seconds": 0.01, "retry_max_seconds": 0.5,
+            "busy_poll_seconds": 0.01, "give_up_seconds": 10,
+        })
         self.llm = FakeLLM()
         for target, value in (("_SETTINGS", self.settings), ("_LLM", self.llm)):
             patcher = mock.patch.object(tf, target, value)
@@ -89,6 +99,9 @@ class FilterTestBase(unittest.IsolatedAsyncioTestCase):
         busy = mock.patch.object(tf.lemonade_gate, "imagegen_busy", return_value=False)
         self.imagegen_busy = busy.start()
         self.addCleanup(busy.stop)
+        down = mock.patch.object(tf, "_model_down", False)
+        down.start()
+        self.addCleanup(down.stop)
 
     def file(self, name: str, data: bytes, kind: str) -> tf.MediaFile:
         path = self.tmp / name
@@ -137,19 +150,68 @@ class VerdictTests(FilterTestBase):
 
 
 class ModelUnavailableTests(FilterTestBase):
-    async def test_imagegen_holding_gpu_passes_without_calling_model(self):
-        self.imagegen_busy.return_value = True
-        v = await self.judge("今日首水")
-        self.assertFalse(v.quarantine)
-        self.assertFalse(v.by_model)
-        self.assertEqual(self.llm.calls, [], "產圖中叫模型會把 LLM 載回去搶 VRAM")
+    async def test_waits_for_imagegen_then_judges(self):
+        self.llm.answer = "文字是「今日首水」。\n隔離｜灌水｜每日打卡"
+        calls_while_busy = []
+        busy = iter([True, True, True, False])
 
-    async def test_waiting_too_long_passes(self):
-        self.llm.delay = 5
+        def imagegen_busy():
+            calls_while_busy.append(len(self.llm.calls))
+            return next(busy, False)
+        self.imagegen_busy.side_effect = imagegen_busy
         v = await self.judge("今日首水")
-        self.assertFalse(v.quarantine)
-        self.assertFalse(v.by_model)
-        self.assertLess(v.seconds, 4, "要在總時限到時放行，不能等模型回完")
+        self.assertTrue(v.quarantine, "等產圖做完再判，不放行")
+        self.assertTrue(v.by_model)
+        self.assertEqual(calls_while_busy[:3], [0, 0, 0], "產圖中叫模型會把 LLM 載回去搶 VRAM")
+
+    async def test_slow_model_is_waited_for(self):
+        # 原本 90 秒就放行：插話一次佔模型好幾分鐘時，垃圾就漏進主頻道（14106）
+        self.llm.answer = "文字是「今日首水」。\n隔離｜灌水｜每日打卡"
+        self.llm.delay = 0.3
+        v = await self.judge("今日首水")
+        self.assertTrue(v.quarantine)
+        self.assertTrue(v.by_model)
+
+    async def test_model_timeout_is_retried_until_answered(self):
+        self.llm.answer = "文字是「今日首水」。\n隔離｜灌水｜每日打卡"
+        self.llm.errors = [tf.LlmTimeoutError("逾時"), tf.LlmConnectionError("連不上")]
+        with self.assertLogs("services.relay.telegram_filter", "WARNING") as logs:
+            v = await self.judge("今日首水")
+        self.assertTrue(v.quarantine, "逾時、連不上是模型忙，再排一次，不放行")
+        self.assertEqual(len(self.llm.calls), 3)
+        self.assertEqual(len(logs.output), 2)
+
+    async def test_gives_up_after_the_limit(self):
+        self.llm.delay = 2
+        with mock.patch.object(tf, "_SETTINGS", self.settings.model_copy(update={"give_up_seconds": 0.2})):
+            with self.assertLogs("services.relay.telegram_filter", "ERROR"):
+                v = await self.judge("今日首水")
+        self.assertEqual((v.quarantine, v.by_model), (False, False))
+        self.assertIn("沒回應", v.reason)
+        self.assertLess(v.seconds, 1.5, "排滿時限就放行，不等模型回完")
+        self.assertTrue(tf._model_down)
+
+    async def test_while_model_is_down_each_message_is_asked_once(self):
+        tf._model_down = True
+        self.llm.errors = [tf.LlmTimeoutError("逾時"), tf.LlmTimeoutError("逾時")]
+        v = await self.judge("今日首水")
+        self.assertEqual((v.quarantine, v.by_model), (False, False))
+        self.assertIn("還沒恢復", v.reason)
+        self.assertEqual(len(self.llm.calls), 1, "掛了就不再每則排滿 30 分鐘，不然一次一則會卡好幾小時")
+        self.assertTrue(tf._model_down)
+
+    async def test_answer_brings_back_queueing(self):
+        tf._model_down = True
+        self.llm.answer = "文字是「今日首水」。\n隔離｜灌水｜每日打卡"
+        with self.assertLogs("services.relay.telegram_filter", "WARNING"):
+            v = await self.judge("今日首水")
+        self.assertTrue(v.quarantine)
+        self.assertFalse(tf._model_down)
+        self.llm.errors = [tf.LlmTimeoutError("逾時")]
+        with self.assertLogs("services.relay.telegram_filter", "WARNING"):
+            v = await self.judge("今日首水")
+        self.assertTrue(v.quarantine, "恢復後又照常排隊、重問")
+        self.assertEqual(len(self.llm.calls), 3)
 
     async def test_model_error_passes(self):
         self.llm.error = RuntimeError("連不上")

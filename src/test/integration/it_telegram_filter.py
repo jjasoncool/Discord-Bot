@@ -8,8 +8,7 @@ E＝兩邊都算對、不計分：罵人但圖有遊戲資訊（照「任一邊�
 樣本與期望值見 AI_HANDOFF_AND_TODO.md 的 telegram-llm-filter-quarantine 區塊。
 
 會佔用主模型，不要在 04:00～07:30 維護時段跑。這支腳本是另一個行程，靠 `lemonade_gate` 的跨行程鎖檔跟 bot
-的插話、/askai 一起排隊（bot 要是 10-06 之後重啟過的版本才會拿這把鎖，否則會直接搶模型）。排隊時間算在等待時限裡，
-所以時限放寬到 `WAIT_SECONDS`：這裡只量準不準，速度要在 bot 裡量。
+的插話、/askai 一起排隊；判斷本身也是排到為止、不設時限（10-08 起），這裡只量準不準，速度要在 bot 裡量。
 執行（容器內）：
     docker exec -w /app discord-bot python -m test.integration.it_telegram_filter            # 全部樣本
     docker exec -w /app discord-bot python -m test.integration.it_telegram_filter 13649 14090 # 指定幾則
@@ -28,7 +27,6 @@ from sys_settings.time_settings import APP_TZ
 from services.relay.telegram_relay_service import TelegramMessageRepository, build_telegram_pg_dsn_from_env
 
 APP_ROOT = Path("/app")
-WAIT_SECONDS = 300
 SAVE_DIR = Path("/tmp/telegram_filter_check")
 
 # (telegram_messages.id, 期望 Q／P／E, 類別)
@@ -94,7 +92,6 @@ async def unit_complete(repo: TelegramMessageRepository, pk: int) -> bool:
 
 async def recent(days: int) -> None:
     """最近 N 天的每個發送單位都判一次，列出會被隔離的。"""
-    tf._SETTINGS = tf._SETTINGS.model_copy(update={"wait_seconds": WAIT_SECONDS})
     repo = TelegramMessageRepository(build_telegram_pg_dsn_from_env())
     await repo.connect()
     quarantined, fallback, skipped, total, total_seconds = [], [], [], 0, 0.0
@@ -150,7 +147,6 @@ async def recent(days: int) -> None:
 async def main(ids: list[int], save: bool) -> None:
     samples = [s for s in SAMPLES if not ids or s[0] in ids] + [(i, "?", "指定") for i in ids
                                                                  if i not in {s[0] for s in SAMPLES}]
-    tf._SETTINGS = tf._SETTINGS.model_copy(update={"wait_seconds": WAIT_SECONDS})
     repo = TelegramMessageRepository(build_telegram_pg_dsn_from_env())
     await repo.connect()
     wrong_quarantine, missed, fallback, total_seconds = [], [], [], 0.0

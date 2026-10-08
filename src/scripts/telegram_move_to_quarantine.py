@@ -43,7 +43,6 @@ from utils.logger_config import configure_logging  # noqa: E402,F401  import 即
 import discord  # noqa: E402
 
 from commands.telegram_quarantine_commands import TelegramQuarantineCommands  # noqa: E402
-from services.relay import telegram_filter  # noqa: E402
 from services.relay.telegram_filter import RelayFilter, Verdict  # noqa: E402
 from services.relay.telegram_quarantine import RUNTIME_PATH, QuarantineThreads  # noqa: E402
 from services.relay.telegram_relay_service import (  # noqa: E402
@@ -54,9 +53,6 @@ from services.relay.telegram_relay_service import (  # noqa: E402
     TelegramRenderAdapter,
     build_telegram_pg_dsn_from_env,
 )
-
-# 跟維護作業排隊時一則可能等好幾分鐘；轉發端的 90 秒是為了不卡住新訊息，這裡寧可等
-_WAIT_SECONDS = 600
 
 
 class _Publisher(DiscordMessagePublisher):
@@ -84,7 +80,6 @@ def _read_targets(args) -> dict[int, Optional[Verdict]]:
 
 
 async def run(targets: dict[int, Optional[Verdict]], apply: bool) -> None:
-    telegram_filter._SETTINGS = telegram_filter._SETTINGS.model_copy(update={"wait_seconds": _WAIT_SECONDS})
     client = discord.Client(intents=discord.Intents.none())
     await client.login(os.environ["DISCORD_TOKEN"])
     repo = TelegramMessageRepository(build_telegram_pg_dsn_from_env())

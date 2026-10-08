@@ -6,8 +6,14 @@
 
 判斷標準（使用者 10-05 定案）：
 - 文字或任一張圖有遊戲資訊就放行；拿不準放行。
-- 模型不能用就放行：產圖佔著 GPU、排隊或回答超過 `wait_seconds`、出錯、回答看不懂。寧可漏掉一則垃圾，
-  不能擋掉一則情報。
+- **模型忙就排隊、不放行**（使用者 10-08：「不能 90 秒沒回應就處理，應該排隊」；原本 90 秒就放行，插話一次佔
+  模型好幾分鐘時垃圾就漏進主頻道，14106）：排在插話、產圖、別的行程後面；模型逾時或連不上就等一下再問。
+  轉發開著過濾時一次只處理一則，後面的訊息跟著排隊，晚一點送但不會漏判。
+- **排了 `give_up_seconds`（30 分鐘）還判不到才放行**：正常的排隊不會這麼久（插話一次最多 3 分鐘、/askai 5 分鐘），
+  到這裡代表模型壞了，情報不能卡好幾個小時。之後認定模型掛了：每則只問一次、失敗就放行，不再每則都等滿
+  30 分鐘（一次一則，不然 5 則就卡 2.5 小時）；有一次問到就恢復排隊（使用者 10-08 照建議定案）。
+- 判不了的才放行：看不了的檔案（語音、壓縮檔）、有圖沒看到、讀不到 prompt、模型回錯誤、回答看不懂。
+  寧可漏掉一則垃圾，不能擋掉一則情報。
 - 每個發送單位（單則或整本相簿）判一次，最多看 `max_images` 張圖：前幾個媒體各一張，媒體不到這個數時，
   剩下的名額給動圖與影片多抽幾格（GIF、動態 WebP 用 `extract_key_frames`，影片用 `video_key_frames`，
   挑幀規則只有一份）。音訊、壓縮檔不看。
@@ -26,6 +32,7 @@ from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
 from llm.client import lemonade_gate
+from llm.client.http_client import LlmConnectionError, LlmTimeoutError
 from llm.preprocess.vision_image import extract_key_frames, fit_for_vision, video_key_frames
 from llm.prompt import prompt_files
 from llm.prompt.answer_line import answer_lines, final_line
@@ -184,13 +191,70 @@ def _passed(reason: str, started: float, images: int = 0, answer: str = "") -> V
                    seconds=time.monotonic() - started, answer=answer)
 
 
+async def _wait_for_imagegen(trace_id: str) -> None:
+    """產圖佔著 GPU 時等它做完：這時叫模型會把 LLM 載回去搶 VRAM（載入在排 GPU 之前）。"""
+    if lemonade_gate.imagegen_busy():
+        logger.info("Telegram 過濾：產圖中，等它做完再判（%s）", trace_id)
+    while lemonade_gate.imagegen_busy():
+        await asyncio.sleep(_SETTINGS.busy_poll_seconds)
+
+
+async def _ask_until_answered(text: str, images: list[bytes], trace_id: str) -> str:
+    """排隊直到模型回答：排 GPU 不設上限（`chat_raw` 裡的鎖）；模型逾時或連不上（多半是別的請求還在跑、
+    或模型重新載入中）就等一下再排一次，間隔逐次加倍到上限。"""
+    delay = _SETTINGS.retry_initial_seconds
+    attempt = 0
+    while True:
+        await _wait_for_imagegen(trace_id)
+        try:
+            return await _ask_model(text, images, trace_id)
+        except (LlmTimeoutError, LlmConnectionError) as exc:
+            attempt += 1
+            logger.warning("Telegram 過濾：模型沒回應（第 %s 次，%s），%g 秒後再排一次（%s）",
+                           attempt, type(exc).__name__, delay, trace_id)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, _SETTINGS.retry_max_seconds)
+
+
+#: 排滿時限還判不到之後，認定模型掛了（每則只問一次）；問到一次就恢復排隊
+_model_down = False
+
+
+async def _ask(text: str, images: list[bytes], trace_id: str) -> str:
+    """模型正常：排隊直到回答，最多 `give_up_seconds`。認定掛了：只問一次（含等產圖、排 GPU），失敗就拋。"""
+    global _model_down
+    if not _model_down:
+        try:
+            answer = await asyncio.wait_for(_ask_until_answered(text, images, trace_id), _SETTINGS.give_up_seconds)
+        except asyncio.TimeoutError:
+            _model_down = True
+            logger.error("Telegram 過濾：模型 %g 分鐘沒回應，這則未判就放行；之後每則只問一次，問到才恢復排隊（%s）",
+                         _SETTINGS.give_up_seconds / 60, trace_id)
+            raise _GaveUp(f"模型 {_SETTINGS.give_up_seconds / 60:g} 分鐘沒回應，未判") from None
+        return answer
+
+    async def once() -> str:
+        await _wait_for_imagegen(trace_id)
+        return await _ask_model(text, images, trace_id)
+    try:
+        answer = await asyncio.wait_for(once(), _SETTINGS.retry_max_seconds)
+    except (asyncio.TimeoutError, LlmTimeoutError, LlmConnectionError):
+        raise _GaveUp("模型還沒恢復，未判") from None
+    _model_down = False
+    logger.warning("Telegram 過濾：模型恢復回應，之後照常排隊（%s）", trace_id)
+    return answer
+
+
+class _GaveUp(Exception):
+    """模型等不到，這則未判就放行（理由寫在訊息裡）。"""
+
+
 async def judge(text: str, media: Iterable[MediaFile], *, trace_id: str) -> Verdict:
-    """判斷一個發送單位。任何失敗都回放行（`by_model=False`），不拋例外。"""
+    """判斷一個發送單位。模型忙或沒回應就排隊等（最多 `give_up_seconds`）；判不了的（看不了的檔案、出錯、
+    回答看不懂、等太久）回放行（`by_model=False`），不拋例外。"""
     started = time.monotonic()
     images: list[bytes] = []
     try:
-        if lemonade_gate.imagegen_busy():
-            return _passed("產圖中，模型不能用", started)
         media = list(media)
         if any(m.kind == "other" for m in media):
             # 語音、壓縮檔模型看不了：歷史上有好幾則語音爆料沒有文字，當成「什麼都沒有」會被錯關
@@ -199,9 +263,9 @@ async def judge(text: str, media: Iterable[MediaFile], *, trace_id: str) -> Verd
         if unseen:
             # 有圖或影片沒看到（檔案讀不到、抽幀失敗）：只憑其他部分判，會把「水」配設計稿那種錯關（13649）
             return _passed("有圖或影片沒看到", started, len(images))
-        answer = await asyncio.wait_for(_ask_model(text, images, trace_id), _SETTINGS.wait_seconds)
-    except asyncio.TimeoutError:
-        return _passed(f"等模型超過 {_SETTINGS.wait_seconds:g} 秒", started, len(images))
+        answer = await _ask(text, images, trace_id)
+    except _GaveUp as exc:
+        return _passed(str(exc), started, len(images))
     except Exception as exc:
         logger.warning("Telegram 過濾：判斷失敗，放行（%s）：%s", trace_id, exc)
         return _passed(f"判斷失敗：{type(exc).__name__}", started, len(images))

@@ -33,11 +33,15 @@ class TelegramFilterSettings(BaseSettings):
     #: 文字太長時只給模型看前面這麼多字
     max_text_chars: int = 1500
 
-    #: 從開始排隊到拿到回答的總時限，超過就放行。模型被插話、/askai、04:00 維護佔著時會一直排隊，
-    #: 而模型呼叫本身的逾時不含排隊時間、逾時還會重試，所以一定要有這個外層時限
-    wait_seconds: float = 90
     #: 單次模型呼叫的逾時（不含排隊）
     request_timeout_seconds: float = 60
+    #: 排隊＋重問的總上限：模型忙就等、不放行（使用者 10-08），排滿這麼久還判不到才放行並認定模型掛了
+    give_up_seconds: float = 30 * 60
+    #: 模型逾時或連不上時，隔多久再排一次（逐次加倍，最多隔 `retry_max_seconds`）
+    retry_initial_seconds: float = 30
+    retry_max_seconds: float = 300
+    #: 產圖佔著 GPU 時，隔多久看一次做完了沒
+    busy_poll_seconds: float = 5
 
     model_config = SettingsConfigDict(extra="forbid", frozen=True)
 
