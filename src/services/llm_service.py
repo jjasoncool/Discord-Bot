@@ -59,6 +59,34 @@ _BACKEND_PROBES: dict[str, tuple[tuple[str, str], ...]] = {
 }
 
 
+def log_llm_usage(trace_label: str, model: str, completion: dict[str, Any]) -> None:
+    """每個 LLM 請求記一行：哪個功能、prompt 多長、命中快取多少、重算多少、讀 prompt 花多久。
+
+    為什麼要記：只有一個處理槽，功能之間會互相洗掉 prompt 快取，被洗掉就得整份重讀（每次多十幾秒）；
+    沒有逐筆紀錄就看不出是誰洗掉誰（KV cache 管理，2026-10-08）。欄位取自 llama.cpp 回應的
+    `timings`，其他後端沒有就退回 OpenAI 格式的 `usage`。只記數字，不記 prompt 內容。
+    """
+    usage = completion.get("usage") or {}
+    timings = completion.get("timings") or {}
+    cached = timings.get("cache_n", (usage.get("prompt_tokens_details") or {}).get("cached_tokens"))
+    # trace 的前綴就是功能（ask-、amb-、diary-、tgfilter-、autofill-）
+    feature = trace_label.split("-", 1)[0] if trace_label and trace_label != "-" else "-"
+    draft = (f"{timings['draft_n_accepted']}/{timings['draft_n']}"
+             if "draft_n" in timings and "draft_n_accepted" in timings else "-")
+    logger.info(
+        "llm_usage feature=%s trace=%s model=%s prompt=%s cached=%s computed=%s prompt_ms=%s"
+        " output=%s tok_s=%s draft=%s",
+        feature, trace_label, model, usage.get("prompt_tokens", "-"), "-" if cached is None else cached,
+        timings.get("prompt_n", "-"), _round_or_dash(timings.get("prompt_ms")),
+        usage.get("completion_tokens", timings.get("predicted_n", "-")),
+        _round_or_dash(timings.get("predicted_per_second"), 1), draft,
+    )
+
+
+def _round_or_dash(value, digits: int = 0):
+    return "-" if value is None else round(float(value), digits) if digits else int(round(float(value)))
+
+
 def _convert_messages_for_openai(
     messages: list[dict[str, object]],
 ) -> list[dict[str, object]]:
@@ -606,6 +634,7 @@ class LLMService:
                 }),
             )
 
+        log_llm_usage(trace_label, model, completion)
         return choices[0], completion
 
     async def chat_with_tools(
