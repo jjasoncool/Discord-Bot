@@ -54,6 +54,15 @@ class BuildConfigTests(unittest.TestCase):
     def test_level_override(self):
         self.assertEqual(build_config(RAW, level="DEBUG")["root"]["level"], "DEBUG")
 
+    def test_another_process_can_send_root_to_its_own_file(self):
+        """MCP server 跟 bot 同一個容器：它的 root 不能寫 bot 的輪替檔，否則輪替時互相蓋掉。"""
+        config = build_config(RAW, root_handlers=["mcp_file"])
+        self.assertEqual(config["root"]["handlers"], ["mcp_file"])
+        self.assertIn("mcp_file", config["handlers"])
+        self.assertNotEqual(config["handlers"]["mcp_file"]["filename"],
+                            config["handlers"]["main_file"]["filename"])
+        self.assertEqual(build_config(RAW)["root"]["handlers"], RAW["root"]["handlers"])  # bot 照舊
+
 
 class SettingsFileTests(unittest.TestCase):
     def test_root_has_console_and_main_file(self):

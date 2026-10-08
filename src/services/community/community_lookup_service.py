@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Tuple
 
 import aiosqlite
 
+from services.source_urls import bahamut_floor_url
 from services.state_db import StateDB
 
 
@@ -550,13 +551,8 @@ def _bahamut_post_from_row(row, in_range: bool) -> CommunityActivity:
     own_title = row["title"] or ""
     parent_title = _safe_get(row, "parent_title") or ""
     display_title = own_title if own_title else parent_title
-    # 組「精確樓層」URL：Co.php?bsn=...&sn=... 可直接跳到該篇主文/回文，
-    # 比 scraper 存的 thread URL (C.php?snA=...) 精確
-    sn_val = row["sn"]
-    precise_url = (
-        f"https://forum.gamer.com.tw/Co.php?bsn={row['board_id']}&sn={sn_val}"
-        if sn_val else row["url"]
-    )
+    # 「精確樓層」URL 直接跳到該篇主文/回文，比 scraper 存的 thread URL 精確
+    precise_url = bahamut_floor_url(row["board_id"], row["sn"]) or row["url"]
     return CommunityActivity(
         kind="post",
         source="bahamut",
@@ -594,10 +590,7 @@ def _bahamut_comment_from_row(row, in_range: bool) -> CommunityActivity:
     thread_sn = _safe_get(row, "thread_sn")
     parent_sn_val = row["parent_sn"]
     target_sn = thread_sn or parent_sn_val
-    parent_precise_url = (
-        f"https://forum.gamer.com.tw/Co.php?bsn={row['board_id']}&sn={target_sn}"
-        if target_sn else row["parent_url"]
-    )
+    parent_precise_url = bahamut_floor_url(row["board_id"], target_sn) or row["parent_url"]
     return CommunityActivity(
         kind="comment",
         source="bahamut",

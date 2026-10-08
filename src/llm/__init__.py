@@ -1,39 +1,6 @@
-"""LLM 模組入口。
+"""LLM 技術：依角色分子資料夾（client、preprocess、prompt、retrievers、persona、ambient、storage）。
 
-集中 re-export 常用函式，讓外部可以用 `from llm import ...`。
+刻意**不在這裡集中轉出**：import 任何子模組（例：`llm.mcp_server`）都會先執行本檔，以前這裡轉出
+聊天檢索，連帶載入 llama_index、discord 與 pgvector 設定（約 1.5 秒，還要 pgvector 帳密）。
+MCP server 是獨立行程、只需要搜尋，不該被拖著載入這些。要用什麼就從子模組直接 import。
 """
-
-from .preprocess.tokenization import tokenize_for_retrieval
-from .retrievers.context_retriever import (
-    retrieve_discord_context,
-    retrieve_rag_context_sync,
-    search_chat,
-)
-from .persona.persona_card_builder import build_persona_cards, extract_mentioned_user_ids
-from .retrievers.web import (
-    IntentResult,
-    WebResult,
-    WebRetrievalOutcome,
-    classify_route,
-    clean_query,
-    fetch_web_results,
-    format_web_context_lines,
-    should_search,
-)
-
-__all__ = [
-    "tokenize_for_retrieval",
-    "retrieve_discord_context",
-    "retrieve_rag_context_sync",
-    "search_chat",
-    "build_persona_cards",
-    "extract_mentioned_user_ids",
-    "IntentResult",
-    "WebResult",
-    "WebRetrievalOutcome",
-    "classify_route",
-    "clean_query",
-    "fetch_web_results",
-    "format_web_context_lines",
-    "should_search",
-]

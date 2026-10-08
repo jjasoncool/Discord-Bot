@@ -165,6 +165,64 @@ class CrossProcessQueueTests(_GateTestCase):
                     self.assertTrue(gate.stream_busy())
 
 
+class SyncGateTests(_GateTestCase):
+    """同步版閘門（情報搜尋的批次算向量、MCP 算問句向量）：和 bot 的 stream_exclusive 排同一個隊。"""
+
+    hold_in_other_process = CrossProcessQueueTests.hold_in_other_process
+
+    async def test_sync_gate_waits_for_another_process_and_releases(self):
+        other = self.hold_in_other_process()
+        entered = []
+
+        def job():
+            with gate.gpu_exclusive_sync():
+                entered.append(True)
+
+        task = asyncio.get_running_loop().run_in_executor(None, job)
+        await asyncio.sleep(0.3)
+        self.assertEqual(entered, [], "別的行程在用，要排隊")
+        other.communicate("\n")
+        await asyncio.wait_for(task, 2)
+        self.assertEqual(entered, [True])
+        self.hold_in_other_process().communicate("\n")   # 用完有放
+
+    async def test_sync_gate_gives_up_after_max_wait(self):
+        """互動式查詢等不起：別的行程佔著超過上限就丟 GpuBusy，而且不會留著鎖。"""
+        # 預設「等滿 15 分鐘照常打模型」縮成 2 秒：等待上限壞掉時測試要很快失敗，不是卡 15 分鐘
+        patcher = mock.patch.object(gate, "_CROSS_PROCESS_MAX_WAIT_S", 2.0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        other = self.hold_in_other_process()
+
+        def job():
+            with gate.gpu_exclusive_sync(max_wait_seconds=0.3):
+                pass
+
+        loop = asyncio.get_running_loop()
+        with self.assertRaises(gate.GpuBusy):
+            await asyncio.wait_for(loop.run_in_executor(None, job), 3)
+        other.communicate("\n")
+        self.hold_in_other_process().communicate("\n")   # 放棄等待的那次沒拿到鎖，也沒留下鎖
+
+    async def test_sync_gate_blocks_the_bot_while_held(self):
+        held, release = asyncio.Event(), asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def job():
+            with gate.gpu_exclusive_sync():
+                loop.call_soon_threadsafe(held.set)
+                asyncio.run_coroutine_threadsafe(release.wait(), loop).result(5)
+
+        worker = loop.run_in_executor(None, job)
+        await asyncio.wait_for(held.wait(), 2)
+        bot = asyncio.create_task(gate.stream_exclusive().__aenter__())
+        await asyncio.sleep(0.3)
+        self.assertFalse(bot.done(), "同步版拿著鎖時，bot 的串流要等")
+        release.set()
+        await asyncio.wait_for(worker, 2)
+        await asyncio.wait_for(bot, 2)
+
+
 class StreamExclusiveRegressionTests(_GateTestCase):
     """短工作路徑（chat / batch embedding）行為不變。"""
 

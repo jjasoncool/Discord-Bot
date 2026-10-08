@@ -36,25 +36,33 @@ def redirected_log_name():
     return os.getenv(TEST_LOG_ENV) or None
 
 
-def build_config(raw: dict, *, log_dir: str = LOG_DIR, test_log_name=None, level=None) -> dict:
-    """把設定檔內容轉成可直接交給 dictConfig 的 dict（不碰全域狀態，方便測試）。"""
+def build_config(raw: dict, *, log_dir: str = LOG_DIR, test_log_name=None, level=None,
+                 root_handlers=None) -> dict:
+    """把設定檔內容轉成可直接交給 dictConfig 的 dict（不碰全域狀態，方便測試）。
+
+    `root_handlers`：換掉 root 的去向。給同一個容器裡另開的行程用（例如 MCP server）：
+    兩個行程寫同一個輪替檔，輪替時會互相蓋掉，所以那個行程的 root 改寫自己的檔。
+    """
     config = copy.deepcopy(raw)
     for handler in config.get("handlers", {}).values():
         if "filename" in handler:
             handler["filename"] = os.path.join(log_dir, test_log_name or handler["filename"])
     if level:
         config.setdefault("root", {})["level"] = level
+    if root_handlers is not None:
+        config.setdefault("root", {})["handlers"] = list(root_handlers)
     return config
 
 
-def configure_logging(force: bool = False) -> None:
-    """套用 settings/logging.json；環境變數 LOG_LEVEL 可覆寫 root 等級。"""
+def configure_logging(force: bool = False, *, root_handlers=None) -> None:
+    """套用 settings/logging.json；環境變數 LOG_LEVEL 可覆寫 root 等級。`root_handlers` 見 `build_config`。"""
     global _configured
     if _configured and not force:
         return
     raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     level = os.getenv("LOG_LEVEL", "").upper() or None
-    logging.config.dictConfig(build_config(raw, test_log_name=redirected_log_name(), level=level))
+    logging.config.dictConfig(build_config(raw, test_log_name=redirected_log_name(), level=level,
+                                           root_handlers=root_handlers))
     _configured = True
 
 

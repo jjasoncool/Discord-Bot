@@ -901,8 +901,8 @@ async def schedule_from_article(bot, article: dict, channel_id: int,
                                 force: bool = False) -> None:
     """從官方文章 dict 觸發活動偵測。欄位對應集中於此，article_monitor 只需一行呼叫。"""
     try:
-        # 官方原文網址的唯一來源在 article_monitor（article 領域的家），這裡不另寫一份
-        from services.relay.article_monitor import official_article_url
+        # 官方原文網址的唯一來源在 services.source_urls，這裡不另寫一份
+        from services.source_urls import official_article_url
 
         text = (article.get("article_content_full") or article.get("article_content")
                 or article.get("article_desc") or "")

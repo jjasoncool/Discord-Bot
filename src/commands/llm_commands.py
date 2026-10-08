@@ -13,8 +13,10 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-import llm
 from llm.logger_factory import build_askai_prompt_log, get_or_create_file_logger
+from llm.persona.persona_card_builder import extract_mentioned_user_ids
+from llm.retrievers.context_retriever import retrieve_discord_context, retrieve_rag_context_sync
+from llm.retrievers.web import WebRetrievalOutcome, fetch_web_results, format_web_context_lines, should_search
 from llm.client.lemonade_gate import imagegen_busy, note_foreground_activity
 from llm.persona.member_names import member_names_from_guild, name_map_lines
 from llm.preprocess import person_anchor
@@ -404,7 +406,7 @@ class LLMCommands(commands.Cog):
             max_relevant_context = min(max_relevant_context, 5)
             max_context_to_send = 5
 
-        mentioned_user_ids = llm.extract_mentioned_user_ids(question)
+        mentioned_user_ids = extract_mentioned_user_ids(question)
 
         # 將 <@id> 解析為「顯示名稱#XXXX」，跟 chat_history / persona card 的錨點對齊
         # 否則 LLM 看到問題裡的「二口氣上吧」對不上卡標題「NNN#7489」（display_name vs alias 不同字串）
@@ -421,7 +423,7 @@ class LLMCommands(commands.Cog):
                     )
 
         # 網路搜尋意圖判斷 + 背景 fetch（與 discord / rag 檢索並行）
-        intent = llm.should_search(resolved_question)
+        intent = should_search(resolved_question)
         run_web = WEB_SETTINGS.enabled and intent.triggered
 
         web_task: asyncio.Task | None = None
@@ -436,7 +438,7 @@ class LLMCommands(commands.Cog):
                 search_engines = WEB_SETTINGS.news_engines
                 search_categories = None
             web_task = asyncio.create_task(
-                llm.fetch_web_results(
+                fetch_web_results(
                     search_query,
                     settings=WEB_SETTINGS,
                     engines=search_engines,
@@ -447,7 +449,7 @@ class LLMCommands(commands.Cog):
                 )
             )
 
-        discord_context, bot_history_context, discord_meta = await llm.retrieve_discord_context(
+        discord_context, bot_history_context, discord_meta = await retrieve_discord_context(
             interaction,
             resolved_question,
             max_context_messages=max_context_messages,
@@ -473,7 +475,7 @@ class LLMCommands(commands.Cog):
         rag_context, rag_meta = await asyncio.get_running_loop().run_in_executor(
             None,
             functools.partial(
-                llm.retrieve_rag_context_sync,
+                retrieve_rag_context_sync,
                 resolved_question,
                 interaction.guild.id if interaction.guild else None,
                 interaction.user.id if interaction.user else None,
@@ -519,7 +521,7 @@ class LLMCommands(commands.Cog):
                         WEB_SETTINGS.fallback_min_results,
                         search_query[:80],
                     )
-                    fallback_outcome = await llm.fetch_web_results(
+                    fallback_outcome = await fetch_web_results(
                         search_query,
                         settings=WEB_SETTINGS,
                         engines=None,      # → default_engines（general，覆蓋廣）
@@ -540,7 +542,7 @@ class LLMCommands(commands.Cog):
                             r for r in fallback_outcome.results if r.url not in seen_urls
                         ]
                         merged = merged[: WEB_SETTINGS.top_k]
-                        outcome = llm.WebRetrievalOutcome(
+                        outcome = WebRetrievalOutcome(
                             results=merged,
                             meta={
                                 **fallback_outcome.meta,
@@ -550,7 +552,7 @@ class LLMCommands(commands.Cog):
                         )
                 web_meta.update(outcome.meta)
                 if outcome.results:
-                    web_context = llm.format_web_context_lines(outcome.results)
+                    web_context = format_web_context_lines(outcome.results)
                     # 記錄前 3 筆 preview 方便日後 debug：判斷 LLM 到底看到什麼
                     web_meta["results_preview"] = [
                         {

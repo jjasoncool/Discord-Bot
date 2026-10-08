@@ -27,6 +27,7 @@ from llm.persona.persona_card_builder import (
     normalize_alias_text,
 )
 from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
+from utils.rank_fusion import rrf_score
 from sys_settings.llm_settings import (
     LLMServiceSettings,
     load_llm_runtime_config,
@@ -162,20 +163,6 @@ def _get_or_build_vector_index(table_name: str, logger: logging.Logger) -> Any |
         except Exception as exc:
             logger.warning("建立 VectorStoreIndex 失敗 table=%s: %s", table_name, exc)
             return None
-
-
-def _rrf_score(rank: int, *, weight: float, rrf_k: int) -> float:
-    """Reciprocal Rank Fusion 分數。"""
-    # 計算原理（RRF）
-    # - 公式：weight / (rrf_k + rank)
-    # - rank 越前面（數字越小），分數越高
-    # - weight 用來控制來源重要性（BM25 vs Vector）
-    #
-    # 範例：rrf_k=60
-    # - rank=1, weight=0.45 -> 0.45/61
-    # - rank=2, weight=0.55 -> 0.55/62
-    # 兩路分數可直接相加，形成融合後的最終排序依據。
-    return weight / (rrf_k + rank)
 
 
 def _build_bm25_rank(
@@ -584,16 +571,16 @@ async def retrieve_discord_context(
         # RRF 融合：message_id -> rrf score
         fused_scores: dict[str, float] = defaultdict(float)
         for message_id, rank in bm25_rank.items():
-            fused_scores[message_id] += _rrf_score(
+            fused_scores[message_id] += rrf_score(
                 rank,
                 weight=bm25_weight,
-                rrf_k=HYBRID_RETRIEVAL_SETTINGS.hybrid_rrf_k,
+                k=HYBRID_RETRIEVAL_SETTINGS.hybrid_rrf_k,
             )
         for message_id, rank in vector_rank.items():
-            fused_scores[message_id] += _rrf_score(
+            fused_scores[message_id] += rrf_score(
                 rank,
                 weight=vector_weight,
-                rrf_k=HYBRID_RETRIEVAL_SETTINGS.hybrid_rrf_k,
+                k=HYBRID_RETRIEVAL_SETTINGS.hybrid_rrf_k,
             )
 
         index_by_message_id = {str(msg.id): idx for idx, msg in enumerate(ordered_messages)}

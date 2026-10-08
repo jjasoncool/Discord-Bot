@@ -135,44 +135,100 @@ async def _watch_lease(lease: GpuLease, holder: asyncio.Task | None) -> None:
         await asyncio.sleep(min(remaining, _WATCHDOG_TICK_S))
 
 
+def _open_lock_file() -> int | None:
+    try:
+        return os.open(CROSS_PROCESS_LOCK_PATH, os.O_RDWR | os.O_CREAT, 0o666)
+    except OSError as exc:
+        logger.warning("開不了跨行程 GPU 鎖檔，只在本行程排隊：%s", exc)
+        return None
+
+
+class GpuBusy(TimeoutError):
+    """等 GPU 鎖檔超過呼叫端給的上限（`gpu_exclusive_sync(max_wait_seconds=…)`）。
+
+    給「等不起」的呼叫用：互動式搜尋算一個問句向量只要零點幾秒，卻可能要等 bot 整段長回答（一兩分鐘）；
+    等不到就放棄這一步、退回不用 GPU 的做法，比讓使用者乾等好。"""
+
+
+def _acquire_steps(fd: int, max_wait: float | None = None):
+    """拿鎖檔的等待流程（讓一拍、輪詢、等太久記 warning、超過上限就放行）。
+
+    寫成產生器：每次 yield 要睡幾秒，結束代表拿到鎖或放棄等待。async 版用 `asyncio.sleep`、同步版用
+    `time.sleep` 走同一套流程，規則只有這一份。`max_wait` 給了就是「等這麼久還拿不到就丟 GpuBusy」，
+    不走預設的「等滿上限照常打模型」。
+    """
+    global _skip_until
+    since_release = time.monotonic() - _last_release
+    if since_release < _CROSS_PROCESS_YIELD_S:
+        yield _CROSS_PROCESS_YIELD_S - since_release
+    started = time.monotonic()
+    next_warn = _CROSS_PROCESS_WARN_S
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _skip_until = 0.0
+            return
+        except BlockingIOError:
+            if time.monotonic() < _skip_until:
+                return      # 剛等滿上限放行過：別的行程還卡著，這段時間不再等
+            waited = time.monotonic() - started
+            if max_wait is not None and waited >= max_wait:
+                raise GpuBusy(f"GPU 被別的工作佔著，等了 {waited:.0f} 秒還沒輪到")
+            if waited >= _CROSS_PROCESS_MAX_WAIT_S:
+                logger.error("等別的行程放 GPU 鎖檔超過 %d 秒，不等了、照常打模型（接下來 %d 秒都不等）（%s）",
+                             _CROSS_PROCESS_MAX_WAIT_S, _CROSS_PROCESS_MAX_WAIT_S, CROSS_PROCESS_LOCK_PATH)
+                _skip_until = time.monotonic() + _CROSS_PROCESS_MAX_WAIT_S
+                return
+            if waited >= next_warn:
+                logger.warning("別的行程佔著 GPU（鎖檔 %s），已等 %d 秒", CROSS_PROCESS_LOCK_PATH, waited)
+                next_warn += 300
+            yield _CROSS_PROCESS_POLL_S
+
+
+def _release(fd: int) -> None:
+    global _last_release
+    os.close(fd)
+    _last_release = time.monotonic()
+
+
 @contextlib.asynccontextmanager
 async def _cross_process_lock():
     """拿鎖檔（別的行程拿著就輪詢等）；離開時關檔放鎖。開不了鎖檔就只在本行程排隊。"""
-    global _last_release, _skip_until
-    try:
-        fd = os.open(CROSS_PROCESS_LOCK_PATH, os.O_RDWR | os.O_CREAT, 0o666)
-    except OSError as exc:
-        logger.warning("開不了跨行程 GPU 鎖檔，只在本行程排隊：%s", exc)
+    fd = _open_lock_file()
+    if fd is None:
         yield
         return
     try:
-        since_release = time.monotonic() - _last_release
-        if since_release < _CROSS_PROCESS_YIELD_S:
-            await asyncio.sleep(_CROSS_PROCESS_YIELD_S - since_release)
-        started = time.monotonic()
-        next_warn = _CROSS_PROCESS_WARN_S
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                _skip_until = 0.0
-                break
-            except BlockingIOError:
-                if time.monotonic() < _skip_until:
-                    break      # 剛等滿上限放行過：別的行程還卡著，這段時間不再等
-                waited = time.monotonic() - started
-                if waited >= _CROSS_PROCESS_MAX_WAIT_S:
-                    logger.error("等別的行程放 GPU 鎖檔超過 %d 秒，不等了、照常打模型（接下來 %d 秒都不等）（%s）",
-                                 _CROSS_PROCESS_MAX_WAIT_S, _CROSS_PROCESS_MAX_WAIT_S, CROSS_PROCESS_LOCK_PATH)
-                    _skip_until = time.monotonic() + _CROSS_PROCESS_MAX_WAIT_S
-                    break
-                if waited >= next_warn:
-                    logger.warning("別的行程佔著 GPU（鎖檔 %s），已等 %d 秒", CROSS_PROCESS_LOCK_PATH, waited)
-                    next_warn += 300
-                await asyncio.sleep(_CROSS_PROCESS_POLL_S)
+        for delay in _acquire_steps(fd):
+            await asyncio.sleep(delay)
         yield
     finally:
-        os.close(fd)
-        _last_release = time.monotonic()
+        _release(fd)
+
+
+@contextlib.contextmanager
+def gpu_exclusive_sync(max_wait_seconds: float | None = None):
+    """同步程式用的 GPU 閘門：只拿跨行程鎖檔，和 bot 的 `stream_exclusive` 排同一個隊。
+
+    `max_wait_seconds`：最多等幾秒，等不到丟 `GpuBusy`（互動式查詢用）；None＝照預設規則一直等（批次工作用）。
+
+    給同一個容器另開、沒有 event loop 的行程用（情報搜尋的批次算向量、MCP 搜尋算問句向量）：
+    那些行程裡沒有別的 GPU 使用者，行程內的 asyncio 鎖用不到，跨行程鎖檔才是重點——
+    10-08 曾在批次 embedding 與 bot 的長回答同時跑時發生顯示卡斷線。
+
+    ⚠️ 不要在 bot 行程裡、`stream_exclusive` 區段內呼叫：同一個行程開兩個檔案描述子搶同一把鎖檔
+    也會互相擋，要等到放行上限才過得去。
+    """
+    fd = _open_lock_file()
+    if fd is None:
+        yield
+        return
+    try:
+        for delay in _acquire_steps(fd, max_wait_seconds):
+            time.sleep(delay)
+        yield
+    finally:
+        _release(fd)
 
 
 @contextlib.asynccontextmanager

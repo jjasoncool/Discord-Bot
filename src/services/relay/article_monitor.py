@@ -13,13 +13,12 @@ from utils.logger_config import get_article_monitor_logger
 from utils.discord_content import post_to_channel
 
 from .base_monitor import BaseContentMonitor
+# 官方原文網址的唯一來源在 services.source_urls；這裡轉出去，舊的 import 路徑照樣能用
+from services.source_urls import OFFICIAL_ARTICLE_URL, official_article_url  # noqa: F401
 
 # 設置日誌器（使用統一配置）
 logger = logging.getLogger(__name__)
 article_logger = get_article_monitor_logger()
-
-# 官方公告原文網址（**唯一來源**：轉發 embed 與自動建活動的描述都用這個，勿再各寫一份）
-OFFICIAL_ARTICLE_URL = "https://wutheringwaves.kurogames.com/zh-tw/main/news/detail/{article_id}"
 
 # 轉發到 Discord 的公告內文上限。
 # Discord embed description 硬上限是 4096，這裡刻意取更小值避免單篇洗版。
@@ -28,12 +27,6 @@ OFFICIAL_ARTICLE_URL = "https://wutheringwaves.kurogames.com/zh-tw/main/news/det
 # 卻會讓版本說明帖變成 40~50 行的牆。被截掉的部分由「閱讀完整公告」連結與 embed.url 兩個出口補。
 EMBED_DESC_LIMIT = 1200
 
-
-def official_article_url(article_id) -> Optional[str]:
-    """官方公告原文網址；article_id 缺失時回 None（embed url 傳 None 等同不設）。"""
-    if article_id in (None, "", "unknown"):
-        return None
-    return OFFICIAL_ARTICLE_URL.format(article_id=article_id)
 
 class ArticleMonitor(BaseContentMonitor):
     """官方文章更新類別"""

@@ -180,6 +180,35 @@ def _find_hardcoded_article_urls(path: Path) -> list[int]:
     return hits
 
 
+def _find_hardcoded_bahamut_floor_urls(path: Path) -> list[int]:
+    """找寫死的巴哈「單一樓層」網址（`Co.php`）。走 AST 的理由同 `_find_hardcoded_article_urls`。
+
+    起因：社群稽查的兩處各自用 f-string 組，情報搜尋也要給樓層連結（2026-10-08 收成一份）。
+    """
+    hits = []
+    for node in ast.walk(_parse(path)):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and "forum.gamer.com.tw/Co.php" in node.value):
+            hits.append(node.lineno)
+    return hits
+
+
+_CONTENT_LIKE = re.compile(r"\b(?:article_content|article_title|content|title|text)\s+LIKE\b", re.IGNORECASE)
+
+
+def _find_content_keyword_search(path: Path) -> list[int]:
+    """找直接對文章內容或標題下 `LIKE` 的 SQL（自己做一份關鍵字搜尋）。走 AST 的理由同上：SQL 只活在字串裡。
+
+    起因：公告、FB、論壇原本完全沒有搜尋，2026-10-08 做了 `services.search`（全文索引、短詞退路、
+    來源上限、簡轉繁）。再各自 `LIKE '%…%'` 會少掉這些處理，也會在十萬列的表上全表掃描。
+    """
+    hits = []
+    for node in ast.walk(_parse(path)):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and _CONTENT_LIKE.search(node.value):
+            hits.append(node.lineno)
+    return hits
+
+
 def _find_named_module_loggers(path: Path) -> list[int]:
     """找 `getLogger("寫死的名稱")`；設定檔裡定義的類別 logger 除外。
 
@@ -614,8 +643,27 @@ RULES = [
     Rule(
         name="官方公告原文網址",
         finder=_find_hardcoded_article_urls,
-        canonical="services.relay.article_monitor.official_article_url()",
-        allowed={"services/relay/article_monitor.py"},
+        canonical="services.source_urls.official_article_url()",
+        allowed={"services/source_urls.py"},
+    ),
+    Rule(
+        name="對公告、FB、論壇文章做關鍵字搜尋",
+        finder=_find_content_keyword_search,
+        canonical="services.search（SearchIndex.search／fetch）",
+        # VersionDateResolver 找的是固定格式的公告（維護預告、第二期卡池），不是給人搜尋
+        allowed={"services/events/event_scheduler.py"},
+    ),
+    Rule(
+        name="名次融合（RRF）",
+        pattern=r"def\s+_?\w*rrf\w*\s*\(",
+        canonical="utils.rank_fusion（rrf_score／fuse_rankings）",
+        allowed={"utils/rank_fusion.py"},
+    ),
+    Rule(
+        name="巴哈單一樓層網址",
+        finder=_find_hardcoded_bahamut_floor_urls,
+        canonical="services.source_urls.bahamut_floor_url()",
+        allowed={"services/source_urls.py"},
     ),
     Rule(
         name="讀交易 thread 的歷史",

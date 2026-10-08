@@ -36,6 +36,7 @@ from services.community.community_lookup_service import (
     BAHAMUT_COMMENT_MIN,
     BAHAMUT_POST_MIN,
 )
+from services.source_urls import bahamut_floor_url
 from services.state_db import StateDB
 from utils.panel_bump import PanelBumper
 from utils.user_dates import parse_user_date
@@ -410,8 +411,8 @@ def _build_comment_blocks(comments: List[CommunityActivity]) -> List[_CommentBlo
                 label_text = f"回文 #{pos}" if pos else "回文"
             else:
                 label_text = "主文"
-            if parent_sn and first.source == "bahamut":
-                sub_url = f"https://forum.gamer.com.tw/Co.php?bsn={first.board}&sn={parent_sn}"
+            sub_url = bahamut_floor_url(first.board, parent_sn) if first.source == "bahamut" else None
+            if sub_url:
                 sub_header = f"　↪️ *[{label_text}]({sub_url})*\n"
             else:
                 sub_header = f"　↪️ *{label_text}*\n"
