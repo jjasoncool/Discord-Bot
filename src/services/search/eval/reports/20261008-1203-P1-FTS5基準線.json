@@ -1,0 +1,1243 @@
+{
+ "label": "P1-FTS5基準線",
+ "when": "2026-10-08T12:03:41.885568+08:00",
+ "summary": {
+  "n": 42,
+  "hit@1": 0.14285714285714285,
+  "hit@5": 0.21428571428571427,
+  "hit@10": 0.35714285714285715,
+  "mrr@10": 0.19469954648526078
+ },
+ "results": [
+  {
+   "qid": "q01",
+   "question": "2024 年 6 月初那個分解練過的聲骸會多噴錢的 bug，官方最後補全服多少貝幣？",
+   "category": "情報",
+   "origin": "article",
+   "type": "換句話說",
+   "rank": 2,
+   "returned": [
+    "bahamut:116683",
+    "article:826",
+    "bahamut:20915",
+    "bahamut:40157",
+    "bahamut:36852",
+    "bahamut:28828",
+    "article:1269",
+    "article:1021",
+    "article:1026",
+    "article:1468",
+    "ptt:M.1776759390.A.206",
+    "ptt:M.1774488839.A.E4C",
+    "ptt:M.1788812835.A.F74",
+    "fb:873",
+    "ptt:M.1791244854.A.296",
+    "ptt:M.1791219397.A.847",
+    "fb:865",
+    "fb:864",
+    "fb:863",
+    "fb:862"
+   ],
+   "relevant": [
+    "article:826",
+    "bahamut:20915",
+    "bahamut:20924"
+   ],
+   "elapsed_ms": 45.2
+  },
+  {
+   "qid": "q02",
+   "question": "1.2 版剛推出的回鍋玩家福利，要多久沒上線才會觸發？",
+   "category": "情報",
+   "origin": "article",
+   "type": "換句話說",
+   "rank": null,
+   "returned": [
+    "bahamut:35814",
+    "bahamut:134498",
+    "bahamut:36442",
+    "bahamut:44897",
+    "bahamut:28032",
+    "ptt:M.1737296534.A.C36",
+    "ptt:M.1737281385.A.52A",
+    "ptt:M.1772760875.A.913"
+   ],
+   "relevant": [
+    "article:1180",
+    "article:1188",
+    "article:2446",
+    "article:3694",
+    "fb:77",
+    "bahamut:36665",
+    "bahamut:38477",
+    "bahamut:36710",
+    "bahamut:72142",
+    "bahamut:104040"
+   ],
+   "elapsed_ms": 10.4
+  },
+  {
+   "qid": "q03",
+   "question": "1.6.2 版 PC 啟動器改成預設 DX12 之後一直卡，要去哪裡切回 DX11 啟動？",
+   "category": "情報",
+   "origin": "article",
+   "type": "字面",
+   "rank": 6,
+   "returned": [
+    "bahamut:41890",
+    "bahamut:41778",
+    "bahamut:41756",
+    "bahamut:91816",
+    "bahamut:41811",
+    "article:1373",
+    "ptt:M.1787191876.A.222",
+    "article:5340",
+    "article:1319",
+    "article:1133",
+    "ptt:M.1790753404.A.02F",
+    "ptt:M.1790734475.A.A29",
+    "article:5562",
+    "ptt:M.1777514949.A.956",
+    "ptt:M.1791166283.A.9E2",
+    "fb:863",
+    "fb:859",
+    "fb:765",
+    "fb:679",
+    "fb:585"
+   ],
+   "relevant": [
+    "article:1319",
+    "article:1373",
+    "bahamut:41681",
+    "bahamut:41802",
+    "bahamut:42163"
+   ],
+   "elapsed_ms": 72.3
+  },
+  {
+   "qid": "q04",
+   "question": "2.0 版今汐那套新衣服要幾個月相？",
+   "category": "情報",
+   "origin": "article",
+   "type": "短詞",
+   "rank": 8,
+   "returned": [
+    "bahamut:60567",
+    "bahamut:53106",
+    "bahamut:62144",
+    "bahamut:112852",
+    "bahamut:59323",
+    "article:2020",
+    "article:1796",
+    "article:1811"
+   ],
+   "relevant": [
+    "article:1811",
+    "bahamut:55617",
+    "bahamut:57393"
+   ],
+   "elapsed_ms": 11.0
+  },
+  {
+   "qid": "q05",
+   "question": "PS5 的 PSN 帳號綁了庫洛通行證，之後還能解綁嗎？可以解幾次？",
+   "category": "情報",
+   "origin": "article",
+   "type": "字面",
+   "rank": 1,
+   "returned": [
+    "bahamut:57413",
+    "article:1857",
+    "bahamut:105125",
+    "bahamut:70233",
+    "bahamut:63844",
+    "bahamut:58612",
+    "article:5112",
+    "article:604",
+    "article:1968",
+    "article:605",
+    "fb:41",
+    "fb:137",
+    "fb:259",
+    "fb:362",
+    "fb:676",
+    "ptt:M.1790406688.A.D37",
+    "ptt:M.1791423605.A.F87",
+    "ptt:M.1791422584.A.4D2",
+    "ptt:M.1791392058.A.AD3",
+    "ptt:M.1791388901.A.7FF"
+   ],
+   "relevant": [
+    "article:1857",
+    "bahamut:57413",
+    "bahamut:57838",
+    "bahamut:63844",
+    "bahamut:75122"
+   ],
+   "elapsed_ms": 10.8
+  },
+  {
+   "qid": "q06",
+   "question": "2025 年 6 月在 Twitch 給實況主訂閱拿到的滑翔翼序號，最晚要什麼時候輸入？",
+   "category": "情報",
+   "origin": "article",
+   "type": "換句話說",
+   "rank": 1,
+   "returned": [
+    "article:2800",
+    "bahamut:93813",
+    "fb:137",
+    "bahamut:86255",
+    "bahamut:106071",
+    "bahamut:101229",
+    "article:654",
+    "bahamut:89375",
+    "ptt:M.1778848351.A.EBA",
+    "ptt:M.1791244854.A.296",
+    "ptt:M.1788623536.A.CF6",
+    "fb:41",
+    "fb:259",
+    "fb:362",
+    "fb:676",
+    "ptt:M.1783781987.A.4D3",
+    "ptt:M.1780995973.A.C23",
+    "article:5562",
+    "article:5474",
+    "article:5432"
+   ],
+   "relevant": [
+    "article:2800"
+   ],
+   "elapsed_ms": 181.9
+  },
+  {
+   "qid": "q07",
+   "question": "2025 年 10 月官方說不再參加第三方平台回饋之後，之前在平台攢的點數什麼時候還能拿來儲值？",
+   "category": "情報",
+   "origin": "article",
+   "type": "換句話說",
+   "rank": null,
+   "returned": [
+    "bahamut:109305",
+    "bahamut:145786",
+    "ptt:M.1791244854.A.296",
+    "bahamut:142656",
+    "bahamut:142396",
+    "bahamut:88093",
+    "fb:873",
+    "ptt:M.1791206162.A.BD7",
+    "ptt:M.1791101436.A.8E6",
+    "ptt:M.1791097300.A.C11",
+    "fb:865",
+    "ptt:M.1790859245.A.6D3",
+    "fb:862",
+    "fb:859",
+    "article:5562",
+    "fb:848",
+    "article:5474",
+    "article:5432",
+    "article:5404"
+   ],
+   "relevant": [
+    "article:3374",
+    "article:3783",
+    "bahamut:99100"
+   ],
+   "elapsed_ms": 50.6
+  },
+  {
+   "qid": "q08",
+   "question": "卜靈是什麼身分？",
+   "category": "情報",
+   "origin": "article",
+   "type": "短詞",
+   "rank": null,
+   "returned": [
+    "bahamut:47188",
+    "bahamut:99833",
+    "bahamut:103070"
+   ],
+   "relevant": [
+    "article:3701",
+    "article:3650",
+    "fb:85",
+    "fb:86",
+    "bahamut:102721",
+    "bahamut:100677"
+   ],
+   "elapsed_ms": 7.0
+  },
+  {
+   "qid": "q09",
+   "question": "3.1 的「奔馳！箭速與激情！」活動總共給幾顆星聲？",
+   "category": "情報",
+   "origin": "article",
+   "type": "字面",
+   "rank": 7,
+   "returned": [
+    "article:4108",
+    "bahamut:111458",
+    "bahamut:112734",
+    "bahamut:112077",
+    "bahamut:114036",
+    "bahamut:115547",
+    "fb:267",
+    "article:4223",
+    "fb:311",
+    "ptt:M.1773850892.A.F7A",
+    "ptt:M.1778307435.A.F23",
+    "fb:221",
+    "ptt:M.1773891475.A.A77",
+    "ptt:M.1773851207.A.7D3",
+    "fb:219",
+    "ptt:M.1773835119.A.7B5",
+    "fb:220",
+    "article:4079",
+    "article:4078",
+    "article:4145"
+   ],
+   "relevant": [
+    "article:4223",
+    "fb:267",
+    "bahamut:112777"
+   ],
+   "elapsed_ms": 149.5
+  },
+  {
+   "qid": "q10",
+   "question": "鳴潮「致予新世界」演唱會台北站是在哪個場館？",
+   "category": "情報",
+   "origin": "article",
+   "type": "字面",
+   "rank": 3,
+   "returned": [
+    "fb:803",
+    "fb:646",
+    "fb:621",
+    "fb:794",
+    "article:5382",
+    "fb:795",
+    "bahamut:140994",
+    "ptt:M.1782874906.A.78B",
+    "ptt:M.1782702183.A.B87",
+    "bahamut:134693",
+    "article:5404",
+    "article:4930",
+    "bahamut:134733",
+    "bahamut:142043",
+    "bahamut:138257",
+    "ptt:M.1781946177.A.203",
+    "ptt:M.1781924470.A.C7F",
+    "ptt:M.1781924939.A.9CF",
+    "article:1747"
+   ],
+   "relevant": [
+    "article:4930",
+    "fb:621",
+    "fb:783",
+    "fb:794",
+    "fb:795",
+    "fb:796",
+    "ptt:M.1781924939.A.9CF",
+    "ptt:M.1787929709.A.211",
+    "ptt:M.1789124080.A.5CC",
+    "bahamut:134693",
+    "bahamut:136158",
+    "bahamut:136177",
+    "bahamut:141831",
+    "bahamut:141880",
+    "bahamut:141966",
+    "bahamut:142503"
+   ],
+   "elapsed_ms": 7.9
+  },
+  {
+   "qid": "q11",
+   "question": "3.5 下半穗穗池的四星是哪幾隻？",
+   "category": "情報",
+   "origin": "article",
+   "type": "短詞",
+   "rank": null,
+   "returned": [
+    "bahamut:137239",
+    "ptt:M.1786356910.A.DD1",
+    "fb:714",
+    "ptt:M.1781534130.A.68B",
+    "bahamut:134259",
+    "bahamut:137391",
+    "bahamut:48866",
+    "fb:637",
+    "bahamut:140448",
+    "article:4948",
+    "fb:635",
+    "ptt:M.1783867499.A.D4F",
+    "ptt:M.1783748237.A.BDD",
+    "ptt:M.1783616058.A.72B",
+    "fb:638",
+    "fb:640",
+    "article:4933"
+   ],
+   "relevant": [
+    "article:5226",
+    "fb:718",
+    "bahamut:139111"
+   ],
+   "elapsed_ms": 6.6
+  },
+  {
+   "qid": "q12",
+   "question": "3.7 之後可以自己挑下載畫質包的那個功能，手機能載最高畫質那檔嗎？",
+   "category": "情報",
+   "origin": "article",
+   "type": "換句話說",
+   "rank": 6,
+   "returned": [
+    "ptt:M.1790765330.A.FC1",
+    "bahamut:143847",
+    "bahamut:144841",
+    "ptt:M.1791038588.A.B21",
+    "ptt:M.1790869469.A.02D",
+    "article:5480",
+    "bahamut:143366",
+    "bahamut:141616",
+    "bahamut:112538",
+    "fb:856",
+    "fb:835",
+    "ptt:M.1791083576.A.9E7",
+    "ptt:M.1790137957.A.506"
+   ],
+   "relevant": [
+    "article:5480",
+    "bahamut:143366",
+    "ptt:M.1789821184.A.0DE",
+    "ptt:M.1789827906.A.4C8",
+    "ptt:M.1790734475.A.A29"
+   ],
+   "elapsed_ms": 13.3
+  },
+  {
+   "qid": "q13",
+   "question": "千咲那張悠遊卡預購開到哪天截止？",
+   "category": "情報",
+   "origin": "fb",
+   "type": "字面",
+   "rank": null,
+   "returned": [],
+   "relevant": [
+    "fb:78"
+   ],
+   "elapsed_ms": 2.6
+  },
+  {
+   "qid": "q14",
+   "question": "1月開預購的贊妮手辦，什麼時候出貨？",
+   "category": "情報",
+   "origin": "fb",
+   "type": "短詞",
+   "rank": null,
+   "returned": [
+    "bahamut:142006",
+    "bahamut:66708",
+    "bahamut:4160",
+    "bahamut:73689",
+    "bahamut:44076",
+    "ptt:M.1777551474.A.13E",
+    "ptt:M.1779795298.A.B56",
+    "ptt:M.1773898371.A.A6B",
+    "ptt:M.1779116833.A.D00",
+    "ptt:M.1780802739.A.884"
+   ],
+   "relevant": [
+    "fb:174",
+    "bahamut:109232"
+   ],
+   "elapsed_ms": 6.5
+  },
+  {
+   "qid": "q15",
+   "question": "2026年4月開賣的鳴潮聯名冰棒有哪幾種口味？",
+   "category": "情報",
+   "origin": "fb",
+   "type": "換句話說",
+   "rank": null,
+   "returned": [
+    "bahamut:120149",
+    "fb:452",
+    "fb:400",
+    "bahamut:137573",
+    "bahamut:136066",
+    "fb:421",
+    "fb:419",
+    "article:4465",
+    "fb:404",
+    "bahamut:123791",
+    "bahamut:122759",
+    "article:4505",
+    "article:4492",
+    "ptt:M.1775793701.A.3D1",
+    "ptt:M.1776828845.A.4CB",
+    "article:4457",
+    "article:4440",
+    "ptt:M.1774959221.A.D1F",
+    "ptt:M.1778234647.A.9F8",
+    "ptt:M.1776421803.A.F43"
+   ],
+   "relevant": [
+    "fb:381",
+    "fb:403",
+    "ptt:M.1774782653.A.5C4",
+    "ptt:M.1775790350.A.60A",
+    "bahamut:117935"
+   ],
+   "elapsed_ms": 22.9
+  },
+  {
+   "qid": "q16",
+   "question": "鳴潮兩週年在北流辦的實體活動，有歌手上台唱歌嗎？大概幾點？",
+   "category": "情報",
+   "origin": "fb",
+   "type": "換句話說",
+   "rank": null,
+   "returned": [
+    "bahamut:118691",
+    "ptt:M.1776429665.A.794",
+    "bahamut:130238",
+    "bahamut:2396",
+    "ptt:M.1779506836.A.CE8",
+    "bahamut:119788",
+    "ptt:M.1779940815.A.007",
+    "bahamut:142857"
+   ],
+   "relevant": [
+    "fb:482",
+    "fb:532",
+    "bahamut:127565"
+   ],
+   "elapsed_ms": 5.2
+  },
+  {
+   "qid": "q17",
+   "question": "3.5版本官方出解謎送機車外觀的那組兌換碼，最後公布的答案是什麼？",
+   "category": "情報",
+   "origin": "fb",
+   "type": "換句話說",
+   "rank": 16,
+   "returned": [
+    "bahamut:136957",
+    "bahamut:139855",
+    "bahamut:109602",
+    "ptt:M.1787048270.A.B39",
+    "bahamut:113937",
+    "fb:618",
+    "bahamut:135402",
+    "fb:714",
+    "fb:639",
+    "fb:637",
+    "article:4948",
+    "fb:638",
+    "article:4933",
+    "ptt:M.1785241630.A.E49",
+    "ptt:M.1783674713.A.766",
+    "ptt:M.1783782480.A.E60",
+    "ptt:M.1790417116.A.C63",
+    "article:5136",
+    "article:4938"
+   ],
+   "relevant": [
+    "fb:685",
+    "ptt:M.1783782480.A.E60",
+    "bahamut:137181",
+    "bahamut:137044",
+    "bahamut:136939"
+   ],
+   "elapsed_ms": 15.9
+  },
+  {
+   "qid": "q18",
+   "question": "索拉逐星舞台 Season 2 正片哪天幾點上線？在哪裡看？",
+   "category": "情報",
+   "origin": "fb",
+   "type": "字面",
+   "rank": 1,
+   "returned": [
+    "fb:865",
+    "bahamut:145343",
+    "ptt:M.1791097300.A.C11",
+    "bahamut:61667",
+    "bahamut:61820",
+    "bahamut:62218",
+    "bahamut:62211",
+    "ptt:M.1778675917.A.0B0",
+    "ptt:M.1788602996.A.8ED",
+    "ptt:M.1778849000.A.3AF",
+    "ptt:M.1778762634.A.515",
+    "fb:873"
+   ],
+   "relevant": [
+    "fb:865",
+    "ptt:M.1791097300.A.C11",
+    "bahamut:145343"
+   ],
+   "elapsed_ms": 11.3
+  },
+  {
+   "qid": "q19",
+   "question": "3.2 前瞻直播送的兌換碼是哪幾組？",
+   "category": "情報",
+   "origin": "ptt",
+   "type": "字面",
+   "rank": 7,
+   "returned": [
+    "bahamut:116373",
+    "bahamut:116361",
+    "bahamut:116409",
+    "bahamut:116365",
+    "bahamut:116370",
+    "ptt:M.1773398658.A.DDE",
+    "ptt:M.1773403880.A.5F0",
+    "fb:398",
+    "ptt:M.1775739160.A.827",
+    "ptt:M.1773402134.A.4F8",
+    "fb:340",
+    "ptt:M.1773138475.A.DC7",
+    "fb:344",
+    "fb:343",
+    "article:5404",
+    "fb:798",
+    "article:2800"
+   ],
+   "relevant": [
+    "ptt:M.1773403880.A.5F0",
+    "ptt:M.1773404381.A.B29",
+    "bahamut:116110",
+    "bahamut:116363"
+   ],
+   "elapsed_ms": 9.5
+  },
+  {
+   "qid": "q20",
+   "question": "女主角那套中文語音不是在重新配嗎？3.3 之後剩下沒配完的說哪一版會補齊？",
+   "category": "情報",
+   "origin": "ptt",
+   "type": "換句話說",
+   "rank": null,
+   "returned": [
+    "bahamut:137109",
+    "ptt:M.1775897725.A.A75",
+    "bahamut:130404",
+    "bahamut:130299",
+    "ptt:M.1780214839.A.E5D",
+    "ptt:M.1779353895.A.BB3",
+    "bahamut:125825",
+    "bahamut:134558",
+    "ptt:M.1779545305.A.0A8",
+    "ptt:M.1778985172.A.25A",
+    "fb:533"
+   ],
+   "relevant": [
+    "ptt:M.1777727137.A.749",
+    "article:4601",
+    "ptt:M.1777514949.A.956",
+    "bahamut:124735"
+   ],
+   "elapsed_ms": 12.2
+  },
+  {
+   "qid": "q21",
+   "question": "水月雨那副鳴潮聯名耳機能不能調音量？",
+   "category": "情報",
+   "origin": "ptt",
+   "type": "字面",
+   "rank": 10,
+   "returned": [
+    "ptt:M.1779985331.A.045",
+    "bahamut:129535",
+    "ptt:M.1779813685.A.46F",
+    "bahamut:138247",
+    "bahamut:138250",
+    "bahamut:138397",
+    "fb:568",
+    "bahamut:138294",
+    "fb:871",
+    "ptt:M.1782916486.A.D75",
+    "ptt:M.1783693571.A.795"
+   ],
+   "relevant": [
+    "ptt:M.1782916486.A.D75"
+   ],
+   "elapsed_ms": 6.6
+  },
+  {
+   "qid": "q22",
+   "question": "8 月初鳴潮在泰國辦的那場比誰打王比較快的比賽，最後是誰拿第一？",
+   "category": "情報",
+   "origin": "ptt",
+   "type": "換句話說",
+   "rank": null,
+   "returned": [
+    "bahamut:141593",
+    "bahamut:81418",
+    "bahamut:80596",
+    "bahamut:111719",
+    "bahamut:90309",
+    "ptt:M.1787713683.A.138",
+    "ptt:M.1787755254.A.7BD",
+    "ptt:M.1780454277.A.F74",
+    "ptt:M.1778765622.A.976",
+    "article:2601",
+    "ptt:M.1780979985.A.A43",
+    "fb:873"
+   ],
+   "relevant": [
+    "ptt:M.1785659660.A.CB7",
+    "ptt:M.1786112143.A.D4F"
+   ],
+   "elapsed_ms": 9.4
+  },
+  {
+   "qid": "q23",
+   "question": "3.4 加的西西點位，她幾點會在婭婭的病房？",
+   "category": "情報",
+   "origin": "ptt",
+   "type": "短詞",
+   "rank": 1,
+   "returned": [
+    "ptt:M.1780902054.A.F9E",
+    "bahamut:132918",
+    "ptt:M.1780929111.A.649",
+    "bahamut:131523",
+    "ptt:M.1779350729.A.072",
+    "bahamut:130191",
+    "bahamut:130742",
+    "ptt:M.1780211374.A.339",
+    "fb:615",
+    "bahamut:133757",
+    "fb:555",
+    "ptt:M.1779353895.A.BB3",
+    "fb:559",
+    "article:4763",
+    "fb:578",
+    "fb:547"
+   ],
+   "relevant": [
+    "ptt:M.1780883405.A.CCB",
+    "ptt:M.1780931844.A.D88",
+    "ptt:M.1780902054.A.F9E",
+    "bahamut:132798"
+   ],
+   "elapsed_ms": 6.0
+  },
+  {
+   "qid": "q24",
+   "question": "10 月底台北跟香港同時辦的那個鳴潮賞月主題實體活動，台北場辦在哪、是哪兩天？",
+   "category": "情報",
+   "origin": "ptt",
+   "type": "換句話說",
+   "rank": 13,
+   "returned": [
+    "bahamut:2396",
+    "bahamut:125069",
+    "bahamut:104653",
+    "bahamut:34208",
+    "bahamut:67592",
+    "ptt:M.1788617643.A.EA3",
+    "ptt:M.1790765330.A.FC1",
+    "ptt:M.1791423605.A.F87",
+    "ptt:M.1791388279.A.212",
+    "ptt:M.1791358162.A.BE6",
+    "fb:873",
+    "fb:871",
+    "fb:868",
+    "fb:865",
+    "fb:772"
+   ],
+   "relevant": [
+    "ptt:M.1791155902.A.187",
+    "fb:868"
+   ],
+   "elapsed_ms": 10.5
+  },
+  {
+   "qid": "q25",
+   "question": "鳴潮 2022 年去日本那個大型遊戲展擺攤的時候，現場請了哪幾位 coser？各扮誰？",
+   "category": "情報",
+   "origin": "bahamut",
+   "type": "換句話說",
+   "rank": null,
+   "returned": [
+    "bahamut:113175",
+    "bahamut:135124",
+    "bahamut:141044",
+    "bahamut:92452",
+    "bahamut:108566",
+    "fb:18",
+    "ptt:M.1779613626.A.1B9",
+    "ptt:M.1787500909.A.5E8",
+    "ptt:M.1788779041.A.EA0",
+    "ptt:M.1785669497.A.00D",
+    "ptt:M.1779790088.A.B35",
+    "fb:197",
+    "fb:875",
+    "fb:874",
+    "fb:873"
+   ],
+   "relevant": [
+    "bahamut:12"
+   ],
+   "elapsed_ms": 33.6
+  },
+  {
+   "qid": "q26",
+   "question": "鳴潮 2023 年國際版第一次封測，報名收到哪天截止？幾號開始可以玩？",
+   "category": "情報",
+   "origin": "bahamut",
+   "type": "換句話說",
+   "rank": 1,
+   "returned": [
+    "bahamut:17",
+    "bahamut:84362",
+    "bahamut:114724",
+    "bahamut:42",
+    "bahamut:115040",
+    "ptt:M.1783341046.A.D75",
+    "ptt:M.1778310190.A.CBC",
+    "ptt:M.1783323649.A.ABE",
+    "ptt:M.1781365610.A.C85",
+    "ptt:M.1778382791.A.F65",
+    "fb:875",
+    "fb:874",
+    "fb:873",
+    "fb:872"
+   ],
+   "relevant": [
+    "bahamut:17"
+   ],
+   "elapsed_ms": 25.2
+  },
+  {
+   "qid": "q27",
+   "question": "大世界那種名字紅色、打了必掉聲骸的特殊強怪，打掉之後要等多久才會再刷出來？",
+   "category": "情報",
+   "origin": "bahamut",
+   "type": "換句話說",
+   "rank": null,
+   "returned": [
+    "bahamut:79982",
+    "bahamut:112636",
+    "ptt:M.1776526213.A.7AC",
+    "bahamut:65106",
+    "bahamut:86734",
+    "bahamut:18813",
+    "ptt:M.1780929077.A.FEB",
+    "ptt:M.1783402737.A.CE0",
+    "ptt:M.1773419788.A.8BD",
+    "ptt:M.1783833167.A.03B"
+   ],
+   "relevant": [
+    "bahamut:9693",
+    "bahamut:8727",
+    "bahamut:23745",
+    "bahamut:27131",
+    "bahamut:18039",
+    "bahamut:11398"
+   ],
+   "elapsed_ms": 12.8
+  },
+  {
+   "qid": "q28",
+   "question": "秋水的分身嘲諷可以撐幾秒？想拿他當坦，聲骸要怎麼配？",
+   "category": "情報",
+   "origin": "bahamut",
+   "type": "短詞",
+   "rank": null,
+   "returned": [
+    "bahamut:87435",
+    "bahamut:43651",
+    "bahamut:43613",
+    "bahamut:88003",
+    "bahamut:86679"
+   ],
+   "relevant": [
+    "bahamut:39891"
+   ],
+   "elapsed_ms": 7.4
+  },
+  {
+   "qid": "q29",
+   "question": "槲生半島的深囚者打贏一次之後還能再挑戰嗎？後面每次給幾個寶箱、全部加起來幾個？",
+   "category": "情報",
+   "origin": "bahamut",
+   "type": "字面",
+   "rank": 2,
+   "returned": [
+    "bahamut:66948",
+    "bahamut:59345",
+    "bahamut:58989",
+    "bahamut:60523",
+    "bahamut:24760"
+   ],
+   "relevant": [
+    "bahamut:58650",
+    "bahamut:59345",
+    "bahamut:60523"
+   ],
+   "elapsed_ms": 7.2
+  },
+  {
+   "qid": "q30",
+   "question": "韓服公布的聲骸副詞條機率裡，暴擊洗到最高 10.5% 那一檔的機率是多少？",
+   "category": "情報",
+   "origin": "bahamut",
+   "type": "字面",
+   "rank": 1,
+   "returned": [
+    "bahamut:136560",
+    "bahamut:136526",
+    "bahamut:111442",
+    "bahamut:101998",
+    "bahamut:27737",
+    "ptt:M.1783417562.A.725",
+    "ptt:M.1779880090.A.726",
+    "ptt:M.1776926213.A.104",
+    "ptt:M.1783403156.A.896",
+    "ptt:M.1783412176.A.AFD"
+   ],
+   "relevant": [
+    "bahamut:136460",
+    "ptt:M.1783417562.A.725",
+    "bahamut:136526",
+    "bahamut:136560"
+   ],
+   "elapsed_ms": 13.5
+  },
+  {
+   "qid": "q31",
+   "question": "景燃沒抽到尤諾的話，隊友要帶誰比較好？",
+   "category": "攻略-配隊",
+   "origin": "bahamut",
+   "type": "短詞",
+   "rank": null,
+   "returned": [
+    "bahamut:142508",
+    "bahamut:98022",
+    "bahamut:10254",
+    "bahamut:98884",
+    "bahamut:98328",
+    "ptt:M.1776783072.A.EE8",
+    "ptt:M.1778324549.A.BF7",
+    "ptt:M.1778286899.A.0FF",
+    "ptt:M.1775660369.A.CA4"
+   ],
+   "relevant": [
+    "bahamut:142288",
+    "bahamut:142378",
+    "bahamut:142484",
+    "bahamut:142808",
+    "bahamut:142394",
+    "bahamut:101250",
+    "bahamut:142823",
+    "bahamut:142787",
+    "bahamut:142810",
+    "bahamut:142368",
+    "bahamut:142369",
+    "bahamut:140321",
+    "ptt:M.1786686192.A.0FA"
+   ],
+   "elapsed_ms": 9.5
+  },
+  {
+   "qid": "q32",
+   "question": "汐汐跟水母同一隊的話要怎麼輪？",
+   "category": "攻略-配隊",
+   "origin": "bahamut",
+   "type": "換句話說",
+   "rank": null,
+   "returned": [
+    "bahamut:15708",
+    "bahamut:11967",
+    "bahamut:96254",
+    "bahamut:133373",
+    "bahamut:105883"
+   ],
+   "relevant": [
+    "bahamut:70572",
+    "bahamut:70032",
+    "bahamut:71588",
+    "bahamut:93439",
+    "bahamut:69592",
+    "bahamut:92365"
+   ],
+   "elapsed_ms": 6.4
+  },
+  {
+   "qid": "q33",
+   "question": "長離跟相里要一起上要怎麼合軸？",
+   "category": "攻略-配隊",
+   "origin": "bahamut",
+   "type": "字面",
+   "rank": null,
+   "returned": [
+    "bahamut:66272",
+    "bahamut:41558",
+    "bahamut:60332",
+    "bahamut:80411",
+    "bahamut:41724",
+    "ptt:M.1773842444.A.822"
+   ],
+   "relevant": [
+    "bahamut:41878",
+    "bahamut:62130",
+    "bahamut:62979",
+    "bahamut:64051",
+    "bahamut:49024",
+    "bahamut:68636",
+    "bahamut:68638",
+    "bahamut:49461",
+    "bahamut:117350",
+    "bahamut:65954"
+   ],
+   "elapsed_ms": 9.0
+  },
+  {
+   "qid": "q34",
+   "question": "千咲想拿來當主C的話要配誰？",
+   "category": "攻略-配隊",
+   "origin": "bahamut",
+   "type": "短詞",
+   "rank": null,
+   "returned": [
+    "bahamut:37120",
+    "bahamut:23930",
+    "bahamut:102924",
+    "bahamut:72846",
+    "bahamut:82539",
+    "ptt:M.1782729207.A.0A0",
+    "ptt:M.1778382791.A.F65",
+    "ptt:M.1787122921.A.E71"
+   ],
+   "relevant": [
+    "bahamut:103732",
+    "bahamut:103325",
+    "bahamut:103260",
+    "bahamut:103096",
+    "bahamut:102935",
+    "bahamut:103291",
+    "bahamut:108403",
+    "bahamut:110026",
+    "bahamut:110719",
+    "bahamut:119930",
+    "bahamut:129094",
+    "bahamut:119945"
+   ],
+   "elapsed_ms": 5.4
+  },
+  {
+   "qid": "q35",
+   "question": "忌炎補到滿命到底差多少？大招會變多痛",
+   "category": "攻略-倍率",
+   "origin": "bahamut",
+   "type": "換句話說",
+   "rank": null,
+   "returned": [
+    "bahamut:107607",
+    "bahamut:116803",
+    "bahamut:62944",
+    "bahamut:79125",
+    "bahamut:42520"
+   ],
+   "relevant": [
+    "bahamut:13484",
+    "bahamut:76344",
+    "bahamut:83311",
+    "bahamut:35857"
+   ],
+   "elapsed_ms": 5.0
+  },
+  {
+   "qid": "q36",
+   "question": "椿是不是幾乎都靠普攻在打？普攻大概佔幾成傷害",
+   "category": "攻略-倍率",
+   "origin": "bahamut",
+   "type": "字面",
+   "rank": null,
+   "returned": [
+    "bahamut:145096",
+    "bahamut:134832",
+    "bahamut:70705",
+    "bahamut:113563",
+    "bahamut:113568",
+    "ptt:M.1778548880.A.A8C",
+    "ptt:M.1778507084.A.687",
+    "ptt:M.1773203173.A.D33",
+    "ptt:M.1787653823.A.2E1",
+    "ptt:M.1776244345.A.04B"
+   ],
+   "relevant": [
+    "bahamut:47451",
+    "bahamut:47279"
+   ],
+   "elapsed_ms": 15.3
+  },
+  {
+   "qid": "q37",
+   "question": "仇遠哪一招最痛啊？大招還是重擊",
+   "category": "攻略-倍率",
+   "origin": "bahamut",
+   "type": "短詞",
+   "rank": null,
+   "returned": [
+    "bahamut:26874",
+    "bahamut:65552"
+   ],
+   "relevant": [
+    "bahamut:101536"
+   ],
+   "elapsed_ms": 3.4
+  },
+  {
+   "qid": "q38",
+   "question": "西格莉卡那招終結E倍率到底多高？",
+   "category": "攻略-倍率",
+   "origin": "bahamut",
+   "type": "字面",
+   "rank": null,
+   "returned": [
+    "bahamut:116235",
+    "bahamut:26346",
+    "bahamut:129724",
+    "bahamut:37158",
+    "bahamut:132242",
+    "fb:384",
+    "fb:278",
+    "ptt:M.1773931988.A.763",
+    "ptt:M.1773717574.A.2C2",
+    "fb:348",
+    "ptt:M.1773727497.A.FBE",
+    "fb:369",
+    "fb:115",
+    "ptt:M.1778937499.A.C65",
+    "ptt:M.1773887302.A.F2A"
+   ],
+   "relevant": [
+    "bahamut:116828",
+    "ptt:M.1773965420.A.544"
+   ],
+   "elapsed_ms": 6.3
+  },
+  {
+   "qid": "q39",
+   "question": "景燃聲骸帶哪套？4C 主詞條要選什麼",
+   "category": "攻略-聲骸",
+   "origin": "bahamut",
+   "type": "短詞",
+   "rank": null,
+   "returned": [
+    "bahamut:114030",
+    "bahamut:78724",
+    "bahamut:80549",
+    "bahamut:145274",
+    "bahamut:44196",
+    "ptt:M.1791386043.A.15C",
+    "ptt:M.1790820607.A.B6D",
+    "ptt:M.1790774542.A.5EB",
+    "ptt:M.1790751583.A.FF6",
+    "ptt:M.1790683390.A.861"
+   ],
+   "relevant": [
+    "bahamut:142808",
+    "bahamut:142404",
+    "bahamut:142394",
+    "bahamut:142494"
+   ],
+   "elapsed_ms": 29.3
+  },
+  {
+   "qid": "q40",
+   "question": "穗穗聲骸要不要放 4C？cost 怎麼排比較好",
+   "category": "攻略-聲骸",
+   "origin": "bahamut",
+   "type": "短詞",
+   "rank": null,
+   "returned": [
+    "bahamut:62870",
+    "bahamut:137727",
+    "bahamut:21970",
+    "bahamut:20612",
+    "bahamut:29871",
+    "ptt:M.1789827906.A.4C8",
+    "ptt:M.1782144254.A.F7D",
+    "ptt:M.1776435222.A.B89",
+    "ptt:M.1791386043.A.15C",
+    "ptt:M.1790820607.A.B6D"
+   ],
+   "relevant": [
+    "bahamut:139146",
+    "bahamut:139199",
+    "bahamut:139730",
+    "bahamut:139209",
+    "bahamut:139241",
+    "bahamut:139314",
+    "bahamut:139434"
+   ],
+   "elapsed_ms": 38.6
+  },
+  {
+   "qid": "q41",
+   "question": "家主當主C的話聲骸要穿哪套？首位放哪隻",
+   "category": "攻略-聲骸",
+   "origin": "bahamut",
+   "type": "換句話說",
+   "rank": null,
+   "returned": [
+    "bahamut:109036",
+    "bahamut:98766",
+    "bahamut:102924",
+    "bahamut:72846",
+    "bahamut:82539",
+    "ptt:M.1782729207.A.0A0",
+    "ptt:M.1778382791.A.F65"
+   ],
+   "relevant": [
+    "bahamut:70297",
+    "bahamut:101245",
+    "bahamut:70572",
+    "bahamut:70210",
+    "bahamut:82894"
+   ],
+   "elapsed_ms": 6.2
+  },
+  {
+   "qid": "q42",
+   "question": "相里要 4C 要帶哪隻？",
+   "category": "攻略-聲骸",
+   "origin": "bahamut",
+   "type": "字面",
+   "rank": null,
+   "returned": [
+    "bahamut:71421",
+    "bahamut:40388",
+    "bahamut:40329",
+    "bahamut:41318",
+    "bahamut:41330",
+    "ptt:M.1778426973.A.BD0",
+    "article:1291",
+    "article:1257",
+    "article:1247",
+    "article:1281",
+    "ptt:M.1791386043.A.15C",
+    "ptt:M.1790820607.A.B6D",
+    "ptt:M.1790774542.A.5EB",
+    "ptt:M.1790751583.A.FF6"
+   ],
+   "relevant": [
+    "bahamut:95232",
+    "bahamut:60147",
+    "bahamut:58167",
+    "bahamut:40592",
+    "bahamut:36106",
+    "bahamut:49214"
+   ],
+   "elapsed_ms": 30.5
+  }
+ ]
+}

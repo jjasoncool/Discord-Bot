@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "wuwa-intel": {
+      "command": "docker",
+      "args": [
+        "exec",
+        "-i",
+        "discord-bot",
+        "python",
+        "-m",
+        "llm.mcp_server"
+      ]
+    }
+  }
+}

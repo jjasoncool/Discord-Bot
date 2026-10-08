@@ -247,6 +247,26 @@ class LlmHttpClient:
         items = _require_json_key(data, "data", op_label="embedding(async)")
         return [item["embedding"] for item in items]
 
+    # ---------- rerank ----------
+
+    def rerank(self, *, model: str, query: str, documents: list[str]) -> list[float]:
+        """POST /v1/rerank（sync；llama.cpp 與 Lemonade 的格式，和 Jina 相容）。
+
+        回傳的分數順序對齊 `documents`（後端回的 results 依分數排序，這裡照 index 放回原位）；
+        後端漏掉的文件給負無限大，排到最後。
+        """
+        if not documents:
+            return []
+        data = self._post_json("/rerank", {"model": model, "query": query, "documents": documents,
+                                           "top_n": len(documents)})
+        items = _require_json_key(data, "results", op_label="rerank(sync)")
+        scores = [float("-inf")] * len(documents)
+        for item in items:
+            index = item.get("index")
+            if isinstance(index, int) and 0 <= index < len(documents):
+                scores[index] = float(item.get("relevance_score", item.get("score", float("-inf"))))
+        return scores
+
     # ---------- models（啟動自我測試 / 觀測用）----------
 
     def list_models(self) -> list[str]:

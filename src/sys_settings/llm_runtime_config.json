@@ -2,6 +2,7 @@
   "backend": "lemonade",
   "model": "Qwen3.8-27B-GGUF-UD-Q4_K_XL",
   "embed_model": "Qwen3-Embedding-0.6B-GGUF",
+  "rerank_model": "Qwen3-Reranker-0.6B-GGUF-llama_cpp-Q8_0",
   "moderation_model": "user.Qwen2.5-7B-Instruct-GGUF-Q4_K_M",
   "personality_model": "Qwen3.8-27B-GGUF-UD-Q4_K_XL",
   "ambient_model": "Qwen3.8-27B-GGUF-UD-Q4_K_XL",
@@ -49,6 +50,10 @@
         "Qwen3-Embedding-0.6B-GGUF": {
           "ctx_size": 4096,
           "llamacpp_args": "-sm none -mg 1"
+        },
+        "Qwen3-Reranker-0.6B-GGUF-llama_cpp-Q8_0": {
+          "ctx_size": 4096,
+          "llamacpp_args": "-sm none -mg 0 -ub 1024 -b 1024"
         }
       }
     },

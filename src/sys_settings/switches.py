@@ -40,6 +40,12 @@ class Switches(BaseModel):
     #: 插話頻道被點名、模型判斷是惡意辱罵（輸出 [INSULT]，llm.ambient.ambient_insult）：on＝按一個嘲諷表情、記下這個人，
     #: 之後幾天不主動接他的話；off＝不按、不記（標記照樣不送出去，等於不回）
     ambient_insult_mode: Literal["off", "on"] = "off"
+    #: 情報搜尋（services.search，MCP 的 search 工具）加上向量（語意）搜尋：on＝關鍵字與向量的名次用 RRF 合併；
+    #: off＝只用關鍵字。向量那邊壞掉時本來就會自動退回關鍵字；off 用在不想讓搜尋多打一次 embedding 的時候
+    search_vector_mode: Literal["off", "on"] = "off"
+    #: 情報搜尋的重新排序（reranker 把問題和每篇候選一起讀、重新打分）：on＝前幾十篇重排（llm_runtime_config.json
+    #: 要設 rerank_model）；off＝不重排。reranker 壞掉、GPU 等太久時會自動照原本的順序
+    search_rerank_mode: Literal["off", "on"] = "off"
 
 
 def _parse(raw: str) -> Switches:

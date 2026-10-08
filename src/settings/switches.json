@@ -10,5 +10,10 @@
     "off：被點名罵時不按表情、不記人（模型照樣不會回嘴，等於不回）",
     "on：按一個嘲諷表情、記下這個人，之後 7 天不主動接他的話（他點名照回）"
   ],
-  "ambient_insult_mode": "on"
+  "ambient_insult_mode": "on",
+  "_search_vector_mode 可以填": [
+    "off：情報搜尋（MCP 的 search 工具）只用關鍵字",
+    "on：關鍵字加上向量（語意）搜尋，名次合併；向量那邊壞掉時會自動退回只用關鍵字"
+  ],
+  "search_vector_mode": "on"
 }

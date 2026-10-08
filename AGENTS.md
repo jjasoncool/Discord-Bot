@@ -43,7 +43,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 
 ## 資料與環境（硬規則）
 
-- **Docker 只做唯讀查詢**：`ps`、`logs --since …`、`exec` 查詢、`inspect`。`compose up/down/restart/build`、`rm`、`rmi` 給指令讓使用者執行。
+- **Docker 只做唯讀查詢**：`ps`、`logs --since …`、`exec` 查詢、`inspect`。`compose up/down/restart/build`、`rm`、`rmi` 給指令讓使用者執行。例外：情報搜尋的 MCP server（`docker exec -i discord-bot python -m llm.mcp_server`）、手動同步索引（`python -m services.search`）、搜尋評估（`python -m services.search.evaluate`）與批次算向量（`python -m services.search.embed`）可以直接執行，它們只寫自己的索引檔 `services/search/data/`、評估報告 `services/search/eval/reports/` 與 pgvector 的 `data_search_chunks` 表（不碰其他表）。
 - **每天 04:00～約 07:30 是維護時段**（人格萃取、persona agent），這段時間請使用者不要重啟 discord-bot。
 - **bot 會長時間不重啟**：會變的外部資料（官方公告、設定）每次用到時重讀，不在啟動時只讀一次。
 - 讀 `articles.db` 用 `mode=ro`：它是 WAL 模式，`immutable=1` 會看不到還在 WAL 裡的新資料。
@@ -54,7 +54,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 
 | 需要做什麼 | 用這個 |
 |---|---|
-| 寫 log | `logging.getLogger(__name__)`；去向、等級、分類改 `src/settings/logging.json`；類別 logger 用 `get_article_monitor_logger()`／`get_llm_anomaly_logger()` |
+| 寫 log | `logging.getLogger(__name__)`；去向、等級、分類改 `src/settings/logging.json`；類別 logger 用 `get_article_monitor_logger()`／`get_llm_anomaly_logger()`；同容器另開的行程用 `configure_logging(force=True, root_handlers=[…])` 寫自己的檔（兩個行程寫同一個輪替檔會互相蓋掉） |
 | 本機時區 | `sys_settings.time_settings.APP_TZ` |
 | 遊戲公告的時間 | `services.events.event_time_parser.SERVER_TZ`（值同為 UTC+8，但語意不同，兩者不可合併） |
 | 連 pgvector | `LLMServiceSettings().pgvector_connect()` |
@@ -67,13 +67,16 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 面板置底 | `utils.panel_bump.PanelBumper`（`bump`／`bump_safe`；有人講話就置底用 `request_bump`） |
 | 已發送去重 | StateDB `sent_content`（`is_content_sent`／`mark_content_as_sent`） |
 | 版本更新時刻 | `services.events.event_scheduler.VersionDateResolver`（`refresh()`、`update_starts()`；只看時間，不看版本號） |
-| GPU 獨佔（產圖時卸載 LLM） | `llm.client.lemonade_gate.gpu_exclusive(owner, lease_seconds)`（同容器另開的行程也一起排隊：跨行程鎖檔） |
+| GPU 獨佔（產圖時卸載 LLM） | `llm.client.lemonade_gate.gpu_exclusive(owner, lease_seconds)`（同容器另開的行程也一起排隊：跨行程鎖檔）；同容器另開、沒有 event loop 的同步程式（情報搜尋的批次算向量、MCP）用 `gpu_exclusive_sync()` |
 | 按鈕、指令的操作權限 | `utils.utils.check_guild`（`owner_only`／`admin_only`／`required_role`／`permission="manage_messages"` 這類 Discord 權限；不通過時自己回只有本人看得到的訊息） |
 | 功能開關（開／關、off／dry_run／on） | 值寫在 `settings/switches.json`（手改、下一次用到就生效）；名稱、預設、允許的值定義在 `sys_settings.switches.Switches`，讀用 `switches.current()`；新開關只能放這裡（守衛擋，舊的改到再搬） |
 | 寫 `config.json` | `ChannelConfig.update_config(apply)`（重讀最新內容、只改這次的 key、安全寫入加備份）；讀 `load_config` 回複本、改檔即生效 |
 | 綁頻道 | `settings/channel_registry.py` 的 `register_channel` |
 | 取得 thread（封存的也拿得到）、解除封存 | `utils.discord_threads.fetch_thread`／`reopen_thread`（封存的 thread 改不了、刪不了訊息） |
 | 讀綁定的頻道 id（可能沒綁） | `ChannelConfig.get_configured_id(key)`（沒綁回 None，不必自己比 `DEFAULT_ID`） |
+| 搜尋公告、官方 FB、PTT、巴哈的內容；讀全文（附推文、留言） | `services.search`（`SearchIndex.search`／`fetch`；索引從 `articles.db` 唯讀增量同步；用語、評估數字見 `AI_HANDOFF_AND_TODO.md` 的 `mcp-search-tools` 區塊）；MCP 殼是 `llm.mcp_server` |
+| 官方公告、巴哈單一樓層的原文網址 | `services.source_urls`（`official_article_url`、`bahamut_floor_url`） |
+| 合併多份排名（關鍵字＋向量的混合檢索） | `utils.rank_fusion`（`rrf_score`／`fuse_rankings`；只看名次、不看各自的分數） |
 | prompt 裡認人的錨點（名字#尾碼） | `llm.preprocess.person_anchor.label()`／`suffix()`（撞號自動加長；`refresh()` 由 `discord_bot` 在啟動與成員進出時呼叫） |
 | 群友的名字（Discord 顯示名稱、伺服器暱稱、全域名稱＋自介／印象暱稱） | `llm.persona.member_names`（`member_names_from_guild`、`merge_names`、`names_member`、`name_map_lines`） |
 | 查 X 貼文／給 AI 看貼文內容與縮圖 | `utils.link_fix.fetch_tweet`（syndication CDN）；給模型看用 `llm.preprocess.tweet_context.expand_tweets` |

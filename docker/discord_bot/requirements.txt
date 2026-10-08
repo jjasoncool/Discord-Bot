@@ -47,3 +47,5 @@ davey>=0.1.0
 # === MCP（Model Context Protocol）===
 # llm/mcp_server.py：讓 Claude Code 查本地資料（官網公告、論壇）。2.x 起主類別改名為 MCPServer。
 mcp>=2.2,<3
+# services/search：建搜尋索引與查詢時簡轉繁（巴哈、PTT 有簡體字的文章，不轉就搜不到）
+opencc>=1.1,<2

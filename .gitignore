@@ -29,3 +29,8 @@ src/settings/community_panel_runtime.json
 src/settings/periodic_reminder_runtime.json
 src/settings/telegram_quarantine_runtime.json
 src/settings/telegram_quarantine_panel_runtime.json
+
+# 情報搜尋的索引：從 articles.db 建出來的衍生資料，刪掉會自動重建
+src/services/search/data/
+# 評估考卷的證據句與標題（論壇原文）：公開 repo 只放問題與文章編號（eval/questions.json）
+src/services/search/eval/private/

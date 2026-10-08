@@ -174,6 +174,8 @@ class LLMRuntimeConfig(BaseModel):
     backend: Literal["ollama", "lemonade", "vllm"] = "ollama"
     model: str
     embed_model: str
+    #: 重新排序（rerank）用的模型；None＝沒有，情報搜尋就不重排
+    rerank_model: str | None = None
     moderation_model: str | None = None
     personality_model: str | None = None
     # 背景插話/傾聽用的小模型（功能二）；None 代表沿用主 model

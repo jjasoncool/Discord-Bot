@@ -1,0 +1,7720 @@
+{
+ "原句": [
+  {
+   "qid": "q01",
+   "query": "2024 年 6 月初那個分解練過的聲骸會多噴錢的 bug，官方最後補全服多少貝幣？",
+   "hits": [
+    {
+     "doc_id": "bahamut:127060",
+     "distance": 0.3449,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1772770710.A.5CF",
+     "distance": 0.3577,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127145",
+     "distance": 0.373,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127169",
+     "distance": 0.3743,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779802059.A.A53",
+     "distance": 0.3771,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777795670.A.E6A",
+     "distance": 0.3776,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1784432105.A.E22",
+     "distance": 0.3779,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127168",
+     "distance": 0.3805,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:126873",
+     "distance": 0.3838,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127189",
+     "distance": 0.3852,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127101",
+     "distance": 0.3858,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127183",
+     "distance": 0.3862,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779722106.A.20A",
+     "distance": 0.3862,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1782464547.A.A86",
+     "distance": 0.3926,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:108997",
+     "distance": 0.3927,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1776450727.A.759",
+     "distance": 0.396,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787191876.A.222",
+     "distance": 0.3967,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q02",
+   "query": "1.2 版剛推出的回鍋玩家福利，要多久沒上線才會觸發？",
+   "hits": [
+    {
+     "doc_id": "bahamut:133902",
+     "distance": 0.3906,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:133076",
+     "distance": 0.4003,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:128397",
+     "distance": 0.4152,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:114360",
+     "distance": 0.4176,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132179",
+     "distance": 0.4181,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117314",
+     "distance": 0.4215,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:145665",
+     "distance": 0.4226,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:128490",
+     "distance": 0.4249,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:114357",
+     "distance": 0.4338,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:467",
+     "distance": 0.4393,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:863",
+     "distance": 0.4398,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:108855",
+     "distance": 0.4455,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141706",
+     "distance": 0.4485,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777514949.A.956",
+     "distance": 0.4502,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:131970",
+     "distance": 0.4507,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135611",
+     "distance": 0.4513,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777461174.A.5BB",
+     "distance": 0.4526,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115613",
+     "distance": 0.4526,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:124735",
+     "distance": 0.4546,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q03",
+   "query": "1.6.2 版 PC 啟動器改成預設 DX12 之後一直卡，要去哪裡切回 DX11 啟動？",
+   "hits": [
+    {
+     "doc_id": "bahamut:141269",
+     "distance": 0.294,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116951",
+     "distance": 0.3029,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:137733",
+     "distance": 0.3391,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116909",
+     "distance": 0.3397,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141320",
+     "distance": 0.3467,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116801",
+     "distance": 0.3631,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142660",
+     "distance": 0.3636,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:134413",
+     "distance": 0.4017,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117277",
+     "distance": 0.4103,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138864",
+     "distance": 0.413,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:145596",
+     "distance": 0.4141,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141767",
+     "distance": 0.4233,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:137590",
+     "distance": 0.4261,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115345",
+     "distance": 0.4303,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116798",
+     "distance": 0.4308,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783787332.A.0B5",
+     "distance": 0.4326,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:128932",
+     "distance": 0.4342,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117043",
+     "distance": 0.4352,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115308",
+     "distance": 0.4382,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q04",
+   "query": "2.0 版今汐那套新衣服要幾個月相？",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1775623582.A.979",
+     "distance": 0.3797,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1775797507.A.0C8",
+     "distance": 0.4023,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135906",
+     "distance": 0.4063,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1775474961.A.7B1",
+     "distance": 0.4246,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1781495279.A.799",
+     "distance": 0.4363,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779940815.A.007",
+     "distance": 0.44,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:108657",
+     "distance": 0.4406,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779490679.A.F8A",
+     "distance": 0.4439,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783597165.A.B06",
+     "distance": 0.4452,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135325",
+     "distance": 0.4468,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783086311.A.E5B",
+     "distance": 0.4485,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:121929",
+     "distance": 0.4489,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135460",
+     "distance": 0.4491,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773320421.A.1A0",
+     "distance": 0.4499,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1786105231.A.5B3",
+     "distance": 0.4518,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1778408329.A.271",
+     "distance": 0.4557,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1782446547.A.01B",
+     "distance": 0.4563,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783693541.A.139",
+     "distance": 0.4568,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783612136.A.3EB",
+     "distance": 0.4595,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:423",
+     "distance": 0.4609,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q05",
+   "query": "PS5 的 PSN 帳號綁了庫洛通行證，之後還能解綁嗎？可以解幾次？",
+   "hits": [
+    {
+     "doc_id": "bahamut:135738",
+     "distance": 0.259,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:134820",
+     "distance": 0.2648,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:134813",
+     "distance": 0.2707,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115437",
+     "distance": 0.2829,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135312",
+     "distance": 0.285,
+     "relevant": false
+    },
+    {
+     "doc_id": "article:5112",
+     "distance": 0.3031,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135311",
+     "distance": 0.3113,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:124850",
+     "distance": 0.3379,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111539",
+     "distance": 0.3528,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118819",
+     "distance": 0.3534,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:126773",
+     "distance": 0.3556,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139267",
+     "distance": 0.3581,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141917",
+     "distance": 0.3747,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135328",
+     "distance": 0.3804,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1781070264.A.844",
+     "distance": 0.4053,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135343",
+     "distance": 0.4088,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q06",
+   "query": "2025 年 6 月在 Twitch 給實況主訂閱拿到的滑翔翼序號，最晚要什麼時候輸入？",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1788629507.A.E08",
+     "distance": 0.4254,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:137354",
+     "distance": 0.4502,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783781987.A.4D3",
+     "distance": 0.4517,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1780995973.A.C23",
+     "distance": 0.4557,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:133038",
+     "distance": 0.4665,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139856",
+     "distance": 0.4699,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139966",
+     "distance": 0.475,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111539",
+     "distance": 0.479,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:137339",
+     "distance": 0.4798,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777607346.A.83E",
+     "distance": 0.4803,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:145271",
+     "distance": 0.483,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:124735",
+     "distance": 0.4835,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1790857750.A.1A5",
+     "distance": 0.4838,
+     "relevant": false
+    },
+    {
+     "doc_id": "article:4601",
+     "distance": 0.4847,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777514949.A.956",
+     "distance": 0.4866,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787475772.A.F94",
+     "distance": 0.4877,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1774001079.A.C08",
+     "distance": 0.4928,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777643371.A.B7F",
+     "distance": 0.4934,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q07",
+   "query": "2025 年 10 月官方說不再參加第三方平台回饋之後，之前在平台攢的點數什麼時候還能拿來儲值？",
+   "hits": [
+    {
+     "doc_id": "bahamut:108588",
+     "distance": 0.336,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:134472",
+     "distance": 0.398,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:108634",
+     "distance": 0.4166,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:108655",
+     "distance": 0.4241,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:109305",
+     "distance": 0.4281,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:388",
+     "distance": 0.4426,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115177",
+     "distance": 0.4459,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:109466",
+     "distance": 0.4464,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:134932",
+     "distance": 0.4482,
+     "relevant": false
+    },
+    {
+     "doc_id": "article:4457",
+     "distance": 0.4486,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1789840556.A.DC3",
+     "distance": 0.4492,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113821",
+     "distance": 0.4512,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:114864",
+     "distance": 0.4514,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:143866",
+     "distance": 0.4544,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:109533",
+     "distance": 0.4582,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111041",
+     "distance": 0.4586,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:109381",
+     "distance": 0.4586,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:129139",
+     "distance": 0.4608,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q08",
+   "query": "卜靈是什麼身分？",
+   "hits": [
+    {
+     "doc_id": "bahamut:140486",
+     "distance": 0.2942,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:140487",
+     "distance": 0.3329,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787032909.A.3DE",
+     "distance": 0.3781,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:140480",
+     "distance": 0.391,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787312089.A.514",
+     "distance": 0.406,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787022500.A.7A2",
+     "distance": 0.4404,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119923",
+     "distance": 0.4517,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787100503.A.D2D",
+     "distance": 0.4557,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117511",
+     "distance": 0.4957,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1784085698.A.F00",
+     "distance": 0.5113,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773404381.A.B29",
+     "distance": 0.5186,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119321",
+     "distance": 0.5216,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132654",
+     "distance": 0.5219,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:126480",
+     "distance": 0.5297,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777706228.A.653",
+     "distance": 0.5308,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111698",
+     "distance": 0.5329,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773801695.A.535",
+     "distance": 0.5425,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116529",
+     "distance": 0.5472,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787569986.A.9E6",
+     "distance": 0.5477,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779002284.A.B54",
+     "distance": 0.5513,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q09",
+   "query": "3.1 的「奔馳！箭速與激情！」活動總共給幾顆星聲？",
+   "hits": [
+    {
+     "doc_id": "bahamut:114314",
+     "distance": 0.3143,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113716",
+     "distance": 0.3155,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115547",
+     "distance": 0.3674,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135148",
+     "distance": 0.3826,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113468",
+     "distance": 0.3938,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:267",
+     "distance": 0.406,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:112777",
+     "distance": 0.42,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:133527",
+     "distance": 0.424,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1782768120.A.9FA",
+     "distance": 0.425,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777343210.A.52D",
+     "distance": 0.4269,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115557",
+     "distance": 0.4276,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113442",
+     "distance": 0.43,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1782401269.A.956",
+     "distance": 0.4343,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:110508",
+     "distance": 0.4345,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115323",
+     "distance": 0.4427,
+     "relevant": false
+    },
+    {
+     "doc_id": "article:4601",
+     "distance": 0.4448,
+     "relevant": false
+    },
+    {
+     "doc_id": "article:4223",
+     "distance": 0.4461,
+     "relevant": true
+    },
+    {
+     "doc_id": "fb:318",
+     "distance": 0.4479,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777458422.A.99C",
+     "distance": 0.449,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116517",
+     "distance": 0.4498,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q10",
+   "query": "鳴潮「致予新世界」演唱會台北站是在哪個場館？",
+   "hits": [
+    {
+     "doc_id": "bahamut:134693",
+     "distance": 0.1495,
+     "relevant": true
+    },
+    {
+     "doc_id": "article:5382",
+     "distance": 0.1604,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141880",
+     "distance": 0.1653,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1781924939.A.9CF",
+     "distance": 0.1665,
+     "relevant": true
+    },
+    {
+     "doc_id": "fb:771",
+     "distance": 0.1809,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142503",
+     "distance": 0.1833,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:141831",
+     "distance": 0.1869,
+     "relevant": true
+    },
+    {
+     "doc_id": "fb:795",
+     "distance": 0.1895,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1789124080.A.5CC",
+     "distance": 0.1915,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:141301",
+     "distance": 0.1931,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1782702183.A.B87",
+     "distance": 0.1941,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:794",
+     "distance": 0.1951,
+     "relevant": true
+    },
+    {
+     "doc_id": "fb:796",
+     "distance": 0.1959,
+     "relevant": true
+    },
+    {
+     "doc_id": "fb:646",
+     "distance": 0.1968,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141966",
+     "distance": 0.197,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1782874906.A.78B",
+     "distance": 0.1989,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:621",
+     "distance": 0.2033,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1781926337.A.2CE",
+     "distance": 0.2037,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q11",
+   "query": "3.5 下半穗穗池的四星是哪幾隻？",
+   "hits": [
+    {
+     "doc_id": "bahamut:139111",
+     "distance": 0.3955,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:139241",
+     "distance": 0.4004,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:128692",
+     "distance": 0.4088,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1782738952.A.6E8",
+     "distance": 0.4157,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783733666.A.400",
+     "distance": 0.4184,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1784878894.A.E63",
+     "distance": 0.4243,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1785408844.A.E72",
+     "distance": 0.4297,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1785398119.A.BDA",
+     "distance": 0.434,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138893",
+     "distance": 0.4341,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139297",
+     "distance": 0.4341,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:145690",
+     "distance": 0.4356,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1785589625.A.AC5",
+     "distance": 0.439,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139418",
+     "distance": 0.4399,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:145973",
+     "distance": 0.4418,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q12",
+   "query": "3.7 之後可以自己挑下載畫質包的那個功能，手機能載最高畫質那檔嗎？",
+   "hits": [
+    {
+     "doc_id": "bahamut:143366",
+     "distance": 0.2966,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:143847",
+     "distance": 0.3469,
+     "relevant": false
+    },
+    {
+     "doc_id": "article:5480",
+     "distance": 0.3504,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:144120",
+     "distance": 0.3642,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:143930",
+     "distance": 0.3799,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:144584",
+     "distance": 0.3822,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:144030",
+     "distance": 0.3897,
+     "relevant": false
+    },
+    {
+     "doc_id": "article:4440",
+     "distance": 0.3956,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1789821184.A.0DE",
+     "distance": 0.397,
+     "relevant": true
+    }
+   ]
+  },
+  {
+   "qid": "q13",
+   "query": "千咲那張悠遊卡預購開到哪天截止？",
+   "hits": [
+    {
+     "doc_id": "fb:588",
+     "distance": 0.2512,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773662959.A.0C6",
+     "distance": 0.2575,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:549",
+     "distance": 0.2946,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779775404.A.36C",
+     "distance": 0.3946,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787826921.A.000",
+     "distance": 0.4026,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111702",
+     "distance": 0.4268,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:109695",
+     "distance": 0.43,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:137837",
+     "distance": 0.4413,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:131258",
+     "distance": 0.4457,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135104",
+     "distance": 0.4485,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142155",
+     "distance": 0.452,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1778299621.A.9A6",
+     "distance": 0.4534,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127565",
+     "distance": 0.4545,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779530974.A.A4E",
+     "distance": 0.4585,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1784385689.A.ECF",
+     "distance": 0.4604,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:124541",
+     "distance": 0.4612,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117852",
+     "distance": 0.4693,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:114747",
+     "distance": 0.4704,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111637",
+     "distance": 0.474,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q14",
+   "query": "1月開預購的贊妮手辦，什麼時候出貨？",
+   "hits": [
+    {
+     "doc_id": "fb:174",
+     "distance": 0.2471,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:109232",
+     "distance": 0.2535,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1783006065.A.27D",
+     "distance": 0.3548,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:114881",
+     "distance": 0.4022,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:333",
+     "distance": 0.4054,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:114315",
+     "distance": 0.4261,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:131072",
+     "distance": 0.4312,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135104",
+     "distance": 0.4338,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111628",
+     "distance": 0.436,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132578",
+     "distance": 0.4417,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119732",
+     "distance": 0.448,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1789984973.A.81C",
+     "distance": 0.449,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127565",
+     "distance": 0.4566,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:114005",
+     "distance": 0.46,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1786581750.A.E3C",
+     "distance": 0.4601,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:498",
+     "distance": 0.4606,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:423",
+     "distance": 0.4629,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:121925",
+     "distance": 0.4635,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:143204",
+     "distance": 0.4679,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773231762.A.7D0",
+     "distance": 0.4716,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q15",
+   "query": "2026年4月開賣的鳴潮聯名冰棒有哪幾種口味？",
+   "hits": [
+    {
+     "doc_id": "bahamut:119553",
+     "distance": 0.2951,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118228",
+     "distance": 0.3272,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118606",
+     "distance": 0.3323,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119557",
+     "distance": 0.3331,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119944",
+     "distance": 0.3407,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:131810",
+     "distance": 0.3422,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119761",
+     "distance": 0.3446,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117969",
+     "distance": 0.3483,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:140987",
+     "distance": 0.3486,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119572",
+     "distance": 0.3488,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:381",
+     "distance": 0.3518,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:119680",
+     "distance": 0.3537,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119536",
+     "distance": 0.3545,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1774782653.A.5C4",
+     "distance": 0.3549,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:120091",
+     "distance": 0.3591,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117908",
+     "distance": 0.3641,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:120053",
+     "distance": 0.3642,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141550",
+     "distance": 0.3656,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119314",
+     "distance": 0.3659,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119530",
+     "distance": 0.3661,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q16",
+   "query": "鳴潮兩週年在北流辦的實體活動，有歌手上台唱歌嗎？大概幾點？",
+   "hits": [
+    {
+     "doc_id": "fb:532",
+     "distance": 0.2303,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:130634",
+     "distance": 0.2669,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:482",
+     "distance": 0.2823,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:127565",
+     "distance": 0.29,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:127301",
+     "distance": 0.2993,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:130494",
+     "distance": 0.3082,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1778159617.A.339",
+     "distance": 0.3113,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:130498",
+     "distance": 0.3118,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:514",
+     "distance": 0.3118,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:124503",
+     "distance": 0.3178,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:124262",
+     "distance": 0.318,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:477",
+     "distance": 0.3193,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:129217",
+     "distance": 0.3225,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:124531",
+     "distance": 0.3232,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1776430740.A.646",
+     "distance": 0.3238,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:124314",
+     "distance": 0.3257,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q17",
+   "query": "3.5版本官方出解謎送機車外觀的那組兌換碼，最後公布的答案是什麼？",
+   "hits": [
+    {
+     "doc_id": "fb:685",
+     "distance": 0.3482,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1783782480.A.E60",
+     "distance": 0.3545,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1782483220.A.FC7",
+     "distance": 0.4088,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135384",
+     "distance": 0.4201,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773569567.A.A18",
+     "distance": 0.4233,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:137181",
+     "distance": 0.4279,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1776248937.A.EF3",
+     "distance": 0.4302,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:136835",
+     "distance": 0.4339,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132648",
+     "distance": 0.4377,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773403880.A.5F0",
+     "distance": 0.4504,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:110972",
+     "distance": 0.4513,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783589776.A.AE3",
+     "distance": 0.4536,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:110998",
+     "distance": 0.4548,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1776430740.A.646",
+     "distance": 0.4554,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1776435222.A.B89",
+     "distance": 0.4567,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:110980",
+     "distance": 0.4669,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:136197",
+     "distance": 0.4778,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q18",
+   "query": "索拉逐星舞台 Season 2 正片哪天幾點上線？在哪裡看？",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1791097300.A.C11",
+     "distance": 0.1449,
+     "relevant": true
+    },
+    {
+     "doc_id": "fb:865",
+     "distance": 0.1774,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1775794008.A.E17",
+     "distance": 0.3211,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141481",
+     "distance": 0.3763,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:774",
+     "distance": 0.3987,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118771",
+     "distance": 0.4172,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:178",
+     "distance": 0.4197,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:109295",
+     "distance": 0.4319,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118793",
+     "distance": 0.4401,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787834805.A.F46",
+     "distance": 0.452,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:199",
+     "distance": 0.4539,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777514949.A.956",
+     "distance": 0.471,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:190",
+     "distance": 0.4969,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116364",
+     "distance": 0.4989,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:191",
+     "distance": 0.5015,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:109812",
+     "distance": 0.5044,
+     "relevant": false
+    },
+    {
+     "doc_id": "article:4601",
+     "distance": 0.5055,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:124735",
+     "distance": 0.5063,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:198",
+     "distance": 0.5068,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q19",
+   "query": "3.2 前瞻直播送的兌換碼是哪幾組？",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1773403880.A.5F0",
+     "distance": 0.2887,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:110972",
+     "distance": 0.3484,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1776435222.A.B89",
+     "distance": 0.3654,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:110980",
+     "distance": 0.368,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1789827906.A.4C8",
+     "distance": 0.3966,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:110998",
+     "distance": 0.3967,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116397",
+     "distance": 0.3989,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1786112905.A.3D4",
+     "distance": 0.3994,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1780061773.A.70A",
+     "distance": 0.4055,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116365",
+     "distance": 0.4068,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116435",
+     "distance": 0.4103,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116367",
+     "distance": 0.4124,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116370",
+     "distance": 0.4167,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116382",
+     "distance": 0.4187,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116373",
+     "distance": 0.4192,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116472",
+     "distance": 0.4228,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116361",
+     "distance": 0.4256,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116110",
+     "distance": 0.4257,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:116395",
+     "distance": 0.4258,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116426",
+     "distance": 0.4268,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q20",
+   "query": "女主角那套中文語音不是在重新配嗎？3.3 之後剩下沒配完的說哪一版會補齊？",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1777727137.A.749",
+     "distance": 0.3263,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:132707",
+     "distance": 0.3339,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779387538.A.659",
+     "distance": 0.3442,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779443758.A.FEB",
+     "distance": 0.3792,
+     "relevant": false
+    },
+    {
+     "doc_id": "article:4601",
+     "distance": 0.3837,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:124735",
+     "distance": 0.3839,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1778296576.A.6B6",
+     "distance": 0.393,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777629315.A.141",
+     "distance": 0.3955,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1780885822.A.265",
+     "distance": 0.4083,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132688",
+     "distance": 0.4091,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:112978",
+     "distance": 0.4137,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:136709",
+     "distance": 0.4146,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1790734475.A.A29",
+     "distance": 0.4165,
+     "relevant": false
+    },
+    {
+     "doc_id": "article:4788",
+     "distance": 0.4175,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:137638",
+     "distance": 0.4195,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:136696",
+     "distance": 0.4198,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777888943.A.53D",
+     "distance": 0.4201,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:112077",
+     "distance": 0.4211,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:129496",
+     "distance": 0.4217,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q21",
+   "query": "水月雨那副鳴潮聯名耳機能不能調音量？",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1782916486.A.D75",
+     "distance": 0.2319,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1779985331.A.045",
+     "distance": 0.2635,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779813685.A.46F",
+     "distance": 0.2773,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132202",
+     "distance": 0.2785,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1780474228.A.21D",
+     "distance": 0.285,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113405",
+     "distance": 0.2897,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1791341670.A.55D",
+     "distance": 0.383,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113616",
+     "distance": 0.3984,
+     "relevant": false
+    },
+    {
+     "doc_id": "article:4933",
+     "distance": 0.4251,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118579",
+     "distance": 0.4258,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1791338884.A.EB1",
+     "distance": 0.4302,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:677",
+     "distance": 0.4362,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q22",
+   "query": "8 月初鳴潮在泰國辦的那場比誰打王比較快的比賽，最後是誰拿第一？",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1785648419.A.B96",
+     "distance": 0.3335,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1786112143.A.D4F",
+     "distance": 0.3815,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:131833",
+     "distance": 0.3828,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111931",
+     "distance": 0.3854,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1785659660.A.CB7",
+     "distance": 0.3855,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1786001111.A.ABD",
+     "distance": 0.3884,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115575",
+     "distance": 0.3943,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1782965892.A.EC3",
+     "distance": 0.3964,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:114748",
+     "distance": 0.3984,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779285590.A.BDB",
+     "distance": 0.3987,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118622",
+     "distance": 0.3993,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:131905",
+     "distance": 0.4001,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1778589597.A.7DA",
+     "distance": 0.401,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1785204618.A.714",
+     "distance": 0.4017,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111898",
+     "distance": 0.4018,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111930",
+     "distance": 0.404,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:130498",
+     "distance": 0.4041,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1778848910.A.68E",
+     "distance": 0.4076,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779021949.A.FEB",
+     "distance": 0.4088,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:130634",
+     "distance": 0.4089,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q23",
+   "query": "3.4 加的西西點位，她幾點會在婭婭的病房？",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1780883405.A.CCB",
+     "distance": 0.2475,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1780931844.A.D88",
+     "distance": 0.2543,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1780902054.A.F9E",
+     "distance": 0.2769,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:132752",
+     "distance": 0.3081,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132993",
+     "distance": 0.3231,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132760",
+     "distance": 0.3252,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132876",
+     "distance": 0.3401,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777579910.A.C97",
+     "distance": 0.3425,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779354307.A.83F",
+     "distance": 0.3597,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1780891064.A.E1D",
+     "distance": 0.3712,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132918",
+     "distance": 0.3718,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779436354.A.C84",
+     "distance": 0.3742,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1780883900.A.AD7",
+     "distance": 0.3783,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132798",
+     "distance": 0.3941,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1779860824.A.9F4",
+     "distance": 0.4027,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1780929111.A.649",
+     "distance": 0.4079,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1780969678.A.402",
+     "distance": 0.409,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q24",
+   "query": "10 月底台北跟香港同時辦的那個鳴潮賞月主題實體活動，台北場辦在哪、是哪兩天？",
+   "hits": [
+    {
+     "doc_id": "fb:868",
+     "distance": 0.2915,
+     "relevant": true
+    },
+    {
+     "doc_id": "fb:628",
+     "distance": 0.2943,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:597",
+     "distance": 0.298,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:532",
+     "distance": 0.3036,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:482",
+     "distance": 0.3197,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135261",
+     "distance": 0.3222,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:871",
+     "distance": 0.3257,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:232",
+     "distance": 0.3352,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:234",
+     "distance": 0.3352,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:236",
+     "distance": 0.3352,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1778159617.A.339",
+     "distance": 0.3353,
+     "relevant": false
+    },
+    {
+     "doc_id": "article:4930",
+     "distance": 0.3378,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111394",
+     "distance": 0.339,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127565",
+     "distance": 0.3392,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:824",
+     "distance": 0.3402,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127760",
+     "distance": 0.3437,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787929709.A.211",
+     "distance": 0.3458,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:196",
+     "distance": 0.3481,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:861",
+     "distance": 0.3503,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:830",
+     "distance": 0.3504,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q25",
+   "query": "鳴潮 2022 年去日本那個大型遊戲展擺攤的時候，現場請了哪幾位 coser？各扮誰？",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1777450566.A.A42",
+     "distance": 0.2273,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777366948.A.53E",
+     "distance": 0.2985,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1780131433.A.72A",
+     "distance": 0.312,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132245",
+     "distance": 0.3377,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:128606",
+     "distance": 0.3484,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1782727627.A.650",
+     "distance": 0.3502,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135424",
+     "distance": 0.3516,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138960",
+     "distance": 0.3528,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1784858299.A.DCA",
+     "distance": 0.3533,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:126374",
+     "distance": 0.3534,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127752",
+     "distance": 0.3558,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141087",
+     "distance": 0.3575,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127962",
+     "distance": 0.3585,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:131804",
+     "distance": 0.36,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:133815",
+     "distance": 0.3625,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139546",
+     "distance": 0.3635,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1780830162.A.B03",
+     "distance": 0.3682,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1790391822.A.B79",
+     "distance": 0.3692,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q26",
+   "query": "鳴潮 2023 年國際版第一次封測，報名收到哪天截止？幾號開始可以玩？",
+   "hits": [
+    {
+     "doc_id": "bahamut:131833",
+     "distance": 0.3266,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:404",
+     "distance": 0.3442,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:131835",
+     "distance": 0.3446,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117949",
+     "distance": 0.3449,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:131905",
+     "distance": 0.3498,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:334",
+     "distance": 0.3535,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:201",
+     "distance": 0.3541,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1776759390.A.206",
+     "distance": 0.3557,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1778159617.A.339",
+     "distance": 0.3575,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1775793701.A.3D1",
+     "distance": 0.3592,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:344",
+     "distance": 0.3603,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1776421803.A.F43",
+     "distance": 0.3614,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:815",
+     "distance": 0.3614,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773397804.A.7A9",
+     "distance": 0.3617,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1778226280.A.7DB",
+     "distance": 0.3657,
+     "relevant": false
+    },
+    {
+     "doc_id": "article:4388",
+     "distance": 0.3662,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:114736",
+     "distance": 0.3662,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116451",
+     "distance": 0.3672,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:547",
+     "distance": 0.3672,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:130634",
+     "distance": 0.3674,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q27",
+   "query": "大世界那種名字紅色、打了必掉聲骸的特殊強怪，打掉之後要等多久才會再刷出來？",
+   "hits": [
+    {
+     "doc_id": "bahamut:127145",
+     "distance": 0.4395,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787200494.A.3B1",
+     "distance": 0.4407,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779863799.A.609",
+     "distance": 0.4436,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779802059.A.A53",
+     "distance": 0.4447,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127169",
+     "distance": 0.4456,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1786006823.A.A3B",
+     "distance": 0.4477,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135733",
+     "distance": 0.4536,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117701",
+     "distance": 0.4542,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:130272",
+     "distance": 0.455,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127060",
+     "distance": 0.4571,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127086",
+     "distance": 0.4583,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:110506",
+     "distance": 0.4605,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127907",
+     "distance": 0.4609,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142647",
+     "distance": 0.4627,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:145749",
+     "distance": 0.465,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:145689",
+     "distance": 0.4658,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:108997",
+     "distance": 0.466,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777739069.A.148",
+     "distance": 0.4665,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:109087",
+     "distance": 0.4666,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127168",
+     "distance": 0.4671,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q28",
+   "query": "秋水的分身嘲諷可以撐幾秒？想拿他當坦，聲骸要怎麼配？",
+   "hits": [
+    {
+     "doc_id": "bahamut:118570",
+     "distance": 0.4801,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1772872422.A.E3A",
+     "distance": 0.4858,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1782469615.A.415",
+     "distance": 0.4863,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779722106.A.20A",
+     "distance": 0.4874,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1785507149.A.F57",
+     "distance": 0.4926,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142647",
+     "distance": 0.4975,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:140740",
+     "distance": 0.4977,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1775942923.A.506",
+     "distance": 0.5007,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115994",
+     "distance": 0.5016,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135635",
+     "distance": 0.5019,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142046",
+     "distance": 0.5027,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:131648",
+     "distance": 0.5032,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127169",
+     "distance": 0.5053,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138968",
+     "distance": 0.5055,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1781524069.A.C04",
+     "distance": 0.5061,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127101",
+     "distance": 0.5062,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773466232.A.7D4",
+     "distance": 0.5068,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:145689",
+     "distance": 0.5073,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1782743479.A.F52",
+     "distance": 0.5077,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1781321083.A.71F",
+     "distance": 0.5098,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q29",
+   "query": "槲生半島的深囚者打贏一次之後還能再挑戰嗎？後面每次給幾個寶箱、全部加起來幾個？",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1790639800.A.6CF",
+     "distance": 0.4641,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119912",
+     "distance": 0.4763,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117242",
+     "distance": 0.4782,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139725",
+     "distance": 0.4897,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:137848",
+     "distance": 0.4938,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117286",
+     "distance": 0.4957,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139655",
+     "distance": 0.4964,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119854",
+     "distance": 0.4998,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1776261311.A.2C4",
+     "distance": 0.5,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138970",
+     "distance": 0.5001,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:131920",
+     "distance": 0.5045,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1784264643.A.450",
+     "distance": 0.507,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117376",
+     "distance": 0.5075,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118603",
+     "distance": 0.5077,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117295",
+     "distance": 0.5087,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1774614209.A.609",
+     "distance": 0.5087,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1776244345.A.04B",
+     "distance": 0.5096,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787034293.A.565",
+     "distance": 0.5096,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115076",
+     "distance": 0.5125,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q30",
+   "query": "韓服公布的聲骸副詞條機率裡，暴擊洗到最高 10.5% 那一檔的機率是多少？",
+   "hits": [
+    {
+     "doc_id": "bahamut:127101",
+     "distance": 0.2717,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:136642",
+     "distance": 0.2737,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127060",
+     "distance": 0.2779,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783412176.A.AFD",
+     "distance": 0.2864,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783413179.A.DEE",
+     "distance": 0.2914,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783417562.A.725",
+     "distance": 0.3145,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:138627",
+     "distance": 0.3188,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127169",
+     "distance": 0.3242,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:126873",
+     "distance": 0.3275,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127086",
+     "distance": 0.3331,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783398991.A.749",
+     "distance": 0.335,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127145",
+     "distance": 0.3499,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1776463687.A.9CC",
+     "distance": 0.3501,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127203",
+     "distance": 0.3511,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:130850",
+     "distance": 0.3575,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127168",
+     "distance": 0.3603,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127157",
+     "distance": 0.3646,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q31",
+   "query": "景燃沒抽到尤諾的話，隊友要帶誰比較好？",
+   "hits": [
+    {
+     "doc_id": "bahamut:144324",
+     "distance": 0.1818,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:144494",
+     "distance": 0.1995,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142288",
+     "distance": 0.2421,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:142566",
+     "distance": 0.2481,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142484",
+     "distance": 0.2656,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:142535",
+     "distance": 0.2667,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142582",
+     "distance": 0.2782,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142808",
+     "distance": 0.3047,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:142629",
+     "distance": 0.3155,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142394",
+     "distance": 0.3312,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1778929965.A.E42",
+     "distance": 0.3332,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142369",
+     "distance": 0.3471,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1778315060.A.ECD",
+     "distance": 0.349,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:143851",
+     "distance": 0.3522,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q32",
+   "query": "汐汐跟水母同一隊的話要怎麼輪？",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1790746609.A.89A",
+     "distance": 0.3257,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773157771.A.D33",
+     "distance": 0.3609,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1778679252.A.FCF",
+     "distance": 0.3658,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116618",
+     "distance": 0.3763,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1788407141.A.9D4",
+     "distance": 0.3793,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118476",
+     "distance": 0.3812,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1778426973.A.BD0",
+     "distance": 0.3836,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779091131.A.95C",
+     "distance": 0.3904,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:145678",
+     "distance": 0.3925,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1790757811.A.2DF",
+     "distance": 0.3956,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1781658999.A.FD7",
+     "distance": 0.3959,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783693541.A.139",
+     "distance": 0.3992,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779094289.A.6CD",
+     "distance": 0.4007,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783997798.A.310",
+     "distance": 0.4057,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1778407595.A.AAD",
+     "distance": 0.409,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1785916044.A.F15",
+     "distance": 0.4093,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119857",
+     "distance": 0.4097,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113746",
+     "distance": 0.412,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1776525184.A.0E7",
+     "distance": 0.4134,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:108614",
+     "distance": 0.4173,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q33",
+   "query": "長離跟相里要一起上要怎麼合軸？",
+   "hits": [
+    {
+     "doc_id": "bahamut:138208",
+     "distance": 0.4086,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138702",
+     "distance": 0.4193,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:130411",
+     "distance": 0.4217,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:108384",
+     "distance": 0.4217,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142981",
+     "distance": 0.4243,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777635974.A.625",
+     "distance": 0.4291,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111150",
+     "distance": 0.4298,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138690",
+     "distance": 0.4315,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113843",
+     "distance": 0.4405,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1774587537.A.5E2",
+     "distance": 0.4469,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1785916044.A.F15",
+     "distance": 0.4525,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139999",
+     "distance": 0.4526,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119857",
+     "distance": 0.4672,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138495",
+     "distance": 0.4699,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:126222",
+     "distance": 0.47,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141991",
+     "distance": 0.4717,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q34",
+   "query": "千咲想拿來當主C的話要配誰？",
+   "hits": [
+    {
+     "doc_id": "bahamut:132217",
+     "distance": 0.2114,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:131264",
+     "distance": 0.216,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:129094",
+     "distance": 0.3007,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:132974",
+     "distance": 0.3178,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1774595871.A.624",
+     "distance": 0.3238,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:112911",
+     "distance": 0.3245,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132296",
+     "distance": 0.3294,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119930",
+     "distance": 0.3342,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:131218",
+     "distance": 0.339,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:131995",
+     "distance": 0.3441,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:130385",
+     "distance": 0.3454,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:126734",
+     "distance": 0.3471,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1785949917.A.41B",
+     "distance": 0.3484,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:134065",
+     "distance": 0.3637,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117165",
+     "distance": 0.3647,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:128470",
+     "distance": 0.3655,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138982",
+     "distance": 0.3672,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138476",
+     "distance": 0.368,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q35",
+   "query": "忌炎補到滿命到底差多少？大招會變多痛",
+   "hits": [
+    {
+     "doc_id": "bahamut:138702",
+     "distance": 0.4341,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1782221703.A.34E",
+     "distance": 0.4458,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:129810",
+     "distance": 0.4588,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:114870",
+     "distance": 0.4689,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:134760",
+     "distance": 0.4726,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:137892",
+     "distance": 0.4742,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113860",
+     "distance": 0.4745,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783826854.A.193",
+     "distance": 0.4751,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783649149.A.EA3",
+     "distance": 0.4764,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:134899",
+     "distance": 0.4775,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1784196491.A.A85",
+     "distance": 0.4801,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1782225182.A.9CE",
+     "distance": 0.4806,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141559",
+     "distance": 0.4809,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135259",
+     "distance": 0.4827,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142368",
+     "distance": 0.4828,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142808",
+     "distance": 0.4844,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:134847",
+     "distance": 0.4846,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116243",
+     "distance": 0.4857,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:140930",
+     "distance": 0.4859,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q36",
+   "query": "椿是不是幾乎都靠普攻在打？普攻大概佔幾成傷害",
+   "hits": [
+    {
+     "doc_id": "bahamut:114973",
+     "distance": 0.3397,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111230",
+     "distance": 0.3942,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1775041325.A.D56",
+     "distance": 0.4027,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787705811.A.A48",
+     "distance": 0.4261,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113156",
+     "distance": 0.4386,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111168",
+     "distance": 0.4438,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119159",
+     "distance": 0.4439,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111259",
+     "distance": 0.4507,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118220",
+     "distance": 0.4546,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1775942923.A.506",
+     "distance": 0.4554,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:108924",
+     "distance": 0.4562,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111284",
+     "distance": 0.4581,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132152",
+     "distance": 0.4717,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779256717.A.836",
+     "distance": 0.4729,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1790819329.A.121",
+     "distance": 0.4777,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1780580703.A.72B",
+     "distance": 0.4791,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113563",
+     "distance": 0.4809,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q37",
+   "query": "仇遠哪一招最痛啊？大招還是重擊",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1779782682.A.F4A",
+     "distance": 0.2858,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1781179775.A.6E5",
+     "distance": 0.3061,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116794",
+     "distance": 0.3115,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1775455891.A.857",
+     "distance": 0.3219,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1775128580.A.5C5",
+     "distance": 0.3284,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1784089110.A.8FD",
+     "distance": 0.3431,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1774618083.A.F7A",
+     "distance": 0.3605,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1775616003.A.3AB",
+     "distance": 0.3683,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113766",
+     "distance": 0.3699,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1775122997.A.9AD",
+     "distance": 0.3711,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1784862447.A.DD8",
+     "distance": 0.3796,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773919954.A.A51",
+     "distance": 0.3844,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116713",
+     "distance": 0.385,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116727",
+     "distance": 0.3855,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118408",
+     "distance": 0.388,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q38",
+   "query": "西格莉卡那招終結E倍率到底多高？",
+   "hits": [
+    {
+     "doc_id": "bahamut:116828",
+     "distance": 0.2555,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:116794",
+     "distance": 0.3543,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117439",
+     "distance": 0.3612,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773918243.A.66B",
+     "distance": 0.4213,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118480",
+     "distance": 0.4225,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773496361.A.0AE",
+     "distance": 0.4276,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118081",
+     "distance": 0.4321,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117921",
+     "distance": 0.439,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118062",
+     "distance": 0.4411,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q39",
+   "query": "景燃聲骸帶哪套？4C 主詞條要選什麼",
+   "hits": [
+    {
+     "doc_id": "bahamut:117166",
+     "distance": 0.2624,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773928779.A.81C",
+     "distance": 0.2739,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142808",
+     "distance": 0.2763,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:145689",
+     "distance": 0.2821,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138637",
+     "distance": 0.3011,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127101",
+     "distance": 0.3145,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116919",
+     "distance": 0.3209,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142369",
+     "distance": 0.3276,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:140116",
+     "distance": 0.3287,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:133798",
+     "distance": 0.3327,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142394",
+     "distance": 0.3362,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1787200494.A.3B1",
+     "distance": 0.3365,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787231844.A.B04",
+     "distance": 0.3395,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:130850",
+     "distance": 0.3415,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:133797",
+     "distance": 0.3468,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116818",
+     "distance": 0.3469,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138982",
+     "distance": 0.3471,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:129267",
+     "distance": 0.3495,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q40",
+   "query": "穗穗聲骸要不要放 4C？cost 怎麼排比較好",
+   "hits": [
+    {
+     "doc_id": "bahamut:139146",
+     "distance": 0.2952,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:117166",
+     "distance": 0.309,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787200494.A.3B1",
+     "distance": 0.3148,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127101",
+     "distance": 0.3375,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773928779.A.81C",
+     "distance": 0.3396,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:129267",
+     "distance": 0.3419,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:133798",
+     "distance": 0.35,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139199",
+     "distance": 0.3507,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:139128",
+     "distance": 0.3584,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779722106.A.20A",
+     "distance": 0.3605,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138637",
+     "distance": 0.3621,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116919",
+     "distance": 0.3644,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:133797",
+     "distance": 0.366,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139730",
+     "distance": 0.3686,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1777739069.A.148",
+     "distance": 0.3696,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1785507149.A.F57",
+     "distance": 0.372,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1786006823.A.A3B",
+     "distance": 0.3721,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127145",
+     "distance": 0.376,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q41",
+   "query": "家主當主C的話聲骸要穿哪套？首位放哪隻",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1773928779.A.81C",
+     "distance": 0.3144,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117166",
+     "distance": 0.319,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1778228101.A.FDD",
+     "distance": 0.3318,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127101",
+     "distance": 0.344,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:145597",
+     "distance": 0.3471,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138637",
+     "distance": 0.3485,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787231844.A.B04",
+     "distance": 0.3487,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127145",
+     "distance": 0.357,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116818",
+     "distance": 0.3576,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141230",
+     "distance": 0.359,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:130232",
+     "distance": 0.3642,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116919",
+     "distance": 0.3651,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:133798",
+     "distance": 0.3655,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:133797",
+     "distance": 0.3697,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1785507149.A.F57",
+     "distance": 0.3743,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115994",
+     "distance": 0.3748,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1782469615.A.415",
+     "distance": 0.3833,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127169",
+     "distance": 0.389,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1780380628.A.46A",
+     "distance": 0.3906,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q42",
+   "query": "相里要 4C 要帶哪隻？",
+   "hits": [
+    {
+     "doc_id": "bahamut:126245",
+     "distance": 0.3707,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:126250",
+     "distance": 0.391,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138982",
+     "distance": 0.3979,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:108924",
+     "distance": 0.403,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:145715",
+     "distance": 0.416,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:136863",
+     "distance": 0.4182,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116618",
+     "distance": 0.424,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119605",
+     "distance": 0.4311,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117350",
+     "distance": 0.4363,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787200494.A.3B1",
+     "distance": 0.4365,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:144771",
+     "distance": 0.44,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117333",
+     "distance": 0.4416,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:133798",
+     "distance": 0.4433,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115861",
+     "distance": 0.4446,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113038",
+     "distance": 0.4458,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:134750",
+     "distance": 0.447,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132001",
+     "distance": 0.4502,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138645",
+     "distance": 0.4511,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115754",
+     "distance": 0.4519,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118042",
+     "distance": 0.4531,
+     "relevant": false
+    }
+   ]
+  }
+ ],
+ "關鍵字": [
+  {
+   "qid": "q01",
+   "query": "聲骸 分解 bug 貝幣 補償",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1774405914.A.9C0",
+     "distance": 0.3905,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:108997",
+     "distance": 0.3966,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1772770710.A.5CF",
+     "distance": 0.4033,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127060",
+     "distance": 0.4183,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127101",
+     "distance": 0.4224,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773886004.A.B91",
+     "distance": 0.4232,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117701",
+     "distance": 0.4263,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127169",
+     "distance": 0.4312,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777795670.A.E6A",
+     "distance": 0.437,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1782725178.A.513",
+     "distance": 0.4376,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779802059.A.A53",
+     "distance": 0.4387,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773890333.A.06D",
+     "distance": 0.4389,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127168",
+     "distance": 0.4408,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116816",
+     "distance": 0.4413,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127189",
+     "distance": 0.4418,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:114565",
+     "distance": 0.442,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q02",
+   "query": "1.2 回鍋玩家 福利 觸發",
+   "hits": [
+    {
+     "doc_id": "bahamut:128490",
+     "distance": 0.4253,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:128397",
+     "distance": 0.442,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117314",
+     "distance": 0.4506,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:145665",
+     "distance": 0.4898,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135611",
+     "distance": 0.4914,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111418",
+     "distance": 0.4932,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132179",
+     "distance": 0.5007,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:133076",
+     "distance": 0.5014,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:133902",
+     "distance": 0.5054,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141559",
+     "distance": 0.5055,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:114360",
+     "distance": 0.5078,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115613",
+     "distance": 0.5116,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:133004",
+     "distance": 0.5119,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113277",
+     "distance": 0.5175,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:863",
+     "distance": 0.5175,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:114357",
+     "distance": 0.5184,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141706",
+     "distance": 0.5185,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773921369.A.F4F",
+     "distance": 0.5188,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q03",
+   "query": "1.6.2 啟動器 DX12 DX11",
+   "hits": [
+    {
+     "doc_id": "bahamut:116951",
+     "distance": 0.3729,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116801",
+     "distance": 0.3937,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116909",
+     "distance": 0.4057,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141269",
+     "distance": 0.4125,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:137733",
+     "distance": 0.4351,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142660",
+     "distance": 0.4461,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787191876.A.222",
+     "distance": 0.4577,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141320",
+     "distance": 0.4697,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116798",
+     "distance": 0.4699,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:134413",
+     "distance": 0.4744,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117043",
+     "distance": 0.4865,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141767",
+     "distance": 0.4942,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:143433",
+     "distance": 0.5027,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117066",
+     "distance": 0.5029,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117277",
+     "distance": 0.5035,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:137590",
+     "distance": 0.5092,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:109720",
+     "distance": 0.5183,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118389",
+     "distance": 0.5197,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116804",
+     "distance": 0.5211,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q04",
+   "query": "2.0 今汐 新裝扮 月相",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1779490679.A.F8A",
+     "distance": 0.3795,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1781495279.A.799",
+     "distance": 0.4048,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116089",
+     "distance": 0.4132,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1781592831.A.01D",
+     "distance": 0.4232,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1778408329.A.271",
+     "distance": 0.4258,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1775797507.A.0C8",
+     "distance": 0.427,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783693541.A.139",
+     "distance": 0.4297,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1790863311.A.6D0",
+     "distance": 0.436,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135460",
+     "distance": 0.4431,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1786626092.A.28F",
+     "distance": 0.4438,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1775623582.A.979",
+     "distance": 0.4444,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1784252873.A.E2C",
+     "distance": 0.4455,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q05",
+   "query": "PS5 PSN 庫洛通行證 解綁",
+   "hits": [
+    {
+     "doc_id": "bahamut:115437",
+     "distance": 0.3333,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:134813",
+     "distance": 0.3367,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:134820",
+     "distance": 0.3374,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135312",
+     "distance": 0.3447,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135738",
+     "distance": 0.3532,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:126773",
+     "distance": 0.3912,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:124850",
+     "distance": 0.397,
+     "relevant": false
+    },
+    {
+     "doc_id": "article:5112",
+     "distance": 0.3977,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135311",
+     "distance": 0.3992,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:143274",
+     "distance": 0.4202,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139267",
+     "distance": 0.4357,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118819",
+     "distance": 0.4371,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:140867",
+     "distance": 0.4412,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119498",
+     "distance": 0.4513,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1781070264.A.844",
+     "distance": 0.4522,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127640",
+     "distance": 0.4613,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:131459",
+     "distance": 0.4637,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111539",
+     "distance": 0.4639,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q06",
+   "query": "Twitch 訂閱 滑翔翼 序號 兌換期限",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1780995973.A.C23",
+     "distance": 0.4157,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:133038",
+     "distance": 0.4182,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783781987.A.4D3",
+     "distance": 0.4208,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:582",
+     "distance": 0.4388,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:854",
+     "distance": 0.454,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:259",
+     "distance": 0.4609,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:676",
+     "distance": 0.4613,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:362",
+     "distance": 0.4634,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1790857750.A.1A5",
+     "distance": 0.4643,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1774001079.A.C08",
+     "distance": 0.4651,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777643371.A.B7F",
+     "distance": 0.4685,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:764",
+     "distance": 0.4713,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787475772.A.F94",
+     "distance": 0.474,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:136842",
+     "distance": 0.4753,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:144164",
+     "distance": 0.4776,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:125431",
+     "distance": 0.4798,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:112154",
+     "distance": 0.4822,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q07",
+   "query": "第三方平台 點數 儲值 時間",
+   "hits": [
+    {
+     "doc_id": "bahamut:134472",
+     "distance": 0.4236,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:143724",
+     "distance": 0.4518,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111041",
+     "distance": 0.4559,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:143866",
+     "distance": 0.4691,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:137256",
+     "distance": 0.4691,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135206",
+     "distance": 0.4703,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:114864",
+     "distance": 0.4732,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111015",
+     "distance": 0.4762,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:134405",
+     "distance": 0.4775,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113821",
+     "distance": 0.4799,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:134363",
+     "distance": 0.4809,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:124558",
+     "distance": 0.4829,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:109305",
+     "distance": 0.4842,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115494",
+     "distance": 0.4847,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138644",
+     "distance": 0.4863,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1789840556.A.DC3",
+     "distance": 0.4877,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:136072",
+     "distance": 0.4881,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138776",
+     "distance": 0.4888,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119445",
+     "distance": 0.4888,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q08",
+   "query": "卜靈 身分",
+   "hits": [
+    {
+     "doc_id": "bahamut:140486",
+     "distance": 0.3559,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:140487",
+     "distance": 0.416,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:140480",
+     "distance": 0.4263,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787032909.A.3DE",
+     "distance": 0.427,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787312089.A.514",
+     "distance": 0.4468,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787022500.A.7A2",
+     "distance": 0.4645,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787100503.A.D2D",
+     "distance": 0.4682,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119923",
+     "distance": 0.4879,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1784085698.A.F00",
+     "distance": 0.5157,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:126480",
+     "distance": 0.5321,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773404381.A.B29",
+     "distance": 0.5365,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:133877",
+     "distance": 0.5451,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117511",
+     "distance": 0.5468,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1775481150.A.08B",
+     "distance": 0.5469,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1775479208.A.B75",
+     "distance": 0.5509,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:140545",
+     "distance": 0.5513,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119321",
+     "distance": 0.553,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111698",
+     "distance": 0.5568,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1778175220.A.175",
+     "distance": 0.5593,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779002284.A.B54",
+     "distance": 0.5599,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q09",
+   "query": "3.1 奔馳 箭速與激情 星聲",
+   "hits": [
+    {
+     "doc_id": "bahamut:113716",
+     "distance": 0.3818,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:114314",
+     "distance": 0.4027,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115547",
+     "distance": 0.4336,
+     "relevant": false
+    },
+    {
+     "doc_id": "article:4108",
+     "distance": 0.4452,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116517",
+     "distance": 0.4561,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:112544",
+     "distance": 0.459,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113468",
+     "distance": 0.46,
+     "relevant": false
+    },
+    {
+     "doc_id": "article:4601",
+     "distance": 0.4665,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:124735",
+     "distance": 0.4718,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115557",
+     "distance": 0.476,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779602650.A.43C",
+     "distance": 0.4771,
+     "relevant": false
+    },
+    {
+     "doc_id": "article:5340",
+     "distance": 0.4775,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:140684",
+     "distance": 0.4776,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1790734475.A.A29",
+     "distance": 0.4834,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:267",
+     "distance": 0.4864,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:113442",
+     "distance": 0.4879,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q10",
+   "query": "致予新世界 演唱會 台北 場館",
+   "hits": [
+    {
+     "doc_id": "bahamut:135891",
+     "distance": 0.147,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141301",
+     "distance": 0.1693,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138166",
+     "distance": 0.175,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141000",
+     "distance": 0.1888,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:134693",
+     "distance": 0.1954,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:134701",
+     "distance": 0.1962,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142831",
+     "distance": 0.1962,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141880",
+     "distance": 0.2077,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:134725",
+     "distance": 0.2159,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:134690",
+     "distance": 0.2164,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138129",
+     "distance": 0.2189,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138092",
+     "distance": 0.2195,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:136056",
+     "distance": 0.2226,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138127",
+     "distance": 0.2245,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1781935116.A.8AF",
+     "distance": 0.2254,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141966",
+     "distance": 0.2269,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:135000",
+     "distance": 0.2269,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:771",
+     "distance": 0.2344,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:134697",
+     "distance": 0.2389,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141831",
+     "distance": 0.2394,
+     "relevant": true
+    }
+   ]
+  },
+  {
+   "qid": "q11",
+   "query": "3.5 下半 穗穗 池 四星",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1783733666.A.400",
+     "distance": 0.3918,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139111",
+     "distance": 0.3952,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1782738952.A.6E8",
+     "distance": 0.405,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1784878894.A.E63",
+     "distance": 0.4084,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1785398119.A.BDA",
+     "distance": 0.4175,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1785408844.A.E72",
+     "distance": 0.4282,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139418",
+     "distance": 0.4345,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139241",
+     "distance": 0.4369,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139209",
+     "distance": 0.4413,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139694",
+     "distance": 0.4468,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139297",
+     "distance": 0.4576,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:145973",
+     "distance": 0.4636,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1785551072.A.F75",
+     "distance": 0.4637,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138893",
+     "distance": 0.4676,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139099",
+     "distance": 0.4696,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q12",
+   "query": "3.7 畫質包 下載 手機 最高畫質",
+   "hits": [
+    {
+     "doc_id": "bahamut:143366",
+     "distance": 0.2926,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1790734475.A.A29",
+     "distance": 0.3531,
+     "relevant": true
+    },
+    {
+     "doc_id": "article:5480",
+     "distance": 0.3566,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:143847",
+     "distance": 0.3617,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:144584",
+     "distance": 0.3849,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:143310",
+     "distance": 0.3949,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1789821184.A.0DE",
+     "distance": 0.4225,
+     "relevant": true
+    }
+   ]
+  },
+  {
+   "qid": "q13",
+   "query": "千咲 悠遊卡 預購 截止",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1773662959.A.0C6",
+     "distance": 0.2928,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:588",
+     "distance": 0.3109,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:549",
+     "distance": 0.358,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1784385689.A.ECF",
+     "distance": 0.4288,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135104",
+     "distance": 0.4549,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:109695",
+     "distance": 0.4551,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117852",
+     "distance": 0.4631,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779775404.A.36C",
+     "distance": 0.4662,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787826921.A.000",
+     "distance": 0.4706,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:136346",
+     "distance": 0.4759,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:114747",
+     "distance": 0.476,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116389",
+     "distance": 0.4797,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127565",
+     "distance": 0.4879,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115533",
+     "distance": 0.49,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132296",
+     "distance": 0.4908,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:124541",
+     "distance": 0.4922,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135760",
+     "distance": 0.5005,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:498",
+     "distance": 0.5026,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q14",
+   "query": "贊妮 手辦 預購 出貨",
+   "hits": [
+    {
+     "doc_id": "fb:174",
+     "distance": 0.2422,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:109232",
+     "distance": 0.2489,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:114881",
+     "distance": 0.4013,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783006065.A.27D",
+     "distance": 0.4087,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:333",
+     "distance": 0.4264,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135104",
+     "distance": 0.4452,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:114315",
+     "distance": 0.4565,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1786581750.A.E3C",
+     "distance": 0.4698,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132578",
+     "distance": 0.4755,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1789984973.A.81C",
+     "distance": 0.4797,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:114005",
+     "distance": 0.4887,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:143204",
+     "distance": 0.4924,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:133691",
+     "distance": 0.4936,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138674",
+     "distance": 0.4978,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127565",
+     "distance": 0.4997,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q15",
+   "query": "聯名 冰棒 口味",
+   "hits": [
+    {
+     "doc_id": "bahamut:118228",
+     "distance": 0.4128,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119536",
+     "distance": 0.427,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119761",
+     "distance": 0.4303,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:120091",
+     "distance": 0.4377,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:123452",
+     "distance": 0.4387,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118505",
+     "distance": 0.4413,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:128191",
+     "distance": 0.4486,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119985",
+     "distance": 0.4495,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118452",
+     "distance": 0.4505,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117908",
+     "distance": 0.4513,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119557",
+     "distance": 0.4605,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:125376",
+     "distance": 0.4619,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118873",
+     "distance": 0.4631,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119944",
+     "distance": 0.4634,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119572",
+     "distance": 0.4649,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117969",
+     "distance": 0.4676,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119314",
+     "distance": 0.4718,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141550",
+     "distance": 0.4744,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119553",
+     "distance": 0.4744,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119526",
+     "distance": 0.4777,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q16",
+   "query": "兩週年 北流 實體活動 歌手",
+   "hits": [
+    {
+     "doc_id": "fb:532",
+     "distance": 0.4266,
+     "relevant": true
+    },
+    {
+     "doc_id": "fb:544",
+     "distance": 0.4338,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:418",
+     "distance": 0.4412,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1778069276.A.CBA",
+     "distance": 0.4528,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127968",
+     "distance": 0.4539,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127988",
+     "distance": 0.456,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127565",
+     "distance": 0.4577,
+     "relevant": true
+    },
+    {
+     "doc_id": "fb:477",
+     "distance": 0.4583,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779465141.A.417",
+     "distance": 0.4592,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127301",
+     "distance": 0.462,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:536",
+     "distance": 0.4665,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:130326",
+     "distance": 0.4701,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:129519",
+     "distance": 0.4703,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:129518",
+     "distance": 0.4711,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:130273",
+     "distance": 0.4754,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:482",
+     "distance": 0.4784,
+     "relevant": true
+    }
+   ]
+  },
+  {
+   "qid": "q17",
+   "query": "3.5 解謎 機車外觀 兌換碼",
+   "hits": [
+    {
+     "doc_id": "fb:685",
+     "distance": 0.4127,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1776248937.A.EF3",
+     "distance": 0.4213,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783782480.A.E60",
+     "distance": 0.4351,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1782483220.A.FC7",
+     "distance": 0.4559,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:135384",
+     "distance": 0.4732,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:136835",
+     "distance": 0.4791,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132648",
+     "distance": 0.4837,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:112507",
+     "distance": 0.484,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:137181",
+     "distance": 0.4854,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1786932869.A.024",
+     "distance": 0.4914,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1775897725.A.A75",
+     "distance": 0.4948,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783589776.A.AE3",
+     "distance": 0.4949,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1776435222.A.B89",
+     "distance": 0.4964,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773569567.A.A18",
+     "distance": 0.5006,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:130523",
+     "distance": 0.5014,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777814254.A.06F",
+     "distance": 0.5044,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:128219",
+     "distance": 0.508,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1774605595.A.3FB",
+     "distance": 0.5091,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:136696",
+     "distance": 0.5129,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q18",
+   "query": "索拉逐星舞台 Season 2 上線",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1791097300.A.C11",
+     "distance": 0.16,
+     "relevant": true
+    },
+    {
+     "doc_id": "fb:865",
+     "distance": 0.2052,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1775794008.A.E17",
+     "distance": 0.3351,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141481",
+     "distance": 0.3801,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:774",
+     "distance": 0.4007,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118793",
+     "distance": 0.4286,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118771",
+     "distance": 0.4581,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787834805.A.F46",
+     "distance": 0.4739,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:109295",
+     "distance": 0.4804,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777514949.A.956",
+     "distance": 0.4854,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:178",
+     "distance": 0.4871,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:124757",
+     "distance": 0.4994,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:108657",
+     "distance": 0.5059,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:454",
+     "distance": 0.5106,
+     "relevant": false
+    },
+    {
+     "doc_id": "article:4601",
+     "distance": 0.5136,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:124735",
+     "distance": 0.5167,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:199",
+     "distance": 0.5203,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:109421",
+     "distance": 0.5246,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1778296842.A.68C",
+     "distance": 0.5273,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q19",
+   "query": "3.2 前瞻 直播 兌換碼",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1773403880.A.5F0",
+     "distance": 0.2446,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1776435222.A.B89",
+     "distance": 0.3523,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1780061773.A.70A",
+     "distance": 0.3829,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116110",
+     "distance": 0.3965,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1786112905.A.3D4",
+     "distance": 0.3987,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116365",
+     "distance": 0.4061,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116382",
+     "distance": 0.4103,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116370",
+     "distance": 0.4112,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116397",
+     "distance": 0.4118,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116435",
+     "distance": 0.4168,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1782483220.A.FC7",
+     "distance": 0.4178,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:110972",
+     "distance": 0.4184,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116373",
+     "distance": 0.4188,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116395",
+     "distance": 0.4192,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:110980",
+     "distance": 0.4211,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1789827906.A.4C8",
+     "distance": 0.4224,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:340",
+     "distance": 0.4253,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116426",
+     "distance": 0.427,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116367",
+     "distance": 0.4325,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116371",
+     "distance": 0.4352,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q20",
+   "query": "漂泊者 中文配音 重配 3.3 補齊",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1777727137.A.749",
+     "distance": 0.3232,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1774797881.A.312",
+     "distance": 0.3659,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:131804",
+     "distance": 0.3804,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1782373065.A.2D2",
+     "distance": 0.3886,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1781782336.A.EA1",
+     "distance": 0.3903,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779380938.A.C7C",
+     "distance": 0.3936,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1782478679.A.EF9",
+     "distance": 0.395,
+     "relevant": false
+    },
+    {
+     "doc_id": "article:4601",
+     "distance": 0.398,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1779632394.A.78A",
+     "distance": 0.404,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:112978",
+     "distance": 0.405,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1774830449.A.CBC",
+     "distance": 0.4051,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:124735",
+     "distance": 0.4113,
+     "relevant": true
+    },
+    {
+     "doc_id": "article:4096",
+     "distance": 0.414,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:120114",
+     "distance": 0.4186,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:136786",
+     "distance": 0.4193,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773888423.A.73D",
+     "distance": 0.4237,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777514949.A.956",
+     "distance": 0.4247,
+     "relevant": true
+    },
+    {
+     "doc_id": "article:5474",
+     "distance": 0.4274,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q21",
+   "query": "水月雨 聯名 耳機 音量",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1782916486.A.D75",
+     "distance": 0.2704,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1779985331.A.045",
+     "distance": 0.2793,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113405",
+     "distance": 0.2824,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779813685.A.46F",
+     "distance": 0.2969,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1780474228.A.21D",
+     "distance": 0.3211,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132202",
+     "distance": 0.3434,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:143284",
+     "distance": 0.4818,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777644137.A.840",
+     "distance": 0.5132,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1791341670.A.55D",
+     "distance": 0.5261,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113616",
+     "distance": 0.5347,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:124483",
+     "distance": 0.5522,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q22",
+   "query": "泰國 比賽 打王 冠軍",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1785659660.A.CB7",
+     "distance": 0.3954,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1783679535.A.AEA",
+     "distance": 0.4532,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1786001111.A.ABD",
+     "distance": 0.4755,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1785648419.A.B96",
+     "distance": 0.4864,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:193",
+     "distance": 0.5076,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779543886.A.BCE",
+     "distance": 0.5189,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787834805.A.F46",
+     "distance": 0.5262,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:133527",
+     "distance": 0.5364,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:129694",
+     "distance": 0.5385,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:143484",
+     "distance": 0.5404,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127753",
+     "distance": 0.5428,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1778234647.A.9F8",
+     "distance": 0.5452,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118365",
+     "distance": 0.5462,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779194172.A.78B",
+     "distance": 0.5467,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1785995016.A.EC7",
+     "distance": 0.5481,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141789",
+     "distance": 0.5548,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1781004307.A.9F5",
+     "distance": 0.5595,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q23",
+   "query": "3.4 西西 點位 秧秧 病房",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1780931844.A.D88",
+     "distance": 0.4121,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1780902054.A.F9E",
+     "distance": 0.4191,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:132760",
+     "distance": 0.4234,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1781655431.A.270",
+     "distance": 0.4283,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132798",
+     "distance": 0.4493,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:132752",
+     "distance": 0.4521,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1780883405.A.CCB",
+     "distance": 0.47,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1783768690.A.CC1",
+     "distance": 0.4757,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132993",
+     "distance": 0.4759,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132876",
+     "distance": 0.4844,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132918",
+     "distance": 0.4859,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1781404357.A.4AA",
+     "distance": 0.4883,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:136827",
+     "distance": 0.4924,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:137331",
+     "distance": 0.5062,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:130134",
+     "distance": 0.5088,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:134017",
+     "distance": 0.5113,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1784459478.A.DE3",
+     "distance": 0.5119,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q24",
+   "query": "賞月 實體活動 台北 日期",
+   "hits": [
+    {
+     "doc_id": "fb:868",
+     "distance": 0.3756,
+     "relevant": true
+    },
+    {
+     "doc_id": "fb:861",
+     "distance": 0.4352,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787929709.A.211",
+     "distance": 0.4357,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127988",
+     "distance": 0.4387,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1791155902.A.187",
+     "distance": 0.44,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1779271366.A.7F4",
+     "distance": 0.4448,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:864",
+     "distance": 0.4468,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1789820921.A.591",
+     "distance": 0.4524,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127968",
+     "distance": 0.4548,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1791108069.A.F35",
+     "distance": 0.4593,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127760",
+     "distance": 0.4619,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779613626.A.1B9",
+     "distance": 0.4688,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779418739.A.FC7",
+     "distance": 0.4692,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779344195.A.44B",
+     "distance": 0.4704,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127301",
+     "distance": 0.4731,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1778069276.A.CBA",
+     "distance": 0.4744,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779506836.A.CE8",
+     "distance": 0.4746,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:514",
+     "distance": 0.4764,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:143484",
+     "distance": 0.4771,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779344038.A.E55",
+     "distance": 0.478,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q25",
+   "query": "2022 東京電玩展 coser",
+   "hits": [
+    {
+     "doc_id": "bahamut:111589",
+     "distance": 0.4858,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777450566.A.A42",
+     "distance": 0.488,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:239",
+     "distance": 0.4897,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1781791388.A.598",
+     "distance": 0.5064,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:249",
+     "distance": 0.5126,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:268",
+     "distance": 0.5244,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:125110",
+     "distance": 0.5271,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:110073",
+     "distance": 0.5289,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111248",
+     "distance": 0.5309,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:110067",
+     "distance": 0.5311,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111394",
+     "distance": 0.5318,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:232",
+     "distance": 0.5322,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:110068",
+     "distance": 0.5328,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:234",
+     "distance": 0.5333,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:196",
+     "distance": 0.5337,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111591",
+     "distance": 0.5342,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:236",
+     "distance": 0.5348,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779613626.A.1B9",
+     "distance": 0.536,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:229",
+     "distance": 0.537,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q26",
+   "query": "2023 國際版 封測 報名 時間",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1791040917.A.181",
+     "distance": 0.506,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777514949.A.956",
+     "distance": 0.5227,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:539",
+     "distance": 0.5249,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:130412",
+     "distance": 0.5308,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:112400",
+     "distance": 0.5326,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:112777",
+     "distance": 0.5381,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:859",
+     "distance": 0.5412,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:267",
+     "distance": 0.5417,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:364",
+     "distance": 0.5421,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:861",
+     "distance": 0.5429,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139966",
+     "distance": 0.5441,
+     "relevant": false
+    },
+    {
+     "doc_id": "article:4601",
+     "distance": 0.5445,
+     "relevant": false
+    },
+    {
+     "doc_id": "article:4223",
+     "distance": 0.5449,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777461174.A.5BB",
+     "distance": 0.547,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:864",
+     "distance": 0.5478,
+     "relevant": false
+    },
+    {
+     "doc_id": "article:4440",
+     "distance": 0.5496,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:124735",
+     "distance": 0.5503,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1788629507.A.E08",
+     "distance": 0.5506,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q27",
+   "query": "大世界 強敵 刷新時間",
+   "hits": [
+    {
+     "doc_id": "bahamut:132918",
+     "distance": 0.5022,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132798",
+     "distance": 0.5041,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:125561",
+     "distance": 0.5043,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:131977",
+     "distance": 0.5142,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:145703",
+     "distance": 0.5143,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1774959614.A.6B9",
+     "distance": 0.5149,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:136696",
+     "distance": 0.5233,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783649543.A.FAA",
+     "distance": 0.526,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779944253.A.A80",
+     "distance": 0.53,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1782135087.A.744",
+     "distance": 0.5306,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117349",
+     "distance": 0.5306,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:137790",
+     "distance": 0.5311,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119722",
+     "distance": 0.5321,
+     "relevant": false
+    },
+    {
+     "doc_id": "article:5136",
+     "distance": 0.5324,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142463",
+     "distance": 0.5331,
+     "relevant": false
+    },
+    {
+     "doc_id": "fb:693",
+     "distance": 0.5336,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:145904",
+     "distance": 0.5355,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115293",
+     "distance": 0.5385,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:137362",
+     "distance": 0.5406,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:143310",
+     "distance": 0.5451,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q28",
+   "query": "秋水 分身 嘲諷 配置",
+   "hits": [
+    {
+     "doc_id": "bahamut:142046",
+     "distance": 0.4707,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1781362776.A.14E",
+     "distance": 0.4888,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1781423672.A.581",
+     "distance": 0.5113,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:128692",
+     "distance": 0.5365,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117467",
+     "distance": 0.5405,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142240",
+     "distance": 0.5427,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:131648",
+     "distance": 0.5478,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1781321083.A.71F",
+     "distance": 0.5478,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142009",
+     "distance": 0.5504,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1790642136.A.A0A",
+     "distance": 0.5515,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1782105815.A.E99",
+     "distance": 0.5598,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1781612842.A.07D",
+     "distance": 0.5599,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1788317636.A.960",
+     "distance": 0.5611,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1790174103.A.3A2",
+     "distance": 0.5624,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138968",
+     "distance": 0.5641,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:125072",
+     "distance": 0.5663,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1775942923.A.506",
+     "distance": 0.5687,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q29",
+   "query": "槲生半島 深囚者 寶箱",
+   "hits": [
+    {
+     "doc_id": "bahamut:113485",
+     "distance": 0.3328,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:137848",
+     "distance": 0.4695,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:136206",
+     "distance": 0.4904,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:137846",
+     "distance": 0.5031,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:145782",
+     "distance": 0.5305,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1778156544.A.350",
+     "distance": 0.5337,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:108661",
+     "distance": 0.534,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113761",
+     "distance": 0.5341,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:145688",
+     "distance": 0.5375,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:130125",
+     "distance": 0.54,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127248",
+     "distance": 0.5412,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113759",
+     "distance": 0.5462,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:108747",
+     "distance": 0.5472,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127252",
+     "distance": 0.5512,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1790639800.A.6CF",
+     "distance": 0.5528,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q30",
+   "query": "韓服 聲骸 副詞條 機率 暴擊",
+   "hits": [
+    {
+     "doc_id": "bahamut:136642",
+     "distance": 0.2913,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127060",
+     "distance": 0.2923,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783412176.A.AFD",
+     "distance": 0.2935,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127101",
+     "distance": 0.2943,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783413179.A.DEE",
+     "distance": 0.3244,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1776463687.A.9CC",
+     "distance": 0.3334,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138627",
+     "distance": 0.3347,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127169",
+     "distance": 0.335,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:130850",
+     "distance": 0.3358,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783417562.A.725",
+     "distance": 0.3437,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:126873",
+     "distance": 0.3481,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127086",
+     "distance": 0.3535,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127145",
+     "distance": 0.3598,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:130859",
+     "distance": 0.3616,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783398991.A.749",
+     "distance": 0.3638,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:140666",
+     "distance": 0.3698,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127168",
+     "distance": 0.3764,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q31",
+   "query": "景燃 尤諾 隊友 搭配",
+   "hits": [
+    {
+     "doc_id": "bahamut:142484",
+     "distance": 0.2154,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:144324",
+     "distance": 0.2225,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:144494",
+     "distance": 0.2384,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142566",
+     "distance": 0.2577,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142808",
+     "distance": 0.2649,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:142535",
+     "distance": 0.2714,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142582",
+     "distance": 0.2931,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142288",
+     "distance": 0.3102,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:142629",
+     "distance": 0.3395,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142394",
+     "distance": 0.3482,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:142368",
+     "distance": 0.3582,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:142369",
+     "distance": 0.363,
+     "relevant": true
+    }
+   ]
+  },
+  {
+   "qid": "q32",
+   "query": "今汐 水母 同隊 輪轉",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1788407141.A.9D4",
+     "distance": 0.3529,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1781658999.A.FD7",
+     "distance": 0.381,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783693541.A.139",
+     "distance": 0.3851,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783997798.A.310",
+     "distance": 0.3982,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1785916044.A.F15",
+     "distance": 0.3986,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783519098.A.BED",
+     "distance": 0.3992,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779490679.A.F8A",
+     "distance": 0.404,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113746",
+     "distance": 0.4057,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783513256.A.4A5",
+     "distance": 0.4107,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1778592773.A.DEB",
+     "distance": 0.4163,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1779094289.A.6CD",
+     "distance": 0.4182,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1778407595.A.AAD",
+     "distance": 0.4186,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1790746609.A.89A",
+     "distance": 0.4196,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1790757811.A.2DF",
+     "distance": 0.4216,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783839018.A.9B7",
+     "distance": 0.4235,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1778679252.A.FCF",
+     "distance": 0.427,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783770319.A.509",
+     "distance": 0.4275,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1791000591.A.405",
+     "distance": 0.4356,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q33",
+   "query": "長離 相里要 合軸",
+   "hits": [
+    {
+     "doc_id": "bahamut:138702",
+     "distance": 0.4614,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1780788565.A.CF2",
+     "distance": 0.4811,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:130411",
+     "distance": 0.4878,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1775610027.A.4B4",
+     "distance": 0.4982,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777635974.A.625",
+     "distance": 0.4984,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138208",
+     "distance": 0.5,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142981",
+     "distance": 0.5007,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111150",
+     "distance": 0.5028,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138690",
+     "distance": 0.5033,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141991",
+     "distance": 0.5103,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:108384",
+     "distance": 0.5236,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139999",
+     "distance": 0.5269,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:136570",
+     "distance": 0.5302,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113843",
+     "distance": 0.5308,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q34",
+   "query": "千咲 主C 搭配",
+   "hits": [
+    {
+     "doc_id": "bahamut:131264",
+     "distance": 0.2396,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132217",
+     "distance": 0.2417,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:129094",
+     "distance": 0.3298,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:131995",
+     "distance": 0.3442,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119930",
+     "distance": 0.3467,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:112911",
+     "distance": 0.347,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:112302",
+     "distance": 0.347,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132296",
+     "distance": 0.3553,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:132974",
+     "distance": 0.3612,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1774595871.A.624",
+     "distance": 0.3629,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:126734",
+     "distance": 0.3641,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1781684985.A.9D7",
+     "distance": 0.3667,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:131218",
+     "distance": 0.3672,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:114292",
+     "distance": 0.3745,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1785949917.A.41B",
+     "distance": 0.3769,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:129807",
+     "distance": 0.3834,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:131648",
+     "distance": 0.3838,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:134065",
+     "distance": 0.3906,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:131346",
+     "distance": 0.391,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q35",
+   "query": "忌炎 滿命 大招 傷害",
+   "hits": [
+    {
+     "doc_id": "bahamut:138702",
+     "distance": 0.4422,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1784801948.A.58A",
+     "distance": 0.498,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:140785",
+     "distance": 0.5011,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:114870",
+     "distance": 0.5099,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113860",
+     "distance": 0.5121,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1783826854.A.193",
+     "distance": 0.5146,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:125578",
+     "distance": 0.5161,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142808",
+     "distance": 0.5187,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142368",
+     "distance": 0.5215,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138979",
+     "distance": 0.5229,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141655",
+     "distance": 0.538,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q36",
+   "query": "椿 普攻 傷害佔比",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1775041325.A.D56",
+     "distance": 0.4239,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:114973",
+     "distance": 0.4261,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111230",
+     "distance": 0.4826,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787705811.A.A48",
+     "distance": 0.4874,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118220",
+     "distance": 0.5015,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:114870",
+     "distance": 0.5028,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1780580703.A.72B",
+     "distance": 0.5035,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119159",
+     "distance": 0.5069,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111168",
+     "distance": 0.5104,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111259",
+     "distance": 0.5201,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113156",
+     "distance": 0.5214,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:145137",
+     "distance": 0.5224,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141212",
+     "distance": 0.5235,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118559",
+     "distance": 0.5249,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:108924",
+     "distance": 0.5253,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:143598",
+     "distance": 0.5281,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:125578",
+     "distance": 0.5285,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:111284",
+     "distance": 0.53,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q37",
+   "query": "仇遠 大招 重擊 傷害",
+   "hits": [
+    {
+     "doc_id": "ptt:M.1779782682.A.F4A",
+     "distance": 0.3552,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116794",
+     "distance": 0.3604,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1781179775.A.6E5",
+     "distance": 0.3655,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1775455891.A.857",
+     "distance": 0.3866,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1775128580.A.5C5",
+     "distance": 0.3873,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1774618083.A.F7A",
+     "distance": 0.4084,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1784089110.A.8FD",
+     "distance": 0.4119,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773919954.A.A51",
+     "distance": 0.4305,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117422",
+     "distance": 0.4334,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:113766",
+     "distance": 0.434,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1774457048.A.F8C",
+     "distance": 0.4387,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116713",
+     "distance": 0.4443,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1774488839.A.E4C",
+     "distance": 0.4478,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116727",
+     "distance": 0.4495,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1774149366.A.A21",
+     "distance": 0.45,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1775122997.A.9AD",
+     "distance": 0.4512,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q38",
+   "query": "西格莉卡 終結E 倍率",
+   "hits": [
+    {
+     "doc_id": "bahamut:116828",
+     "distance": 0.292,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:117439",
+     "distance": 0.3758,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116794",
+     "distance": 0.4025,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:118081",
+     "distance": 0.4461,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116792",
+     "distance": 0.448,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773932020.A.BBE",
+     "distance": 0.4495,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117921",
+     "distance": 0.4516,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116966",
+     "distance": 0.4524,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1774241246.A.EF1",
+     "distance": 0.4569,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773496361.A.0AE",
+     "distance": 0.4576,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q39",
+   "query": "景燃 聲骸 4C 主詞條",
+   "hits": [
+    {
+     "doc_id": "bahamut:142808",
+     "distance": 0.3343,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:145689",
+     "distance": 0.3343,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142394",
+     "distance": 0.3486,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:142369",
+     "distance": 0.3596,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773928779.A.81C",
+     "distance": 0.3783,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117166",
+     "distance": 0.385,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787200494.A.3B1",
+     "distance": 0.3896,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1784801948.A.58A",
+     "distance": 0.401,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142288",
+     "distance": 0.4012,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127101",
+     "distance": 0.4025,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142494",
+     "distance": 0.4026,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:140116",
+     "distance": 0.4036,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138637",
+     "distance": 0.4063,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:129267",
+     "distance": 0.4081,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q40",
+   "query": "穗穗 聲骸 4C cost",
+   "hits": [
+    {
+     "doc_id": "bahamut:139146",
+     "distance": 0.3467,
+     "relevant": true
+    },
+    {
+     "doc_id": "bahamut:139199",
+     "distance": 0.3809,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1787200494.A.3B1",
+     "distance": 0.4064,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139694",
+     "distance": 0.4342,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:129267",
+     "distance": 0.4352,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:140632",
+     "distance": 0.4438,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117166",
+     "distance": 0.4495,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:145669",
+     "distance": 0.451,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:133077",
+     "distance": 0.4579,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:133797",
+     "distance": 0.4626,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:145690",
+     "distance": 0.4686,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139128",
+     "distance": 0.4709,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:142497",
+     "distance": 0.4751,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773928779.A.81C",
+     "distance": 0.4777,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139434",
+     "distance": 0.484,
+     "relevant": true
+    },
+    {
+     "doc_id": "ptt:M.1786006823.A.A3B",
+     "distance": 0.4869,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q41",
+   "query": "相里要 主C 聲骸 首位",
+   "hits": [
+    {
+     "doc_id": "bahamut:133797",
+     "distance": 0.382,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115994",
+     "distance": 0.3847,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115861",
+     "distance": 0.3915,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1777739069.A.148",
+     "distance": 0.3974,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1785507149.A.F57",
+     "distance": 0.3975,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:144771",
+     "distance": 0.4027,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:133798",
+     "distance": 0.408,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787200494.A.3B1",
+     "distance": 0.4081,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1773928779.A.81C",
+     "distance": 0.4135,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:141230",
+     "distance": 0.4144,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1786006823.A.A3B",
+     "distance": 0.4159,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117166",
+     "distance": 0.4243,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115855",
+     "distance": 0.4297,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:108924",
+     "distance": 0.4301,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:127101",
+     "distance": 0.432,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116970",
+     "distance": 0.4372,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138637",
+     "distance": 0.4418,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1787231844.A.B04",
+     "distance": 0.4459,
+     "relevant": false
+    },
+    {
+     "doc_id": "ptt:M.1778228101.A.FDD",
+     "distance": 0.4486,
+     "relevant": false
+    }
+   ]
+  },
+  {
+   "qid": "q42",
+   "query": "相里要 4C 搭配",
+   "hits": [
+    {
+     "doc_id": "bahamut:138982",
+     "distance": 0.3966,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:126245",
+     "distance": 0.3966,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:108924",
+     "distance": 0.4175,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:126250",
+     "distance": 0.4356,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:116618",
+     "distance": 0.436,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139146",
+     "distance": 0.4398,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117350",
+     "distance": 0.4494,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115844",
+     "distance": 0.4615,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:139199",
+     "distance": 0.4635,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117333",
+     "distance": 0.4642,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119605",
+     "distance": 0.4707,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:145715",
+     "distance": 0.4751,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:144771",
+     "distance": 0.4765,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:117166",
+     "distance": 0.477,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115753",
+     "distance": 0.4798,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:138476",
+     "distance": 0.4805,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:115754",
+     "distance": 0.4818,
+     "relevant": false
+    },
+    {
+     "doc_id": "bahamut:119923",
+     "distance": 0.4825,
+     "relevant": false
+    }
+   ]
+  }
+ ]
+}
