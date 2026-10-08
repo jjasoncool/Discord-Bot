@@ -203,6 +203,11 @@ class TelegramMessageRepository:
                 );
                 """
             )
+            # 要補判：開著過濾、模型沒判到就送進主頻道的（使用者 10-08 UC-Q1；欄名使用者要求看得懂）。預設 FALSE，加欄不改既有資料
+            await conn.execute(
+                "ALTER TABLE telegram_relay_delivery_state "
+                "ADD COLUMN IF NOT EXISTS needs_recheck BOOLEAN NOT NULL DEFAULT FALSE;"
+            )
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS telegram_relay_runtime_state (
@@ -410,24 +415,55 @@ class TelegramMessageRepository:
             )
             return int(first_pk) if first_pk is not None else int(row["id"])
 
-    async def mark_message_published(self, message_pk: int, discord_channel_id: int) -> None:
+    async def mark_message_published(self, message_pk: int, discord_channel_id: int, *,
+                                     needs_recheck: bool = False) -> None:
+        """記成送到這個頻道；`needs_recheck`＝模型沒判到就送出，之後要補判（跟發送紀錄同一句寫，不會送了卻沒記）。"""
         if self.pool is None:
             raise RuntimeError("TelegramMessageRepository 尚未 connect")
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """
-                INSERT INTO telegram_relay_delivery_state (message_pk, discord_channel_id, delivered_at)
-                VALUES ($1, $2, NOW())
+                INSERT INTO telegram_relay_delivery_state (message_pk, discord_channel_id, delivered_at, needs_recheck)
+                VALUES ($1, $2, NOW(), $3)
                 ON CONFLICT (message_pk, discord_channel_id)
-                DO UPDATE SET delivered_at = NOW();
+                DO UPDATE SET delivered_at = NOW(), needs_recheck = EXCLUDED.needs_recheck;
                 """,
                 int(message_pk),
+                int(discord_channel_id),
+                bool(needs_recheck),
+            )
+
+    async def list_needs_recheck(self, limit: int = 20) -> list[tuple[int, int, datetime]]:
+        """要補判的（pk, 頻道, 送出時間），舊的先。"""
+        if self.pool is None:
+            raise RuntimeError("TelegramMessageRepository 尚未 connect")
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT message_pk, discord_channel_id, delivered_at FROM telegram_relay_delivery_state
+                WHERE needs_recheck ORDER BY delivered_at, message_pk LIMIT $1;
+                """,
+                int(limit),
+            )
+        return [(int(r["message_pk"]), int(r["discord_channel_id"]), r["delivered_at"]) for r in rows]
+
+    async def clear_needs_recheck(self, message_pks: list[int], discord_channel_id: int) -> None:
+        """補判完（放行、或判不了也不必再判）：清掉要補判的標記。"""
+        if self.pool is None:
+            raise RuntimeError("TelegramMessageRepository 尚未 connect")
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE telegram_relay_delivery_state SET needs_recheck = FALSE
+                WHERE message_pk = ANY($1::bigint[]) AND discord_channel_id = $2 AND needs_recheck;
+                """,
+                [int(pk) for pk in message_pks],
                 int(discord_channel_id),
             )
 
     @contextlib.asynccontextmanager
     async def moving_deliveries(self, message_pks: list[int], from_channel_id: int, to_channel_id: int):
-        """把這批 pk 的發送紀錄從 from 頻道改記成 to 頻道：只改頻道欄位，`delivered_at` 不動（相簿補圖看第一次
+        """把這批 pk 的發送紀錄從 from 頻道改記成 to 頻道：只改頻道欄位（並清掉要補判的標記），`delivered_at` 不動（相簿補圖看第一次
         送出多久了，改成現在會讓舊相簿重新收補圖）。區塊內出錯就整批不改——搬移時區塊內刪主頻道原貼文，
         刪不掉就不能改紀錄。產出被改的（列 id, pk），寫進 log 供整批復原。"""
         if self.pool is None:
@@ -437,7 +473,7 @@ class TelegramMessageRepository:
                 rows = await conn.fetch(
                     """
                     UPDATE telegram_relay_delivery_state
-                    SET discord_channel_id = $3
+                    SET discord_channel_id = $3, needs_recheck = FALSE
                     WHERE message_pk = ANY($1::bigint[]) AND discord_channel_id = $2
                     RETURNING id, message_pk;
                     """,
@@ -1506,6 +1542,9 @@ class MessageRelayWorker:
         self._quarantine_lock = asyncio.Lock()
         # 開了過濾時一次只處理一則（開關每則重讀，切換不用重啟）
         self._filtered_lock = asyncio.Lock()
+        # 待補判：模型恢復回應時叫醒補判（`_recheck_loop`）；確定沒有待補判的才不叫（啟動時不知道，先當有）
+        self._recheck_wake = asyncio.Event()
+        self._recheck_known = True
         self._last_polled_pk: int = 0
 
         # 正在收集的 media group（key=(chat_id, grouped_id)）。收集期間到的組員只登記到
@@ -1584,6 +1623,7 @@ class MessageRelayWorker:
             asyncio.create_task(self._listen_loop(), name="telegram_relay_listen"),
             asyncio.create_task(self._poll_loop(), name="telegram_relay_poll"),
             asyncio.create_task(self._process_loop(), name="telegram_relay_process"),
+            asyncio.create_task(self._recheck_loop(), name="telegram_relay_recheck"),
         ]
         logger.info("Telegram Relay Worker 已啟動（notify=%s poll=%ss）", self.notify_channel, self.poll_interval_sec)
         if bootstrap_count > 0:
@@ -1965,30 +2005,40 @@ class MessageRelayWorker:
             for item in unit.media_items
         ]
 
-    async def _judge_unit(self, unit: TelegramMessageRecord, *, complete: bool) -> Optional[Verdict]:
-        """過濾一個發送單位。回傳判成垃圾、而且要真的隔離的判定；其他情況（沒開、只記錄、放行）回 None。
+    async def _judge_unit(self, unit: TelegramMessageRecord, *, complete: bool) -> tuple[Optional[Verdict], bool]:
+        """過濾一個發送單位 →（要隔離的判定, 要不要記成待補判）。
 
-        `complete=False`（相簿等待逾時只到齊一部分、單則的圖等太久還沒到）不判、照常送：只看到一部分就判，
-        會把「文字只有水、圖是設計稿」那種情報錯關（13649）。
+        - 判定：判成垃圾、而且要真的隔離時才有；其他情況（沒開、只記錄、放行）是 None。
+        - 待補判：正式模式下模型沒判到（沒回應、出錯、回答看不懂）就照常送主頻道的，之後補判、是垃圾再搬走
+          （使用者 10-08：「每個訊息應該都要被檢查過」）。
+        - `complete=False`（相簿等待逾時只到齊一部分、單則的圖等太久還沒到）不判、照常送：只看到一部分就判，
+          會把「文字只有水、圖是設計稿」那種情報錯關（13649）。
         """
         if not self._filter_active():
-            return None
+            return None, False
         mode = self._filter.mode
         if not complete:
             logger.info("Telegram 過濾：圖還沒到齊，不判、照常送 message_pk=%s", unit.message_pk)
-            return None
+            return None, False
         verdict = await self._filter.judge(unit.text, self._filter_media(unit), trace_id=f"tgfilter-{unit.message_pk}")
         logger.info(
             "Telegram 過濾：message_pk=%s 判定=%s 標籤=%s 理由=%s 看圖=%s 秒=%.1f 由模型判=%s mode=%s",
             unit.message_pk, "隔離" if verdict.quarantine else "放行", verdict.label or "-", verdict.reason or "-",
             verdict.images_seen, verdict.seconds, verdict.by_model, mode,
         )
+        if verdict.by_model:
+            if self._recheck_known:
+                self._recheck_wake.set()   # 模型回應了：之前沒判到的可以補判
+        elif verdict.recheck and mode == "on" and self._quarantine is not None:
+            self._recheck_known = True
+            logger.info("Telegram 過濾：沒判到就送主頻道，記成待補判 message_pk=%s", unit.message_pk)
+            return None, True
         if not verdict.quarantine:
-            return None
+            return None, False
         if mode != "on" or self._quarantine is None:
             logger.info("Telegram 過濾（只記錄）：會隔離、照常送主頻道 message_pk=%s", unit.message_pk)
-            return None
-        return verdict
+            return None, False
+        return verdict, False
 
     @staticmethod
     def _verdict_header(verdict: Optional[Verdict]) -> str:
@@ -2022,10 +2072,12 @@ class MessageRelayWorker:
         header: str = "",
         record: bool = True,
         sent: Optional[list] = None,
+        needs_recheck: bool = False,
     ) -> int:
         """把一個發送單位送到頻道（或 thread），並把這批 pk 記成送到那裡。單則、相簿、隔離共用。
 
-        `record=False`：不寫紀錄，由呼叫端改（搬移：主頻道原貼文刪掉後才改）；`sent`：收集送出的 Discord 訊息。
+        `record=False`：不寫紀錄，由呼叫端改（搬移：主頻道原貼文刪掉後才改）；`sent`：收集送出的 Discord 訊息；
+        `needs_recheck`：模型沒判到就送出，紀錄記成要補判。
         """
         logger.info(
             "Telegram relay 發送目標: channel_id=%s guild=%r channel=%r",
@@ -2042,7 +2094,7 @@ class MessageRelayWorker:
             return count
         try:
             for pk in pks:
-                await self.repository.mark_message_published(pk, channel_id)
+                await self.repository.mark_message_published(pk, channel_id, needs_recheck=needs_recheck)
         except Exception as exc:
             raise SentButNotRecorded(f"已送到 {channel_id}，但發送紀錄沒寫上：{exc}") from exc
         return count
@@ -2357,6 +2409,68 @@ class MessageRelayWorker:
         logger.warning("Telegram 隔離區搬移：改紀錄第一次失敗（%s），原貼文已全刪，重試成功", exc)
         return rows
 
+    # ------------------------------------------------------------------
+    # 待補判：模型沒判到就送進主頻道的，之後補判（使用者 10-08：「每個訊息應該都要被檢查過」，UC-Q1～Q3）
+    # ------------------------------------------------------------------
+
+    _RECHECK_INTERVAL = timedelta(minutes=10)
+    _RECHECK_BATCH = 20
+
+    async def _recheck_loop(self) -> None:
+        """模型恢復回應時（`_judge_unit` 叫醒）或每 `_RECHECK_INTERVAL` 補判一次；出錯不中斷。"""
+        while self._running:
+            try:
+                await asyncio.wait_for(self._recheck_wake.wait(), self._RECHECK_INTERVAL.total_seconds())
+            except asyncio.TimeoutError:
+                pass
+            self._recheck_wake.clear()
+            try:
+                await self.run_recheck()
+            except Exception as exc:
+                logger.error("Telegram 過濾補判失敗：%s", exc, exc_info=True)
+
+    async def run_recheck(self) -> int:
+        """要補判的（`needs_recheck`）判一次：垃圾搬進隔離區、情報（或再判也一樣的）清掉標記；還是判不到的留到下次。
+        只在正式模式（on）做：只記錄模式本來就不搬，關掉時不判。回傳判完幾個發送單位。"""
+        if not self._filter_active() or self._filter.mode != "on" or self._quarantine is None:
+            return 0
+        rows = await self.repository.list_needs_recheck(self._RECHECK_BATCH)
+        self._recheck_known = bool(rows)
+        done: set[int] = set()
+        handled = 0
+        for pk, channel_id, delivered_at in rows:
+            if pk in done:
+                continue
+            record = await self.repository.get_message_by_pk(pk)
+            if record is None:
+                await self.repository.clear_needs_recheck([pk], channel_id)
+                continue
+            unit = await self.unit_pks(record)
+            done.update(unit)
+            if (record.grouped_id is not None
+                    and datetime.now(timezone.utc) - delivered_at < self._GROUP_FOLLOWUP_MAX_AGE):
+                continue   # 補圖時效內的相簿搬不動（`_move_originals`），過了再補判
+            verdict = await self.judge_existing(unit[0])
+            if verdict is None or (not verdict.by_model and verdict.recheck):
+                logger.info("Telegram 過濾補判：還是判不到，下次再補 db#%s（%s）", unit[0],
+                            getattr(verdict, "reason", "-"))
+                break   # 模型還沒好，後面的也判不到
+            handled += 1
+            if not verdict.quarantine:
+                await self.repository.clear_needs_recheck(unit, channel_id)
+                logger.info("Telegram 過濾補判：放行 db#%s（%s）", unit[0], verdict.reason or "-")
+                continue
+            channel = await self._resolve_channel(channel_id)
+            posts = await self.relay_posts(channel, after=delivered_at - timedelta(minutes=5)) if channel else {}
+            ok, note = await self.move_to_quarantine(unit[0], verdict, posts)
+            if ok:
+                logger.info("Telegram 過濾補判：判成垃圾，%s", note)
+            else:
+                # 判成垃圾卻搬不動（原貼文被刪了、找不到）：不再補判，留 log 給人處理
+                await self.repository.clear_needs_recheck(unit, channel_id)
+                logger.error("Telegram 過濾補判：判成垃圾但搬不動，請手動處理 db#%s：%s", unit[0], note)
+        return handled
+
     async def _process_group_member(self, message: TelegramMessageRecord, started: float) -> None:
         """media group 組員入口：同組同時只有一個收集者，其餘組員登記後返回。"""
         key = (message.telegram_chat_id, int(message.grouped_id))
@@ -2453,12 +2567,12 @@ class MessageRelayWorker:
             if follow is None:
                 # 第一次送：整本判一次（多個路由共用同一個判定）
                 if "verdict" not in judged:
-                    judged["verdict"] = await self._judge_unit(merged, complete=complete)
-                verdict = judged["verdict"]
+                    judged["verdict"], judged["recheck"] = await self._judge_unit(merged, complete=complete)
+                verdict, recheck = judged["verdict"], judged["recheck"]
                 to_quarantine = verdict is not None
             else:
-                # 補圖：跟著同本的去向，不再判
-                verdict = None
+                # 補圖：跟著同本的去向，不再判（待補判時整本一起判、一起搬，補圖不另記）
+                verdict, recheck = None, False
                 to_quarantine = follow == "quarantine"
             dest = await self._destination(channel_id, to_quarantine)
             if dest is None:
@@ -2471,6 +2585,7 @@ class MessageRelayWorker:
                     merged, pending, target, target_id,
                     title_suffix=self._GROUP_FOLLOWUP_TITLE_SUFFIX if follow is not None else "",
                     header=self._verdict_header(verdict),
+                    needs_recheck=recheck and target_id == channel_id,
                 )
                 sent_pks.update(pending)
                 followup = followup or follow is not None
@@ -2569,7 +2684,8 @@ class MessageRelayWorker:
             else:
                 pending_routes.append(channel_id)
 
-        verdict = await self._judge_unit(message, complete=not media_pending) if pending_routes else None
+        verdict, recheck = (await self._judge_unit(message, complete=not media_pending)
+                            if pending_routes else (None, False))
         for channel_id in pending_routes:
             dest = await self._destination(channel_id, verdict is not None)
             if dest is None:
@@ -2578,6 +2694,7 @@ class MessageRelayWorker:
             try:
                 published_count += await self._send_unit(
                     message, [message_pk], target, target_id, header=self._verdict_header(verdict),
+                    needs_recheck=recheck and target_id == channel_id,
                 )
                 if target_id != channel_id:
                     self._quarantine.changed(channel_id, target)

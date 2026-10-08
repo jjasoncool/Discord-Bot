@@ -12,6 +12,9 @@
 - 隔離 thread 開在主頻道底下、7 天才封存，之後一直用同一個（重啟也是）；封存的先解封；開不了就這次不送、
   不寫紀錄（之後重試），主頻道也不送
 - 一次性搬移腳本（只走 HTTP、沒有 thread 快取）也找得到開著的那個；腳本與 bot 各自記 thread 時不互相蓋掉
+- 要補判（使用者 10-08「每個訊息應該都要被檢查過」）：正式模式下模型沒判到（沒回應、出錯、看不懂）照常送主頻道，
+  紀錄記成要補判（`needs_recheck`）；補判判成垃圾就搬進隔離區（主頻道原貼文刪掉）、判成情報就清掉；還是判不到的留著、不一則一則
+  再問；看不了的檔案、只記錄模式不記；相簿過了補圖時效才搬；模型一回應就叫醒補判；判成垃圾卻搬不動的清掉並記 log
 - 開了過濾一次只處理一則（模型一次只能判一則，並行只會打亂順序）；排隊或處理中又收到的通知，處理完再排一次
 
 執行：
@@ -33,6 +36,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
+from services.relay.telegram_filter import Verdict
 from services.relay.telegram_quarantine import QuarantineThreads
 from test.telegram_relay_fakes import CHANNEL, FakeBot, FakeFilter, make_worker, media_of
 
@@ -433,6 +437,89 @@ class ProcessLoopTests(FilterTestBase):
             loop_task.cancel()
             await asyncio.gather(loop_task, return_exceptions=True)
         self.assertEqual(self.publisher.to(CHANNEL)[0]["media"], media_of(9), "處理中收到的通知不能丟掉")
+
+
+
+class RecheckTests(FilterTestBase):
+    async def post_unanswered(self, pk, text="水"):
+        self.repo.add_row(pk, 200 + pk, grouped_id=None, text=text, has_media=False)
+        self.filter.unanswered(pk)
+        await self.worker._process_one(pk)
+
+    async def test_unanswered_goes_to_main_and_is_marked(self):
+        await self.post_unanswered(9)
+        self.assertEqual(len(self.publisher.to(CHANNEL)), 1, "判不到照常送主頻道，不擋情報")
+        self.assertEqual(self.repo.needs_recheck, {(9, CHANNEL)})
+
+    async def test_recheck_moves_spam(self):
+        await self.post_unanswered(9)
+        self.filter.quarantine(9, "灌水", "每日打卡")
+        self.assertEqual(await self.worker.run_recheck(), 1)
+        thread = self.thread()
+        self.assertEqual(self.repo.channels_of(9), {thread.id})
+        self.assertEqual(self.repo.needs_recheck, set())
+        self.assertEqual(self.bot.main.messages, [], "主頻道原貼文刪掉")
+        self.assertIn("判定：灌水｜每日打卡", thread.messages[0].content)
+
+    async def test_recheck_pass_clears_the_mark(self):
+        await self.post_unanswered(9)
+        self.filter.verdicts[9] = Verdict(False, reason="有情報")
+        await self.worker.run_recheck()
+        self.assertEqual(self.repo.needs_recheck, set())
+        self.assertEqual(self.repo.channels_of(9), {CHANNEL})
+        self.assertEqual(len(self.bot.main.messages), 1)
+
+    async def test_still_unanswered_stays_marked_and_stops_asking(self):
+        await self.post_unanswered(9)
+        await self.post_unanswered(10)
+        self.filter.calls.clear()
+        self.assertEqual(await self.worker.run_recheck(), 0)
+        self.assertEqual(self.repo.needs_recheck, {(9, CHANNEL), (10, CHANNEL)})
+        self.assertEqual(len(self.filter.calls), 1, "模型還沒好，後面的不一則一則再問")
+
+    async def test_not_marked_when_rechecking_would_not_help_or_not_on(self):
+        self.repo.add_row(9, 209, grouped_id=None, text="聽這個", has_media=False)
+        self.filter.verdicts[9] = Verdict(False, reason="附有看不了的檔案（語音、壓縮檔）", by_model=False)
+        await self.worker._process_one(9)
+        self.assertEqual([c["pk"] for c in self.filter.calls], [9], "有送去判")
+        self.filter.mode = "dry_run"
+        await self.post_unanswered(10)
+        self.assertEqual(self.repo.needs_recheck, set())
+        self.assertEqual(await self.worker.run_recheck(), 0, "只記錄模式不補判")
+
+    async def test_new_album_waits_for_the_followup_window(self):
+        for pk in (1, 2):
+            self.repo.add_ready(pk, 500 + pk, grouped_id=77, text="說明" if pk == 1 else "")
+        self.filter.unanswered(1)
+        await self.worker._process_one(1)
+        self.assertEqual(self.repo.needs_recheck, {(1, CHANNEL), (2, CHANNEL)})
+        self.filter.quarantine(1, "無關圖片", "奶龍")
+        self.filter.calls.clear()
+        await self.worker.run_recheck()
+        self.assertEqual(self.filter.calls, [], "補圖時效內搬不動，先不判")
+        self.assertEqual(len(self.repo.needs_recheck), 2)
+        for pk in (1, 2):
+            self.repo.delivered[(pk, CHANNEL)] = ago(hours=13)
+        await self.worker.run_recheck()
+        thread = self.thread()
+        self.assertEqual((self.repo.channels_of(1), self.repo.channels_of(2)), ({thread.id}, {thread.id}), "整本一起搬")
+        self.assertEqual(self.repo.needs_recheck, set())
+
+    async def test_model_answer_wakes_the_recheck(self):
+        await self.post_unanswered(9)
+        self.assertFalse(self.worker._recheck_wake.is_set(), "判不到的那則不算模型恢復")
+        self.repo.add_row(10, 210, grouped_id=None, text="已开服", has_media=False)
+        await self.worker._process_one(10)
+        self.assertTrue(self.worker._recheck_wake.is_set())
+
+    async def test_spam_that_cannot_be_moved_is_cleared_and_logged(self):
+        await self.post_unanswered(9)
+        self.bot.main.messages.clear()   # 原貼文先被人刪了
+        self.filter.quarantine(9)
+        with self.assertLogs("services.relay.telegram_relay_service", "ERROR") as logs:
+            await self.worker.run_recheck()
+        self.assertTrue(any("手動處理" in line for line in logs.output))
+        self.assertEqual(self.repo.needs_recheck, set(), "不再一直補判")
 
 
 if __name__ == "__main__":

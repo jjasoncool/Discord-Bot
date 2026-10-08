@@ -36,6 +36,8 @@ class FakeRepository:
         self.rows: dict[int, dict] = {}
         self.media: dict[int, list[TelegramMediaRecord]] = {}
         self.delivered: dict[tuple[int, int], datetime] = {}
+        #: 要補判的 (pk, 頻道)
+        self.needs_recheck: set[tuple[int, int]] = set()
         self.replay_pk = None
         self.reads: list[int] = []
         self.read_delay = 0.0
@@ -108,8 +110,16 @@ class FakeRepository:
         return sorted(unique, key=lambda r: (r["message_date"] or datetime.min.replace(tzinfo=timezone.utc),
                                              r["telegram_message_id"]))
 
-    async def mark_message_published(self, pk, discord_channel_id):
+    async def mark_message_published(self, pk, discord_channel_id, *, needs_recheck=False):
         self.delivered[(pk, discord_channel_id)] = datetime.now(timezone.utc)
+        (self.needs_recheck.add if needs_recheck else self.needs_recheck.discard)((pk, discord_channel_id))
+
+    async def list_needs_recheck(self, limit=20):
+        rows = sorted(((pk, ch, self.delivered[(pk, ch)]) for pk, ch in self.needs_recheck), key=lambda r: (r[2], r[0]))
+        return rows[:limit]
+
+    async def clear_needs_recheck(self, message_pks, discord_channel_id):
+        self.needs_recheck -= {(pk, discord_channel_id) for pk in message_pks}
 
     @contextlib.asynccontextmanager
     async def moving_deliveries(self, message_pks, from_channel_id, to_channel_id):
@@ -119,11 +129,12 @@ class FakeRepository:
             raise RuntimeError("資料庫斷線")
         if any((pk, from_channel_id) in self.delivered and (pk, to_channel_id) in self.delivered for pk in message_pks):
             raise RuntimeError("唯一鍵衝突（同一則已有 to 那列）")   # 跟真的一樣：(pk, 頻道) 是唯一鍵
-        before = dict(self.delivered)
+        before, recheck_before = dict(self.delivered), set(self.needs_recheck)
         moved = []
         for pk in message_pks:
             if (pk, from_channel_id) in self.delivered:
                 self.delivered[(pk, to_channel_id)] = self.delivered.pop((pk, from_channel_id))
+                self.needs_recheck.discard((pk, from_channel_id))
                 moved.append((len(moved) + 1, pk))
         try:
             yield moved
@@ -131,7 +142,7 @@ class FakeRepository:
                 self._failed_move()
                 raise RuntimeError("寫入失敗")
         except BaseException:
-            self.delivered = before
+            self.delivered, self.needs_recheck = before, recheck_before
             raise
 
     def _failed_move(self) -> None:
@@ -368,6 +379,10 @@ class FakeFilter:
 
     def quarantine(self, pk: int, label: str = "灌水", reason: str = "每日打卡") -> None:
         self.verdicts[pk] = Verdict(True, label=label, reason=reason)
+
+    def unanswered(self, pk: int) -> None:
+        """模型等不到（排滿時限、或掛了只問一次失敗）：放行、之後要補判。"""
+        self.verdicts[pk] = Verdict(False, reason="模型 30 分鐘沒回應，未判", by_model=False, recheck=True)
 
     async def judge(self, text, media, *, trace_id):
         pk = int(trace_id.rsplit("-", 1)[-1])

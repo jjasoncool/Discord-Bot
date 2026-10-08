@@ -202,10 +202,10 @@ class RestoreTests(QuarantineTestBase):
         thread = self.thread()
         original = self.repo.mark_message_published
 
-        async def broken(pk, channel_id):
+        async def broken(pk, channel_id, **kwargs):
             if channel_id == CHANNEL:
                 raise RuntimeError("資料庫斷線")
-            await original(pk, channel_id)
+            await original(pk, channel_id, **kwargs)
         self.repo.mark_message_published = broken
         ok, message = await self.worker.restore(9, "小明")
         self.assertTrue(ok, "主頻道已經送出，回報失敗的話操作者會再按一次、貼兩則")

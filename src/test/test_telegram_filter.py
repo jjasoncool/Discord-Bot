@@ -213,6 +213,24 @@ class ModelUnavailableTests(FilterTestBase):
         self.assertTrue(v.quarantine, "恢復後又照常排隊、重問")
         self.assertEqual(len(self.llm.calls), 3)
 
+    async def test_which_passes_are_rechecked_later(self):
+        # 使用者 10-08 UC-Q2：模型沒判到（沒回應、出錯、看不懂）之後補判；看不了的檔案、有圖沒看到再判也一樣
+        self.llm.answer = "看起來是梗圖"
+        self.assertTrue((await self.judge("水")).recheck, "回答看不懂")
+        self.llm.error = RuntimeError("連不上")
+        with self.assertLogs("services.relay.telegram_filter", "WARNING"):
+            self.assertTrue((await self.judge("水")).recheck, "出錯")
+        self.llm.error = None
+        tf._model_down = True
+        self.llm.errors = [tf.LlmTimeoutError("逾時")]
+        self.assertTrue((await self.judge("水")).recheck, "等不到模型")
+        voice = self.file("a.ogg", b"OggS", "other")
+        missing = tf.MediaFile(self.tmp / "gone.jpg", "image")
+        for media in ([voice], [missing]):
+            self.assertFalse((await self.judge("", media)).recheck, media)
+        self.llm.answer = "看到圖。\n放行｜有角色"
+        self.assertFalse((await self.judge("水")).recheck, "模型判過了")
+
     async def test_model_error_passes(self):
         self.llm.error = RuntimeError("連不上")
         with self.assertLogs("services.relay.telegram_filter", "WARNING"):

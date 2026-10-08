@@ -66,6 +66,9 @@ class Verdict:
     reason: str = ""
     #: 有沒有真的由模型判斷；False＝模型不能用而放行（`reason` 寫原因）
     by_model: bool = True
+    #: 沒經模型判、但之後再判可能判得出來（模型沒回應、出錯、回答看不懂）：轉發端記成待補判（使用者 10-08 UC-Q2）。
+    #: 看不了的檔案、有圖沒看到再判也一樣，不補
+    recheck: bool = False
     images_seen: int = 0
     seconds: float = 0.0
     answer: str = field(default="", repr=False)
@@ -186,9 +189,9 @@ async def _ask_model(text: str, images: list[bytes], trace_id: str) -> str:
     )
 
 
-def _passed(reason: str, started: float, images: int = 0, answer: str = "") -> Verdict:
+def _passed(reason: str, started: float, images: int = 0, answer: str = "", *, recheck: bool = False) -> Verdict:
     return Verdict(False, reason=reason, by_model=False, images_seen=images,
-                   seconds=time.monotonic() - started, answer=answer)
+                   seconds=time.monotonic() - started, answer=answer, recheck=recheck)
 
 
 async def _wait_for_imagegen(trace_id: str) -> None:
@@ -265,13 +268,13 @@ async def judge(text: str, media: Iterable[MediaFile], *, trace_id: str) -> Verd
             return _passed("有圖或影片沒看到", started, len(images))
         answer = await _ask(text, images, trace_id)
     except _GaveUp as exc:
-        return _passed(str(exc), started, len(images))
+        return _passed(str(exc), started, len(images), recheck=True)
     except Exception as exc:
         logger.warning("Telegram 過濾：判斷失敗，放行（%s）：%s", trace_id, exc)
-        return _passed(f"判斷失敗：{type(exc).__name__}", started, len(images))
+        return _passed(f"判斷失敗：{type(exc).__name__}", started, len(images), recheck=True)
     parsed = parse_verdict(answer)
     if parsed is None:
-        return _passed("看不懂模型的回答", started, len(images), answer)
+        return _passed("看不懂模型的回答", started, len(images), answer, recheck=True)
     quarantine, label, reason = parsed
     return Verdict(quarantine, label=label, reason=reason, images_seen=len(images),
                    seconds=time.monotonic() - started, answer=answer)
