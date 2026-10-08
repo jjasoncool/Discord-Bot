@@ -42,6 +42,10 @@ services:
       dockerfile: docker/scraper/dockerfile
     container_name: scraper
     restart: always
+    # FB 爬蟲每小時開關一次 Firefox（fb_scraper_service.py），Firefox 結束後它的子程序會改掛到容器的 PID 1。
+    # 沒有 init 時 PID 1 是 python main.py，它不會清掉這些已結束的程序，會一直累積成殭屍（ps 裡的 <defunct>）。
+    # init: true 讓 Docker 用一個小 init 程式當 PID 1，由它負責清掉。
+    init: true
     expose:
       - "8000"  # 只在內網暴露 API 端口
     volumes:
