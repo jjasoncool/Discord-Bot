@@ -25,6 +25,7 @@
 > 4. 保留可追溯來源，避免之後重複討論同一件事
 
 最後盤點紀錄（只保留近期；過往詳見 `TODO-completed.md` 各歸檔 entry）：
+- 2026-10-08 11:5x（Telegram 過濾改排隊＋補判，**已上線・已 commit**）：使用者「為什麼那張圖過了 db14106」→ 原因是排 90 秒就放行；改成排隊、30 分鐘才放行、模型掛了每則只問一次；沒判到就送的記 `needs_recheck`（使用者自己加欄）、之後補判、垃圾自動搬進 thread。11:08 重啟上線，14107～14109 都由模型判放行、要補判 0。另一個 session 同時在做情報搜尋 MCP，commit 只帶這輪檔案。細節見 telegram-llm-filter-quarantine 區塊的「TF-Q7 改定案」。
 - 2026-10-07 08:0x（Telegram 舊垃圾訊息搬移，**已 commit・bot 不用重啟**）：搬移功能與一次性腳本完成，db#14095 實際搬過一次並查證（資料庫、主頻道、thread、面板）。使用者：「我確定 commit 但只能跟你修改相關的」——同時有另一個 session 在改插話，只 commit 搬移相關檔案，本檔只帶搬移那段。獨立審查在背景跑，有成立的問題另外補 commit。細節見 telegram-llm-filter-quarantine 區塊的「搬移實作完成」。
 - 2026-10-07 08:2x（RB 收尾並上線：使用者定案門檻「明顯敵意就算」、RB-Q7 不回補、從重啟後開始記；使用者 08:13 重啟、驗收建表正常；使用者要求 commit → `40737ea` refactor(utils)、`0f71b6d` feat(ambient)、本 docs，各快照在容器 /tmp 跑完整測試全過；`emoji_dictionary.txt` 是 bot 看圖補的、不在範圍）。
 - 2026-10-07 08:1x（RB 第 3～4 輪：RB-Q6 做記仇心情、RB-Q8 群主不記仇、門檻拉高；獨立審查只有 1 條成立並修正；標記改英文 `[INSULT]`；完整 1142 項全過・未 commit；開關已開，**等使用者重啟**）。
@@ -781,6 +782,23 @@ affects: Telegram relay、config.json
         - 結果（今天 9 個單位 14096～14104）：搬走 4 個——14096（明日方舟圖）、14102（卡通梗圖）、14103（索要角色閒聊）、14104（奶龍梗圖）；留下 5 個——14097（遊戲任務完成畫面）、14098～14101（角色爆料、宣傳圖、劇情爆料）。資料庫查證：4 個的列改成 thread、送出時間不變；面板已重貼。
         - **事故**：我先開的預覽被使用者拒絕，但 `docker exec` 的行程在容器裡沒停，從約 11:49 佔著跨行程 GPU 鎖到 12:06，搬移腳本與 bot（插話一直「串流忙，讓位」）都卡在後面；第一輪 14096 等滿 600 秒、14097 模型逾時，都沒判。用 /proc 找到行程 5629/5635 停掉後恢復，14096、14097 重跑。防再發：工具呼叫被拒絕或中斷後，查容器裡有沒有留下的行程（`/proc/*/cmdline`）。
         - 待觀察：搬移腳本判斷時最多等 600 秒、佔著模型時 bot 的插話與新訊息過濾都要排隊；整批搬很多則時要避開群組熱鬧時段。
+      - **TF-Q7 改定案：排隊、不因等太久放行（10-08 10:1x～10:4x，突變 7 種全紅；11:08 重啟上線、已 commit）**：
+        - 起因：使用者「為什麼那張圖過了 db14106」→ log「等模型超過 90 秒，由模型判=False」：10:15:10 插話開始生成、佔著模型好幾分鐘（思考模式，模型伺服器顯示一次輸出 3,339 個字詞），14106 10:15:21 進來排了 90 秒就照舊規則放行。使用者：「規則要改，不能 90 秒沒回應就處理，應該排隊」「逾時抓 30 分鐘」；滿 30 分鐘後怎麼辦、後面排隊的怎麼辦兩題「都按照你的建議」。
+        - 定案：排隊（插話、產圖、別的行程後面都等）；產圖中等它做完再判（不然把 LLM 載回去搶 VRAM）；模型逾時或連不上隔 30 秒～5 分鐘（逐次加倍）再排；**排滿 30 分鐘（`give_up_seconds`）才放行**，log 記「模型 30 分鐘沒回應，未判」；之後認定模型掛了：每則只問一次、失敗就放行，問到一次就恢復排隊（避免一次一則時每則都等滿 30 分鐘）。判不了的（看不了的檔案、有圖沒看到、讀不到 prompt、模型回錯誤、回答看不懂）照舊放行。
+        - 程式：`telegram_filter._ask`／`_ask_until_answered`／`_wait_for_imagegen`、`_model_down`；設定 `TelegramFilterSettings` 拿掉 `wait_seconds`，加 `give_up_seconds`、`retry_initial_seconds`、`retry_max_seconds`、`busy_poll_seconds`；搬移腳本與 `it_telegram_filter.py` 拿掉 `wait_seconds` 覆寫（判斷本身就排到為止）。
+        - 各模組逾時（供參考）：插話一次生成看門狗 180 秒；/askai 等一般呼叫 300 秒；persona agent 讓前景最多等 600 秒；表情補字典 120 秒；跨行程 GPU 鎖等別的行程超過 15 分鐘就不等；過濾單次問模型 60 秒（連線層再自動重試 2 次）。
+        - 14106（奶蛙早安梗圖）已用腳本判斷並搬進 thread（10:32）。
+        - **UC 補判輪（10-08 使用者提出，待回覆）**：使用者：「每個訊息應該都要被檢查過，沒檢查過的即便放行，後續要補檢查確認……需要加資料庫欄位嗎？」機制：沒判就送進主頻道的，記一個「待補判」標記（重啟也不能忘）；模型恢復時再判，判成垃圾就用現成的搬移功能移進 thread，判成情報就清掉標記。
+          - UC-Q1 標記記在哪：A 發送紀錄表加一欄 `filter_pending`→ 改名 `needs_recheck`（布林、預設 FALSE；既有的列都是 FALSE、不改資料；送主頻道那一句一起寫，不會「送出了、標記沒寫上」；啟動時自動加欄，要復原就刪欄）［建議］／B runtime 檔（不動資料庫，但跟發送紀錄分兩處寫，中間當機就漏）／C 既有的 key-value 表存一份清單（不改表結構，但整份讀寫）。
+          - UC-Q2 哪些要補判：A 模型沒回應（30 分鐘放棄、掛了只問一次失敗）＋回答看不懂［建議：再問可能就判得出來］；看不了的檔案（語音、壓縮檔、有圖沒看到）補判結果也一樣，不補／B 所有沒經模型判的都補。
+          - UC-Q3 何時補判：A 模型一恢復回應就補，另外每 10 分鐘掃一次（過濾開著時）［建議］／B 只定時掃。
+          - 已知後果（不另出題）：補判搬走時群友會看到「出現又消失」；相簿要第一次送出滿 12 小時才搬（補圖時效，`_move_originals`），垃圾相簿會晚一點才移走。
+          - **定案（使用者 10-08：「都依照你的需求，資料庫新增欄位給我指令」）**：UC-Q1＝A、UC-Q2＝A、UC-Q3＝A。已給使用者加欄指令（`ALTER TABLE telegram_relay_delivery_state ADD COLUMN IF NOT EXISTS needs_recheck BOOLEAN NOT NULL DEFAULT FALSE;`，在 pgvector 容器的 telegram_data 庫，PostgreSQL 18 加欄不重寫表）與復原指令（`DROP COLUMN IF EXISTS needs_recheck`）；10:5x 查還沒加，bot 重啟時 `ensure_relay_tables` 也會自動加（同一句）。
+          - **實作（完整 1,193 全過・突變 11 種全紅；11:08 重啟上線、已 commit）**：`Verdict.recheck`（等不到模型、出錯、回答看不懂＝True；看不了的檔案、有圖沒看到＝False）；`_judge_unit` 回傳（要隔離的判定, 待補判），只有正式模式記；`_send_unit(needs_recheck=)` → `mark_message_published(needs_recheck=)` 跟紀錄同一句寫；`moving_deliveries` 搬走時清掉；`list_needs_recheck`／`clear_needs_recheck`；`_recheck_loop`（模型一回應就被 `_judge_unit` 叫醒，另外每 10 分鐘）→ `run_recheck`：相簿過補圖時效才判；`judge_existing` 判；垃圾 → `move_to_quarantine`、情報或再判也一樣 → 清標記；還是判不到 → 留著、這輪停（模型還沒好）；判成垃圾卻搬不動 → 清標記、log error「請手動處理」。
+          - **欄名改 `needs_recheck`（使用者 10-08：「filter_pending false 是什麼意思？欄位名稱有點讓人不懂」「一起改，程式也要對應改」）**：TRUE＝要補判、FALSE＝不用補判；不用反向的 `checked`，因為過濾上線前的舊紀錄其實沒判過。改名時欄位還沒加進資料庫，沒有搬資料。程式、測試、假物件一起改（`mark_message_published(needs_recheck=)`、`list_needs_recheck`／`clear_needs_recheck`、`run_recheck`）。完整 1,193 全過；真的 SQL 用同結構暫存表驗證（加欄、寫紀錄帶標記、列出、清掉、搬移時清掉都對），整段回滾，正式表欄位不變。
+          - **欄位已加（使用者 10-08 11:0x 自己執行加欄指令）**：唯讀查 4,784 列、`needs_recheck` 為 TRUE 的 0 列。線上 bot（10-07 12:48 起的舊程式）寫紀錄不帶這欄，用預設 FALSE，不受影響。待：使用者重啟（新程式才會記、補判）、commit 只帶這輪檔案。
+          - **已重啟上線（10-08 11:08，只重啟、沒 build）**：啟動檢查 1,193 全過，11:09:42 上線。重啟期間進來的 14109 由啟動補償排入、模型判放行（10 秒）。重啟前舊程式判的 14107、14108 也都由模型判放行（24、17 秒）。要補判 0 筆。另一個 session 在 `requirements.txt` 加了 `opencc`（未 commit、容器沒裝），那邊的搜尋只是不簡轉繁，不影響啟動；要裝得 build。
+          - 同時有另一個 session 在改情報搜尋 MCP（`services/search/`、`llm/mcp_server.py`、`logger_config`、`llm_service.py`、`test_shared_conventions.py` 等），已避開；commit 時只帶這輪的檔案。
     - 30 天判斷已跑完（03:37～約 06:40，跟維護作業排隊，平均 26.3 秒）：414 個中 75 個會被隔離（閒聊 30、無關圖片 24、灌水 15、罵人 6）、2 個圖沒下載到略過、1 個（13476）含語音／壓縮檔直接放行。結果在 session scratchpad `mv_judge_30d.jsonl`（容器 `/tmp` 也有一份）。下一輪：清單給使用者劃掉判錯的。
   - **功能開關清查（10-06 使用者「幫我清查目前開關都分散在哪」，唯讀 workflow 6＋1 個 agent；全文 25k 字在 session scratchpad `switch_inventory.md`，依功能分 20 組表格）**：開關分散在六種地方——`config.json`（綁頻道、Telegram 總開關／路由／重送、`event_schedule_dry_run`）、`sys_settings` 的 class 預設值（插話、日記、persona、看圖補字典、Telegram 過濾，改了要重啟）、環境變數（`ASKAI_WEB_ENABLED`、`PERIODIC_REMINDER_ENABLED`、`TRADE_*`、`LOG_LEVEL`…，要重建容器，`docker restart` 不會套用）、runtime JSON（爬蟲 `runtime_config.json` 每 2 秒熱更新、`llm_runtime_config.json` 依 mtime、`article_runtime.json` 部分只在啟動讀、點名 runtime 手改會被覆寫）、Discord 指令／面板（/server_manager、/article_manager 停止只在記憶體）、寫死的常數（scraper 排程、PTT 輪詢沒有停止鍵）。觀察重點：
     - **更正 TF-Q10 的前提**：`telegram_relay_enabled` 只在 worker 啟動時讀（執行中改 false 不會停），只有路由與「這則要不要強制重送」每則讀；照 A 放 config.json 要另外寫每則讀取，並行數（迴圈開始時決定）也要一起處理。
