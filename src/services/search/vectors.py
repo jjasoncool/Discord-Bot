@@ -9,7 +9,7 @@
     延後 import——MCP 行程只有真的要算向量時才載入
   - 查詢前面加任務說明，文件不加（這類 embedding 模型的用法；見 SEARCH_SETTINGS.query_instruction）
   - 打 embedding 一律經過 GPU 閘門（`lemonade_gate.gpu_exclusive_sync`），和 bot 的串流排同一個隊：
-    這裡是 docker exec 另開的行程（MCP、批次指令），只問「忙不忙」擋不住 bot 在我們算到一半時開始串流
+    這裡是另一個行程（search-mcp 容器、docker exec 的批次指令），只問「忙不忙」擋不住 bot 在我們算到一半時開始串流
 """
 from __future__ import annotations
 

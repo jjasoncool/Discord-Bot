@@ -1,6 +1,6 @@
 """批次算向量：把搜尋索引裡的文件切段、算向量、存進 pgvector。
 
-用法（容器裡）：
+用法（search-mcp 容器裡；每天 03:00 也會自動補算新文章，見 `nightly.py`）：
   python -m services.search.embed --dry-run            # 只算要做多少（不呼叫 GPU）
   python -m services.search.embed --limit 1000         # 先做最新的 1000 份，量速度
   python -m services.search.embed                      # 做完 SEARCH_SETTINGS.vector_since 之後的全部
@@ -110,26 +110,31 @@ def run(planned: Sequence[PlannedDoc], store, embedder, *, batch_size: int = SEA
     return report
 
 
+def embed_pending(index: Optional[SearchIndex] = None, store=None, *, since: str = SEARCH_SETTINGS.vector_since,
+                  limit: Optional[int] = None, dry_run: bool = False) -> EmbedReport:
+    """同步索引、把還沒算過（或內容改過）的段落算完。手動指令和 search-mcp 的每日維護都走這裡。"""
+    if store is None:
+        from services.search.vectors import PgVectorStore
+
+        store = PgVectorStore()
+    index = index or SearchIndex()
+    index.sync(force=True)
+    report = run(plan(index.index_path, since=since, limit=limit), store, store.embedder, dry_run=dry_run)
+    rate = report.chars / report.seconds if report.seconds and report.embedded else 0
+    logger.info("算向量%s：%d 份文件、%d 段（要算 %d、沒變跳過 %d、刪掉多出來的舊段 %d）、%d 字；花 %.0f 秒%s",
+                "試算" if dry_run else "完成", report.docs, report.chunks, report.chunks - report.skipped,
+                report.skipped, report.removed, report.chars, report.seconds,
+                f"；約 {rate:.0f} 字／秒（含排隊等 bot）" if rate else "")
+    return report
+
+
 def main(argv: Optional[list[str]] = None) -> EmbedReport:
     parser = argparse.ArgumentParser(description="把搜尋索引的文件切段、算向量、存進 pgvector")
     parser.add_argument("--since", default=SEARCH_SETTINGS.vector_since, help="只做這天之後的文件（YYYY-MM-DD）")
     parser.add_argument("--limit", type=int, default=None, help="最多做幾份文件（新的先做）")
     parser.add_argument("--dry-run", action="store_true", help="只算要做多少，不呼叫 GPU")
     args = parser.parse_args(argv)
-
-    from services.search.vectors import PgVectorStore
-
-    index = SearchIndex()
-    index.sync()
-    planned = plan(index.index_path, since=args.since, limit=args.limit)
-    store = PgVectorStore()
-    report = run(planned, store, store.embedder, dry_run=args.dry_run)
-    rate = report.chars / report.seconds if report.seconds and report.embedded else 0
-    logger.info("%s：%d 份文件、%d 段（要算 %d、沒變跳過 %d、刪掉多出來的舊段 %d）、%d 字；花 %.0f 秒%s",
-                "試算" if args.dry_run else "完成", report.docs, report.chunks, report.chunks - report.skipped,
-                report.skipped, report.removed, report.chars, report.seconds,
-                f"；約 {rate:.0f} 字／秒（含排隊等 bot）" if rate else "")
-    return report
+    return embed_pending(since=args.since, limit=args.limit, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

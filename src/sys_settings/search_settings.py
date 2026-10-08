@@ -4,19 +4,20 @@
 """
 from __future__ import annotations
 
+from datetime import time
 from pathlib import Path
 from typing import Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_SRC_DIR = Path(__file__).resolve().parent.parent
-
 
 class SearchSettings(BaseSettings):
     #: scraper 的資料庫；只用唯讀方式開（`mode=ro`，見 `services.search.index`）
     articles_db_path: Path = Path("/app/scraper/articles.db")
-    #: 搜尋索引：從 articles.db 建出來的衍生資料，刪掉會自動重建，不算使用者資料
-    index_path: Path = _SRC_DIR / "services" / "search" / "data" / "search_index.db"
+    #: 搜尋索引：從 articles.db 建出來的衍生資料，刪掉會自動重建，不算使用者資料。
+    #: 放在 repo 根目錄的 `search_data/`（docker-compose 只掛給 search-mcp），不放 src/：幾百 MB 的
+    #: 衍生資料不該跟程式碼混在一起。沒掛這個資料夾的容器用到時會直接失敗，不會悄悄另建一份
+    index_path: Path = Path("/search_data/search_index.db")
 
     #: 每種來源最多回幾筆，避免論壇的量把官方公告淹掉
     per_source_limit: int = 5
@@ -70,6 +71,17 @@ class SearchSettings(BaseSettings):
     rerank_candidates: int = 30
     #: 每篇送給 reranker 的長度（字）：標題＋文件裡和問題最相關的那一段
     rerank_passage_chars: int = 500
+
+    # ---------- 常駐服務（docker-compose 的 search-mcp）----------
+    #: MCP 走 HTTP 時聽的位址與 port。容器裡要聽 0.0.0.0，主機那端由 compose 只綁 127.0.0.1
+    mcp_host: str = "0.0.0.0"
+    mcp_port: int = 8765
+    #: 允許的 Host 標頭（MCP 套件防 DNS rebinding）：本機連進來、或同一個 docker 網路用服務名稱連
+    mcp_allowed_hosts: tuple[str, ...] = ("127.0.0.1:*", "localhost:*", "search-mcp:*")
+    #: 每日維護（同步索引、補算新文章的向量）的時刻；過了 `nightly_deadline` 還沒做就等明天，
+    #: 不在 04:00～07:30 維護時段（人格萃取、persona agent 用模型）裡搶 GPU
+    nightly_at: time = time(3, 0)
+    nightly_deadline: time = time(4, 0)
 
     model_config = SettingsConfigDict(env_prefix="SEARCH_", extra="ignore", frozen=True)
 

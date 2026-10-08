@@ -4,6 +4,7 @@
   - 只做指定日期之後的文件、新的先做；巴哈只做攻略、心得、情報、問題四類（回覆樓層照討論串標題判斷）
   - 內容沒變的段落不重算；改過的只重算改到的段；文件改短時刪掉多出來的舊段（只刪結尾、前面沒變也要刪）
   - 試算模式不呼叫 embedding
+  - 補算（手動指令與每日維護共用的 `embed_pending`）先跟上 scraper 的新文章再算
   （和 bot 排隊用 GPU 閘門，在 `vectors.Embedder` 裡，見 test_search_vectors）
 
 執行：
@@ -19,7 +20,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from services.search.embed import plan, run  # noqa: E402
+from services.search.embed import embed_pending, plan, run  # noqa: E402
 from test.test_search_index import SearchIndexTestBase  # noqa: E402
 
 
@@ -136,6 +137,20 @@ class EmbedTests(SearchIndexTestBase):
         self.assertEqual(embedder.calls, [])
         self.assertEqual((report.docs, report.chunks, report.embedded), (1, 1, 0))
         self.assertGreater(report.chars, 0)
+
+    def test_embed_pending_catches_up_on_articles_added_after_the_last_sync(self):
+        self.db.ptt("M.1.A.001", "[鳴潮] 舊文", "內容", published="2026-03-01 10:00:00.000000")
+        # 常駐服務的索引剛因為有人搜尋同步過（還在最短間隔內），補算時照樣要跟上
+        index = self.make_index(sync_min_interval_seconds=3600)
+        index.sync()
+        self.db.ptt("M.1.A.002", "[鳴潮] 新文", "剛爬到的內容", published="2026-03-02 10:00:00.000000")
+        store = FakeStore()
+        store.embedder = FakeEmbedder()
+
+        report = embed_pending(index, store, since="2026-01-01")
+
+        self.assertEqual({doc_id for doc_id, _ in store.rows.values()}, {"ptt:M.1.A.001", "ptt:M.1.A.002"})
+        self.assertEqual(report.embedded, 2)
 
 
 if __name__ == "__main__":

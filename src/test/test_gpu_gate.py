@@ -223,6 +223,24 @@ class SyncGateTests(_GateTestCase):
         await asyncio.wait_for(bot, 2)
 
 
+class UnittestLockPathTests(unittest.TestCase):
+    """跑單元測試（啟動 gate）不能用正式鎖檔：容器的環境變數指向和 search-mcp 共用的那一個，
+    測試去搶它就會跟執行中的 bot、search-mcp 互相等。"""
+
+    def test_unittest_replaces_the_lock_path_from_the_container_env(self):
+        shared = "/nonexistent/shared/lemonade_gpu.lock"
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "import unittest, test\n"
+             "from llm.client import lemonade_gate\n"
+             "print(lemonade_gate.CROSS_PROCESS_LOCK_PATH)\n"],
+            cwd=SRC_DIR, env={**os.environ, "LEMONADE_GPU_LOCK_PATH": shared},
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(result.stdout.strip(), shared)
+
+
 class StreamExclusiveRegressionTests(_GateTestCase):
     """短工作路徑（chat / batch embedding）行為不變。"""
 

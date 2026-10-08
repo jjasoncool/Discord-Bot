@@ -1,8 +1,12 @@
+# 主程式（整包 src/）的映像檔：discord-bot 與 search-mcp 共用（各層共用、不多佔硬碟）；兩個爬蟲各有自己的映像檔。
+# 跑整包 src/ 的服務都引用這一份：改 Dockerfile 路徑時不會只改到一邊，讓套件版本悄悄分岔
+x-main-build: &main-build
+  context: .
+  dockerfile: docker/discord_bot/dockerfile
+
 services:
   discord-bot:
-    build:
-      context: .
-      dockerfile: docker/discord_bot/dockerfile
+    build: *main-build
     container_name: discord-bot
     restart: always
     # 啟動前自動探索並跑 src/test/ 下所有 hermetic 單元測試（test_*.py）；測試紅就 exit 1，
@@ -25,11 +29,57 @@ services:
       - type: bind
         source: ./logs
         target: /logs
+      # GPU 鎖檔和 search-mcp 共用：兩個容器的 /tmp 是分開的，鎖檔放各自的 /tmp 就各排各的隊
+      - type: bind
+        source: ./gpu_lock
+        target: /gpu_lock
     env_file:
       - .env
     environment:
       # LlamaIndex 將在此服務中以 Python 套件方式執行（非獨立容器）
       - TZ=Asia/Taipei
+      - LEMONADE_GPU_LOCK_PATH=/gpu_lock/lemonade_gpu.lock
+    networks:
+      - discord-net
+    depends_on:
+      pgvector:
+        condition: service_healthy
+
+  # 情報搜尋的 MCP server（常駐）：給這台的 Claude Code 連（.mcp.json → http://127.0.0.1:8765/mcp），
+  # 每天 03:00 同步搜尋索引、補算新文章的向量（llm/mcp_server.py、services/search/nightly.py）。
+  # 沿用 bot 的映像與程式碼，但只帶用得到的環境變數：不帶 Discord token、Telegram 憑證
+  search-mcp:
+    build: *main-build
+    container_name: search-mcp
+    restart: always
+    command: ["python", "-m", "llm.mcp_server", "--http"]
+    expose:
+      - "8765"  # 同一個 docker 網路的服務用 http://search-mcp:8765/mcp
+    ports:
+      - "127.0.0.1:8765:8765"  # 只綁本機：主機上的服務連得到，別台連不到
+    volumes:
+      - type: bind
+        source: ./src
+        target: /app
+      - type: bind
+        source: ./logs
+        target: /logs
+      # 搜尋索引（從 articles.db 建出來的衍生資料，刪掉會自動重建）
+      - type: bind
+        source: ./search_data
+        target: /search_data
+      - type: bind
+        source: ./gpu_lock
+        target: /gpu_lock
+    environment:
+      - TZ=Asia/Taipei
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LEMONADE_GPU_LOCK_PATH=/gpu_lock/lemonade_gpu.lock
+      - LLM_BASE_URL=${LLM_BASE_URL:?LLM_BASE_URL_required}
+      - LLM_TIMEOUT=${LLM_TIMEOUT:-300}
+      - PGVECTOR_DB=${PGVECTOR_DB:-discord_data}
+      - PGVECTOR_USER=${PGVECTOR_USER:?PGVECTOR_USER_required}
+      - PGVECTOR_PASSWORD=${PGVECTOR_PASSWORD:?PGVECTOR_PASSWORD_required}
     networks:
       - discord-net
     depends_on:

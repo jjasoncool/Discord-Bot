@@ -1,22 +1,29 @@
 """MCP server：把情報搜尋（`services.search`）包成兩個工具，給 LLM 客戶端呼叫。
 
-目前的客戶端只有這台的 Claude Code：它照 repo 根目錄的 `.mcp.json` 執行
-`docker exec -i discord-bot python -m llm.mcp_server`，走 stdio。不開 port、不用 token。
+兩種跑法：
+  - 常駐（正式）：docker-compose 的 `search-mcp` 服務執行 `python -m llm.mcp_server --http`，聽 8765 port
+    （主機那端只綁 127.0.0.1）；順便在背景跑每日維護（同步索引、補算向量，見 `services.search.nightly`）。
+    客戶端是這台的 Claude Code，照 repo 根目錄的 `.mcp.json` 連 `http://127.0.0.1:8765/mcp`。不用 token：
+    只有本機連得到
+  - stdio：不帶參數執行，給除錯或沒有常駐服務時用（`docker exec -i search-mcp python -m llm.mcp_server`）
 
 這一層只做協定（宣告工具、轉進呼叫、把結果包回去）；查詢、同步、讀全文都在 `services.search`。
 之後 bot 要用搜尋是直接 import `services.search`，不當 MCP 客戶端。
 
-**stdout 是協定通道**：這個行程不能 print，log 一律寫 `mcp_server.log`（見 `main`）。
+**stdio 模式下 stdout 是協定通道**：不能 print，log 一律寫 `mcp_server.log`（見 `main`）。
 """
 from __future__ import annotations
 
+import argparse
 import logging
 from typing import Any, Literal, Optional
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.transport_security import TransportSecuritySettings
 
 from services.search import SOURCES, DocumentNotFound, IndexTooNew, SearchIndex, default_index
+from sys_settings.search_settings import SEARCH_SETTINGS
 
 logger = logging.getLogger(__name__)
 
@@ -107,13 +114,43 @@ def fetch(id: str, page: int = 1) -> dict[str, Any]:  # noqa: A002 — 參數名
     }
 
 
-def main() -> None:
+def http_options() -> dict[str, Any]:
+    """常駐模式的 HTTP 設定（`main` 與測試共用）。
+
+    - 容器裡聽 0.0.0.0；只綁本機是 docker-compose 的 `ports` 在做
+    - Host 標頭白名單：MCP 套件預設只認 127.0.0.1，改聽 0.0.0.0 後要自己列（防 DNS rebinding：
+      惡意網頁讓瀏覽器把自己的網域解析到 127.0.0.1 來打這個 port，Host 會是那個網域，被擋下）
+    - stateless：每個請求各自獨立、不記 session。容器重開（例如改了程式）後客戶端不必重新連線
+    """
+    return {
+        "host": SEARCH_SETTINGS.mcp_host,
+        "stateless_http": True,
+        "transport_security": TransportSecuritySettings(
+            enable_dns_rebinding_protection=True, allowed_hosts=list(SEARCH_SETTINGS.mcp_allowed_hosts)),
+    }
+
+
+def main(argv: Optional[list[str]] = None) -> None:
     from utils.logger_config import configure_logging
 
-    # 跟 bot 同一個容器：root 改寫自己的檔，不碰 bot 的輪替 log；也不輸出到 stdout
-    configure_logging(force=True, root_handlers=["mcp_file"])
-    logger.info("MCP server 啟動（stdio）")
-    server.run("stdio")
+    parser = argparse.ArgumentParser(description="情報搜尋的 MCP server")
+    parser.add_argument("--http", action="store_true", help="常駐模式：走 HTTP，並在背景跑每日維護")
+    args = parser.parse_args(argv)
+
+    if not args.http:
+        # stdio：stdout 是協定通道，log 只寫自己的檔
+        configure_logging(force=True, root_handlers=["mcp_file"])
+        logger.info("MCP server 啟動（stdio）")
+        server.run("stdio")
+        return
+
+    from services.search import nightly
+
+    # 自己一個容器：log 寫自己的檔，也輸出到畫面（docker logs search-mcp 看得到）
+    configure_logging(force=True, root_handlers=["console", "mcp_file"])
+    logger.info("MCP server 啟動（HTTP，port %d）", SEARCH_SETTINGS.mcp_port)
+    nightly.start_in_background()
+    server.run("streamable-http", port=SEARCH_SETTINGS.mcp_port, **http_options())
 
 
 if __name__ == "__main__":

@@ -1,15 +1,8 @@
 {
   "mcpServers": {
     "wuwa-intel": {
-      "command": "docker",
-      "args": [
-        "exec",
-        "-i",
-        "discord-bot",
-        "python",
-        "-m",
-        "llm.mcp_server"
-      ]
+      "type": "http",
+      "url": "http://127.0.0.1:8765/mcp"
     }
   }
 }

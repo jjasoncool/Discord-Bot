@@ -6,6 +6,8 @@
   - 每筆結果都標明來源、是否官方、連結，模型才能分開講官方與玩家說法並附連結
   - 參數錯（不認得的來源、沒有的 id）要把**可讀的原因**送回模型，讓它改參數重試
   - 模型給了使用者的原句（`question`），重新排序要讀到原句，不是拆過的關鍵字
+  - 常駐模式（`--http`）：聽設定的 port、背景開每日維護；只接受本機與 docker 服務名稱的 Host（防 DNS rebinding）；
+    stdio 模式不開每日維護
 
 執行：
     cd src && python -m unittest test.test_search_mcp_server -v
@@ -14,6 +16,7 @@
 import os
 import sys
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC_DIR = os.path.dirname(HERE)
@@ -25,6 +28,7 @@ from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError  # no
 from llm import mcp_server  # noqa: E402
 from services.search import SOURCES  # noqa: E402
 from services.search.text import normalize  # noqa: E402
+from sys_settings.search_settings import SEARCH_SETTINGS  # noqa: E402
 from test.test_search_index import SearchIndexTestBase  # noqa: E402
 from test.test_search_rerank import StubReranker  # noqa: E402
 
@@ -110,6 +114,48 @@ class McpServerTests(SearchIndexTestBase, unittest.IsolatedAsyncioTestCase):
         await mcp_server.server.call_tool("search", {"query": "桃園會展中心"})
 
         self.assertEqual(stub.queries, [normalize("演唱會在哪裡辦？"), normalize("桃園會展中心")])
+
+
+_INITIALIZE = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+               "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                          "clientInfo": {"name": "test", "version": "1"}}}
+
+
+class HttpModeTests(unittest.TestCase):
+    def test_only_local_and_service_name_hosts_are_accepted(self):
+        from starlette.testclient import TestClient
+
+        options = mcp_server.http_options()
+        options.pop("host")
+        headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+        port = SEARCH_SETTINGS.mcp_port
+        for host, ok in ((f"127.0.0.1:{port}", True), (f"localhost:{port}", True), (f"search-mcp:{port}", True),
+                         (f"evil.example:{port}", False), (f"127.0.0.1.evil.example:{port}", False)):
+            with self.subTest(host=host):
+                with TestClient(mcp_server.server.streamable_http_app(**options), base_url=f"http://{host}") as client:
+                    response = client.post("/mcp", json=_INITIALIZE, headers=headers)
+                self.assertEqual(response.status_code == 200, ok, response.text[:200])
+
+    def test_http_mode_serves_on_the_configured_port_and_starts_nightly(self):
+        with mock.patch("utils.logger_config.configure_logging"), \
+                mock.patch.object(mcp_server.server, "run") as run, \
+                mock.patch("services.search.nightly.start_in_background") as nightly:
+            mcp_server.main(["--http"])
+
+        nightly.assert_called_once()
+        transport = run.call_args.args[0]
+        self.assertEqual(transport, "streamable-http")
+        self.assertEqual(run.call_args.kwargs["port"], SEARCH_SETTINGS.mcp_port)
+        self.assertEqual(run.call_args.kwargs["host"], "0.0.0.0")   # 容器裡要聽所有介面，compose 才轉得進來
+
+    def test_stdio_mode_does_not_start_nightly(self):
+        with mock.patch("utils.logger_config.configure_logging"), \
+                mock.patch.object(mcp_server.server, "run") as run, \
+                mock.patch("services.search.nightly.start_in_background") as nightly:
+            mcp_server.main([])
+
+        run.assert_called_once_with("stdio")
+        nightly.assert_not_called()
 
 
 if __name__ == "__main__":

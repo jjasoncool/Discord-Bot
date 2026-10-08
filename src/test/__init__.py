@@ -10,8 +10,9 @@ import sys
 os.environ.setdefault("APP_TEST_LOG_FILE", "test_run.log")
 
 # 跑單元測試時（啟動 gate、手動 unittest），GPU 閘門的跨行程鎖檔換成這次專用的暫存檔：
-# 用正式的 /tmp/lemonade_gpu.lock 會跟執行中的 bot 互相排隊。手動抽查腳本（test/integration/it_*.py）
-# 不經過 unittest，照樣用正式的鎖檔跟 bot 一起排隊（使用者 10-06：「我希望跑判斷還是要排隊的」）
+# 用正式的鎖檔會跟執行中的 bot 互相排隊。手動抽查腳本（test/integration/it_*.py）
+# 不經過 unittest，照樣用正式的鎖檔跟 bot 一起排隊（使用者 10-06：「我希望跑判斷還是要排隊的」）。
+# 要蓋掉、不能 setdefault：容器的環境變數已經把 LEMONADE_GPU_LOCK_PATH 指到和 search-mcp 共用的正式鎖檔
 if "unittest" in sys.modules:
     import atexit
     import shutil
@@ -19,7 +20,7 @@ if "unittest" in sys.modules:
 
     _lock_dir = tempfile.mkdtemp(prefix="gpu_lock_")
     atexit.register(shutil.rmtree, _lock_dir, True)
-    os.environ.setdefault("LEMONADE_GPU_LOCK_PATH", os.path.join(_lock_dir, "gpu.lock"))
+    os.environ["LEMONADE_GPU_LOCK_PATH"] = os.path.join(_lock_dir, "gpu.lock")
 
 _SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _SRC_DIR not in sys.path:

@@ -1,6 +1,6 @@
 """搜尋評估：拿考卷（`eval/questions.json`）考搜尋，算 Hit Rate@k、MRR@10、Recall@10、nDCG@10。
 
-用法（容器裡）：`python -m services.search.evaluate --label 基準線`
+用法（search-mcp 容器裡）：`python -m services.search.evaluate --label 基準線`
 報告寫到 `services/search/eval/reports/<時間>-<名稱>.json`（設定、各模式的分數、每題正確答案排第幾、
 搜尋回了哪些文件）；表格只印到畫面。結論與數字記在 `AI_HANDOFF_AND_TODO.md` 的 `mcp-search-tools` 區塊，
 不另存 Markdown 報告（使用者 2026-10-08：markdown 收成一份就好）。
