@@ -25,7 +25,11 @@
 > 4. 保留可追溯來源，避免之後重複討論同一件事
 
 最後盤點紀錄（只保留近期；過往詳見 `TODO-completed.md` 各歸檔 entry）：
-- 2026-10-08 17:xx（情報搜尋 P1～P4 完成並 commit `dd89c58`／`539686f`／`998b687`，未推送）：使用者要 markdown 收成一份 → `eval/RESULTS.md`、根目錄 `CONTEXT.md` 併進 `mcp-search-tools` 區塊後刪除、評估報告只留 JSON、`EVAL_DRAFT.md` 刪除；搜尋區塊的討論過程（R2～R12）歸檔到 `TODO-completed.md`；KV cache 另立 `llm-inference-kv` 區塊。R12（MCP 常駐、索引搬家、每日補向量、重排改用原始問句）實作中。
+- 2026-10-08 20:0x（合併搜尋系列的繞路 commit，**未推送**）：使用者「之前改的來來去去的如果繞彎路的我覺得可以合併 rebase」、「甚至不需要有這些檔案的紀錄」→ 搜尋本體 commit 從頭就不含 24 份 `.md` 評估報告與 `CONTEXT.md`、`RESULTS.md`（評估一開始就只寫 JSON、註解一開始就指向本檔），原本的 `7bd56e3` 變空拿掉，`1a25a19` 改成只記錄交接與歸檔（`00767af`）。新編號：搜尋本體 `c842b9b`、LLM 用量 `9b4ec88`、交接 `00767af`、重排讀原句 `c96cc80`、常駐服務 `ca5b837`、本 docs。最後內容和改寫前一字不差；內容有變的兩個快照在容器 `/tmp` 跑完整測試全過（1,245、1,248 項）。改寫前的歷史留在本機分支 `backup/before-search-squash`（沒問題就可刪）。只動搜尋系列；更早未推送的 Telegram 等 commit 沒有加了又刪的檔案，沒動。
+- 2026-10-08 19:4x（R12 **已 commit・未推送**）：使用者「commit」→ 拆成 `c96cc80` feat(search)（重排讀原句、評估、開重排開關、P4 報告）、`ca5b837` feat(search)（常駐服務、每日維護、索引搬家、共用 GPU 鎖檔、`x-main-build` 錨點）、本 docs；前兩個快照各在容器 `/tmp` 跑完整測試全過（1,252、1,263 項）。中間版本只寫進 git index，工作目錄沒動。沒 commit：bot 自己寫的表情／貼圖字典、`it_comfyui_image.py`。同輪討論：search-mcp 共用 bot 映像檔（理由見搜尋區塊的設計決定）、compose 的 bind 不改 named volume。
+- 2026-10-08 19:0x（R12 **已部署・未 commit**）：使用者 18:50 執行 `docker compose up -d --build search-mcp discord-bot`；bot 啟動測試 1,263 項全過、已上線；search-mcp 聽 8765、每日維護已排程；主機連 MCP 200；兩個容器與主機看到的鎖檔是同一個檔（inode 相同）。使用者同意後：`search_rerank_mode` 改 on（實測生效）、刪舊索引 `src/services/search/data/`、刪根目錄 `HANDOFF_MCP_TELEGRAM_FILTER.md`。新發現：閒置後第一次搜尋可能要 20～50 秒（VM 記憶體 7.7 GB，索引與 pgvector 被擠出快取），列為未定案。
+- 2026-10-08 17:1x（R12 實作完成・**未部署、未 commit**）：MCP 改成 compose 服務 `search-mcp`（HTTP、只綁本機 8765、Host 白名單、stateless）、索引搬到 `search_data/`（已用備份 API 複製，舊檔待刪）、每日 03:00 補算向量（`services/search/nightly.py`）、`search` 加 `question` 讓重排讀原句、GPU 鎖檔改掛 `./gpu_lock/` 跨容器共用。完整測試 1,263 項全過、19 個突變全抓到、HTTP 模式實機冒煙通過。P4 重量：關鍵字模式 MRR 0.483 → 0.596。待使用者：部署（`docker compose up -d --build search-mcp discord-bot`，避開 04:00～07:30）、是否開 `search_rerank_mode`、刪舊索引、刪 `HANDOFF_MCP_TELEGRAM_FILTER.md`、commit。
+- 2026-10-08 17:xx（情報搜尋 P1～P4 完成並 commit `dd89c58`／`c842b9b`／`9b4ec88`，未推送）：使用者要 markdown 收成一份 → `eval/RESULTS.md`、根目錄 `CONTEXT.md` 併進 `mcp-search-tools` 區塊後刪除、評估報告只留 JSON、`EVAL_DRAFT.md` 刪除；搜尋區塊的討論過程（R2～R12）歸檔到 `TODO-completed.md`；KV cache 另立 `llm-inference-kv` 區塊。R12（MCP 常駐、索引搬家、每日補向量、重排改用原始問句）實作中。
 - 2026-10-08 11:5x（Telegram 過濾改排隊＋補判，**已上線・已 commit**）：使用者「為什麼那張圖過了 db14106」→ 原因是排 90 秒就放行；改成排隊、30 分鐘才放行、模型掛了每則只問一次；沒判到就送的記 `needs_recheck`（使用者自己加欄）、之後補判、垃圾自動搬進 thread。11:08 重啟上線，14107～14109 都由模型判放行、要補判 0。另一個 session 同時在做情報搜尋 MCP，commit 只帶這輪檔案。細節見 telegram-llm-filter-quarantine 區塊的「TF-Q7 改定案」。
 - 2026-10-07 08:0x（Telegram 舊垃圾訊息搬移，**已 commit・bot 不用重啟**）：搬移功能與一次性腳本完成，db#14095 實際搬過一次並查證（資料庫、主頻道、thread、面板）。使用者：「我確定 commit 但只能跟你修改相關的」——同時有另一個 session 在改插話，只 commit 搬移相關檔案，本檔只帶搬移那段。獨立審查在背景跑，有成立的問題另外補 commit。細節見 telegram-llm-filter-quarantine 區塊的「搬移實作完成」。
 - 2026-10-07 08:2x（RB 收尾並上線：使用者定案門檻「明顯敵意就算」、RB-Q7 不回補、從重啟後開始記；使用者 08:13 重啟、驗收建表正常；使用者要求 commit → `40737ea` refactor(utils)、`0f71b6d` feat(ambient)、本 docs，各快照在容器 /tmp 跑完整測試全過；`emoji_dictionary.txt` 是 bot 看圖補的、不在範圍）。
@@ -295,7 +299,7 @@ last_confirmed: 2026-10-02
 | 點歌機器人（Music Bot） | 已上線運作 | 85% | [點歌機器人](#點歌機器人專區) |
 | Telegram relay 可靠性 | 補掃、媒體防雷、相簿漏圖修正都已上線並驗證（9/29 起合併與補圖符合設計） | 98% | [Telegram 補掃](#telegram-漏收補掃與相簿漏圖已上線) |
 | 程式結構整理 | **主要整理已完成並上線**（`llm/` 與 `services/` 分群、點名去除反向依賴）；剩 P2 拆檔（未決）、P3 `discord_bot.py` 瘦身（暫停）、N3（延後）、命名慣例未寫進 AGENTS.md | 90% | [程式結構整理](#程式結構整理2026-09-29-起主要整理已完成剩-p2p3n3) |
-| 情報搜尋（MCP）：公告、FB、PTT、巴哈 | **P1～P4 已完成並 commit（10-08，未推送）**：全文索引＋向量（RRF）＋reranker、42 題評估（原句 Hit@5 21%→55%）；待做：MCP 改常駐服務＋索引移出 src＋每日補向量、重排改用原始問句 | 85% | [情報搜尋（MCP）](#情報搜尋mcp官網公告官方-fbptt巴哈p1p4-已完成常駐化實作中) |
+| 情報搜尋（MCP）：公告、FB、PTT、巴哈 | **P1～P4 已 commit（10-08，未推送）**：全文索引＋向量（RRF）＋reranker、42 題評估（原句 Hit@5 21%→67%、關鍵字 60%→81%）；**R12 已上線並 commit（10-08，未推送）**：常駐服務 `search-mcp`、索引移到 `search_data/`、每日補向量、重排讀原句並已開啟；待決定：閒置後第一次搜尋慢 | 90% | [情報搜尋（MCP）](#情報搜尋mcp官網公告官方-fbptt巴哈p1p4-已完成常駐服務已上線) |
 | LLM 推論：KV cache 與 GPU | 查證完成、`llm_usage` 已上線；待調 prompt 順序、`--parallel` 實驗 | 30% | [LLM 推論](#llm-推論kv-cacheprompt-快取與-gpu2026-10-08-查證) |
 | Telegram 訊息 LLM 過濾 + 隔離區 | **構想（2026-09-28）**，討論中 | 0% | [Telegram 過濾](#telegram-訊息-llm-過濾--隔離區2026-09-28-構想討論中) |
 | 週期活動提醒（深塔海墟矩陣） | **已上線**：9/29 20:00 矩陣結束前提醒實發、手機通知確認正常；待 10/7 矩陣開放與自介面板置底驗證 | 95% | [週期活動提醒](#週期活動提醒深塔海墟矩陣已上線) |
@@ -507,30 +511,34 @@ affects: src/ 全部資料夾、mcp-search-tools（R2-Q5 程式放哪）、test_
 
 ---
 
-## 情報搜尋（MCP）：官網公告、官方 FB、PTT、巴哈（P1～P4 已完成，常駐化實作中）
+## 情報搜尋（MCP）：官網公告、官方 FB、PTT、巴哈（P1～P4 已完成，常駐服務已上線）
 
 <!-- @meta
 id: mcp-search-tools
 type: STATE
 status: confirmed
 last_confirmed: 2026-10-08
-affects: services/search、llm/mcp_server.py、.mcp.json、pgvector data_search_chunks、Lemonade（embedding、reranker）、之後的 /askai
+affects: services/search、llm/mcp_server.py、.mcp.json、docker-compose（search-mcp、gpu_lock）、search_data/、pgvector data_search_chunks、Lemonade（embedding、reranker）、之後的 /askai
 -->
 
 > 2026-09-29～10-08 每一輪的討論與查證（R2～R12）原文在 `TODO-completed.md`「MCP／搜尋工具化：討論與實作紀錄」。本區只放現況、定案、數字與待辦；評估紀錄（原 `eval/RESULTS.md`）與用語（原根目錄 `CONTEXT.md`）也併在這裡。
 
 **現況（2026-10-08）**
 - 用途：讓 LLM 自己決定要不要查、查什麼；來源是官網公告、官方 FB、PTT、巴哈（Telegram 內鬼頻道、依 ID 查人不納入）。先做成 MCP server 給這台的 Claude Code 用；bot 之後直接 import `services.search`，不當 MCP 客戶端。
-- 已 commit（未推送）：`dd89c58` refactor（共用網址、RRF、同步 GPU 閘門、側行程 log）、`539686f` feat(search)、`998b687` feat(llm)（逐筆 LLM 用量 log）。完整測試 1,248 項全過，新測試都做過突變驗證。
-- 運作中：MCP 走 stdio（`.mcp.json` 用 `docker exec -i discord-bot python -m llm.mcp_server`）；`settings/switches.json` 的 `search_vector_mode: on`、`search_rerank_mode: off`（重排在關鍵字模式變差，待修）。
+- 已 commit（未推送）：`dd89c58` refactor（共用網址、RRF、同步 GPU 閘門、側行程 log）、`c842b9b` feat(search)、`9b4ec88` feat(llm)（逐筆 LLM 用量 log）。完整測試 1,248 項全過，新測試都做過突變驗證。
+- **R12 已部署（10-08 18:50）、已 commit（`c96cc80`、`ca5b837`，未推送）**：MCP 是常駐的 compose 服務 `search-mcp`（HTTP，`127.0.0.1:8765`）、索引在 repo 根目錄 `search_data/`（舊位置已刪）、每天 03:00 補算新文章向量、重排讀原句。完整測試 1,263 項全過、19 個突變全抓到。
+- 運作中：`settings/switches.json` 的 `search_vector_mode: on`、`search_rerank_mode: on`（10-08 使用者同意打開）。
 - 索引：11.2 萬份文件（公告 543、FB 874、PTT 5.5k、巴哈 10.5 萬樓）；向量：2026 年起的 1.8 萬段（巴哈只做攻略、心得、情報、問題四類討論串）。
 
 **架構**
-- `llm/mcp_server.py`：MCP 協定層，只有 `search(query, sources?, since, until, limit)` 與 `fetch(id, page)` 兩個工具；參數錯把原因原文回給模型（`ToolError`）。
-- `services/search/`：`index.py`（索引同步、召回、排序、RRF 合併、重排、讀全文）、`sources.py`（來源登記表；加來源＝寫一個 `Source`）、`text.py`（HTML 轉文字、NFKC＋簡轉繁、兩字組切詞）、`chunking.py`、`vectors.py`（pgvector＋HNSW、問句向量）、`embed.py`（批次算向量）、`rerank.py`、`evaluate.py`；`eval/`（`questions.json` 考卷、`keyword_queries.json`、`reports/*.json`、`private/` 證據句不進 git）；`data/search_index.db`（SQLite＋WAL，不進 git，可刪掉重建約 3.5 分鐘）。
+- `llm/mcp_server.py`：MCP 協定層，只有 `search(query, sources?, since, until, limit, question?)` 與 `fetch(id, page)` 兩個工具；參數錯把原因原文回給模型（`ToolError`）。`--http` 是常駐模式（stateless Streamable HTTP、聽 0.0.0.0:8765、Host 白名單 `127.0.0.1`／`localhost`／`search-mcp`，別的 Host 回 421），並在背景開每日維護；不帶參數是 stdio（備用）。
+- compose 服務 `search-mcp`：沿用 bot 的 build（兩邊引用同一個錨點 `x-main-build`，不改 Dockerfile）、`restart: always`、不跑啟動測試（discord-bot 已經跑同一份程式的）；只帶 `LLM_BASE_URL`、`LLM_TIMEOUT`、`PGVECTOR_*`、`LOG_LEVEL`、`TZ`、`LEMONADE_GPU_LOCK_PATH`（沒有 Discord token、Telegram 憑證）；掛 `./src`、`./logs`、`./search_data`、`./gpu_lock`；`ports: 127.0.0.1:8765:8765`＋`expose: 8765`。`.mcp.json` 改成 `{"type": "http", "url": "http://127.0.0.1:8765/mcp"}`。
+- `services/search/nightly.py`：每天 03:00～04:00 之間做一次「同步索引＋補算向量」（`embed.embed_pending`，向量開關關著只同步）；04:00 之後才啟動不補做、等明天；同一天不重做、出錯也不在同一時段重試；排程走 `utils.due_loop.run_due_loop`，在自己的執行緒與 event loop 上跑。
+- GPU 鎖檔跨容器：各容器的 `/tmp` 是分開的，所以 discord-bot 與 search-mcp 都掛 `./gpu_lock` 並設 `LEMONADE_GPU_LOCK_PATH=/gpu_lock/lemonade_gpu.lock`；單元測試由 `test/__init__.py` 強制換成暫存檔（不能 `setdefault`，容器的環境變數已經有值）。
+- `services/search/`：`index.py`（索引同步、召回、排序、RRF 合併、重排、讀全文）、`sources.py`（來源登記表；加來源＝寫一個 `Source`）、`text.py`（HTML 轉文字、NFKC＋簡轉繁、兩字組切詞）、`chunking.py`、`vectors.py`（pgvector＋HNSW、問句向量）、`embed.py`（批次算向量）、`rerank.py`、`evaluate.py`；`nightly.py`（每日維護）；`eval/`（`questions.json` 考卷、`keyword_queries.json`、`reports/*.json`、`private/` 證據句不進 git）。索引 `search_data/search_index.db`（repo 根目錄，只掛給 search-mcp 的 `/search_data`；SQLite＋WAL，不進 git，可刪掉重建約 3.5 分鐘；沒掛的容器用到會直接失敗，不會悄悄另建一份）。
 - 設定 `sys_settings/search_settings.py`；開關 `settings/switches.json`；模型 `sys_settings/llm_runtime_config.json` 的 `embed_model`、`rerank_model` 與 `model_load_options`（reranker：`-sm none -mg 0 -ub 1024 -b 1024`）。
 - 依賴單向：MCP 層 → 搜尋本體 → 共用元件（`services.source_urls`、`utils.rank_fusion`、`lemonade_gate.gpu_exclusive_sync`）。搜尋本體不 import discord 與 mcp；bot 程式沒有 import 搜尋。
-- 搜尋流程：全詞（FTS5 trigram，每個長關鍵字整段出現）＋兩字組 BM25（FTS5 contentless，整句也能用）＋一個字的詞走 LIKE → 依「含幾個關鍵字 → 兩字組 BM25 名次 → 新舊」排 → 向量（餘弦距離 ≤ 0.35）與關鍵字名次 RRF（k=60）合併 →（開關開時）前 30 篇 reranker 重排 → 每種來源最多 5 筆、總共最多 20 筆。
+- 搜尋流程：全詞（FTS5 trigram，每個長關鍵字整段出現）＋兩字組 BM25（FTS5 contentless，整句也能用）＋一個字的詞走 LIKE → 依「含幾個關鍵字 → 兩字組 BM25 名次 → 新舊」排 → 向量（餘弦距離 ≤ 0.35）與關鍵字名次 RRF（k=60）合併 →（開關開時）前 30 篇 reranker 重排（有 `question` 就讀原句；每篇挑哪一段仍看查詢字）→ 每種來源最多 5 筆、總共最多 20 筆。
 - 同步：游標 (updated_at, 列 id)＋內容 hash（巴哈每天約兩萬列只是「最後看到時間」變了）；索引版本只升不降（舊行程遇到新索引丟 `IndexTooNew`，不會把它砍回舊版）；`articles.db` 一律 `mode=ro`。
 - GPU：所有 embedding、rerank 都走 `gpu_exclusive_sync`，和 bot 排同一個隊；問句向量與重排最多等 10 秒（`query_gpu_wait_seconds`），等不到這次跳過那一步；批次一直等。向量或重排壞掉都退回關鍵字結果，搜尋本身不會失敗。
 
@@ -540,8 +548,9 @@ affects: services/search、llm/mcp_server.py、.mcp.json、pgvector data_search_
 - **段落**：文件切出來算向量的片段（約 500 字、重疊 80 字，每段帶標題）；命中任一段就算命中那份文件。
 - **評估集（考卷）**、**正確答案**（讀了就能回答；一題可有好幾篇）、**只答一半**（預設不算對）。
 
-**常用指令**（容器裡；`AGENTS.md` 的 Docker 例外允許 agent 直接執行）
+**常用指令**（`docker exec search-mcp …`；`AGENTS.md` 的 Docker 例外允許 agent 直接執行。discord-bot 沒掛 `search_data/`，在那裡跑會失敗）
 - `python -m services.search`：手動同步索引。
+- `docker logs search-mcp`：啟動、每日維護的結果（也寫 `logs/mcp_server.log`）。
 - `python -m services.search.embed [--dry-run] [--limit N] [--since YYYY-MM-DD]`：補算向量（增量、排 GPU 隊）。
 - `python -m services.search.evaluate --label 名稱 [--vector on|off] [--rerank on|off] [--split 全部|A|B] [--vector-weight W] [--max-distance X|inf] [--diagnose-vectors]`：報告寫到 `eval/reports/<時間>-<名稱>.json`。
 
@@ -563,13 +572,16 @@ affects: services/search、llm/mcp_server.py、.mcp.json、pgvector data_search_
 | P3 | 同上 | 關鍵字 | 45% | 74% | 79% | 0.559 | 55% | 0.476 | 77% | 67% | `1554-P3-不重排-新指標` |
 | P4 | 合併後前 30 篇 reranker 重排 | 原句 | 48% | 67% | 71% | 0.555 | 46% | 0.433 | 73% | 50% | `1609-P4-重排前30篇` |
 | P4 | 同上 | 關鍵字 | 31% | 74% | 76% | 0.483 | 46% | 0.389 | 77% | 67% | `1609-P4-重排前30篇` |
+| P4 原句重排 | 重排改讀原句（`question`），挑段落仍看查詢字 | 原句 | 48% | 67% | 71% | 0.555 | 46% | 0.433 | 73% | 50% | `1705-P4-重排用原句` |
+| P4 原句重排 | 同上 | 關鍵字 | 48% | 81% | 81% | 0.596 | 54% | 0.482 | 83% | 75% | `1705-P4-重排用原句` |
 
 （報告檔名前面都是 `20261008-`；P1、P1.5 當時還沒有 Recall／nDCG。P3 與 `1341-P3-門檻0.35` 的數字完全相同，後者是第一次跑的。）
 
 - **P1 → P1.5**：兩字組讓原句 +17、關鍵字 +11 個百分點（搜尋端）；關鍵字改寫 +33～39 個百分點（客戶端，影響更大）。代價：原句模式平均 23 → 87 ms、索引 242 → 299 MB、整份重建 55 → 204 秒。「P1 關鍵字」是事後補量：在容器暫存區把程式還原成 P1 另建暫時索引，同一份程式量原句得到 21%／0.195，和當初的基準線完全一致。
 - **P3 門檻怎麼選**：第一次挑候選門檻用了全部 42 題的距離分布（B 半參與了選擇，程式碼審查抓到），照規則重做——只用 A 半的分布，候選＝正確答案距離的中位數與第 90 百分位（0.35、0.43），A 半選出 0.35（MRR 平均 0.403，只用關鍵字 0.391，差距可能是雜訊），**B 半驗收 0.476 → 0.602**，兩半一致才採用。調參報告在 `reports/調參過程/`。
 - **P3 的觀察**：向量幫最多的是原句模式與攻略題（攻略題原句 0% → 33%）；正確答案有向量的 22 題原句 Hit@5 77%、沒有向量的（2025 年以前）30%——舊資料補向量是最直接的改進。只有 1,000 份有向量的預覽版整體反而變差（原句 38 → 29%）：向量那一路涵蓋不全時，會把不相關的新文章與關鍵字找對的結果平分名次；混合檢索的兩路要涵蓋同一批資料、向量要有門檻。
-- **P4 的觀察**：只比一種設定、沒有挑參數。原句模式明顯變好（MRR 0.446 → 0.555；A 半 0.335 → 0.561、B 半 0.557 → 0.549）；**關鍵字模式變差**（0.559 → 0.483；A 半 0.471 → 0.487、B 半 0.647 → 0.478）。推測 reranker 是用自然語言問句訓練的，「卜靈 身分」這種斷片判不準 → 改用原始問句（待做）。第一次 P4 評估約三分之一請求失敗（llama.cpp 的物理批次預設 512 token，段落＋問題到 530～569 token），已作廢（`調參過程/*P4-重排前30篇-作廢-批次上限`），加 `-ub 1024 -b 1024` 後重跑零失敗。
+- **P4 的觀察**：只比一種設定、沒有挑參數。原句模式明顯變好（MRR 0.446 → 0.555；A 半 0.335 → 0.561、B 半 0.557 → 0.549）；**關鍵字模式變差**（0.559 → 0.483；A 半 0.471 → 0.487、B 半 0.647 → 0.478）。推測 reranker 是用自然語言問句訓練的，「卜靈 身分」這種斷片判不準 → 改用原始問句（見下一點）。第一次 P4 評估約三分之一請求失敗（llama.cpp 的物理批次預設 512 token，段落＋問題到 530～569 token），已作廢（`調參過程/*P4-重排前30篇-作廢-批次上限`），加 `-ub 1024 -b 1024` 後重跑零失敗。
+- **P4 原句重排（10-08 17:05）**：只改一處、沒挑參數。關鍵字模式 MRR 0.483 → **0.596**（也高過不重排的 0.559），Hit@1 31 → 48%、Hit@5 74 → 81%；A 半 0.487 → 0.563、B 半 0.478 → 0.629（和不重排比：A 0.471 → 0.563、B 0.647 → 0.629，B 的差距不到一題的量）。原句模式與上一次一字不差（這個模式下原句就是查詢字），等於重現了舊結果。推測成立：reranker 要讀自然語言問句。還沒過的 8 題多是暱稱（家主、汐汐、水母）與答案只在舊資料（沒向量）。
 - 速度：向量化約 4,600 字／秒（今年 1.8 萬段 16 分鐘，含讓路 4 分鐘）；reranker 30 篇約 1.6 秒（第一次載入 24 秒）。
 
 **已定案的設計決定**（理由）
@@ -582,14 +594,15 @@ affects: services/search、llm/mcp_server.py、.mcp.json、pgvector data_search_
 - 向量門檻 0.35（A／B 拆半選出）；重排前 30 篇、在來源上限之前做、段落＝標題＋和問題重疊最多的那段。
 - 先做 2026 年起的向量（比例原則，使用者 R10-Q2），舊資料之後補；巴哈只做四類討論串。
 - 開關放 `switches.json`（預設關）；考卷留在 git（只有問題與文件 id），論壇原文不進 git（R5-Q3）。
+- compose 的 bind 掛載不改 named volume（10-08 使用者問）：`./src`（即時改程式）、`./logs`（主機要看）、`search_data`（主機要備份、刪除）都需要主機路徑；`gpu_lock` 改 named volume 的話資料夾歸 root、容器裡的 appuser 建不了鎖檔，只會記警告然後各排各的隊。重複只有三個掛載，YAML 合併不了清單，只把 `build:` 抽成 `x-main-build` 錨點（兩個服務的映像檔不能分岔）。
+- search-mcp 共用 bot 的映像檔、不另做精簡版（10-08 使用者問）：實測一次完整搜尋只載入 mcp、opencc、llama-index-core（embedding 用戶端和 bot 的聊天記憶共用）、psycopg2、bs4／lxml 等，discord.py、yt-dlp、Telethon 都沒載入——沒用到的套件不佔記憶體（search-mcp 約 190 MB）；兩個映像檔 12 層全部共用，不多佔硬碟。另做一份反而要多維護一份 requirements，共用的程式（`sys_settings`、`llm.client`、`utils`）加了 bot 專用套件的 import 時精簡版會在執行時才壞，opencc 版本分岔還會讓索引的正規化方式不一致。之後搜尋要搬到別台機器或單獨發布時再拆。
+- R12（10-08）：MCP 常駐成獨立的 compose 服務（不放進 bot 行程：建索引會搶 event loop、改程式要重啟 bot、開 port 的行程不該握有 Discord token）；stateless HTTP（容器重開客戶端不用重連）；容器聽 0.0.0.0、主機只綁 127.0.0.1、Host 白名單防 DNS rebinding；索引移出 `src/`（幾百 MB 衍生資料不跟程式碼混）；每日維護避開 04:00～07:30、不補做（漏一天下次一起補）；`question` 只給重排用（reranker 用自然語言問句訓練；關鍵字適合找、挑段落）。
 - 2026-10-08 程式碼審查（5 個面向的 agent 找、每個發現再由懷疑者反駁，29 個成立 13 個）修掉：批次向量沒走 GPU 閘門、新舊行程輪流重建索引、評估挑門檻用到 B 半、只刪結尾時舊段沒刪、`relaxed_order` 沒排序就去重、`until=9999-12-31` 溢位、共用元件表漏列。
 
 **待做**
-1. **R12 實作**（使用者 10-08 同意）：
-   - MCP 常駐：新增 compose 服務 `search-mcp`（沿用 discord-bot 映像、不改 Dockerfile、`restart: always`、不帶 Discord token），`mcp_server.py` 加 HTTP 模式，`.mcp.json` 改連網址；port：`expose: 8765` 加 `ports: "127.0.0.1:8765:8765"`（只綁本機；只有 `expose` 的話 Claude Code 在主機上連不到）。容器裡要聽 0.0.0.0，MCP 套件的 DNS rebinding 保護要允許 localhost 與服務名稱。
-   - 索引移出 `src/`：repo 根目錄 `search_data/`（不進 git），只掛給需要的容器。
-   - 每日 03:00（避開 04:00～07:30 維護時段）在 `search-mcp` 服務同步索引、補算新文章向量；bot 不改。
-   - 重排改用原始問句：MCP `search` 加可選 `question`，重排時優先用它；評估的關鍵字模式把原句一起傳，改完重量 P4。
+1. **R12 收尾**：已部署、驗收、commit；Claude Code 重連後 `search`、`fetch` 實測可用（10-08 19:22）。
+   - **未定案：閒置後第一次搜尋很慢**。實測：部署後第一次 37 秒（同步 20 秒＋載入模型）；另一次 48 秒，Lemonade log 顯示空檔落在「問句向量算完」到「送出重排」之間，也就是讀 pgvector 或搜尋索引；同一句再跑 1.2 秒。原因：VM 記憶體 7.7 GB（快取約 3.7 GB，和 bot、pgvector、其他服務共用）、虛擬硬碟，閒置後索引頁面被擠出快取。選項：(a) 先接受（目前只有 Claude Code 偶爾用）；(b) 搜尋各階段計時寫進 log（總時間超過幾秒才記），先分清楚是 pgvector 還是 SQLite 慢；(c) 定時暖快取（會跟其他服務搶記憶體，不建議）；(d) 縮小讀取量（例：兩字組 BM25 對很常見的字組設上限）。建議：先做 (b)，有數據再決定 (d)。
+   - 未定案：向量那一路要不要也改用原句（embedding 的查詢說明本來就寫「問題」；關鍵字斷片的向量可能比較差）。建議：照重排的做法加進評估量一次再決定。
 2. 舊資料（2025 年以前）補向量；之後再量一次。
 3. 暱稱對照表（查詢擴展；家主＝坎特蕾拉、汐汐＝今汐、水母＝坎特蕾拉、里哥／要哥＝相里要…），前後都要量。
 4. 向量的模型指紋（分支事項，使用者「先記起來」）：向量表沒記是哪個模型算的、hash 只看文字，換 embedding 模型會新舊座標系混用且不報錯；要補時一個模型一張表、用考卷比較後切換。pgvector 的維數是欄位型別的一部分不能直接改；HNSW 上限 2,000 維（更大用 `halfvec`）。
