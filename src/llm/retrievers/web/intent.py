@@ -150,9 +150,11 @@ _NEWS_QUERY_NOISE = re.compile(
     r"新聞|頭條|時事|消息|報導|大事|情況|狀況|資訊|相關|重點|整理|"
     r"有沒有|有什麼|有哪些|什麼|哪些|怎麼樣|怎樣|如何|多少|發生|事情|重要|值得|"
     r"請問|請|幫我|想|知道|看看|一下|告訴我|我|你|"
-    r"的|嗎|呢|了|是|在|可以|能|幫|找|查|說|講|到|過|有|吧|啊|呀|"
-    r"[\s，,、。？?！!~～]"
+    r"的|嗎|呢|了|是|在|可以|能|幫|找|查|說|講|到|過|有|吧|啊|呀"
 )
+# 空白與標點換成一個空白、不是刪掉：英文關鍵字黏在一起（「NBA Lakers playoffs」→「NBALakersplayoffs」）
+# 新聞引擎與通用引擎都查不到（10-09 審查實測 0 筆）；中文本來就靠引擎自己斷詞，留空白無妨
+_NEWS_QUERY_SEPARATORS = re.compile(r"[\s，,、。？?！!~～]+")
 _NEWS_ANCHOR_QUERY = "台灣 新聞"
 
 
@@ -164,7 +166,8 @@ def focus_news_query(cleaned: str, categories: str | None) -> str:
     """
     if categories != "news" or not cleaned:
         return cleaned
-    topic = _NEWS_QUERY_NOISE.sub("", cleaned).strip()
+    spaced = _NEWS_QUERY_SEPARATORS.sub(" ", cleaned)
+    topic = " ".join(_NEWS_QUERY_NOISE.sub("", spaced).split())
     return topic if len(topic) >= 2 else _NEWS_ANCHOR_QUERY
 
 

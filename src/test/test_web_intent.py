@@ -271,6 +271,11 @@ class NewsQueryFocusTests(unittest.TestCase):
             should_search("鳴潮什麼時候改版").cleaned_query, "鳴潮什麼時候改版"
         )
 
+    def test_keywords_stay_apart(self):
+        # 空白與標點換成一個空白，不黏在一起：英文黏字新聞引擎與通用引擎都查不到（10-09 審查實測 0 筆）
+        self.assertEqual(focus_news_query("NBA Lakers playoffs 最新", "news"), "NBA Lakers playoffs")
+        self.assertEqual(focus_news_query("台積電，營收 最新消息", "news"), "台積電 營收")
+
     def test_helper_is_news_only(self):
         self.assertEqual(focus_news_query("今天有什麼新聞", None), "今天有什麼新聞")
         self.assertEqual(focus_news_query("今天有什麼新聞", "news"), "台灣 新聞")
