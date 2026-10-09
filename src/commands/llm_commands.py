@@ -16,6 +16,7 @@ from discord.ext import commands
 from llm.logger_factory import build_askai_prompt_log, get_or_create_file_logger
 from llm.persona.persona_card_builder import extract_mentioned_user_ids
 from llm.retrievers.context_retriever import retrieve_discord_context, retrieve_rag_context_sync
+from llm.retrievers.intel import run_with_intel
 from llm.retrievers.web import WebRetrievalOutcome, fetch_web_results, format_web_context_lines, should_search
 from llm.client.lemonade_gate import imagegen_busy, note_foreground_activity
 from llm.persona.member_names import member_names_from_guild, name_map_lines
@@ -30,8 +31,10 @@ from llm.preprocess.vision_image import (
     is_vision_image,
 )
 from services.llm_service import LLMService
-from sys_settings.llm_settings import AskAICommandSettings, AskAIWebSettings
+from sys_settings import switches
+from sys_settings.llm_settings import AskAICommandSettings, AskAIIntelSettings, AskAIWebSettings
 from sys_settings.time_settings import APP_TZ
+from utils.discord_content import DISCORD_MESSAGE_LIMIT, split_message
 from utils.dm_notifier import send_dm
 from utils.utils import safe_send_interaction_message, check_guild
 
@@ -39,6 +42,7 @@ logger = logging.getLogger(__name__)
 
 ASKAI_SETTINGS = AskAICommandSettings()
 WEB_SETTINGS = AskAIWebSettings()
+INTEL_SETTINGS = AskAIIntelSettings()
 PROMPT_FILE_PATH = Path(ASKAI_SETTINGS.prompt_file_path)
 IDENTITY_FILE_PATH = Path(ASKAI_SETTINGS.identity_file_path)
 GUARDRAILS_FILE_PATH = Path(ASKAI_SETTINGS.guardrails_file_path)
@@ -196,6 +200,7 @@ def append_askai_response_log(
     trace_id: str | None = None,
     messages_sent: list[dict[str, object]] | None = None,
     error_kind: str | None = None,
+    intel_meta: dict[str, object] | None = None,
 ) -> None:
     """將每次 askai 的輸入/輸出與必要統計 append 到 jsonl，供後續觀察改善。
 
@@ -203,6 +208,7 @@ def append_askai_response_log(
     `messages_sent` 只在失敗時保留（含圖片佔位符），成功時不存——askai_prompt.txt
     已記錄同源 prompt_record_log，重複落盤一份完整 messages 會讓 jsonl 體積膨脹過快。
     `error_kind` 在失敗時標記類型（no_choices / empty_content / http_error / timeout / connection / unknown）。
+    `intel_meta` 是查遊戲情報的經過：開關、有沒有連上 search-mcp、呼叫了哪些工具（參數、花多久、結果 id 或錯誤）。
     """
     guild_id = interaction.guild.id if interaction.guild else None
     channel_id = interaction.channel.id if interaction.channel else None
@@ -229,6 +235,7 @@ def append_askai_response_log(
         "discord_context_meta": discord_meta,
         "rag_context_meta": rag_meta,
         "web_context_meta": web_meta,
+        "intel_meta": intel_meta,
     }
 
     response_logger = get_or_create_file_logger(
@@ -239,6 +246,20 @@ def append_askai_response_log(
         backup_count=ASKAI_SETTINGS.response_log_backup_count,
     )
     response_logger.info(json.dumps(record, ensure_ascii=False))
+
+
+async def send_followup_in_parts(interaction: discord.Interaction, text: str) -> None:
+    """把 /askai 的回覆送出去；超過 Discord 一則 2000 字就切成多則，只有第一則 @ 發問者。
+
+    問題（斜線指令可以打到 6000 字）＋回答＋引用網址很容易超過（2026-05-04 出過錯，使用者只看到「執行命令時
+    發生錯誤」）。split_message 平衡暴雷標記時每段最多多 4 個字，所以留點餘裕。"""
+    chunks = split_message(text, DISCORD_MESSAGE_LIMIT - 10)
+    await interaction.followup.send(
+        content=chunks[0],
+        allowed_mentions=discord.AllowedMentions(users=[interaction.user]),
+    )
+    for chunk in chunks[1:]:
+        await interaction.followup.send(content=chunk, allowed_mentions=discord.AllowedMentions.none())
 
 
 class _AskaiCancelButton(discord.ui.View):
@@ -701,28 +722,42 @@ class LLMCommands(commands.Cog):
         elif interaction.client.user:
             bot_display_name = name_with_anchor(interaction.client.user)
 
-        # 用 asyncio.Task 包裝，取消時可中斷 Ollama HTTP 請求
-        llm_task = asyncio.create_task(self.llm_service.generate_reply(
-            prompt=llm_question,
-            system=system_prompt,
-            chat_context=chat_context,
-            bot_history=bot_history,
-            persona_context=persona_context,
-            target_profiles=target_profiles,
-            web_context=web_context,
-            images=image_payload,
-            model=target_model,
-            think=target_think,
-            asker_profile=asker_profile_text,
-            asker_display_name=asker_display_name,
-            bot_display_name=bot_display_name,
-            # 閒置 1h 後才釋放 VRAM，避開反覆 unload/reload 觸發的 Windows
-            # ephemeral port 與 runner crash（Ollama 時代的實戰教訓，值刻意保留）。
-            # ⚠️ 只有 Ollama 吃這個值：Lemonade 沒有 TTL 概念，會被
-            # `_build_chat_extra_body` 丟進 ignored。Lemonade 下要讓出 VRAM 只有
-            # 一條路——產圖排程在 `gpu_exclusive` 內呼叫 `LLMService.release_model()`。
-            keep_alive="1h",
-            trace_id=trace_id,
+        # 查遊戲情報（llm.retrievers.intel → search-mcp）：開關開著才連；連不上就照原本的方式回答。
+        # 要不要查、查什麼由模型決定（之前定案：關鍵字觸發會漏掉該查的，見 generate_reply 的工具輪）
+        intel_mode = switches.current().askai_intel_search_mode
+        intel_meta: dict[str, object] = {"mode": intel_mode}
+
+        async def _generate(tool_runner=None):
+            return await self.llm_service.generate_reply(
+                prompt=llm_question,
+                system=system_prompt,
+                chat_context=chat_context,
+                bot_history=bot_history,
+                persona_context=persona_context,
+                target_profiles=target_profiles,
+                web_context=web_context,
+                images=image_payload,
+                model=target_model,
+                think=target_think,
+                asker_profile=asker_profile_text,
+                asker_display_name=asker_display_name,
+                bot_display_name=bot_display_name,
+                # 閒置 1h 後才釋放 VRAM，避開反覆 unload/reload 觸發的 Windows
+                # ephemeral port 與 runner crash（Ollama 時代的實戰教訓，值刻意保留）。
+                # ⚠️ 只有 Ollama 吃這個值：Lemonade 沒有 TTL 概念，會被
+                # `_build_chat_extra_body` 丟進 ignored。Lemonade 下要讓出 VRAM 只有
+                # 一條路——產圖排程在 `gpu_exclusive` 內呼叫 `LLMService.release_model()`。
+                keep_alive="1h",
+                trace_id=trace_id,
+                tool_runner=tool_runner,
+                max_tool_rounds=INTEL_SETTINGS.max_tool_rounds,
+                decide_max_tokens=INTEL_SETTINGS.decide_max_tokens,
+            )
+
+        # 用 asyncio.Task 包裝，取消時可中斷 LLM 的 HTTP 請求；查情報的連線開在同一個 task 裡，按取消時一起中斷
+        llm_task = asyncio.create_task(run_with_intel(
+            _generate, question=resolved_question, enabled=intel_mode == "on", meta=intel_meta,
+            settings=INTEL_SETTINGS,
         ))
 
         # 同時等 LLM 回覆和取消事件
@@ -738,12 +773,27 @@ class LLMCommands(commands.Cog):
             await asyncio.gather(llm_task, cancel_waiter, return_exceptions=True)
             if cancel_event.is_set():
                 return
-            llm_result = llm_task.result()
         else:
-            llm_result = await llm_task
+            await asyncio.wait([llm_task])
+        if llm_task.cancelled():
+            # 不是使用者按的取消，回答卻被取消了（例如底層連線出錯時的連帶取消）：當成這次失敗、正常結束，
+            # 別讓 CancelledError 一路穿出去——排隊的工作者接不到它會整個結束，後面排隊的人都卡住
+            logger.error("askai 回答意外被取消 trace=%s", trace_id)
+            if thinking_msg:
+                try:
+                    await thinking_msg.edit(content="⚠️ 這次沒有順利回答，請再試一次。", view=None)
+                except Exception:
+                    pass
+            return
+        llm_result = llm_task.result()
 
         reply = llm_result.reply
         prompt_record_log = llm_result.prompt_record_log
+        if intel_mode == "on":
+            intel_calls = intel_meta.get("calls") or []
+            logger.info("askai 查情報 trace=%s 連上=%s 呼叫=%s", trace_id, intel_meta.get("connected"),
+                        [(c.get("tool"), c.get("elapsed_ms"), c.get("error") or len(c.get("result_ids") or []))
+                         for c in intel_calls])
         messages_sent = llm_result.messages_sent
         error_kind = llm_result.error_kind
 
@@ -817,6 +867,7 @@ class LLMCommands(commands.Cog):
                 trace_id=trace_id,
                 messages_sent=messages_sent,
                 error_kind=error_kind,
+                intel_meta=intel_meta,
             )
         except Exception as exc:
             logger.warning("寫入 askai response history 失敗 trace=%s: %s", trace_id, exc)
@@ -831,10 +882,7 @@ class LLMCommands(commands.Cog):
             response_lines.append(f"🖼️ **圖片：** {image.url}")
         response_text = "\n".join(response_lines)
 
-        await interaction.followup.send(
-            content=response_text,
-            allowed_mentions=discord.AllowedMentions(users=[interaction.user])
-        )
+        await send_followup_in_parts(interaction, response_text)
 
         # 回覆完成後停用取消按鈕
         if cancel_view and thinking_msg:

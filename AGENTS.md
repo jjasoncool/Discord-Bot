@@ -69,6 +69,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 已發送去重 | StateDB `sent_content`（`is_content_sent`／`mark_content_as_sent`） |
 | 版本更新時刻 | `services.events.event_scheduler.VersionDateResolver`（`refresh()`、`update_starts()`；只看時間，不看版本號） |
 | GPU 獨佔（產圖時卸載 LLM） | `llm.client.lemonade_gate.gpu_exclusive(owner, lease_seconds)`（另開的行程、search-mcp 容器也一起排隊：跨行程鎖檔，跨容器靠 compose 掛同一個 `gpu_lock/` 並設 `LEMONADE_GPU_LOCK_PATH`）；沒有 event loop 的同步程式（情報搜尋的批次算向量、MCP）用 `gpu_exclusive_sync()` |
+| 讓模型先用工具查、再回答（決策輪不開思考限長度、正式輪照原設定、每輪帶同一份工具清單、查滿輪數保證有文字） | `LLMService.generate_reply(tool_runner=…)`（工具介面 `llm.client.tool_calls.ToolRunner`；/askai 查情報用它，不要再寫一份迴圈） |
 | 工具呼叫的訊息格式（模型要呼叫工具的 assistant 訊息、`role: tool` 回覆、取工具名稱與解析參數） | `llm.client.tool_calls`（`assistant_message`／`tool_message`／`call_name_and_arguments`／`parse_arguments`；迴圈、預算、工具怎麼跑留給呼叫端。人格萃取 agent 與 /askai 情報搜尋共用） |
 | 按鈕、指令的操作權限 | `utils.utils.check_guild`（`owner_only`／`admin_only`／`required_role`／`permission="manage_messages"` 這類 Discord 權限；不通過時自己回只有本人看得到的訊息） |
 | 功能開關（開／關、off／dry_run／on） | 值寫在 `settings/switches.json`（手改、下一次用到就生效）；名稱、預設、允許的值定義在 `sys_settings.switches.Switches`，讀用 `switches.current()`；新開關只能放這裡（守衛擋，舊的改到再搬） |
@@ -76,7 +77,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 綁頻道 | `settings/channel_registry.py` 的 `register_channel` |
 | 取得 thread（封存的也拿得到）、解除封存 | `utils.discord_threads.fetch_thread`／`reopen_thread`（封存的 thread 改不了、刪不了訊息） |
 | 讀綁定的頻道 id（可能沒綁） | `ChannelConfig.get_configured_id(key)`（沒綁回 None，不必自己比 `DEFAULT_ID`） |
-| 搜尋公告、官方 FB、PTT、巴哈的內容；讀全文（附推文、留言） | `services.search`（`SearchIndex.search`／`fetch`；索引從 `articles.db` 唯讀增量同步；用語、評估數字見 `AI_HANDOFF_AND_TODO.md` 的 `mcp-search-tools` 區塊）；MCP 殼是 `llm.mcp_server`，常駐在 compose 的 `search-mcp` 服務（背景同步與每日維護 `services.search.background`） |
+| 搜尋公告、官方 FB、PTT、巴哈的內容；讀全文（附推文、留言） | `services.search`（`SearchIndex.search`／`fetch`；索引從 `articles.db` 唯讀增量同步；用語、評估數字見 `AI_HANDOFF_AND_TODO.md` 的 `mcp-search-tools` 區塊）；MCP 殼是 `llm.mcp_server`，常駐在 compose 的 `search-mcp` 服務（背景同步與每日維護 `services.search.background`）；bot 端（discord-bot 沒掛索引）一律當 MCP 客戶端用 `llm.retrievers.intel`（`run_with_intel` 依開關準備工具、交給回答流程並記經過；`prepare_intel_session`；每次工具呼叫各開短連線，見模組說明） |
 | 官方公告、巴哈單一樓層的原文網址 | `services.source_urls`（`official_article_url`、`bahamut_floor_url`） |
 | 合併多份排名（關鍵字＋向量的混合檢索） | `utils.rank_fusion`（`rrf_score`／`fuse_rankings`；只看名次、不看各自的分數） |
 | prompt 裡認人的錨點（名字#尾碼） | `llm.preprocess.person_anchor.label()`／`suffix()`（撞號自動加長；`refresh()` 由 `discord_bot` 在啟動與成員進出時呼叫） |

@@ -8,7 +8,8 @@
   - stdio：不帶參數執行，給除錯或沒有常駐服務時用（`docker exec -i search-mcp python -m llm.mcp_server`）
 
 這一層只做協定（宣告工具、轉進呼叫、把結果包回去）；查詢、同步、讀全文都在 `services.search`。
-之後 bot 要用搜尋是直接 import `services.search`，不當 MCP 客戶端。
+bot（/askai）也是這裡的 MCP 客戶端（`llm.retrievers.intel`，連 `http://search-mcp:8765/mcp`）：索引只掛在
+search-mcp 容器、也只該有一個行程在寫，所以 bot 不直接 import `services.search`。
 
 **stdio 模式下 stdout 是協定通道**：不能 print，log 一律寫 `mcp_server.log`（見 `main`）。
 """

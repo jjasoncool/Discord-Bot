@@ -27,8 +27,9 @@ class SearchSettings(BaseSettings):
     candidate_pool: int = 300
     #: 搜尋結果附的摘要長度（字）
     snippet_chars: int = 160
-    #: 讀全文時每頁的字數
-    fetch_page_chars: int = 4000
+    #: 讀全文時每頁的字數。不能超過 bot 給模型的全文上限（AskAIIntelSettings.fetch_max_chars）：否則 bot 截掉的
+    #: 每頁後段，翻頁也讀不到（2026-10-09 最後審查：原本 4000 對 2500，維護預告、版本說明的後段都漏掉）
+    fetch_page_chars: int = 2500
     #: 兩次增量同步的最短間隔（秒）；連續搜尋時不必每次都掃一遍 scraper 的資料庫
     sync_min_interval_seconds: float = 60.0
 

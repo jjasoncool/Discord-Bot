@@ -53,6 +53,7 @@
     "discord.player": {"level": "WARNING"},
     "httpx": {"level": "WARNING"},
     "mcp.server.streamable_http": {"level": "WARNING"},
+    "httpx2": {"level": "WARNING"},
     "httpcore": {"level": "WARNING"},
     "urllib3": {"level": "WARNING"},
     "llama_index": {"level": "WARNING"},

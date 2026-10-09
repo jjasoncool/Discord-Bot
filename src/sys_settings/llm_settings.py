@@ -287,6 +287,45 @@ class AskAIWebSettings(BaseSettings):
         return (init_settings, env_settings, dotenv_settings, file_secret_settings)
 
 
+class AskAIIntelSettings(BaseSettings):
+    """/askai 查遊戲情報（官網公告、官方 FB、PTT、巴哈）的細項參數；開關在 settings/switches.json 的
+    `askai_intel_search_mode`。bot 當 MCP 客戶端連常駐的 search-mcp（`llm.retrievers.intel`）。
+
+    只吃 class 預設值：`TOP_K` 這類通用環境變數名會誤蓋欄位（AskAIWebSettings 就有這個問題）。
+    """
+
+    #: search-mcp 的 MCP 端點（同一個 docker 網路用服務名稱連）
+    mcp_url: str = "http://search-mcp:8765/mcp"
+    #: 一次工具呼叫最多等幾秒。搜尋端冷啟動（Lemonade 把模型卸載後重新載入）實測 16.8 秒，
+    #: 等顯示卡的額度另有 10 秒；逾時就把錯誤回給模型，讓它用手上的資料回答
+    call_timeout_seconds: float = 40.0
+    #: 最多查幾輪（每輪可同時呼叫好幾個工具）。之前估算決策輪約 1～2 秒、每次搜尋多 5～10 秒，建議 2 輪
+    max_tool_rounds: int = 2
+    #: 決定要不要查的那幾輪，模型最多輸出幾個 token：只需要工具呼叫，不必寫完整回答；超過就截斷、當作不查
+    decide_max_tokens: int = 200
+    #: 一次 search 最多給模型幾筆（工具結果也佔 context）
+    search_limit: int = 6
+    #: fetch 的全文最多給模型幾個字（PTT、巴哈的留言很長，而且是任何人都能寫的內容）。
+    #: search-mcp 每頁的字數（SEARCH_SETTINGS.fetch_page_chars）不能超過這個值，否則每頁後段永遠讀不到
+    fetch_max_chars: int = 2500
+    #: 怎麼用情報工具的規則：只在真的有工具時接在系統提示詞後面（改檔即生效）
+    rules_path: str = "/app/settings/prompts/askai_intel_rules.txt"
+
+    model_config = SettingsConfigDict(extra="forbid", frozen=True)
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: Any,
+        env_settings: Any,
+        dotenv_settings: Any,
+        file_secret_settings: Any,
+    ) -> Tuple[Any, ...]:
+        """停用 env/dotenv，僅接受初始化參數與 class 預設值。"""
+        return (init_settings,)
+
+
 class AmbientChatSettings(BaseSettings):
     """功能二「AI 偶爾插話 / 閒聊」設定（集中常數來源，不使用 env 覆寫）。
 

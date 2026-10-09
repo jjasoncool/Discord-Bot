@@ -46,6 +46,9 @@ class Switches(BaseModel):
     #: 情報搜尋的重新排序（reranker 把問題和每篇候選一起讀、重新打分）：on＝前幾十篇重排（llm_runtime_config.json
     #: 要設 rerank_model）；off＝不重排。reranker 壞掉、GPU 等太久時會自動照原本的順序
     search_rerank_mode: Literal["off", "on"] = "off"
+    #: /askai 查遊戲情報（官網公告、官方 FB、PTT、巴哈；llm.retrievers.intel 連 search-mcp）：on＝讓模型自己決定要不要
+    #: 先查、查什麼再回答；off＝跟原本一樣直接回答。search-mcp 沒開時本來就會自動不查
+    askai_intel_search_mode: Literal["off", "on"] = "off"
 
 
 def _parse(raw: str) -> Switches:

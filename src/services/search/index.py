@@ -603,7 +603,7 @@ _default: Optional[SearchIndex] = None
 
 
 def default_index() -> SearchIndex:
-    """照 `SEARCH_SETTINGS` 建的共用索引（MCP 與之後 bot 的工具呼叫都用這一個）。"""
+    """照 `SEARCH_SETTINGS` 建的共用索引（search-mcp 行程裡的 MCP 工具、背景同步、每日維護都用這一個）。"""
     global _default
     if _default is None:
         from services.search.rerank import LemonadeReranker

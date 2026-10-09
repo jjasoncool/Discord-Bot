@@ -20,5 +20,10 @@
     "off：不重排，照關鍵字＋向量合併後的名次",
     "on：合併後的前 30 篇再讓 reranker 讀過、重新排序（每次搜尋多約 1.6 秒；顯示卡被 bot 佔著時最多等 10 秒，等不到就照原本的名次）"
   ],
-  "search_rerank_mode": "on"
+  "search_rerank_mode": "on",
+  "_askai_intel_search_mode 可以填": [
+    "off：/askai 跟原本一樣直接回答，不查遊戲情報",
+    "on：/askai 遇到鳴潮的問題（版本、活動、兌換碼、角色、配隊、聲骸…）先查官網公告、官方 FB、PTT、巴哈再回答，會附連結；每題多花幾秒到十幾秒"
+  ],
+  "askai_intel_search_mode": "on"
 }
