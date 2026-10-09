@@ -30,6 +30,13 @@ class LLMServiceSettings(BaseSettings):
         default=300,
         validation_alias="LLM_TIMEOUT",
     )
+    #: 拿著 GPU 閘門算 embedding（聊天記憶寫入、情報搜尋算向量）時，單次請求、排隊等 embedding 名額、
+    #: 載入模型各最多等幾秒，而且不重試（`make_safe_llm_embedding(holding_gpu_gate=True)`）。正常一批不到幾秒；
+    #: 等滿 llm_timeout 再重試等於整段佔著顯示卡，插話與 /askai 全卡（2026-10-09 Lemonade 卡住時卡了一個多小時）
+    gated_embed_timeout: int = Field(
+        default=60,
+        validation_alias="GATED_EMBED_TIMEOUT",
+    )
     pgvector_host: str = Field(
         default="pgvector",
         validation_alias="PGVECTOR_HOST",

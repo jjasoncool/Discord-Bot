@@ -53,8 +53,11 @@ class Embedder:
             from sys_settings.llm_settings import LLMServiceSettings, load_llm_runtime_config
 
             settings = LLMServiceSettings()
+            # 算向量時拿著跨行程 GPU 鎖檔（embed_documents／embed_query 的 self._gate），bot 的插話與 /askai
+            # 都排在後面：用「拿著閘門」模式，後端卡住時短逾時、不重試，早點放鎖
             self._model = make_safe_llm_embedding(
-                settings=settings, runtime_config=load_llm_runtime_config(settings.llm_runtime_model_path))
+                settings=settings, runtime_config=load_llm_runtime_config(settings.llm_runtime_model_path),
+                holding_gpu_gate=True)
         return self._model
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:

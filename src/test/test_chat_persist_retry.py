@@ -11,16 +11,20 @@
      失敗後暫停滿門檻觸發，只靠定期 flush 重試；恢復後滿門檻觸發也跟著恢復。
   5. 編輯過的訊息：先刪舊向量後才連不上的，也要放回去補寫，不能從聊天表消失；
      flush 期間又被編輯的，以較新的文字為準。
+  6. 拿著 GPU 閘門的時間有上限：一次 flush 寫超過 FLUSH_GPU_BUDGET_SECONDS 就停、放鎖，剩下的（新增與編輯）
+     放回 buffer 下一輪寫，不會丟；embedding 用「拿著閘門」模式（短逾時、不重試、等名額也有上限）。
+     2026-10-09 Lemonade 卡住時，這裡拿著閘門一個多小時，插話與 /askai 全卡。
 """
 
 import asyncio
 import os
 import sys
 import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC_DIR = os.path.dirname(HERE)
@@ -280,6 +284,61 @@ class ChatPersistRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.index.deleted, [])     # 沒有去刪舊向量
         self.assertEqual(self.buffer_ids(), ["1"])
         self.assertEqual([i["message_id"] for i in store_chat._edit_buffer], ["9"])
+
+
+    # ---- 6. 佔用 GPU 閘門的時間有上限 ----
+
+    async def test_flush_stops_when_its_gpu_time_is_up(self):
+        for mid in range(1, 6):
+            store_chat.enqueue_message(_msg(mid))
+        self.index.on_insert = lambda _doc: time.sleep(0.25)      # 後端很慢，但沒有逾時
+
+        with patch.object(store_chat, "FLUSH_GPU_BUDGET_SECONDS", 0.2):
+            with self.assertLogs(store_chat.logger, "WARNING") as logs:
+                written = await store_chat.flush_buffer()
+
+        self.assertEqual(written, 1)
+        self.assertEqual(self.buffer_ids(), ["2", "3", "4", "5"])           # 剩下的照順序放回
+        self.assertTrue(any("先停" in line for line in logs.output))
+
+        self.index.on_insert = None
+        await store_chat.flush_buffer()                                     # 下一輪補寫，一則都沒丟
+        self.assertEqual(self.index.ids(), ["1", "2", "3", "4", "5"])
+
+    async def test_edits_wait_when_the_time_is_already_up(self):
+        self.persisted.add("9")
+        store_chat.enqueue_message(_msg(1))
+        store_chat.enqueue_message_edit(_msg(9, "改過"))
+
+        with patch.object(store_chat, "FLUSH_GPU_BUDGET_SECONDS", 0):
+            with self.assertLogs(store_chat.logger, "WARNING"):
+                await store_chat.flush_buffer()
+
+        self.assertEqual((self.index.insert_calls, self.index.deleted), (0, []))
+        self.assertEqual(self.buffer_ids(), ["1"])
+        self.assertEqual([i["message_id"] for i in store_chat._edit_buffer], ["9"])
+
+    def test_edit_batch_has_its_own_time_check(self):
+        batch = [{"message_id": "9", "text": "改過", "author_id": "7", "channel_id": "10", "timestamp": "t"}]
+
+        with self.assertLogs(store_chat.logger, "WARNING"):
+            updated, left = store_chat._sync_update_batch(batch, deadline=time.monotonic() - 1)
+
+        self.assertEqual((updated, left, self.index.deleted), (0, batch, []))
+
+
+class ChatIndexTimeoutTests(unittest.TestCase):
+    def test_chat_memory_embeds_in_gpu_gate_mode(self):
+        saved = store_chat._chat_index_cache
+        store_chat._chat_index_cache = None
+        self.addCleanup(setattr, store_chat, "_chat_index_cache", saved)
+        with patch("llm.client.embedding_client.make_safe_llm_embedding") as make, \
+                patch("llama_index.vector_stores.postgres.PGVectorStore.from_params"), \
+                patch("llama_index.core.VectorStoreIndex.from_vector_store", return_value=MagicMock()), \
+                self.assertLogs(store_chat.logger, "INFO"):
+            store_chat._get_chat_index()
+
+        self.assertIs(make.call_args.kwargs["holding_gpu_gate"], True)
 
 
 if __name__ == "__main__":

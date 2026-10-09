@@ -84,6 +84,14 @@ class LlmTimeoutError(Exception):
     """LLM 後端逾時（已重試用盡）。"""
 
 
+def is_unreachable(exc: BaseException) -> bool:
+    """連不上或逾時（已重試用盡）：跟請求內容無關，後端恢復前換個寫法重送也不會好，呼叫端該停手、晚點再試。
+
+    和「某個請求本身有問題」（`LlmAPIError`，例如某段文字讓後端出錯）分開：後者換個寫法或略過那筆就好。
+    """
+    return isinstance(exc, (LlmConnectionError, LlmTimeoutError))
+
+
 class _LemonadeUpstreamWedge(httpx.ConnectError):
     """Lemonade admin 活著、但它 CURL 轉發的 downstream backend process 卡死/不回應
     （回 200 + {"error":{"type":"network_error", message 含 "Couldn't connect to server"}}）。

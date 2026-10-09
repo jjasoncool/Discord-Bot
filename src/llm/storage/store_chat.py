@@ -5,6 +5,11 @@
 
 embedding 後端或 pgvector 連不上時，沒寫成的訊息放回 buffer 等下一輪定期 flush；
 buffer 有上限（MAX_BUFFER_SIZE），斷太久就丟最舊的。
+
+寫入時拿著 GPU 閘門（算 embedding 要用顯示卡），插話與 /askai 都在後面排隊，所以佔用時間有上限：
+embedding 用「拿著閘門」模式（`make_safe_llm_embedding(holding_gpu_gate=True)`：短逾時、不重試），
+一次 flush 最多寫 FLUSH_GPU_BUDGET_SECONDS，時間到就放鎖，沒寫完的留到下一輪
+（2026-10-09 Lemonade 卡住時，這裡拿著閘門一個多小時、整個 bot 的 AI 全卡）。
 """
 from __future__ import annotations
 
@@ -16,7 +21,7 @@ from typing import Optional
 
 import discord
 
-from llm.client.http_client import LlmConnectionError, LlmTimeoutError
+from llm.client.http_client import is_unreachable
 from llm.preprocess.emoji_text_utils import replace_custom_emoji_with_description
 from llm.client.lemonade_gate import stream_exclusive
 from llm.preprocess.sticker_cache import get_sticker_text
@@ -29,6 +34,10 @@ FLUSH_INTERVAL_SECONDS = 300  # 5 分鐘
 # 失敗的訊息會放回 buffer，沒有上限的話後端斷越久積越多。以熱絡時段每 5 分鐘
 # 10～20 則估，約可撐 4～5 小時；超過時丟最舊的，因為插話與 RAG 比較需要最近的對話。
 MAX_BUFFER_SIZE = 1000
+# 一次 flush 拿著 GPU 閘門最多寫幾秒；到了就停，剩下的放回 buffer 下一輪再寫（不會丟）。每則寫入前檢查，
+# 所以最壞再多一則的時間：排隊等 embedding 名額＋請求本身（各最多 LLMServiceSettings.gated_embed_timeout，
+# 模型要重新載入時再加一次）。後端卡住時第一則就逾時、立刻停，通常只佔一次逾時
+FLUSH_GPU_BUDGET_SECONDS = 120
 
 # 訊息過濾：太短的純噪音
 MIN_TEXT_LENGTH = 2
@@ -182,7 +191,7 @@ def _is_backend_unreachable(exc: BaseException) -> bool:
     其他錯誤（例如後端回 4xx／5xx）可能是那則訊息本身的問題，重試也不會好；
     照舊略過該則，避免一則壞訊息永遠卡在 buffer。
     """
-    if isinstance(exc, (LlmConnectionError, LlmTimeoutError)):
+    if is_unreachable(exc):
         return True
     try:
         from sqlalchemy.exc import InterfaceError, OperationalError
@@ -238,15 +247,17 @@ async def flush_buffer() -> int:
         insert_left: list[dict] = []
         update_left: list[dict] = update_batch
         async with stream_exclusive():
+            # 從拿到閘門起算：排隊等閘門的時間不算在內
+            deadline = time.monotonic() + FLUSH_GPU_BUDGET_SECONDS
             if insert_batch:
                 written, insert_left = await loop.run_in_executor(
-                    None, _sync_write_batch, insert_batch
+                    None, _sync_write_batch, insert_batch, deadline
                 )
                 count += written
-            # 新增那批已經連不上就不必再試編輯：一樣會失敗，還多佔 GPU 閘門
+            # 新增那批已經連不上（或時間用完）就不必再試編輯：一樣會失敗，還多佔 GPU 閘門
             if update_batch and not insert_left:
                 updated, update_left = await loop.run_in_executor(
-                    None, _sync_update_batch, update_batch
+                    None, _sync_update_batch, update_batch, deadline
                 )
                 count += updated
 
@@ -298,6 +309,7 @@ def _get_chat_index():
         embed_model = make_safe_llm_embedding(
             settings=settings,
             runtime_config=runtime_config,
+            holding_gpu_gate=True,     # flush 拿著 GPU 閘門算 embedding
         )
         vector_store = PGVectorStore.from_params(
             database=settings.pgvector_db,
@@ -318,11 +330,16 @@ def _get_chat_index():
         return index
 
 
-def _sync_write_batch(batch: list[dict]) -> tuple[int, list[dict]]:
+def _out_of_time(deadline: Optional[float]) -> bool:
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def _sync_write_batch(batch: list[dict], deadline: Optional[float] = None) -> tuple[int, list[dict]]:
     """同步寫入一批訊息到 pgvector（在 executor 中執行）。
 
     回傳 (新寫入則數, 沒寫成、要放回 buffer 的訊息)。後端連不上時立刻停下、剩下的整批放回：
     逐則硬試的話每則都要等到連線逾時，這段時間一直佔著 GPU 閘門，/askai 與插話都得等。
+    過了 `deadline`（`time.monotonic()` 的時刻）也停：後端只是很慢時，不讓一批訊息拖住閘門。
     """
     from llama_index.core import Document
 
@@ -340,6 +357,12 @@ def _sync_write_batch(batch: list[dict]) -> tuple[int, list[dict]]:
         if mid in persisted_ids:
             skipped += 1
             continue
+        if _out_of_time(deadline):
+            logger.warning(
+                "on_message 批次寫入 pgvector 先停（佔 GPU 閘門超過 %d 秒，已寫 %d 則），剩下的下一輪再寫",
+                FLUSH_GPU_BUDGET_SECONDS, written,
+            )
+            return written, batch[pos:]
         try:
             doc = Document(
                 text=item["text"],
@@ -376,10 +399,10 @@ def _sync_write_batch(batch: list[dict]) -> tuple[int, list[dict]]:
     return written, []
 
 
-def _sync_update_batch(batch: list[dict]) -> tuple[int, list[dict]]:
+def _sync_update_batch(batch: list[dict], deadline: Optional[float] = None) -> tuple[int, list[dict]]:
     """同步更新已持久化的訊息（delete + re-insert 以刷新 embedding）。
 
-    回傳 (更新則數, 要放回編輯 buffer 的訊息)，規則同 `_sync_write_batch`。
+    回傳 (更新則數, 要放回編輯 buffer 的訊息)，規則（連不上、時間用完）同 `_sync_write_batch`。
     刪掉舊的之後才連不上的那則也會放回去，下一輪補寫，不會從 pgvector 消失。
     """
     from llama_index.core import Document
@@ -393,6 +416,12 @@ def _sync_update_batch(batch: list[dict]) -> tuple[int, list[dict]]:
     updated = 0
     for pos, item in enumerate(batch):
         mid = item["message_id"]
+        if _out_of_time(deadline):
+            logger.warning(
+                "on_message_edit 批次更新 pgvector 先停（佔 GPU 閘門超過 %d 秒，已更新 %d 則），剩下的下一輪再更新",
+                FLUSH_GPU_BUDGET_SECONDS, updated,
+            )
+            return updated, batch[pos:]
         try:
             index.delete_ref_doc(mid)
             doc = Document(

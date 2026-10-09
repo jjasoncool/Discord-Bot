@@ -5,6 +5,7 @@
   - 同一篇多段只留距離最近的那段，順序照最近的距離
   - 門檻：距離超過的段落不算；沒設門檻全部照收
   - 查詢前面加任務說明，文件本身不加
+  - 算向量時拿著跨行程 GPU 鎖檔，embedding 用戶端用「拿著閘門」模式（短逾時、不重試；10-09 bot 的 AI 全卡事故）
 
 執行：
     cd src && python -m unittest test.test_search_vectors -v
@@ -13,6 +14,7 @@
 import os
 import sys
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC_DIR = os.path.dirname(HERE)
@@ -99,6 +101,11 @@ class PgVectorStoreTests(unittest.TestCase):
 
 
 class EmbedderTests(unittest.TestCase):
+    def test_embedding_client_is_built_for_holding_the_gpu_lock(self):
+        with mock.patch("llm.client.embedding_client.make_safe_llm_embedding") as make:
+            Embedder(gate=lambda **_: None)._client()
+        self.assertIs(make.call_args.kwargs["holding_gpu_gate"], True)
+
     def test_only_queries_get_the_task_instruction(self):
         class Client:
             def get_text_embedding(self, text):
