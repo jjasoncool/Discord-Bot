@@ -9,7 +9,21 @@ tool_calls），再對**每個** tool_call_id 各回一則 `role: tool`——少
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Protocol
+
+
+class ToolRunner(Protocol):
+    """給模型用的一組工具：宣告（OpenAI 格式）、怎麼用的規則（接在系統提示詞後面，可以是空字串）、執行。
+    執行失敗也要回字串（例如 `{"error": ...}`），不往外丟。"""
+
+    instructions: str
+
+    @property
+    def tools(self) -> list[dict[str, Any]]:
+        ...
+
+    async def execute(self, name: str, arguments: Any) -> str:
+        ...
 
 
 class ToolArgumentError(ValueError):

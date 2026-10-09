@@ -61,6 +61,15 @@ def build(**kwargs):
 
 class PromptBundleContractTests(unittest.TestCase):
 
+    def test_web_directive_lets_looked_up_facts_through_when_there_are_tools(self):
+        """有工具（/askai 查遊戲情報）時，網路搜尋的「本規則優先」不能把查到的官方資料擋掉。"""
+        plain = build(**EVERYTHING).messages[1]["content"]
+        with_tools = build(**EVERYTHING, has_tools=True).messages[1]["content"]
+
+        self.assertIn("只能用<web_context>給的 URL", plain)
+        self.assertIn("只能用<web_context> 或你查到的資料給的 URL", with_tools)
+        self.assertIn("不可編造<web_context> 或你查到的資料以外的數字", with_tools)
+
     def test_system_then_user_message(self):
         bundle = build(**EVERYTHING)
         self.assertEqual([m["role"] for m in bundle.messages], ["system", "user"])

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from llm.client.lemonade_gate import stream_exclusive
+from llm.client.tool_calls import ToolRunner, assistant_message, call_name_and_arguments, tool_message
 from llm.preprocess.vision_image import is_universal_image, to_png_first_frame
 from llm.prompt.prompt_builder import build_prompt_bundle
 from llm.client.http_client import (
@@ -651,6 +652,7 @@ class LLMService:
         timeout: Optional[int] = None,
         keep_alive: Optional[str] = None,
         trace_id: Optional[str] = None,
+        max_tokens: Optional[int] = None,
     ) -> ChatMessageResult:
         """tool-calling 版的底層呼叫：回傳完整 assistant message 而非 content 字串。
 
@@ -668,6 +670,9 @@ class LLMService:
 
         兩者共用模型載入、串流互斥閘與重試——**agent 因此自動遵守「一次只做一件事」**，
         不會與 /askai、插話 搶 GPU。
+
+        `max_tokens`：這次最多輸出幾個 token。/askai 決定要不要查情報的那一輪只需要工具呼叫，限長度免得它
+        先寫完一整篇（會被丟掉的）回答。
 
         Raises: 與 `chat_raw` 相同（LLMAPIError / LlmTimeoutError / LlmConnectionError），
         另外在 content 與 tool_calls 同時為空時拋 `empty_content`。
@@ -689,6 +694,8 @@ class LLMService:
             extra_body["tools"] = tools
         if response_format:
             extra_body["response_format"] = response_format
+        if max_tokens:
+            extra_body["max_tokens"] = max_tokens
 
         trace_label = trace_id or "-"
         choice, completion = await self._chat_completion_checked(
@@ -768,6 +775,88 @@ class LLMService:
                 trace_label, error_kind, exc,
             )
 
+    async def _answer_with_tools(
+        self,
+        messages: list[dict[str, object]],
+        runner: ToolRunner,
+        *,
+        progress: list[dict[str, object]],
+        transcript: list[str],
+        model: str,
+        think: Optional[bool],
+        temperature: Optional[float],
+        top_p: Optional[float],
+        num_ctx: Optional[int],
+        timeout: Optional[int],
+        keep_alive: Optional[str],
+        trace_id: Optional[str],
+        max_tool_rounds: int,
+        decide_max_tokens: int,
+    ) -> str:
+        """讓模型自己決定要不要先用工具查，再回答。回傳回答；送出的 messages 與工具呼叫紀錄**邊做邊寫進**
+        `progress`／`transcript`（呼叫端給的空 list）——中途失敗時，錯誤紀錄才看得到已經查了什麼。
+
+        - 第一輪是「決策輪」：不開思考、限輸出長度，只決定要不要查、查什麼（幾秒內）。沒要查就丟掉這段草稿，
+          用正式設定（照 /askai 原本的思考設定）再問一次——不查的問題回答品質與原本相同
+        - 查過之後的每一輪都用正式設定，也都帶著工具：模型可以再查（最多 `max_tool_rounds` 輪），或直接回答
+        - **每一輪都帶同一份工具清單**：工具宣告插在系統提示詞之後，帶不帶工具會讓後面整段聊天紀錄的提示詞快取
+          失效（要多算幾十秒）；只換思考開關與結尾，前面整段都吃得到快取
+        - 工具在兩次模型呼叫之間執行，**不拿著 GPU 鎖**：搜尋端算向量、重排也要排同一把鎖
+        - 查滿輪數還想查（就算順手寫了一句「讓我再查一下」也一樣）：提醒一次「不能再查了」；還是只給工具呼叫，
+          就改用不帶工具的一般呼叫，保證有文字
+        - 決策輪本身失敗：什麼都沒產出就當作不查；後端拒絕（例如不支援工具）就照原本的方式回答——原本的 /askai
+          在這種情況下答得出來，不能因為多了查情報反而答不出來
+        """
+        progress[:] = list(messages)
+        messages = progress
+        rounds = 0
+        deciding = max_tool_rounds > 0
+        nudged = False
+        common = dict(model=model, temperature=temperature, top_p=top_p, num_ctx=num_ctx, timeout=timeout,
+                      keep_alive=keep_alive, trace_id=trace_id)
+        while True:
+            try:
+                result = await self.chat_with_tools(
+                    messages=messages,
+                    tools=runner.tools,
+                    think=False if deciding else think,
+                    max_tokens=decide_max_tokens if deciding else None,
+                    **common,
+                )
+            except LLMAPIError as exc:
+                if not deciding:
+                    raise
+                deciding = False
+                if exc.kind == "empty_content":
+                    logger.warning("工具輪 trace=%s 決策輪沒有產出，當作不查", trace_id or "-")
+                    continue
+                logger.warning("工具輪 trace=%s 決策輪失敗（%s），這次不查、照原本的方式回答", trace_id or "-", exc)
+                return await self.chat_raw(messages=messages, think=think, **common)
+            if result.tool_calls and rounds < max_tool_rounds:
+                rounds += 1
+                messages.append(assistant_message(result.content, result.tool_calls))
+                for call in result.tool_calls:
+                    name, arguments = call_name_and_arguments(call)
+                    payload = await runner.execute(name, arguments)
+                    messages.append(tool_message(call, payload))
+                    transcript.append(f"[第 {rounds} 輪] {name} {str(arguments)[:200]} → {payload[:300]}")
+                logger.info("工具輪 trace=%s 第 %d 輪：%s", trace_id or "-", rounds,
+                            "、".join(call_name_and_arguments(c)[0] for c in result.tool_calls))
+                deciding = False
+                continue
+            if deciding:
+                # 決策輪沒有要查：這段是沒開思考、可能被截斷的草稿，丟掉，用正式設定回答（吃同一份快取）
+                deciding = False
+                continue
+            if result.content.strip() and not result.tool_calls:
+                return result.content
+            if not nudged:
+                nudged = True
+                messages.append({"role": "user", "content": "（不能再查了。請就上面已經查到的資料，直接回答原本的問題。）"})
+                continue
+            logger.warning("工具輪 trace=%s 查滿 %d 輪仍只給工具呼叫，改用不帶工具的呼叫取得回答", trace_id or "-", rounds)
+            return await self.chat_raw(messages=messages, think=think, **common)
+
     async def generate_reply(
         self,
         prompt: str,
@@ -795,6 +884,9 @@ class LLMService:
         replied_to_text: Optional[str] = None,
         keep_alive: Optional[str] = None,
         trace_id: Optional[str] = None,
+        tool_runner: Optional[ToolRunner] = None,
+        max_tool_rounds: int = 2,
+        decide_max_tokens: int = 200,
     ) -> "GenerateReplyResult":
         """/askai 專用：組 prompt bundle → 呼叫 `chat_raw` → 回 GenerateReplyResult。
 
@@ -803,11 +895,20 @@ class LLMService:
 
         `keep_alive` 轉交給 `chat_raw`；不同 caller（/askai / moderation）可獨立設值。
         `trace_id` 串接 caller 與 anomaly log，失敗時可由 ERROR log 一鍵追到 raw response。
+
+        `tool_runner` 給了（而且有工具）就讓模型自己決定要不要先查（/askai 的情報搜尋），見 `_answer_with_tools`；
+        沒給就跟原本一樣一問一答。錯誤訊息、圖片退成 PNG 重試兩種路徑共用。
+        有工具時才把這組工具的使用規則（`tool_runner.instructions`）接在系統提示詞後面：沒工具時提示詞跟原本完全一樣。
         """
+        use_tools = tool_runner is not None and bool(tool_runner.tools)
+        instructions = getattr(tool_runner, "instructions", "") if use_tools else ""
+        if instructions:
+            system = f"{system}\n\n{instructions}" if system else instructions
         bundle = build_prompt_bundle(
             safety_rules=self.context_safety_rules,
             latest_open_tag=self.settings.latest_open_tag,
             latest_close_tag=self.settings.latest_close_tag,
+            has_tools=use_tools,
             system=system,
             user_query_text=prompt,
             chat_context=chat_context,
@@ -830,11 +931,23 @@ class LLMService:
         target_think = self.resolve_request_think(think)
         trace_label = trace_id or "-"
         sent_messages = bundle.messages
+        # 工具輪邊做邊寫進來：失敗時錯誤紀錄也看得到已經查了什麼、模型實際收到哪些
+        progress: list[dict[str, object]] = []
+        transcript_so_far: list[str] = []
 
-        try:
-            reply = await self.chat_raw(
+        async def answer(messages: list[dict[str, object]]) -> tuple[str, list[dict[str, object]], list[str]]:
+            if use_tools:
+                transcript_so_far.clear()
+                text = await self._answer_with_tools(
+                    messages, tool_runner, progress=progress, transcript=transcript_so_far, model=target_model,
+                    think=target_think, temperature=temperature, top_p=top_p, num_ctx=num_ctx, timeout=timeout,
+                    keep_alive=keep_alive, trace_id=trace_id, max_tool_rounds=max_tool_rounds,
+                    decide_max_tokens=decide_max_tokens,
+                )
+                return text, list(progress), list(transcript_so_far)
+            text = await self.chat_raw(
                 model=target_model,
-                messages=sent_messages,
+                messages=messages,
                 think=target_think,
                 temperature=temperature,
                 top_p=top_p,
@@ -844,10 +957,20 @@ class LLMService:
                 keep_alive=keep_alive,
                 trace_id=trace_id,
             )
+            return text, list(messages), []
+
+        def record_log(transcript: list[str]) -> str:
+            # askai_prompt.txt 記「真正送給模型的內容」：查過情報時，工具呼叫與結果也是模型看到的一部分
+            if not transcript:
+                return bundle.prompt_record_log
+            return bundle.prompt_record_log + "\n<tool_rounds>\n" + "\n".join(transcript) + "\n</tool_rounds>"
+
+        try:
+            reply, final_messages, transcript = await answer(sent_messages)
             return GenerateReplyResult(
                 reply=reply,
-                prompt_record_log=bundle.prompt_record_log,
-                messages_sent=list(sent_messages),
+                prompt_record_log=record_log(transcript),
+                messages_sent=final_messages,
                 error_kind=None,
             )
         except LLMAPIError as exc:
@@ -860,22 +983,11 @@ class LLMService:
                     trace_label, exc.status,
                 )
                 try:
-                    reply = await self.chat_raw(
-                        model=target_model,
-                        messages=downgraded,
-                        think=target_think,
-                        temperature=temperature,
-                        top_p=top_p,
-                        repeat_penalty=repeat_penalty,
-                        num_ctx=num_ctx,
-                        timeout=timeout,
-                        keep_alive=keep_alive,
-                        trace_id=trace_id,
-                    )
+                    reply, final_messages, transcript = await answer(downgraded)
                     return GenerateReplyResult(
                         reply=reply,
-                        prompt_record_log=bundle.prompt_record_log,
-                        messages_sent=list(downgraded),
+                        prompt_record_log=record_log(transcript),
+                        messages_sent=final_messages,
                         error_kind=None,
                     )
                 except Exception as retry_exc:
@@ -884,8 +996,8 @@ class LLMService:
                 logger.error("LLM 回應失敗 trace=%s status=%s detail=%s", trace_label, exc.status, exc.detail)
                 return GenerateReplyResult(
                     reply="⚠️ LLM 回應失敗，請稍後再試。",
-                    prompt_record_log=bundle.prompt_record_log,
-                    messages_sent=list(bundle.messages),
+                    prompt_record_log=record_log(transcript_so_far),
+                    messages_sent=list(progress) or list(bundle.messages),
                     error_kind="http_error",
                 )
             # raise 端帶 kind，未帶時退回 unknown_format（理論上不會走到，留個安全網）
@@ -893,24 +1005,24 @@ class LLMService:
             logger.error("LLM 回應格式異常 trace=%s kind=%s detail=%s", trace_label, kind, exc.detail)
             return GenerateReplyResult(
                 reply="⚠️ LLM 回應格式異常，請稍後再試。",
-                prompt_record_log=bundle.prompt_record_log,
-                messages_sent=list(bundle.messages),
+                prompt_record_log=record_log(transcript_so_far),
+                messages_sent=list(progress) or list(bundle.messages),
                 error_kind=kind,
             )
         except LlmTimeoutError as exc:
             logger.error("LLM 連線逾時 trace=%s: %s", trace_label, exc)
             return GenerateReplyResult(
                 reply="⚠️ 無法連線到 LLM 服務。",
-                prompt_record_log=bundle.prompt_record_log,
-                messages_sent=list(bundle.messages),
+                prompt_record_log=record_log(transcript_so_far),
+                messages_sent=list(progress) or list(bundle.messages),
                 error_kind="timeout",
             )
         except LlmConnectionError as exc:
             logger.error("LLM 連線失敗 trace=%s: %s", trace_label, exc)
             return GenerateReplyResult(
                 reply="⚠️ 無法連線到 LLM 服務。",
-                prompt_record_log=bundle.prompt_record_log,
-                messages_sent=list(bundle.messages),
+                prompt_record_log=record_log(transcript_so_far),
+                messages_sent=list(progress) or list(bundle.messages),
                 error_kind="connection",
             )
         except Exception as exc:
@@ -921,7 +1033,7 @@ class LLMService:
             )
             return GenerateReplyResult(
                 reply="⚠️ LLM 發生未預期錯誤。",
-                prompt_record_log=bundle.prompt_record_log,
-                messages_sent=list(bundle.messages),
+                prompt_record_log=record_log(transcript_so_far),
+                messages_sent=list(progress) or list(bundle.messages),
                 error_kind="unknown",
             )
