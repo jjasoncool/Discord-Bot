@@ -292,7 +292,9 @@ class UnfilteredKeywordTests(SearchIndexTestBase):
                                   ({"until": "2025-12-31"}, {"bahamut:500"})):
             with self.subTest(filters=filters):
                 statements, ids = self.fts_statements(self.make_index(), **filters)
-                self.assertTrue([s for s in statements if "JOIN docs" in s])
+                # 有篩選時用 (source, published_at) 小索引挑編號再比對，不 JOIN docs 大表
+                self.assertTrue([s for s in statements if "+rowid IN" in s])
+                self.assertFalse([s for s in statements if "JOIN docs" in s])
                 self.assertEqual(set(ids), expected)
 
 

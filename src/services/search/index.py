@@ -432,9 +432,13 @@ class SearchIndex:
                     return [r[0] for r in con.execute(
                         f"SELECT rowid FROM {table} WHERE {table} MATCH ? ORDER BY bm25({table}) LIMIT ?",
                         (match, pool))]
+                # 有篩來源、日期時：先用 (source, published_at) 這個小索引挑出符合的文章編號，再讓全文索引的命中
+                # 跟這份清單比對——不要每個命中都回 docs 大表讀一列（冷快取時「只查官方」一次要 35 秒，2026-10-09）。
+                # rowid 前面的 + 是讓這個條件不交給全文索引逐筆查找（那樣快取熱時反而要 1 秒多），改成先全文再比對
                 return [r[0] for r in con.execute(
-                    f"SELECT d.id FROM {table} JOIN docs d ON d.id = {table}.rowid"
-                    f" WHERE {table} MATCH ? AND {where} ORDER BY bm25({table}) LIMIT ?",
+                    f"SELECT rowid FROM {table} WHERE {table} MATCH ? AND +rowid IN"
+                    f" (SELECT id FROM docs WHERE source IN ({marks}) AND published_at >= ? AND published_at < ?)"
+                    f" ORDER BY bm25({table}) LIMIT ?",
                     (match, *params, pool))]
 
             if long_terms:
