@@ -6,6 +6,10 @@
 被擋的引擎：SearXNG 在回應的 `unresponsive_engines` 寫出哪個引擎沒回應、為什麼。真人驗證、限流、拒絕存取
 這類「對方擋了我們」的，記一行 WARNING，接下來一段時間（`blocked_engine_cooldown_seconds`）先不問它。
 以前 bot 只記「ok: 0 results」，duckduckgo 被真人驗證擋了幾個小時都看不出來（10-09）。
+
+直接答案：匯率、天氣這類專用引擎的答案放在回應的 `answers`，不在 `results`。以前只讀 `results`，這些都被丟掉
+（10-09 調查）；現在整理成一行行文字放在 `WebRetrievalOutcome.answers`。SearXNG 外掛產生的答案（例：查詢以 ip 開頭
+就回主機 IP 的 self_info）不收。`infoboxes`（維基摘要）只有 wikipedia 引擎會給，我們指定的引擎裡沒有它，所以不讀。
 """
 
 from __future__ import annotations
@@ -13,10 +17,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import aiohttp
+
+from sys_settings.time_settings import APP_TZ
 
 logger = logging.getLogger(__name__)
 
@@ -71,10 +79,94 @@ class WebResult:
 
 @dataclass(frozen=True)
 class WebRetrievalOutcome:
-    """一次搜尋的完整輸出（含結果與觀測用 meta）。"""
+    """一次搜尋的完整輸出（含結果與觀測用 meta）。`answers`：SearXNG 的直接答案（匯率、天氣），整理成文字。"""
 
     results: list[WebResult]
     meta: dict[str, Any]
+    answers: list[str] = field(default_factory=list)
+
+
+#: 一次最多留幾則直接答案、每則最多幾個字（天氣預報整理後約兩三百字）
+_MAX_ANSWERS = 3
+_MAX_ANSWER_CHARS = 600
+#: 天氣預報最多整理幾天
+_WEATHER_DAYS = 3
+
+
+def _value(item: Any) -> Any:
+    """SearXNG 的數值欄位是 {"val": …, "unit": …}；取 val。"""
+    return item.get("val") if isinstance(item, dict) else item
+
+
+def _render_weather(answer: dict[str, Any]) -> str | None:
+    """天氣引擎的答案（現在＋逐時預報）→ 一行：地點（國別）、現在、往後幾天的高低溫與天氣狀況（英文狀況交給模型翻）。
+
+    - 地點帶國別：地名查座標只取同名的第一筆（「Zhongshan」可能是廣東中山），模型才看得出查錯地方
+    - 逐時預報的時間是 SearXNG 用它容器的時區產生、沒帶時區（compose 設 TZ=Asia/Taipei），換成當地時間再分天，
+      國外城市的「某日」才不會混到前後兩天
+    - 已經過去的小時引擎不給，所以第一天如果不是從 0 點開始，標「剩下時段」，免得被當成整天的高低溫
+    """
+    current = answer.get("current") or {}
+    forecasts = [f for f in answer.get("forecasts") or [] if isinstance(f, dict)]
+    place = current.get("location") or (forecasts[0].get("location") if forecasts else None) or {}
+    location = place.get("name")
+    if not location or not (current or forecasts):
+        return None
+    if place.get("country_code"):
+        location = f"{location}（{place['country_code']}）"
+    try:
+        zone = ZoneInfo(place["timezone"]) if place.get("timezone") else APP_TZ
+    except Exception:
+        zone = APP_TZ
+    parts = []
+    if current:
+        temperature = _value(current.get("temperature"))
+        humidity = _value(current.get("humidity"))
+        now = f"現在 {temperature}°C、{current.get('condition') or ''}"
+        if humidity is not None:
+            now += f"、濕度 {humidity}%"
+        parts.append(now)
+    days: dict[Any, dict[str, Any]] = {}
+    for forecast in forecasts:
+        temperature = _value(forecast.get("temperature"))
+        try:
+            moment = datetime.fromisoformat(str((forecast.get("datetime") or {}).get("datetime")))
+        except ValueError:
+            continue
+        if not isinstance(temperature, (int, float)):
+            continue
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=APP_TZ)
+        local = moment.astimezone(zone)
+        day = days.setdefault(local.date(), {"temps": [], "conditions": [], "first_hour": local.hour})
+        day["temps"].append(temperature)
+        condition = forecast.get("condition")
+        if condition and condition not in day["conditions"]:
+            day["conditions"].append(condition)
+    for position, (date, day) in enumerate(list(days.items())[:_WEATHER_DAYS]):
+        label = date.strftime("%m-%d") + ("（剩下時段）" if position == 0 and day["first_hour"] > 0 else "")
+        parts.append(f"{label}：{min(day['temps']):g}～{max(day['temps']):g}°C，{'、'.join(day['conditions'])}")
+    engine = answer.get("engine") or "天氣引擎"
+    return f"{location} 天氣（{engine} 預報）：" + "；".join(parts)
+
+
+def _render_answers(data: dict[str, Any]) -> list[str]:
+    """`answers`（匯率、天氣）→ 一行行文字，給模型當最優先的資料。外掛產生的答案不收（self_info 會回主機 IP）。"""
+    lines: list[str] = []
+    for answer in data.get("answers") or []:
+        if not isinstance(answer, dict) or str(answer.get("engine") or "").startswith("plugin"):
+            continue
+        if isinstance(answer.get("answer"), str) and answer["answer"].strip():
+            text = answer["answer"].strip()
+            if answer.get("engine"):
+                text += f"（{answer['engine']}）"
+        elif answer.get("forecasts") or answer.get("current"):
+            text = _render_weather(answer)
+        else:
+            text = None
+        if text:
+            lines.append(text[:_MAX_ANSWER_CHARS])
+    return lines[:_MAX_ANSWERS]
 
 
 async def fetch_web_results(
@@ -175,6 +267,8 @@ async def fetch_web_results(
     if isinstance(data, dict):
         meta["unresponsive_engines"] = _note_unresponsive(data.get("unresponsive_engines"), settings, log)
 
+    answers = _render_answers(data) if isinstance(data, dict) else []
+    meta["answer_count"] = len(answers)
     raw_results = data.get("results", []) if isinstance(data, dict) else []
     normalized: list[WebResult] = []
     seen_urls: set[str] = set()
@@ -206,26 +300,27 @@ async def fetch_web_results(
 
     meta["result_count"] = len(normalized)
     log.info(
-        "SearXNG ok: %d results in %dms (engines=%s 略過=%s 沒回應=%s query=%s)",
+        "SearXNG ok: %d results、%d answers in %dms (engines=%s 略過=%s 沒回應=%s query=%s)",
         len(normalized),
+        len(answers),
         meta["elapsed_ms"],
         effective_engines,
         skipped_engines or "-",
         [name for name, _ in meta["unresponsive_engines"]] or "-",
         question[:80],
     )
-    return WebRetrievalOutcome(results=normalized, meta=meta)
+    return WebRetrievalOutcome(results=normalized, meta=meta, answers=answers)
 
 
-def format_web_context_lines(results: list[WebResult]) -> list[str]:
-    """把 WebResult 列表渲染成 <web_context> 區塊內每行。
+def format_web_context_lines(results: list[WebResult], answers: list[str] | None = None) -> list[str]:
+    """把 WebResult 列表渲染成 <web_context> 區塊內每行；直接答案（`answers`）排在最前面，標「[答]」。
 
     格式：`[N] [YYYY-MM-DD] 標題 — snippet <url>`
     URL 以 `<...>` 角括號包覆：這是 Discord 認得的 URL 邊界標記，避免輸出被
     Discord 客戶端誤把右括號 `)` / 句號等吃進 URL。LLM 看到範本就會模仿這個格式。
     日期取自 publishedDate（前 10 碼），無日期時省略該欄；snippet 為空時也省略。
     """
-    lines: list[str] = []
+    lines: list[str] = [f"[答] {answer}" for answer in answers or []]
     for idx, result in enumerate(results, start=1):
         parts = [f"[{idx}]"]
         if result.published_date:

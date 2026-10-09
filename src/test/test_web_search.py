@@ -7,7 +7,8 @@
   - 補查也沒結果：留著主搜的結果，meta 記下補查過
   - 不補查：主搜出錯（SearXNG 本身異常，重試無益）、結果夠多、本來就是通用不限時的
   - 同一個查詢（同字串、同路由）短時間內直接用上次的結果，少打引擎；出錯、0 筆、有引擎沒回應（結果不完整）的不記
-  - 補查合併後，主搜的引擎狀況另外留在 meta
+  - 補查合併後，主搜的引擎狀況另外留在 meta，答案數照合併後的算
+  - 直接答案（匯率、天氣、維基摘要）在快取與補查之後都留著；只有直接答案、沒有網頁也算有結果
   - 守衛：別處直接呼叫 `fetch_web_results` 會被擋
 
 執行：
@@ -38,8 +39,9 @@ def hit(n, prefix="a"):
     return WebResult(title=f"{prefix}{n}", url=f"https://{prefix}.example/{n}", snippet="s", engine="bing")
 
 
-def outcome(results, error=None):
-    return WebRetrievalOutcome(results=list(results), meta={"result_count": len(results), "error": error})
+def outcome(results, error=None, answers=()):
+    return WebRetrievalOutcome(results=list(results), meta={"result_count": len(results), "error": error},
+                               answers=list(answers))
 
 
 class SearchWebTests(unittest.IsolatedAsyncioTestCase):
@@ -134,6 +136,19 @@ class SearchWebTests(unittest.IsolatedAsyncioTestCase):
                 await search_web(f"颱風 {label}", settings=SETTINGS)
                 self.assertEqual(len(self.calls), 2)
 
+    async def test_direct_answers_survive_the_cache_and_the_top_up(self):
+        self.replies = [outcome([], answers=["1.0 USD = 31.96 TWD"])]
+        await search_web("1 USD to TWD", settings=SETTINGS)
+        again = await search_web("1 USD to TWD", settings=SETTINGS)
+        self.assertEqual((len(self.calls), again.answers), (1, ["1.0 USD = 31.96 TWD"]))
+
+        self.replies = [outcome([hit(1)], answers=["颱風警報"]), outcome([hit(2, "b")])]
+        topped_up = await search_web("颱風", settings=SETTINGS, time_range="day")
+        self.assertEqual(topped_up.answers, ["颱風警報"])
+        self.replies = [outcome([hit(1)], answers=["颱風警報"]), outcome([])]
+        not_found = await search_web("颱風 2", settings=SETTINGS, time_range="day")
+        self.assertEqual(not_found.answers, ["颱風警報"])
+
     async def test_incomplete_results_are_not_remembered(self):
         partial = WebRetrievalOutcome(results=[hit(i) for i in range(5)],
                                       meta={"error": None, "unresponsive_engines": [["duckduckgo", "timeout"]]})
@@ -143,13 +158,14 @@ class SearchWebTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.calls), 2)
 
     async def test_the_top_up_keeps_what_the_first_search_saw(self):
-        primary = WebRetrievalOutcome(results=[hit(1)],
+        primary = WebRetrievalOutcome(results=[hit(1)], answers=["颱風警報"],
                                       meta={"error": None, "unresponsive_engines": [["duckduckgo", "CAPTCHA"]]})
         self.replies = [primary, outcome([hit(2, "b"), hit(3, "b")])]
 
         merged = await search_web("颱風", settings=SETTINGS, time_range="day")
 
         self.assertEqual(merged.meta["primary_unresponsive_engines"], [["duckduckgo", "CAPTCHA"]])
+        self.assertEqual(merged.meta["answer_count"], 1)
 
     async def test_cache_can_be_turned_off(self):
         no_cache = AskAIWebSettings(top_k=5, fallback_min_results=3, cache_seconds=0)

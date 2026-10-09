@@ -516,8 +516,8 @@ class LLMCommands(commands.Cog):
             try:
                 outcome = await web_task
                 web_meta.update(outcome.meta)
-                if outcome.results:
-                    web_context = format_web_context_lines(outcome.results)
+                if outcome.results or outcome.answers:
+                    web_context = format_web_context_lines(outcome.results, outcome.answers)
                     # 記錄前 3 筆 preview 方便日後 debug：判斷 LLM 到底看到什麼
                     web_meta["results_preview"] = [
                         {

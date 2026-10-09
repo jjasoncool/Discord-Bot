@@ -28,13 +28,14 @@ def _cached(key: tuple) -> WebRetrievalOutcome | None:
     if hit is None:
         return None
     outcome = hit[1]
-    return WebRetrievalOutcome(results=list(outcome.results), meta={**outcome.meta, "cached": True})
+    return WebRetrievalOutcome(results=list(outcome.results), meta={**outcome.meta, "cached": True},
+                               answers=list(outcome.answers))
 
 
 def _remember(key: tuple, outcome: WebRetrievalOutcome, settings: Any) -> None:
-    """只記有結果的（0 筆下次要重查；出錯時本來就沒有結果）；有引擎這次沒回應的也不記（結果不完整，
+    """只記有結果或直接答案的（都沒有下次要重查；出錯時本來就沒有）；有引擎這次沒回應的也不記（結果不完整，
     下次可能就齊了）。超過上限丟最早到期的。`cache_seconds` 設 0 等於關掉：記進去就已經過期，下次讀不到。"""
-    if not outcome.results:
+    if not outcome.results and not outcome.answers:
         return
     if outcome.meta.get("unresponsive_engines") or outcome.meta.get("primary_unresponsive_engines"):
         return
@@ -114,7 +115,8 @@ async def _search(query: str, *, settings: Any, categories: str | None, time_ran
         "error": fallback.meta.get("error"),
     }
     if not fallback.results:
-        return WebRetrievalOutcome(results=outcome.results, meta={**outcome.meta, "fallback": fallback_meta})
+        return WebRetrievalOutcome(results=outcome.results, meta={**outcome.meta, "fallback": fallback_meta},
+                                   answers=outcome.answers)
     seen_urls = {r.url for r in outcome.results}
     merged = list(outcome.results) + [r for r in fallback.results if r.url not in seen_urls]
     merged = merged[: settings.top_k]
@@ -125,7 +127,9 @@ async def _search(query: str, *, settings: Any, categories: str | None, time_ran
             "result_count": len(merged),
             "merged_from_primary": len(seen_urls),
             "fallback": fallback_meta,
-            # meta 其他欄位是補查那次的；主搜的引擎狀況另外留著
+            # meta 其他欄位是補查那次的；主搜的引擎狀況另外留著，答案數照實際合併後的算
             "primary_unresponsive_engines": outcome.meta.get("unresponsive_engines") or [],
+            "answer_count": len(outcome.answers or fallback.answers),
         },
+        answers=outcome.answers or fallback.answers,
     )
