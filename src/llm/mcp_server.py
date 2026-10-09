@@ -2,7 +2,7 @@
 
 兩種跑法：
   - 常駐（正式）：docker-compose 的 `search-mcp` 服務執行 `python -m llm.mcp_server --http`，聽 8765 port
-    （主機那端只綁 127.0.0.1）；順便在背景跑每日維護（同步索引、補算向量，見 `services.search.nightly`）。
+    （主機那端只綁 127.0.0.1）；順便在背景定期同步索引、每天補算向量（見 `services.search.background`）。
     客戶端是這台的 Claude Code，照 repo 根目錄的 `.mcp.json` 連 `http://127.0.0.1:8765/mcp`。不用 token：
     只有本機連得到
   - stdio：不帶參數執行，給除錯或沒有常駐服務時用（`docker exec -i search-mcp python -m llm.mcp_server`）
@@ -136,7 +136,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     from utils.logger_config import configure_logging
 
     parser = argparse.ArgumentParser(description="情報搜尋的 MCP server")
-    parser.add_argument("--http", action="store_true", help="常駐模式：走 HTTP，並在背景跑每日維護")
+    parser.add_argument("--http", action="store_true", help="常駐模式：走 HTTP，並在背景定期同步索引、每天補算向量")
     args = parser.parse_args(argv)
 
     if not args.http:
@@ -146,12 +146,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         server.run("stdio")
         return
 
-    from services.search import nightly
+    from services.search import background
 
     # 自己一個容器：log 寫自己的檔，也輸出到畫面（docker logs search-mcp 看得到）
     configure_logging(force=True, root_handlers=["console", "mcp_file"])
     logger.info("MCP server 啟動（HTTP，port %d）", SEARCH_SETTINGS.mcp_port)
-    nightly.start_in_background()
+    background.start_in_background()
     server.run("streamable-http", port=SEARCH_SETTINGS.mcp_port, **http_options())
 
 

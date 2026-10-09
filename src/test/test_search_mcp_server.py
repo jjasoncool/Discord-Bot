@@ -6,8 +6,8 @@
   - 每筆結果都標明來源、是否官方、連結，模型才能分開講官方與玩家說法並附連結
   - 參數錯（不認得的來源、沒有的 id）要把**可讀的原因**送回模型，讓它改參數重試
   - 模型給了使用者的原句（`question`），重新排序要讀到原句，不是拆過的關鍵字
-  - 常駐模式（`--http`）：聽設定的 port、背景開每日維護；只接受本機與 docker 服務名稱的 Host（防 DNS rebinding）；
-    stdio 模式不開每日維護
+  - 常駐模式（`--http`）：聽設定的 port、開背景工作（定期同步、每日維護）；只接受本機與 docker 服務名稱的 Host
+    （防 DNS rebinding）；stdio 模式不開背景工作
 
 執行：
     cd src && python -m unittest test.test_search_mcp_server -v
@@ -136,26 +136,26 @@ class HttpModeTests(unittest.TestCase):
                     response = client.post("/mcp", json=_INITIALIZE, headers=headers)
                 self.assertEqual(response.status_code == 200, ok, response.text[:200])
 
-    def test_http_mode_serves_on_the_configured_port_and_starts_nightly(self):
+    def test_http_mode_serves_on_the_configured_port_and_starts_background_work(self):
         with mock.patch("utils.logger_config.configure_logging"), \
                 mock.patch.object(mcp_server.server, "run") as run, \
-                mock.patch("services.search.nightly.start_in_background") as nightly:
+                mock.patch("services.search.background.start_in_background") as background:
             mcp_server.main(["--http"])
 
-        nightly.assert_called_once()
+        background.assert_called_once()
         transport = run.call_args.args[0]
         self.assertEqual(transport, "streamable-http")
         self.assertEqual(run.call_args.kwargs["port"], SEARCH_SETTINGS.mcp_port)
         self.assertEqual(run.call_args.kwargs["host"], "0.0.0.0")   # 容器裡要聽所有介面，compose 才轉得進來
 
-    def test_stdio_mode_does_not_start_nightly(self):
+    def test_stdio_mode_does_not_start_background_work(self):
         with mock.patch("utils.logger_config.configure_logging"), \
                 mock.patch.object(mcp_server.server, "run") as run, \
-                mock.patch("services.search.nightly.start_in_background") as nightly:
+                mock.patch("services.search.background.start_in_background") as background:
             mcp_server.main([])
 
         run.assert_called_once_with("stdio")
-        nightly.assert_not_called()
+        background.assert_not_called()
 
 
 if __name__ == "__main__":

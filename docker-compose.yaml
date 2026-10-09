@@ -46,7 +46,7 @@ services:
         condition: service_healthy
 
   # 情報搜尋的 MCP server（常駐）：給這台的 Claude Code 連（.mcp.json → http://127.0.0.1:8765/mcp），
-  # 每天 03:00 同步搜尋索引、補算新文章的向量（llm/mcp_server.py、services/search/nightly.py）。
+  # 背景每 50 秒同步搜尋索引、每天 03:00 補算新文章的向量（llm/mcp_server.py、services/search/background.py）。
   # 沿用 bot 的映像與程式碼，但只帶用得到的環境變數：不帶 Discord token、Telegram 憑證
   search-mcp:
     build: *main-build

@@ -8,7 +8,8 @@
   - **絕不寫 scraper 的資料庫**（articles.db 是使用者資料，只能唯讀開）
   - 讀全文時帶上 PTT 推文、巴哈留言，並分頁
   - 一次搜尋超過門檻秒數，就把每一步（同步、向量、關鍵字、重排）花的時間寫進 log；快的不寫
-  - 索引檔是好幾個行程共用的：索引裡有這個行程不認得的來源就略過
+  - 索引檔是好幾個行程共用的：索引裡有這個行程不認得的來源就略過；搜尋不排在同一行程正在跑的同步後面，
+    別的行程握著寫入鎖時照樣用現有的資料搜尋
 
 執行：
     cd src && python -m unittest test.test_search_index -v
@@ -21,6 +22,7 @@ import re
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -307,6 +309,48 @@ class SharedIndexTests(SearchIndexTestBase):
         older = self.make_index(sources={k: v for k, v in SOURCES.items() if k != "bahamut"})
 
         self.assertEqual(self.ids(older.search("今汐 配隊")), ["ptt:M.1.A.001"])
+
+    def test_search_does_not_queue_behind_a_sync_already_running_in_this_process(self):
+        index = self.make_index()
+        index.sync()
+        index._last_sync = float("-inf")    # 該同步了，但背景那一輪正在跑
+        hits = []
+        with index._sync_lock:
+            worker = threading.Thread(target=lambda: hits.extend(index.search("今汐 配隊")))
+            worker.start()
+            worker.join(3)
+            self.assertFalse(worker.is_alive(), "搜尋不該等背景同步跑完")
+        self.assertTrue(hits)
+
+    def test_forced_sync_waits_for_the_running_one(self):
+        index = self.make_index()
+        done = threading.Event()
+        with index._sync_lock:
+            worker = threading.Thread(target=lambda: (index.sync(force=True), done.set()))
+            worker.start()
+            self.assertFalse(done.wait(0.3))
+        self.assertTrue(done.wait(5))
+
+    def test_search_uses_existing_data_when_another_process_holds_the_write_lock(self):
+        index = self.make_index()
+        index.sync()
+        index._last_sync = float("-inf")
+        open_index = index._open_index
+
+        def quick_timeout():
+            con = open_index()
+            con.execute("PRAGMA busy_timeout = 200")
+            return con
+
+        index._open_index = quick_timeout
+        other = sqlite3.connect(self.index_path, isolation_level=None)
+        other.execute("BEGIN IMMEDIATE")
+        try:
+            with self.assertLogs("services.search.index", level="WARNING"):
+                self.assertTrue(index.search("今汐 配隊"))
+        finally:
+            other.execute("ROLLBACK")
+            other.close()
 
 
 class SyncTests(SearchIndexTestBase):

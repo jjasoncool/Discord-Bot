@@ -80,6 +80,9 @@ class SearchSettings(BaseSettings):
     mcp_port: int = 8765
     #: 允許的 Host 標頭（MCP 套件防 DNS rebinding）：本機連進來、或同一個 docker 網路用服務名稱連
     mcp_allowed_hosts: tuple[str, ...] = ("127.0.0.1:*", "localhost:*", "search-mcp:*")
+    #: 背景每幾秒同步一次（`services.search.background`）。比搜尋時的同步間隔（`sync_min_interval_seconds`）短，
+    #: 搜尋時就幾乎輪不到自己同步；巴哈爬蟲每小時重存約 2 萬列，趁剛寫完還在記憶體快取時先消化
+    background_sync_seconds: float = 50.0
     #: 每日維護（同步索引、補算新文章的向量）的時刻；過了 `nightly_deadline` 還沒做就等明天，
     #: 不在 04:00～07:30 維護時段（人格萃取、persona agent 用模型）裡搶 GPU
     nightly_at: time = time(3, 0)

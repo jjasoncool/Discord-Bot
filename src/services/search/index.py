@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
+import threading
 import time
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
@@ -185,6 +186,8 @@ class SearchIndex:
         self.sync_min_interval = (s.sync_min_interval_seconds if sync_min_interval_seconds is None
                                   else sync_min_interval_seconds)
         self._last_sync = float("-inf")
+        #: 同一個行程裡同時只有一個同步（背景定期同步、每日維護、搜尋前的同步共用這個物件）
+        self._sync_lock = threading.Lock()
         #: 向量那一路；None＝只用關鍵字（單元測試、或 SEARCH_SETTINGS.vector_enabled 關掉時）
         self.vector_store = vector_store
         #: 每次搜尋都問一次（正式環境接 settings/switches.json 的 search_vector_mode，改了就生效）
@@ -254,9 +257,21 @@ class SearchIndex:
     # ---------- 同步 ----------
 
     def sync(self, *, force: bool = False) -> SyncReport:
-        """把 scraper 資料庫的新增、修改、刪除跟上。`force=False` 時距離上次太近就跳過。"""
+        """把 scraper 資料庫的新增、修改、刪除跟上。`force=False` 時距離上次太近就跳過。
+
+        同一個行程裡已經有人在同步時（背景那一輪還沒跑完）：`force=False`（搜尋前的順手同步）就跳過，
+        直接讀已經寫好的資料，不排在背景的寫入交易後面——那一輪若超過 60 秒，搜尋會因鎖逾時失敗；
+        `force=True`（背景、每日維護）才排隊等。也避免兩邊同時判定要整份重建、互相交錯。"""
         if not force and time.monotonic() - self._last_sync < self.sync_min_interval:
             return SyncReport(skipped=True)
+        if not self._sync_lock.acquire(blocking=force):
+            return SyncReport(skipped=True)
+        try:
+            return self._sync_locked()
+        finally:
+            self._sync_lock.release()
+
+    def _sync_locked(self) -> SyncReport:
         started = time.monotonic()
         added = updated = removed = 0
         with closing(self._open_source()) as src, closing(self._open_index()) as con:
@@ -376,7 +391,14 @@ class SearchIndex:
         limit = max(1, min(int(limit or self.max_limit), self.max_limit))
         terms = parse_terms(query)
         with _timed(timings, "同步"):
-            self.sync()
+            try:
+                self.sync()
+            except sqlite3.OperationalError as exc:
+                # 別的行程（手動同步、stdio 版）正握著索引的寫入鎖：照樣用已經寫好的資料搜尋
+                if "locked" not in str(exc):
+                    raise
+                logger.warning("搜尋前同步時索引被別的行程鎖住，這次用現有的資料：%s", exc)
+                notes.append("同步被鎖住，用現有的資料")
         if not terms:
             return []
         with _timed(timings, "向量"):

@@ -1,6 +1,6 @@
 """批次算向量：把搜尋索引裡的文件切段、算向量、存進 pgvector。
 
-用法（search-mcp 容器裡；每天 03:00 也會自動補算新文章，見 `nightly.py`）：
+用法（search-mcp 容器裡；每天 03:00 也會自動補算新文章，見 `background.py`）：
   python -m services.search.embed --dry-run            # 只算要做多少（不呼叫 GPU）
   python -m services.search.embed --limit 1000         # 先做最新的 1000 份，量速度
   python -m services.search.embed                      # 做完 SEARCH_SETTINGS.vector_since 之後的全部
