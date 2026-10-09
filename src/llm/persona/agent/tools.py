@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Optional, Sequence
 
+from llm.client.tool_calls import ToolArgumentError, parse_arguments
 from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
 from sys_settings.time_settings import APP_TZ
 
@@ -768,16 +769,10 @@ def dispatch(ctx: ToolContext, *, name: str, arguments: Any) -> str:
     if fn is None:
         return _error(f"沒有名為 {name} 的工具；可用的是：{', '.join(_TOOL_FUNCS)}")
 
-    if isinstance(arguments, str):
-        try:
-            kwargs = json.loads(arguments or "{}")
-        except json.JSONDecodeError as exc:
-            return _error(f"arguments 不是合法 JSON：{exc}")
-    else:
-        kwargs = arguments or {}
-
-    if not isinstance(kwargs, dict):
-        return _error("arguments 必須是 JSON object")
+    try:
+        kwargs = parse_arguments(arguments)
+    except ToolArgumentError as exc:
+        return _error(str(exc))
 
     try:
         return fn(ctx, **kwargs)

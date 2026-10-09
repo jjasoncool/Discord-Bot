@@ -500,6 +500,21 @@ def _find_sleep_until_in_tree(tree: ast.Module) -> list[int]:
     return sorted(hits)
 
 
+def _find_tool_call_messages(path: Path) -> list[int]:
+    """自己組工具呼叫訊息（`{"role": "tool", ...}` 或帶 `tool_call_id` 的 dict）的地方。格式一律走
+    `llm.client.tool_calls`：每個 tool_call_id 都要回、id 要對上，少一則後端就拒絕（2026-10-09 /askai 接上
+    情報搜尋，成為第二個工具迴圈時抽出）。"""
+    found = []
+    for node in ast.walk(_parse(path)):
+        if not isinstance(node, ast.Dict):
+            continue
+        pairs = {k.value: v for k, v in zip(node.keys, node.values) if isinstance(k, ast.Constant)}
+        role = pairs.get("role")
+        if "tool_call_id" in pairs or (isinstance(role, ast.Constant) and role.value == "tool"):
+            found.append(node.lineno)
+    return sorted(found)
+
+
 def _find_sleep_until(path: Path) -> list[int]:
     return _find_sleep_until_in_tree(_parse(path))
 
@@ -692,6 +707,12 @@ RULES = [
             "commands/management_commands.py",
             "commands/community_lookup_commands.py",
         },
+    ),
+    Rule(
+        name="工具呼叫的訊息格式（assistant 的 tool_calls、role: tool 的回覆、解析工具參數）",
+        finder=_find_tool_call_messages,
+        canonical="llm.client.tool_calls（assistant_message／tool_message／call_name_and_arguments／parse_arguments）",
+        allowed={"llm/client/tool_calls.py"},
     ),
     Rule(
         name="定時排程（算出離下一次還有幾秒、睡到那時）",

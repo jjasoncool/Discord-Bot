@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Sequence
 
 from llm.client.lemonade_gate import foreground_recently_active, stream_busy
+from llm.client.tool_calls import assistant_message, call_name_and_arguments, tool_message
 from services.llm_service import LLMAPIError
 from llm.persona.agent import tools as agent_tools
 from llm.persona.agent.schema import build_response_format
@@ -316,11 +317,7 @@ async def run_for_user(
                 )
                 break
 
-            messages.append({
-                "role": "assistant",
-                "content": result.content,
-                "tool_calls": result.tool_calls,
-            })
+            messages.append(assistant_message(result.content, result.tool_calls))
 
             # 這一步有沒有真的執行到工具。全部被擋（只回佔位字串）就沒有繼續的理由——
             # 否則批量被擋之後 pending 不再成長，迴圈會一路空轉到 max_steps。
@@ -330,9 +327,7 @@ async def run_for_user(
             # 否則一步塞六個 get_conversation 就會直接衝破上限。
             # 超出後仍要對每個 tool_call_id 回覆（協議要求），只是改回佔位字串。
             for call in result.tool_calls:
-                fn = call.get("function") or {}
-                name = str(fn.get("name") or "")
-                arguments = fn.get("arguments") or "{}"
+                name, arguments = call_name_and_arguments(call)
                 call_started = time.perf_counter()
                 # search_messages 走保留額度：預算用盡後仍可再查幾次（回傳小、價值高）
                 projected = used_tokens + pending_tokens * estimate_scale
@@ -375,12 +370,7 @@ async def run_for_user(
                     "persona agent trace=%s step=%d tool=%s args=%s %dms → %s",
                     trace, step, name, str(arguments)[:120], elapsed_ms, payload[:120],
                 )
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": call.get("id"),
-                    "name": name,
-                    "content": payload,
-                })
+                messages.append(tool_message(call, payload))
                 # 這一步新增的工具結果還沒被伺服器算過，先估；下一輪呼叫後會被實際值取代
                 pending_tokens += estimate_tokens(payload)
 
