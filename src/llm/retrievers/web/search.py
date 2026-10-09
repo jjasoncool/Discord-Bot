@@ -8,11 +8,39 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from .searxng import WebRetrievalOutcome, fetch_web_results
 
 logger = logging.getLogger(__name__)
+
+#: (查詢, 路由) → (到期時刻, 結果)。同一個查詢短時間內直接用上次的結果：少打引擎、降低被擋的機會
+_cache: dict[tuple, tuple[float, WebRetrievalOutcome]] = {}
+_CACHE_MAX = 64
+
+
+def _cached(key: tuple) -> WebRetrievalOutcome | None:
+    now = time.monotonic()
+    for stale in [k for k, (expires, _) in _cache.items() if expires <= now]:
+        del _cache[stale]
+    hit = _cache.get(key)
+    if hit is None:
+        return None
+    outcome = hit[1]
+    return WebRetrievalOutcome(results=list(outcome.results), meta={**outcome.meta, "cached": True})
+
+
+def _remember(key: tuple, outcome: WebRetrievalOutcome, settings: Any) -> None:
+    """只記有結果的（0 筆下次要重查；出錯時本來就沒有結果）；有引擎這次沒回應的也不記（結果不完整，
+    下次可能就齊了）。超過上限丟最早到期的。`cache_seconds` 設 0 等於關掉：記進去就已經過期，下次讀不到。"""
+    if not outcome.results:
+        return
+    if outcome.meta.get("unresponsive_engines") or outcome.meta.get("primary_unresponsive_engines"):
+        return
+    if len(_cache) >= _CACHE_MAX:
+        del _cache[min(_cache, key=lambda k: _cache[k][0])]
+    _cache[key] = (time.monotonic() + settings.cache_seconds, outcome)
 
 
 async def search_web(
@@ -28,8 +56,21 @@ async def search_web(
 
     窄路由（限類別、限時間）結果少於 `settings.fallback_min_results` 時，改用通用引擎、不限類別與時間再查一次，
     合併去重（窄路由的結果通常比較貼題，排前面）；補查的經過記在 meta.fallback。
+    同一個查詢（同字串、同路由）`settings.cache_seconds` 內直接回上次的結果（meta.cached）；出錯或 0 筆不記。
     """
     log = logger_override or logger
+    key = (query, categories, time_range, language)
+    hit = _cached(key)
+    if hit is not None:
+        return hit
+    outcome = await _search(query, settings=settings, categories=categories, time_range=time_range,
+                            language=language, log=log)
+    _remember(key, outcome, settings)
+    return outcome
+
+
+async def _search(query: str, *, settings: Any, categories: str | None, time_range: str | None,
+                  language: str | None, log: logging.Logger) -> WebRetrievalOutcome:
     engines: str | None = None
     query_categories = categories
     if categories == "news":
@@ -84,5 +125,7 @@ async def search_web(
             "result_count": len(merged),
             "merged_from_primary": len(seen_urls),
             "fallback": fallback_meta,
+            # meta 其他欄位是補查那次的；主搜的引擎狀況另外留著
+            "primary_unresponsive_engines": outcome.meta.get("unresponsive_engines") or [],
         },
     )

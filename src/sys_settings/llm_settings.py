@@ -267,8 +267,17 @@ class AskAIWebSettings(BaseSettings):
     # 名單依實測收斂（詳見 handoff）：只有 bing / duckduckgo 系穩定，reuters 供 lang=en 路由。
     default_engines: str = "bing,duckduckgo"
     news_engines: str = "bing news,duckduckgo news,reuters"
-    timeout_seconds: float = 4.0
+    # 比 SearXNG 自己的最長等待（settings.yml max_request_timeout 4.0）多一點：剛好相等時，同一次查詢混進慢引擎，
+    # 連已經回來的結果都一起丟掉
+    timeout_seconds: float = 5.0
     top_k: int = 5
+    # 引擎回報被擋（真人驗證、限流、拒絕存取）後，這段時間先不問它。SearXNG 對 duckduckgo 的真人驗證不會自己停用
+    # （停用秒數寫死 0），每次都重打、每次都 0 筆；不問它也比較有機會讓封鎖自己解除（10-09 實測）
+    blocked_engine_cooldown_seconds: float = 1800.0
+    # 同一個查詢（同字串、同路由）這段時間內直接用上次的結果：少打引擎，降低被擋的機會
+    cache_seconds: float = 300.0
+    # 成人內容過濾：0 不過濾、1 一般、2 嚴格（SearXNG 的 safesearch 參數；settings.yml 預設 0）
+    safesearch: int = 1
     # 主搜結果太少就走 general fallback。門檻不設 0：news 引擎常「只吐 1 筆」，
     # 那種結果答不了問題卻又擋掉救援，會安靜降級。
     fallback_min_results: int = 3
