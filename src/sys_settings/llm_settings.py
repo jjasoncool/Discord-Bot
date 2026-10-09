@@ -253,12 +253,9 @@ class AskAICommandSettings(BaseSettings):
 
 
 class AskAIWebSettings(BaseSettings):
-    """/askai 網路搜尋整合設定（關鍵項可由 env/dotenv 覆寫）。"""
+    """/askai 網路搜尋整合設定（關鍵項可由 env/dotenv 覆寫）。開關在 settings/switches.json 的 `askai_web_search_mode`
+    （10-09 由這裡的 `enabled`／`ASKAI_WEB_ENABLED` 搬過去；當時 .env 與 compose 都沒設）。"""
 
-    enabled: bool = Field(
-        default=True,
-        validation_alias="ASKAI_WEB_ENABLED",
-    )
     searxng_url: str = Field(
         default="http://searxng:8080/search",
         validation_alias="SEARXNG_URL",
@@ -267,6 +264,10 @@ class AskAIWebSettings(BaseSettings):
     # 名單依實測收斂（詳見 handoff）：只有 bing / duckduckgo 系穩定，reuters 供 lang=en 路由。
     default_engines: str = "bing,duckduckgo"
     news_engines: str = "bing news,duckduckgo news,reuters"
+    # 工具模式的天氣、匯率類型用 SearXNG 內建的專用引擎，答案在回應的 answers（不用註冊、不用授權碼）。
+    # openmeteo 在 settings.yml 是 disabled，但明確指定 engines 一樣會跑（10-09 實測）；它只認英文地名
+    weather_engines: str = "openmeteo"
+    currency_engines: str = "currency"
     # 比 SearXNG 自己的最長等待（settings.yml max_request_timeout 4.0）多一點：剛好相等時，同一次查詢混進慢引擎，
     # 連已經回來的結果都一起丟掉
     timeout_seconds: float = 5.0
@@ -282,6 +283,8 @@ class AskAIWebSettings(BaseSettings):
     # 那種結果答不了問題卻又擋掉救援，會安靜降級。
     fallback_min_results: int = 3
     language: str = "zh-TW"
+    #: 工具模式（模型自己決定要不要查）時，怎麼用 web_search 的規則；只在有這個工具時接在系統提示詞後面
+    rules_path: str = "/app/settings/prompts/askai_web_rules.txt"
 
     model_config = SettingsConfigDict(
         extra="ignore",

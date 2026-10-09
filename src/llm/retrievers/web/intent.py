@@ -176,7 +176,9 @@ def focus_news_query(cleaned: str, categories: str | None) -> str:
 # ⚠ news 路由不可用 time_range="day"（實測直接回 0 筆，勿改回去）：bing news 會送
 # `qft=interval="4"`，Bing 對此回空 body → 引擎拋 ParserError；duckduckgo news 沒宣告
 # time_range_support → SearXNG 帶任何 time_range 就整個跳過它。兩根柱子同時倒。
-# general 引擎不受影響（支援 day），所以天氣 / 體育即時那幾條 general+day 照留。
+# general 也不全然支援：bing（一般）沒宣告 time_range_support，帶了時間範圍就整個被跳過（10-09 查 /config 與
+# SearXNG 原始碼），所以天氣、遊戲改版、體育即時這幾條 general+時間範圍 實際只剩 duckduckgo 在跑。
+# 這張表只給關鍵字模式（保留下來當退回用，帶著這個已知問題）；工具模式由模型選類型、一般搜尋不限時間，見 tools._KINDS。
 #
 # 為什麼遊戲改版類走通用 engines 而不是 news：
 # 實測 Google News / Bing News 在 zh-TW 對遊戲垂直站（巴哈、4Gamers、遊戲角落）

@@ -49,6 +49,9 @@ class Switches(BaseModel):
     #: /askai 查遊戲情報（官網公告、官方 FB、PTT、巴哈；llm.retrievers.intel 連 search-mcp）：on＝讓模型自己決定要不要
     #: 先查、查什麼再回答；off＝跟原本一樣直接回答。search-mcp 沒開時本來就會自動不查
     askai_intel_search_mode: Literal["off", "on"] = "off"
+    #: /askai 的網路搜尋（SearXNG，llm.retrievers.web）：keyword＝問題裡有時事類關鍵字就先查好、塞進 prompt（舊做法）；
+    #: tool＝做成工具，由模型和遊戲情報一起決定查哪邊（兩邊不會同時塞資料）；off＝不查。預設照舊做法
+    askai_web_search_mode: Literal["off", "keyword", "tool"] = "keyword"
 
 
 def _parse(raw: str) -> Switches:

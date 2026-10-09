@@ -17,7 +17,7 @@ from llm.logger_factory import build_askai_prompt_log, get_or_create_file_logger
 from llm.persona.persona_card_builder import extract_mentioned_user_ids
 from llm.retrievers.context_retriever import retrieve_discord_context, retrieve_rag_context_sync
 from llm.retrievers.intel import run_with_intel
-from llm.retrievers.web import format_web_context_lines, search_web, should_search
+from llm.retrievers.web import WebSearchTools, format_web_context_lines, search_web, should_search
 from llm.client.lemonade_gate import imagegen_busy, note_foreground_activity
 from llm.persona.member_names import member_names_from_guild, name_map_lines
 from llm.preprocess import person_anchor
@@ -443,9 +443,11 @@ class LLMCommands(commands.Cog):
                         f"<@!{uid_str}>", name_with_id
                     )
 
-        # 網路搜尋意圖判斷 + 背景 fetch（與 discord / rag 檢索並行）
+        # 網路搜尋（開關 askai_web_search_mode）：keyword＝關鍵字判斷要不要查、背景先查好塞進 prompt（與 discord / rag
+        # 檢索並行）；tool＝做成工具，由模型和遊戲情報一起決定查哪邊（兩邊不會同時塞資料，見下方 run_with_intel）；off＝不查
+        web_mode = switches.current().askai_web_search_mode
         intent = should_search(resolved_question)
-        run_web = WEB_SETTINGS.enabled and intent.triggered
+        run_web = web_mode == "keyword" and intent.triggered
 
         web_task: asyncio.Task | None = None
         if run_web:
@@ -502,8 +504,9 @@ class LLMCommands(commands.Cog):
 
         # 回收背景 web_task 結果（若有觸發），組 web_context 與 web_meta
         web_context: list[str] | None = None
+        # 工具模式也記下關鍵字會不會觸發（reason、trigger_keyword…），方便和模型實際的決定對照
         web_meta: dict[str, object] = {
-            "enabled": WEB_SETTINGS.enabled,
+            "mode": web_mode,
             "triggered": run_web,
             "reason": intent.reason,
             "trigger_keyword": intent.trigger_keyword,
@@ -698,10 +701,13 @@ class LLMCommands(commands.Cog):
                 decide_max_tokens=INTEL_SETTINGS.decide_max_tokens,
             )
 
-        # 用 asyncio.Task 包裝，取消時可中斷 LLM 的 HTTP 請求；查情報的連線開在同一個 task 裡，按取消時一起中斷
+        # 網路搜尋的工具模式：和情報工具合成一組交給模型（輪數、決策輪長度兩邊共用 INTEL_SETTINGS 的值）
+        web_tools = WebSearchTools(settings=WEB_SETTINGS) if web_mode == "tool" else None
+
+        # 用 asyncio.Task 包裝，取消時可中斷 LLM 的 HTTP 請求；查情報、查網路都在同一個 task 裡，按取消時一起中斷
         llm_task = asyncio.create_task(run_with_intel(
             _generate, question=resolved_question, enabled=intel_mode == "on", meta=intel_meta,
-            settings=INTEL_SETTINGS,
+            settings=INTEL_SETTINGS, also=[web_tools] if web_tools else (),
         ))
 
         # 同時等 LLM 回覆和取消事件
@@ -738,6 +744,12 @@ class LLMCommands(commands.Cog):
             logger.info("askai 查情報 trace=%s 連上=%s 呼叫=%s", trace_id, intel_meta.get("connected"),
                         [(c.get("tool"), c.get("elapsed_ms"), c.get("error") or len(c.get("result_ids") or []))
                          for c in intel_calls])
+        if web_tools is not None:
+            web_meta["calls"] = web_tools.calls
+            logger.info("askai 網路搜尋 trace=%s 呼叫=%s", trace_id,
+                        [(c.get("kind"), c.get("query"), c.get("elapsed_ms"),
+                          c.get("error") or f"{c.get('result_count')} 筆＋答案 {c.get('answer_count', 0)}")
+                         for c in web_tools.calls])
         messages_sent = llm_result.messages_sent
         error_kind = llm_result.error_kind
 

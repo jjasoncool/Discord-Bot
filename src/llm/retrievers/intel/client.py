@@ -20,11 +20,11 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Awaitable, Callable, Optional, TypeVar
+from typing import Any, Awaitable, Callable, Optional, Sequence, TypeVar
 
 from mcp.client.client import Client
 
-from llm.client.tool_calls import ToolArgumentError, parse_arguments
+from llm.client.tool_calls import ToolArgumentError, ToolRunner, combine_runners, parse_arguments
 from llm.prompt import prompt_files
 from sys_settings.llm_settings import AskAIIntelSettings
 
@@ -148,19 +148,21 @@ async def prepare_intel_session(*, question: str, settings: Optional[AskAIIntelS
                               instructions=instructions)
 
 
-async def run_with_intel(generate: Callable[[Optional[IntelSearchSession]], Awaitable[T]], *, question: str,
+async def run_with_intel(generate: Callable[[Optional[ToolRunner]], Awaitable[T]], *, question: str,
                          enabled: bool, meta: dict[str, Any], settings: Optional[AskAIIntelSettings] = None,
-                         server: Any = None) -> T:
-    """開關開著就準備情報工具、交給 `generate`；關著或連不上就 `generate(None)`（照原本的方式回答）。
+                         server: Any = None, also: Sequence[Optional[ToolRunner]] = ()) -> T:
+    """開關開著就準備情報工具、交給 `generate`；關著或連不上就不給情報工具（照原本的方式回答）。
 
-    查情報的經過寫進 `meta`（`connected`：有沒有連上；`calls`：呼叫了哪些工具），給 /askai 的回應紀錄用。
+    `also`：其他一起交給模型的工具（/askai 的網路搜尋），和情報工具合成一組（`combine_runners`），模型在同一個
+    工具輪裡挑要查哪邊；情報關著或連不上時就只給它們，都沒有時 `generate(None)`。
+    查情報的經過寫進 `meta`（`connected`：有沒有連上；`calls`：呼叫了哪些情報工具），給 /askai 的回應紀錄用。
     每次工具呼叫的短連線都在呼叫端的 task 裡開關：/askai 把整段包成一個 task，按取消時搜尋一起中斷。"""
     if not enabled:
-        return await generate(None)
+        return await generate(combine_runners(*also))
     session = await prepare_intel_session(question=question, settings=settings, server=server)
     meta["connected"] = session is not None
     try:
-        return await generate(session)
+        return await generate(combine_runners(session, *also))
     finally:
         if session is not None:
             meta["calls"] = session.calls

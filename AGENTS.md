@@ -79,8 +79,8 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 綁頻道 | `settings/channel_registry.py` 的 `register_channel` |
 | 取得 thread（封存的也拿得到）、解除封存 | `utils.discord_threads.fetch_thread`／`reopen_thread`（封存的 thread 改不了、刪不了訊息） |
 | 讀綁定的頻道 id（可能沒綁） | `ChannelConfig.get_configured_id(key)`（沒綁回 None，不必自己比 `DEFAULT_ID`） |
-| 搜尋公告、官方 FB、PTT、巴哈的內容；讀全文（附推文、留言） | `services.search`（`SearchIndex.search`／`fetch`；索引從 `articles.db` 唯讀增量同步；用語、評估數字見 `AI_HANDOFF_AND_TODO.md` 的 `mcp-search-tools` 區塊）；MCP 殼是 `llm.mcp_server`，常駐在 compose 的 `search-mcp` 服務（背景同步與每日維護 `services.search.background`）；bot 端（discord-bot 沒掛索引）一律當 MCP 客戶端用 `llm.retrievers.intel`（`run_with_intel` 依開關準備工具、交給回答流程並記經過；`prepare_intel_session`；每次工具呼叫各開短連線，見模組說明） |
-| 網路搜尋（SearXNG；哪類題目用哪組引擎、窄路由結果太少換通用引擎補查） | `llm.retrievers.web.search_web`（路由用 `intent.classify_route`；直接呼叫 `fetch_web_results` 守衛擋） |
+| 搜尋公告、官方 FB、PTT、巴哈的內容；讀全文（附推文、留言） | `services.search`（`SearchIndex.search`／`fetch`；索引從 `articles.db` 唯讀增量同步；用語、評估數字見 `AI_HANDOFF_AND_TODO.md` 的 `mcp-search-tools` 區塊）；MCP 殼是 `llm.mcp_server`，常駐在 compose 的 `search-mcp` 服務（背景同步與每日維護 `services.search.background`）；bot 端（discord-bot 沒掛索引）一律當 MCP 客戶端用 `llm.retrievers.intel`（`run_with_intel` 依開關準備工具、交給回答流程並記經過，`also=` 帶其他一起給模型的工具；`prepare_intel_session`；每次工具呼叫各開短連線，見模組說明） |
+| 網路搜尋（SearXNG；哪類題目用哪組引擎、窄路由結果太少換通用引擎補查） | `llm.retrievers.web.search_web`（路由用 `intent.classify_route`；直接呼叫 `fetch_web_results` 守衛擋）；給模型當工具用 `WebSearchTools`（/askai 開關 `askai_web_search_mode`：keyword 先查好塞進 prompt、tool 由模型和遊戲情報一起決定；工具模式的題目類型由模型選 `kind`，每種類型的引擎寫在 `tools._KINDS`）；SearXNG 的直接答案（匯率、天氣）在 `WebRetrievalOutcome.answers`；被擋的引擎自動暫避 |
 | 官方公告、巴哈單一樓層的原文網址 | `services.source_urls`（`official_article_url`、`bahamut_floor_url`） |
 | 合併多份排名（關鍵字＋向量的混合檢索） | `utils.rank_fusion`（`rrf_score`／`fuse_rankings`；只看名次、不看各自的分數） |
 | prompt 裡認人的錨點（名字#尾碼） | `llm.preprocess.person_anchor.label()`／`suffix()`（撞號自動加長；`refresh()` 由 `discord_bot` 在啟動與成員進出時呼叫） |

@@ -149,6 +149,16 @@ class SearchWebTests(unittest.IsolatedAsyncioTestCase):
         not_found = await search_web("颱風 2", settings=SETTINGS, time_range="day")
         self.assertEqual(not_found.answers, ["颱風警報"])
 
+    async def test_named_engines_skip_the_category_choice(self):
+        self.replies = [outcome([], answers=["Taipei 天氣"]), outcome([], answers=["1 USD = 31.96 TWD"])]
+
+        await search_web("Taipei", settings=SETTINGS, engines="openmeteo", language="en")
+        await search_web("Taipei", settings=SETTINGS, engines="currency", language="en")    # 引擎不同就不共用快取
+
+        weather, currency = self.calls
+        self.assertEqual((weather["engines"], weather["categories"], weather["language"]), ("openmeteo", None, "en"))
+        self.assertEqual(currency["engines"], "currency")
+
     async def test_incomplete_results_are_not_remembered(self):
         partial = WebRetrievalOutcome(results=[hit(i) for i in range(5)],
                                       meta={"error": None, "unresponsive_engines": [["duckduckgo", "timeout"]]})

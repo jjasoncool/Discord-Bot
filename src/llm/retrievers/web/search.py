@@ -1,8 +1,8 @@
 """一次網路搜尋：依路由挑引擎 → 查 SearXNG → 窄路由結果太少就換通用引擎補。
 
 /askai 的兩種用法共用這一份（開關 `askai_web_search_mode`）：關鍵字模式由 `intent.should_search` 決定要不要查、
-路由，查完塞進 prompt；工具模式由模型決定要不要查（`tools.WebSearchTools`）。哪類引擎對哪類題目有效、
-什麼時候要換引擎補查，都是實測出來的（見 `intent._ROUTE_RULES` 的說明），兩種用法不能各寫一份。
+用 `intent._ROUTE_RULES` 路由，查完塞進 prompt；工具模式由模型決定要不要查、選題目類型，路由寫在 `tools._KINDS`
+（兩張表刻意分開：關鍵字模式是保留下來退回用的舊做法）。兩種用法共用的是「怎麼查、結果太少怎麼補查、快取」這一份。
 """
 
 from __future__ import annotations
@@ -51,30 +51,31 @@ async def search_web(
     categories: str | None = None,
     time_range: str | None = None,
     language: str | None = None,
+    engines: str | None = None,
     logger_override: logging.Logger | None = None,
 ) -> WebRetrievalOutcome:
-    """照路由（`intent.classify_route` 的 categories／time_range／language）查一次；失敗不 raise，原因在 meta.error。
+    """照路由（categories／time_range／language，或明確指定的 engines）查一次；失敗不 raise，原因在 meta.error。
 
     窄路由（限類別、限時間）結果少於 `settings.fallback_min_results` 時，改用通用引擎、不限類別與時間再查一次，
     合併去重（窄路由的結果通常比較貼題，排前面）；補查的經過記在 meta.fallback。
     同一個查詢（同字串、同路由）`settings.cache_seconds` 內直接回上次的結果（meta.cached）；出錯或 0 筆不記。
+    `engines`：明確指定引擎（天氣、匯率這類專用引擎），不照類別挑。
     """
     log = logger_override or logger
-    key = (query, categories, time_range, language)
+    key = (query, categories, time_range, language, engines)
     hit = _cached(key)
     if hit is not None:
         return hit
     outcome = await _search(query, settings=settings, categories=categories, time_range=time_range,
-                            language=language, log=log)
+                            language=language, engines=engines, log=log)
     _remember(key, outcome, settings)
     return outcome
 
 
 async def _search(query: str, *, settings: Any, categories: str | None, time_range: str | None,
-                  language: str | None, log: logging.Logger) -> WebRetrievalOutcome:
-    engines: str | None = None
+                  language: str | None, engines: str | None, log: logging.Logger) -> WebRetrievalOutcome:
     query_categories = categories
-    if categories == "news":
+    if engines is None and categories == "news":
         # engines 與 categories 二選一：同送時 SearXNG 取聯集，會把停用的引擎一起叫來陪跑
         engines = settings.news_engines
         query_categories = None

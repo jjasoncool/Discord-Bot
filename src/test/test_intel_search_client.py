@@ -7,7 +7,8 @@
   - 參數錯、工具不存在、搜尋端錯誤都回 `{"error": ...}` 給模型，不往外丟；每次呼叫都記下來
   - **搜尋到一半連線斷掉（服務重啟）也只是回 `{"error": ...}`**：不能變成「取消」整個 /askai
   - 服務連不上就給 None（呼叫端照原本的方式回答）；工具的使用規則跟著工具一起給（只有真的有工具時才有）
-  - `run_with_intel`：開關關著不連線；開著就把工具交給回答流程，並記下有沒有連上、呼叫了哪些工具
+  - `run_with_intel`：開關關著不連線；開著就把工具交給回答流程，並記下有沒有連上、呼叫了哪些工具；
+    其他工具（網路搜尋）和情報工具合成一組給模型，情報關著或連不上時照樣給
   - /askai 的接線：照開關決定、經過寫進回應紀錄、長回答切成多則
 
 測試直接連同一個行程裡的 MCP server（`llm.mcp_server.server`），索引換成假資料，不碰網路。
@@ -17,6 +18,7 @@
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import sys
@@ -216,6 +218,48 @@ class RunWithIntelTests(_IntelServerBase):
         self.assertIs(meta["connected"], False)
 
 
+class FakeWebTools:
+    instructions = "【網路搜尋規則】"
+    tools = [{"type": "function", "function": {"name": "web_search", "description": "搜網路", "parameters": {}}}]
+
+    async def execute(self, name, arguments):
+        return '{"results": []}'
+
+
+class RunWithOtherToolsTests(_IntelServerBase):
+    async def test_other_tools_join_the_intel_tools(self):
+        seen = []
+
+        async def generate(runner):
+            seen.append(runner)
+            return "回答"
+
+        await run_with_intel(generate, question="q", enabled=True, meta={"mode": "on"}, server=mcp_server.server,
+                             also=[FakeWebTools()])
+
+        (runner,) = seen
+        self.assertEqual([t["function"]["name"] for t in runner.tools], ["search", "fetch", "web_search"])
+        self.assertIn("【網路搜尋規則】", runner.instructions)
+        self.assertIn("search", runner.instructions.split("【網路搜尋規則】")[0])   # 情報規則在前
+
+    async def test_other_tools_still_come_when_intel_is_off_or_unreachable(self):
+        web = FakeWebTools()
+        for label, kwargs in (("關著", {"enabled": False}),
+                              ("連不上", {"enabled": True,
+                                        "settings": AskAIIntelSettings(mcp_url="http://127.0.0.1:9/mcp")})):
+            with self.subTest(label):
+                seen = []
+
+                async def generate(runner):
+                    seen.append(runner)
+                    return "回答"
+
+                with self.assertLogs("llm.retrievers.intel.client", level="WARNING") if label == "連不上" \
+                        else contextlib.nullcontext():
+                    await run_with_intel(generate, question="q", meta={"mode": "on"}, also=[web], **kwargs)
+                self.assertEqual(seen, [web])
+
+
 class AskaiWiringTests(unittest.TestCase):
     """/askai 的指令處理要接 Discord 互動，難以整段跑；這裡守住接線的關鍵點。"""
 
@@ -228,6 +272,16 @@ class AskaiWiringTests(unittest.TestCase):
         self.assertIn('enabled=intel_mode == "on"', self.askai)
         self.assertIn("tool_runner=tool_runner,", self.askai)
         self.assertIn("await send_followup_in_parts(interaction, response_text)", self.askai)
+
+    def test_web_search_mode_picks_keyword_or_tool_never_both(self):
+        self.assertIn("web_mode = switches.current().askai_web_search_mode", self.askai)
+        self.assertIn('run_web = web_mode == "keyword" and intent.triggered', self.askai)
+        self.assertIn('WebSearchTools(settings=WEB_SETTINGS) if web_mode == "tool" else None', self.askai)
+        self.assertIn("also=[web_tools] if web_tools else ()", self.askai)
+        self.assertIn('web_meta["calls"] = web_tools.calls', self.askai)
+        # 關鍵字模式：只有直接答案（匯率、天氣）沒有網頁時，也要給模型
+        self.assertIn("if outcome.results or outcome.answers:", self.askai)
+        self.assertIn("format_web_context_lines(outcome.results, outcome.answers)", self.askai)
 
     def test_long_replies_go_out_in_parts_and_only_the_first_mentions_the_asker(self):
         from commands import llm_commands

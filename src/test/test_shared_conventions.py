@@ -321,7 +321,6 @@ def _find_config_json_writes(path: Path) -> list[int]:
 # 2026-10-06 開關集中到 settings/switches.json 時已有的開關欄位：之後改到哪個功能就搬過去、從這裡移除（使用者 SW-Q2：
 # 有改到才搬）。改了要重啟或重建容器才生效，是它們該搬的原因。
 _LEGACY_SWITCH_FIELDS = {
-    "sys_settings/llm_settings.py:AskAIWebSettings.enabled",
     "sys_settings/llm_settings.py:AmbientChatSettings.enabled",
     "sys_settings/llm_settings.py:AmbientChatSettings.use_shared_identity",
     "sys_settings/llm_settings.py:AmbientChatSettings.use_examples",
