@@ -290,6 +290,48 @@ class SyncTests(SearchIndexTestBase):
         index.sync()
         self.assertEqual(index.search("獨一無二的舊段落"), [])
 
+    def test_rows_sharing_the_cursor_timestamp_are_not_skipped(self):
+        """scraper 同一輪寫入的列 updated_at 相同；游標停在其中一列時，同時間、編號較大的列下次還要撈到。"""
+        stamp = self.db.tick()
+        first = self.db.floor("1", 1, "700", "同一輪寫入的甲", title="【閒聊】甲")
+        self.db.update("UPDATE bahamut_posts SET updated_at=? WHERE id=?", stamp, first)
+        index = self.make_index()
+        index.sync()
+        second = self.db.floor("2", 1, "701", "同一輪寫入的乙", title="【閒聊】乙")
+        self.db.update("UPDATE bahamut_posts SET updated_at=? WHERE id=?", stamp, second)
+
+        index.sync()
+
+        self.assertIn("bahamut:701", self.ids(index.search("同一輪寫入的乙")))
+
+    def test_sync_seeks_through_the_scrapers_updated_at_index(self):
+        """有 scraper 的 (updated_at, id) 索引時，增量同步直接跳到游標之後、不整張表掃：
+        巴哈十萬多列整張掃，沒有變動也要讀 120 MB，冷快取時一次同步 20 秒以上。"""
+        tables = ("article_details", "fb_posts", "ptt_posts", "bahamut_posts")
+        for table in tables:
+            self.db.con.execute(f"CREATE INDEX ix_{table}_updated_at_id ON {table} (updated_at, id)")
+        self.db.con.commit()
+        self.db.ptt("M.1.A.001", "標題", "內容")
+        index = self.make_index()
+        index.sync()
+        queries = []
+        open_source = index._open_source
+
+        def traced():
+            con = open_source()
+            con.set_trace_callback(queries.append)
+            return con
+
+        index._open_source = traced
+        index.sync(force=True)
+
+        scans = [q for q in queries if q.lstrip().upper().startswith("SELECT") and "updated_at" in q]
+        self.assertEqual(len(scans), len(tables))
+        for sql in scans:
+            plan = " ".join(row[3] for row in self.db.con.execute(
+                "EXPLAIN QUERY PLAN " + sql, ("", 0) if "?" in sql else ()))
+            self.assertTrue(plan.startswith("SEARCH") and "updated_at_id" in plan, plan)
+
     def test_search_syncs_by_itself(self):
         index = self.make_index()
         self.assertEqual(index.search("突發情報"), [])

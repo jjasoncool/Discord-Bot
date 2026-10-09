@@ -65,12 +65,15 @@ class Source:
 
     def _changed_rows(self, con, cursor, columns: str):
         updated, row_id = cursor
-        # updated_at 可能相同（同一輪寫入），所以游標帶列 id 才不會漏也不會重複
+        # updated_at 可能相同（同一輪寫入），所以游標帶列 id 才不會漏也不會重複。
+        # 寫成 (updated_at, id) 成組比較、欄位不包函式，才用得上 scraper 的 (updated_at, id) 索引
+        # （2026-10-09 直接在 articles.db 建立，scraper 的 db/models.py 有宣告），直接跳到游標之後：原本每次同步都整張表掃過，
+        # 巴哈就算沒有變動也讀 120 MB，快取被擠掉後一次同步要 20 秒以上。
+        # updated_at 是空的列撈不到：scraper 建立時就給值（ORM default），目前也沒有空值
         return con.execute(
-            f"SELECT {columns}, id AS _row_id, COALESCE(updated_at, '') AS _updated FROM {self.table}"
-            " WHERE COALESCE(updated_at, '') > ? OR (COALESCE(updated_at, '') = ? AND id > ?)"
-            " ORDER BY COALESCE(updated_at, ''), id",
-            (updated, updated, row_id),
+            f"SELECT {columns}, id AS _row_id, updated_at AS _updated FROM {self.table}"
+            " WHERE (updated_at, id) > (?, ?) ORDER BY updated_at, id",
+            (updated, row_id),
         )
 
 

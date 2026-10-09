@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, event, Column, Integer, String, Text, DateTime, Boolean, ForeignKey, UniqueConstraint
+from sqlalchemy import create_engine, event, Column, Integer, String, Text, DateTime, Boolean, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime, timezone
@@ -65,6 +65,11 @@ class ArticleDetail(Base):
     # 關聯關係
     article_menu = relationship("ArticleMenu", back_populates="article_detail")
 
+    # 情報搜尋（bot 的 services/search）依 (updated_at, id) 游標增量同步；沒有這個索引時每次同步都整張表掃過
+    __table_args__ = (
+        Index('ix_article_details_updated_at_id', 'updated_at', 'id'),
+    )
+
     def __repr__(self):
         return f"<ArticleDetail(article_id={self.article_id}, title='{self.article_title}')>"
 
@@ -120,6 +125,8 @@ class FBPost(Base):
     # 唯一約束：確保 url 和 pfbid_url 組合不重複
     __table_args__ = (
         UniqueConstraint('url', 'pfbid_url', name='unique_fb_urls'),
+        # 情報搜尋依 (updated_at, id) 游標增量同步，見 ArticleDetail
+        Index('ix_fb_posts_updated_at_id', 'updated_at', 'id'),
     )
 
     def __repr__(self):
@@ -169,6 +176,8 @@ class PTTPost(Base):
     __table_args__ = (
         UniqueConstraint('board', 'article_id', name='uq_ptt_board_article_id'),
         UniqueConstraint('url', name='uq_ptt_url'),
+        # 情報搜尋依 (updated_at, id) 游標增量同步，見 ArticleDetail
+        Index('ix_ptt_posts_updated_at_id', 'updated_at', 'id'),
     )
 
     def __repr__(self):
@@ -216,6 +225,9 @@ class BahamutPost(Base):
 
     __table_args__ = (
         UniqueConstraint('board_id', 'sn', name='uq_bahamut_board_sn'),
+        # 情報搜尋依 (updated_at, id) 游標增量同步，見 ArticleDetail。巴哈每輪都會更新 updated_at，
+        # 沒有索引時每次同步要掃 10 萬多列（約 120 MB）
+        Index('ix_bahamut_posts_updated_at_id', 'updated_at', 'id'),
     )
 
     def __repr__(self):
