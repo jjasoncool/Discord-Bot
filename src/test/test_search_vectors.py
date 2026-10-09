@@ -57,8 +57,8 @@ class FakeConnection:
 
 
 class FakeEmbedder:
-    def embed_query(self, text):
-        self.last_query = text
+    def embed_query(self, text, max_wait_seconds=None):
+        self.last_query, self.last_wait = text, max_wait_seconds
         return [0.1, 0.2]
 
 
@@ -76,6 +76,12 @@ class PgVectorStoreTests(unittest.TestCase):
         self.assertIn("ORDER BY distance LIMIT %s", sql)
         self.assertEqual(params[1:], (["ptt", "bahamut"], "2026-01-01", "2026-04-01", 60))
         self.assertIn(("SET LOCAL hnsw.ef_search = %s", (120,)), self.con.executed)
+
+    def test_search_passes_the_wait_limit_to_the_query_embedding(self):
+        store = self.make_store([])
+        store.search("深塔", sources=["ptt"], start="", end="9", k=10, max_wait_seconds=3)
+
+        self.assertEqual(store.embedder.last_wait, 3)
 
     def test_one_document_keeps_its_closest_chunk(self):
         store = self.make_store([("ptt:a", 0.20), ("bahamut:1", 0.30), ("ptt:a", 0.35), ("fb:9", 0.60)])
@@ -123,12 +129,13 @@ class EmbedderTests(unittest.TestCase):
 
         embedder.embed_query("深塔多久重置")
         embedder.embed_documents(["深塔每兩週重置"])
+        embedder.embed_query("深塔多久重置", max_wait_seconds=4)   # 搜尋給的剩餘額度
 
         self.assertEqual(client.query, "Instruct: 找答案\nQuery:深塔多久重置")
         self.assertEqual(client.docs, ["深塔每兩週重置"])
-        # 兩次都經過 GPU 閘門（和 bot 的串流排同一個隊）；問句等不起、有上限，文件批次照預設一直等
-        self.assertEqual(entered, ["進", "出", "進", "出"])
-        self.assertEqual(waits, [embedder.query_gpu_wait_seconds, None])
+        # 都經過 GPU 閘門（和 bot 的串流排同一個隊）；問句等不起、有上限，文件批次照預設一直等
+        self.assertEqual(entered, ["進", "出"] * 3)
+        self.assertEqual(waits, [embedder.query_gpu_wait_seconds, None, 4])
         self.assertIsNotNone(embedder.query_gpu_wait_seconds)
 
     def test_closest_chunk_wins_even_when_rows_come_back_out_of_order(self):

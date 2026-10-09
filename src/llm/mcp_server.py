@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import time
 from typing import Any, Literal, Optional
 
 from mcp.server.mcpserver import MCPServer
@@ -67,12 +68,13 @@ def search(
     question: Optional[str] = None,
 ) -> dict[str, Any]:
     index: SearchIndex = index_provider()
+    started = time.monotonic()
     try:
         hits = index.search(query, sources=sources, since=since, until=until, limit=limit, question=question)
     except _READABLE_ERRORS as exc:
         raise ToolError(str(exc)) from exc
-    logger.info("search query=%r question=%r sources=%s since=%s until=%s → %d 筆",
-                query, question, sources, since, until, len(hits))
+    logger.info("search query=%r question=%r sources=%s since=%s until=%s → %d 筆（%.1f 秒）",
+                query, question, sources, since, until, len(hits), time.monotonic() - started)
     return {"results": [
         {
             "id": h.doc_id,

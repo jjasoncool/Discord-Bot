@@ -19,12 +19,13 @@ import logging
 import re
 import sqlite3
 import time
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from llm.client.lemonade_gate import GpuBusy
 from services.search.sources import SOURCES, Doc, Source
 from services.search.text import bigram_tokens, normalize, normalizer_id
 from services.search.rerank import Reranker, best_passage
@@ -37,6 +38,8 @@ logger = logging.getLogger(__name__)
 
 #: 索引結構改了就加一。索引比這個數字舊就整份重建；**比這個數字新就停下**（見 `IndexTooNew`）
 SCHEMA_VERSION = 2
+#: 沒有日期上限時用的結束日（比任何文章的日期都大）
+_NO_UPPER_BOUND = "9999-12-31"
 #: 正規化方式的新舊（數字大的較新）：裝上 opencc 之後是升級，舊環境的行程不能把它降回去
 _NORMALIZER_RANK = {"nfkc": 1, "nfkc+s2t": 2}
 
@@ -167,6 +170,8 @@ class SearchIndex:
         vector_max_distance: Optional[float] = None,
         reranker: Optional[Reranker] = None,
         rerank_enabled: Callable[[], bool] = lambda: True,
+        gpu_wait_seconds: Optional[float] = None,
+        slow_search_seconds: Optional[float] = None,
     ):
         s = SEARCH_SETTINGS
         self.index_path = Path(index_path or s.index_path)
@@ -194,6 +199,10 @@ class SearchIndex:
         self.rerank_enabled = rerank_enabled
         self.rerank_candidates = s.rerank_candidates
         self.rerank_passage_chars = s.rerank_passage_chars
+        #: 一次搜尋（問句向量＋重排）共用的等 GPU 額度（秒）
+        self.gpu_wait_seconds = s.query_gpu_wait_seconds if gpu_wait_seconds is None else gpu_wait_seconds
+        #: 一次搜尋超過這麼多秒就把每一步的時間寫進 log
+        self.slow_search_seconds = s.slow_search_log_seconds if slow_search_seconds is None else slow_search_seconds
 
     # ---------- 連線 ----------
 
@@ -333,9 +342,9 @@ class SearchIndex:
         # 起訖都含當天：until 那天的 23:59:59 也要算進去。模型想表達「不設上限」時可能傳 9999-12-31，
         # 加一天會超出日期範圍——那就等於沒有上限
         try:
-            end_text = (end + timedelta(days=1)).isoformat() if end else "9999-12-31"
+            end_text = (end + timedelta(days=1)).isoformat() if end else _NO_UPPER_BOUND
         except OverflowError:
-            end_text = "9999-12-31"
+            end_text = _NO_UPPER_BOUND
         return (start.isoformat() if start else "", end_text)
 
     def search(self, query: str, *, sources: Optional[Iterable[str]] = None, since: Optional[str] = None,
@@ -344,15 +353,39 @@ class SearchIndex:
         """`query` 是查詢字（關鍵字或整句都可以）；`question` 是使用者的原句，只給重新排序用。
 
         為什麼分開：關鍵字適合找（全詞、BM25），reranker 是拿自然語言的問句訓練的，拿「卜靈 身分」這種
-        斷片去判斷哪篇在回答，反而排不準（2026-10-08 評估：關鍵字模式加上重排，MRR 0.559 → 0.483）。"""
+        斷片去判斷哪篇在回答，反而排不準（2026-10-08 評估：關鍵字模式加上重排，MRR 0.559 → 0.483）。
+
+        超過 `slow_search_seconds` 就把每一步花的時間寫進 log：慢可能是冷快取（硬碟讀取）或等 GPU，要分得出來。"""
+        timings: dict[str, float] = {}
+        notes: list[str] = []
+        started = time.monotonic()
+        try:
+            return self._search(query, sources=sources, since=since, until=until, limit=limit, question=question,
+                                timings=timings, notes=notes)
+        finally:
+            total = time.monotonic() - started
+            if total >= self.slow_search_seconds:
+                steps = "、".join(f"{name} {seconds:.1f}" for name, seconds in timings.items())
+                logger.warning("搜尋花了 %.1f 秒（%s）%s query=%r", total, steps,
+                               "".join(f"；{n}" for n in notes), query)
+
+    def _search(self, query: str, *, sources, since, until, limit, question, timings: dict[str, float],
+                notes: list[str]) -> list[SearchHit]:
         keys = self.resolve_sources(sources)
         start, end = self._date_range(since, until)
         limit = max(1, min(int(limit or self.max_limit), self.max_limit))
         terms = parse_terms(query)
-        self.sync()
+        with _timed(timings, "同步"):
+            self.sync()
         if not terms:
             return []
-        vector_ids = self._vector_doc_ids(query, keys, start, end)
+        with _timed(timings, "向量"):
+            vector_ids, gpu_busy = self._vector_doc_ids(query, keys, start, end, max_wait_seconds=self.gpu_wait_seconds)
+        # 一次搜尋共用一個等 GPU 的額度：向量那步等不到（GPU 被佔著），重排就不再等第二次；
+        # 向量那步花掉的時間也從額度扣（含算向量本身，寧可少等也不讓人多等）
+        gpu_left = 0.0 if gpu_busy else self.gpu_wait_seconds - timings["向量"]
+        if gpu_busy:
+            notes.append("顯示卡忙：向量、重排都略過，只用關鍵字")
 
         long_terms = [t for t in terms if len(t) >= 3]
         # 兩個字的詞本身就是一組兩字組，交給兩字組索引；只有一個字的才走 LIKE
@@ -363,11 +396,20 @@ class SearchIndex:
         params = [*keys, start, end]
         pool = self.candidate_pool
 
-        with closing(self._open_index()) as con:
+        # 沒有篩來源、日期時（最常見），全文索引自己排出前幾名就好，不必每個命中都回 docs 表看來源與日期：
+        # 常見的字會命中幾千篇，一篇一次隨機讀，冷快取時要十幾到幾十秒（2026-10-09「今汐 配隊」命中 5,174 篇，
+        # 回 docs 表讀 16 MB、只查全文索引 1.3 MB）。條件全都成立時兩種寫法的結果相同
+        unfiltered = set(keys) == set(self.sources) and not start and end == _NO_UPPER_BOUND
+
+        with _timed(timings, "關鍵字"), closing(self._open_index()) as con:
             candidate_ids: dict[int, None] = {}
             fuzzy_rank: dict[int, int] = {}
 
             def fts(table: str, match: str) -> list[int]:
+                if unfiltered:
+                    return [r[0] for r in con.execute(
+                        f"SELECT rowid FROM {table} WHERE {table} MATCH ? ORDER BY bm25({table}) LIMIT ?",
+                        (match, pool))]
                 return [r[0] for r in con.execute(
                     f"SELECT d.id FROM {table} JOIN docs d ON d.id = {table}.rowid"
                     f" WHERE {table} MATCH ? AND {where} ORDER BY bm25({table}) LIMIT ?",
@@ -394,8 +436,11 @@ class SearchIndex:
             ids = list(candidate_ids)
             for i in range(0, len(ids), 500):
                 chunk = ids[i:i + 500]
-                rows += con.execute(f"SELECT {columns} FROM docs WHERE id IN ({','.join('?' * len(chunk))})",
-                                    chunk).fetchall()
+                # 只讀候選（最多幾百篇），順便篩來源：沒篩選時全文索引那步沒看來源，索引裡若有這個行程
+                # 不認得的來源（新版程式加了來源、這個行程還沒重開），在這裡濾掉，不讓整次搜尋失敗
+                rows += con.execute(
+                    f"SELECT {columns} FROM docs WHERE id IN ({','.join('?' * len(chunk))}) AND source IN ({marks})",
+                    (*chunk, *keys)).fetchall()
             vector_rows = []
             for i in range(0, len(vector_ids), 500):
                 chunk = vector_ids[i:i + 500]
@@ -421,7 +466,8 @@ class SearchIndex:
                 weights=self.fusion_weights, k=self.rrf_k)
             ordered = [by_doc[doc_id] for doc_id in fused]
         # 重排在來源上限之前：先決定誰最相關，再每種來源取前幾筆
-        ordered = self._rerank(query, ordered, question=question)
+        with _timed(timings, "重排"):
+            ordered = self._rerank(query, ordered, question=question, max_wait_seconds=gpu_left)
 
         hits: list[SearchHit] = []
         per_source: dict[str, int] = {}
@@ -439,16 +485,22 @@ class SearchIndex:
                 break
         return hits
 
-    def _rerank(self, query: str, rows: list, *, question: Optional[str] = None) -> list:
+    def _rerank(self, query: str, rows: list, *, question: Optional[str] = None,
+                max_wait_seconds: Optional[float] = None) -> list:
         """前 `rerank_candidates` 篇照 reranker 的分數重排，其餘照舊接在後面。
         有原句就讓 reranker 讀原句；每篇挑哪一段還是看查詢字（關鍵字就是要找的詞，原句多了「是什麼」這類虛字）。
+        `max_wait_seconds` 是這次搜尋剩下的等 GPU 額度，用完（≤ 0）就不重排。
         reranker 壞掉、GPU 等太久、回傳筆數不對，都照原本的名次（搜尋本身不能因此失敗）。"""
         if self.reranker is None or len(rows) < 2 or not self.rerank_enabled():
+            return rows
+        if max_wait_seconds is not None and max_wait_seconds <= 0:
+            logger.info("這次搜尋等 GPU 的額度已用完，不重排、照原本的名次")
             return rows
         head, tail = rows[:self.rerank_candidates], rows[self.rerank_candidates:]
         passages = [best_passage(query, row["search_text"], self.rerank_passage_chars) for row in head]
         try:
-            scores = self.reranker.rerank(normalize((question or "").strip() or query), passages)
+            scores = self.reranker.rerank(normalize((question or "").strip() or query), passages,
+                                          max_wait_seconds=max_wait_seconds)
         except Exception as exc:
             logger.warning("重新排序失敗，這次照原本的名次：%s", exc)
             return rows
@@ -459,16 +511,22 @@ class SearchIndex:
         order = sorted(range(len(head)), key=lambda i: -scores[i])
         return [head[i] for i in order] + tail
 
-    def _vector_doc_ids(self, query: str, keys: list[str], start: str, end: str) -> list[str]:
-        """向量那一路的名次。壞掉（pgvector、embedding 連不上）就退回只用關鍵字，搜尋本身不能因此失敗。"""
+    def _vector_doc_ids(self, query: str, keys: list[str], start: str, end: str, *,
+                        max_wait_seconds: Optional[float] = None) -> tuple[list[str], bool]:
+        """向量那一路的名次，以及「是不是因為 GPU 被佔著才沒做」（是的話重排也不必再等）。
+        壞掉（pgvector、embedding 連不上）就退回只用關鍵字，搜尋本身不能因此失敗。"""
         if self.vector_store is None or not self.vector_enabled():
-            return []
+            return [], False
         try:
             return self.vector_store.search(normalize(query), sources=keys, start=start, end=end,
-                                            k=self.vector_candidates, max_distance=self.vector_max_distance)
+                                            k=self.vector_candidates, max_distance=self.vector_max_distance,
+                                            max_wait_seconds=max_wait_seconds), False
+        except GpuBusy as exc:
+            logger.warning("向量搜尋失敗，這次只用關鍵字：%s", exc)
+            return [], True
         except Exception as exc:
             logger.warning("向量搜尋失敗，這次只用關鍵字：%s", exc)
-            return []
+            return [], False
 
     def _snippet(self, text: str, terms: list[str]) -> str:
         """命中的關鍵字前後各取一段；沒有整段命中（模糊那一路）就取開頭。"""
@@ -503,6 +561,16 @@ class SearchIndex:
             title=doc.title, url=doc.url, published_at=doc.published_at, text=pages[page - 1],
             page=page, total_pages=len(pages),
         )
+
+
+@contextmanager
+def _timed(timings: dict[str, float], name: str):
+    """把區塊花的秒數記進 timings[name]（中途丟例外也記）。"""
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        timings[name] = time.monotonic() - started
 
 
 _default: Optional[SearchIndex] = None

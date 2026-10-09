@@ -61,9 +61,11 @@ class SearchSettings(BaseSettings):
         "that answer it"
     )
 
-    #: 搜尋時算問句向量、重新排序要排 GPU 的隊；最多等幾秒，等不到這次就跳過那一步（bot 正在產生長回答時，
-    #: 不讓搜尋跟著乾等一兩分鐘）
+    #: 搜尋時算問句向量、重新排序要排 GPU 的隊。這是**一次搜尋共用**的等待額度（秒）：向量那步等不到，重排就不再等；
+    #: 向量那步花掉的時間也從額度扣（bot 正在產生長回答時，不讓搜尋跟著乾等一兩分鐘；2026-10-08 實測兩步各等 10 秒白等 20 秒）
     query_gpu_wait_seconds: float = 10.0
+    #: 一次搜尋超過這麼多秒，就把每一步（同步、向量、關鍵字、重排）花的時間寫進 log，找出慢在哪裡
+    slow_search_log_seconds: float = 3.0
 
     # ---------- 重新排序（reranker）：P4 ----------
     # 開關在 settings/switches.json 的 search_rerank_mode；模型名稱在 llm_runtime_config.json 的 rerank_model

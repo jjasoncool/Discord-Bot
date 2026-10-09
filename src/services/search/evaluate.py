@@ -205,8 +205,9 @@ def diagnose_vectors(store, questions: list[dict], queries: Optional[dict[str, s
     rows = []
     for q in questions:
         query = queries[q["qid"]] if queries is not None else q["question"]
+        # 診斷不怕等：碰上 bot 在回答就排隊，不要因為等不到 GPU 少了題目
         hits = store.search_with_distances(normalize(query), sources=["article", "fb", "ptt", "bahamut"],
-                                           start="", end="9999-12-31", k=k)
+                                           start="", end="9999-12-31", k=k, max_wait_seconds=600)
         relevant = set(q["relevant"])
         rows.append({"qid": q["qid"], "query": query,
                      "hits": [{"doc_id": d, "distance": round(dist, 4), "relevant": d in relevant} for d, dist in hits]})
@@ -242,17 +243,17 @@ def main(argv: Optional[list[str]] = None) -> Path:
     if args.rerank == "on":
         from services.search.rerank import LemonadeReranker
 
-        # 評估要量的是 reranker 本身：GPU 等久一點也沒關係，不要因為剛好碰上 bot 在回答就跳過重排
-        reranker = LemonadeReranker(max_wait_seconds=600)
+        reranker = LemonadeReranker()
+    # 評估要量的是向量、reranker 本身：GPU 等久一點也沒關係，不要因為剛好碰上 bot 在回答就跳過那一步
+    # （一次搜尋共用的等待額度放寬到 600 秒）；也不必每題都寫慢查詢 log
+    options = dict(reranker=reranker, gpu_wait_seconds=600, slow_search_seconds=float("inf"))
     if args.vector == "on":
         from services.search.vectors import PgVectorStore
 
         index = SearchIndex(vector_store=PgVectorStore(), vector_weight=args.vector_weight,
-                            vector_max_distance=args.max_distance, reranker=reranker)
-        # 同上：問句向量也不要因為碰上 bot 在回答就退回只用關鍵字，否則量到的不是向量的效果
-        index.vector_store.embedder.query_gpu_wait_seconds = 600
+                            vector_max_distance=args.max_distance, **options)
     else:
-        index = SearchIndex(reranker=reranker)
+        index = SearchIndex(**options)
     embedded = None
     if index.vector_store is not None:
         try:

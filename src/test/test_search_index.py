@@ -7,6 +7,8 @@
   - 新文章、改過的、刪掉的，下一次搜尋前都會跟上；只被「看過」（時間戳變了、內容沒變）的不重建
   - **絕不寫 scraper 的資料庫**（articles.db 是使用者資料，只能唯讀開）
   - 讀全文時帶上 PTT 推文、巴哈留言，並分頁
+  - 一次搜尋超過門檻秒數，就把每一步（同步、向量、關鍵字、重排）花的時間寫進 log；快的不寫
+  - 索引檔是好幾個行程共用的：索引裡有這個行程不認得的來源就略過
 
 執行：
     cd src && python -m unittest test.test_search_index -v
@@ -15,9 +17,11 @@
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -26,7 +30,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from services.search import DocumentNotFound, SearchIndex  # noqa: E402
+from services.search import SOURCES, DocumentNotFound, SearchIndex  # noqa: E402
 from services.search import text as search_text  # noqa: E402
 
 SCHEMA = """
@@ -251,6 +255,60 @@ class FilterTests(SearchIndexTestBase):
             self.index.search("版本", since="上個月")
 
 
+class UnfilteredKeywordTests(SearchIndexTestBase):
+    """沒有篩來源、日期時，全文索引自己排名，不必每個命中都回 docs 表（常見字命中幾千篇，冷快取時要幾十秒）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.db.ptt("M.1.A.001", "[鳴潮] 今汐配隊", "今汐配隊心得，今汐", published="2026-03-01 10:00:00.000000")
+        self.db.floor("1", 1, "500", "今汐的配隊問題", title="【問題】今汐", published="2025-03-01 10:00:00.000000")
+        self.db.fb("今汐角色介紹", ts="2026-02-01 10:00:00.000000")
+
+    def fts_statements(self, index, **filters):
+        statements = []
+        open_index = index._open_index
+
+        def traced():
+            con = open_index()
+            con.set_trace_callback(statements.append)
+            return con
+
+        index._open_index = traced
+        hits = index.search("今汐 配隊", **filters)
+        return [s for s in statements if " MATCH " in s], self.ids(hits)
+
+    def test_no_filters_ranks_inside_the_full_text_index(self):
+        statements, ids = self.fts_statements(self.make_index())
+
+        self.assertTrue(statements)
+        self.assertFalse([s for s in statements if "JOIN docs" in s], statements)
+        self.assertEqual(set(ids), {"ptt:M.1.A.001", "bahamut:500", "fb:1"})
+
+    def test_filters_still_apply(self):
+        for filters, expected in (({"sources": ["ptt"]}, {"ptt:M.1.A.001"}),
+                                  ({"since": "2026-01-01"}, {"ptt:M.1.A.001", "fb:1"}),
+                                  ({"until": "2025-12-31"}, {"bahamut:500"})):
+            with self.subTest(filters=filters):
+                statements, ids = self.fts_statements(self.make_index(), **filters)
+                self.assertTrue([s for s in statements if "JOIN docs" in s])
+                self.assertEqual(set(ids), expected)
+
+
+class SharedIndexTests(SearchIndexTestBase):
+    """索引檔是好幾個行程共用的（常駐的 search-mcp、手動同步、評估），程式版本可能不同。"""
+
+    def setUp(self):
+        super().setUp()
+        self.db.ptt("M.1.A.001", "[鳴潮] 今汐配隊", "今汐配隊心得")
+        self.db.floor("1", 1, "500", "今汐的配隊問題", title="【問題】今汐")
+
+    def test_documents_from_a_source_this_process_does_not_know_are_skipped(self):
+        self.make_index().sync()     # 新版程式：四種來源都進了索引
+        older = self.make_index(sources={k: v for k, v in SOURCES.items() if k != "bahamut"})
+
+        self.assertEqual(self.ids(older.search("今汐 配隊")), ["ptt:M.1.A.001"])
+
+
 class SyncTests(SearchIndexTestBase):
     def test_new_changed_and_deleted_rows_are_picked_up_before_the_next_search(self):
         self.db.ptt("M.1.A.001", "舊文", "原本的內容甲")
@@ -434,14 +492,16 @@ class FetchTests(SearchIndexTestBase):
 
 
 class StubVectorStore:
-    """假的向量那一路：照預先排好的名單回傳，記下收到的篩選條件；`error` 給了就丟出來。"""
+    """假的向量那一路：照預先排好的名單回傳，記下收到的篩選條件；`error` 給了就丟出來；`delay` 秒模擬算向量花的時間。"""
 
-    def __init__(self, ranked=(), error=None):
-        self.ranked, self.error, self.calls = list(ranked), error, []
+    def __init__(self, ranked=(), error=None, delay=0.0):
+        self.ranked, self.error, self.delay, self.calls = list(ranked), error, delay, []
 
-    def search(self, query, *, sources, start, end, k, max_distance=None):
+    def search(self, query, *, sources, start, end, k, max_distance=None, max_wait_seconds=None):
         self.calls.append({"query": query, "sources": list(sources), "start": start, "end": end, "k": k,
-                           "max_distance": max_distance})
+                           "max_distance": max_distance, "max_wait_seconds": max_wait_seconds})
+        if self.delay:
+            time.sleep(self.delay)
         if self.error:
             raise self.error
         return self.ranked[:k]
@@ -526,6 +586,30 @@ class SimplifiedChineseTests(SearchIndexTestBase):
         self.assertEqual(set(self.ids(index.search("红名怪"))), {"bahamut:600", "bahamut:601"})
         self.assertEqual(set(self.ids(index.search("紅名怪"))), {"bahamut:600", "bahamut:601"})
 
+
+
+class SlowSearchLogTests(SearchIndexTestBase):
+    def setUp(self):
+        super().setUp()
+        self.db.ptt("M.1.A.001", "[鳴潮] 深塔", "深塔海墟每兩週重置")
+
+    def test_slow_search_logs_every_step(self):
+        index = self.make_index(vector_store=StubVectorStore(delay=0.2), slow_search_seconds=0.1)
+
+        with self.assertLogs("services.search.index", level="WARNING") as logs:
+            index.search("深塔海墟")
+
+        line = next(l for l in logs.output if "搜尋花了" in l)
+        for step in ("同步", "向量", "關鍵字", "重排"):
+            self.assertIn(step, line)
+        # 看得出慢在向量那一步（比數值不比字串：機器忙時 0.2 秒可能被記成 0.3）
+        self.assertGreaterEqual(float(re.search(r"向量 ([\d.]+)", line).group(1)), 0.2)
+
+    def test_fast_search_is_not_logged(self):
+        index = self.make_index(slow_search_seconds=60)
+
+        with self.assertNoLogs("services.search.index", level="WARNING"):
+            index.search("深塔海墟")
 
 if __name__ == "__main__":
     unittest.main()

@@ -24,10 +24,11 @@ logger = logging.getLogger(__name__)
 
 class VectorSearcher(Protocol):
     """搜尋只需要這一個方法：問句 → 依相似度排好的文件 id（同一篇多段只留最前面那次）。
-    `max_distance`：餘弦距離（1－相似度）超過這個值的段落不算，None＝不設門檻。"""
+    `max_distance`：餘弦距離（1－相似度）超過這個值的段落不算，None＝不設門檻。
+    `max_wait_seconds`：算問句向量最多等 GPU 幾秒（這次搜尋的等待額度），None＝用 embedder 的預設；等不到丟 `GpuBusy`。"""
 
     def search(self, query: str, *, sources: Sequence[str], start: str, end: str, k: int,
-               max_distance: Optional[float] = None) -> list[str]:
+               max_distance: Optional[float] = None, max_wait_seconds: Optional[float] = None) -> list[str]:
         ...
 
 
@@ -61,10 +62,11 @@ class Embedder:
         with self._gate():
             return client.get_text_embedding_batch(list(texts))
 
-    def embed_query(self, text: str) -> list[float]:
+    def embed_query(self, text: str, *, max_wait_seconds: Optional[float] = None) -> list[float]:
         prompt = f"Instruct: {self.query_instruction}\nQuery:{text}" if self.query_instruction else text
         client = self._client()
-        with self._gate(max_wait_seconds=self.query_gpu_wait_seconds):
+        wait = self.query_gpu_wait_seconds if max_wait_seconds is None else max_wait_seconds
+        with self._gate(max_wait_seconds=wait):
             return client.get_text_embedding(prompt)
 
 
@@ -177,9 +179,9 @@ class PgVectorStore:
     # ---------- 查詢 ----------
 
     def search_with_distances(self, query: str, *, sources: Sequence[str], start: str, end: str,
-                              k: int) -> list[tuple[str, float]]:
+                              k: int, max_wait_seconds: Optional[float] = None) -> list[tuple[str, float]]:
         """問句 → [(文件 id, 餘弦距離)]，距離小的在前；同一篇多段只留最近的那段。"""
-        vector = _vector_literal(self.embedder.embed_query(query))
+        vector = _vector_literal(self.embedder.embed_query(query, max_wait_seconds=max_wait_seconds))
         con = self._conn()
         try:
             self.ensure_schema(con)
@@ -203,7 +205,8 @@ class PgVectorStore:
         return list(best.items())
 
     def search(self, query: str, *, sources: Sequence[str], start: str, end: str, k: int,
-               max_distance: Optional[float] = None) -> list[str]:
+               max_distance: Optional[float] = None, max_wait_seconds: Optional[float] = None) -> list[str]:
         return [doc_id for doc_id, distance in
-                self.search_with_distances(query, sources=sources, start=start, end=end, k=k)
+                self.search_with_distances(query, sources=sources, start=start, end=end, k=k,
+                                           max_wait_seconds=max_wait_seconds)
                 if max_distance is None or distance <= max_distance]

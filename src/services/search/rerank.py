@@ -7,8 +7,8 @@
   - 模型：`llm_runtime_config.json` 的 `rerank_model`（Lemonade 載入；和主模型、embedding 各佔一個位置）
   - 送什麼：標題＋文件裡和問題最相關的那一段（切段規則同向量；挑和問題重疊的兩字組最多的那段）
   - 問題用哪個：呼叫端給了使用者的原句就用原句（reranker 是拿自然語言問句訓練的），沒給才用查詢字
-  - 排 GPU 的隊（`lemonade_gate.gpu_exclusive_sync`），最多等 `query_gpu_wait_seconds`；
-    等不到或出錯就丟例外，搜尋照原本的名次（見 `index.SearchIndex._rerank`）
+  - 排 GPU 的隊（`lemonade_gate.gpu_exclusive_sync`），最多等這次搜尋剩下的等待額度（`max_wait_seconds`，
+    沒給就用 `query_gpu_wait_seconds`）；等不到或出錯就丟例外，搜尋照原本的名次（見 `index.SearchIndex._rerank`）
 """
 from __future__ import annotations
 
@@ -24,9 +24,11 @@ logger = logging.getLogger(__name__)
 
 
 class Reranker(Protocol):
-    """問題＋每篇的段落 → 每篇的分數（順序對齊 passages，分數越高越相關）。"""
+    """問題＋每篇的段落 → 每篇的分數（順序對齊 passages，分數越高越相關）。
+    `max_wait_seconds`：最多等 GPU 幾秒，None＝用預設；等不到丟 `GpuBusy`。"""
 
-    def rerank(self, query: str, passages: Sequence[str]) -> list[float]:
+    def rerank(self, query: str, passages: Sequence[str], *,
+               max_wait_seconds: Optional[float] = None) -> list[float]:
         ...
 
 
@@ -64,7 +66,8 @@ class LemonadeReranker:
         settings = LLMServiceSettings()
         return settings, load_llm_runtime_config(settings.llm_runtime_model_path)
 
-    def rerank(self, query: str, passages: Sequence[str]) -> list[float]:
+    def rerank(self, query: str, passages: Sequence[str], *,
+               max_wait_seconds: Optional[float] = None) -> list[float]:
         model, options = self._fixed_model, None
         if model is None or self._client is None:
             settings, runtime = self._settings()
@@ -77,7 +80,7 @@ class LemonadeReranker:
                 self._client = LlmHttpClient(base_url=settings.llm_base_url, timeout=60.0)
         if not model:
             raise RuntimeError("沒有設定 rerank_model（llm_runtime_config.json）")
-        with self._gate(max_wait_seconds=self.max_wait_seconds):
+        with self._gate(max_wait_seconds=self.max_wait_seconds if max_wait_seconds is None else max_wait_seconds):
             if options:
                 # 跟 embedding 一樣：Lemonade 要用對的載入參數（例如固定在哪一張卡）
                 self._client.ensure_lemonade_model(model=model, options=options)

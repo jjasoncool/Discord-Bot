@@ -7,6 +7,8 @@
   - 每篇送給 reranker 的是標題＋和問題最相關的那一段，不是整篇
   - 呼叫端給了使用者的原句，reranker 讀原句（它是拿自然語言問句訓練的）；挑段落還是看查詢字
   - 打 reranker 要排 GPU 的隊，而且有等待上限；沒設定模型時不打
+  - 一次搜尋共用一個等 GPU 的額度：向量那步等不到 GPU，重排就不再等（不呼叫 reranker）；
+    向量那步花掉的時間從額度扣；向量是別的原因壞掉（pgvector 連不上）不影響重排
   - 後端回的分數依 index 放回原位（後端回傳的是依分數排好的）
 
 執行：
@@ -26,7 +28,8 @@ if SRC_DIR not in sys.path:
 from llm.client.http_client import LlmHttpClient  # noqa: E402
 from services.search.rerank import LemonadeReranker, best_passage  # noqa: E402
 from services.search.text import normalize  # noqa: E402
-from test.test_search_index import SearchIndexTestBase  # noqa: E402
+from llm.client.lemonade_gate import GpuBusy  # noqa: E402
+from test.test_search_index import SearchIndexTestBase, StubVectorStore  # noqa: E402
 
 
 class StubReranker:
@@ -34,10 +37,11 @@ class StubReranker:
 
     def __init__(self, favourite="", error=None, wrong_count=False):
         self.favourite, self.error, self.wrong_count, self.calls = favourite, error, wrong_count, []
-        self.queries = []
+        self.queries, self.waits = [], []
 
-    def rerank(self, query, passages):
+    def rerank(self, query, passages, max_wait_seconds=None):
         self.queries.append(query)
+        self.waits.append(max_wait_seconds)
         self.calls.append(list(passages))
         if self.error:
             raise self.error
@@ -118,6 +122,53 @@ class RerankInSearchTests(SearchIndexTestBase):
         self.assertEqual(stub.queries, [normalize("深塔海墟")])
 
 
+class GpuBudgetTests(SearchIndexTestBase):
+    """問句向量與重排共用一次搜尋的等 GPU 額度（10-08 實測：bot 插話時兩步各等 10 秒，白等 20 秒）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.db.ptt("M.1.A.001", "[鳴潮] 深塔海墟", "深塔海墟深塔海墟，閒聊")
+        self.db.ptt("M.1.A.002", "[鳴潮] 整理", "深塔海墟每兩週重置一次")
+
+    def test_gpu_busy_for_vectors_skips_rerank_without_waiting_again(self):
+        stub = StubReranker("每兩週")
+        index = self.make_index(vector_store=StubVectorStore(error=GpuBusy("GPU 被別的工作佔著")), reranker=stub)
+        plain = self.ids(self.make_index().search("深塔海墟"))
+
+        with self.assertLogs("services.search.index", level="INFO"):
+            self.assertEqual(self.ids(index.search("深塔海墟")), plain)
+        self.assertEqual(stub.calls, [])
+
+    def test_time_spent_on_vectors_comes_out_of_the_rerank_budget(self):
+        stub = StubReranker("每兩週")
+        index = self.make_index(vector_store=StubVectorStore(delay=0.3), reranker=stub, gpu_wait_seconds=1.0)
+
+        index.search("深塔海墟")
+
+        self.assertEqual(index.vector_store.calls[0]["max_wait_seconds"], 1.0)
+        self.assertGreater(stub.waits[0], 0)
+        self.assertLess(stub.waits[0], 0.75)
+
+    def test_budget_used_up_by_vectors_skips_rerank(self):
+        stub = StubReranker("每兩週")
+        index = self.make_index(vector_store=StubVectorStore(delay=0.3), reranker=stub, gpu_wait_seconds=0.2)
+
+        index.search("深塔海墟")
+
+        self.assertEqual(stub.calls, [])
+
+    def test_other_vector_failures_leave_the_budget_for_rerank(self):
+        stub = StubReranker("每兩週")
+        index = self.make_index(vector_store=StubVectorStore(error=ConnectionError("pgvector 連不上")),
+                                reranker=stub, gpu_wait_seconds=1.0)
+
+        with self.assertLogs("services.search.index", level="WARNING"):
+            ids = self.ids(index.search("深塔海墟"))
+
+        self.assertEqual(ids[0], "ptt:M.1.A.002")
+        self.assertGreater(stub.waits[0], 0.9)
+
+
 class BestPassageTests(unittest.TestCase):
     def test_short_document_is_sent_whole_and_long_one_sends_the_overlapping_chunk(self):
         self.assertEqual(best_passage("深塔", "標題\n深塔每兩週重置", 500), "標題\n深塔每兩週重置")
@@ -143,8 +194,10 @@ class LemonadeRerankerTests(unittest.TestCase):
         reranker = LemonadeReranker(client=client, gate=Gate, max_wait_seconds=7, model="reranker-x")
 
         self.assertEqual(reranker.rerank("問題", ["甲", "乙"]), [0.9, 0.1])
-        self.assertEqual(waits, [7])
-        client.rerank.assert_called_once_with(model="reranker-x", query="問題", documents=["甲", "乙"])
+        reranker.rerank("問題", ["甲", "乙"], max_wait_seconds=3)   # 這次搜尋剩下的額度
+        self.assertEqual(waits, [7, 3])
+        self.assertEqual(client.rerank.call_count, 2)
+        client.rerank.assert_called_with(model="reranker-x", query="問題", documents=["甲", "乙"])
 
     def test_without_a_model_it_refuses_instead_of_calling_the_backend(self):
         client = mock.Mock()
