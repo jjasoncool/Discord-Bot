@@ -515,6 +515,18 @@ def _find_tool_call_messages(path: Path) -> list[int]:
     return sorted(found)
 
 
+_SPLITTER_NAME = re.compile(r"^_?split\w*(text|content|message)", re.IGNORECASE)
+
+
+def _find_message_splitters(path: Path) -> list[int]:
+    """自己寫「把長文切成 Discord 放得下的多段」的函式。一律走 `utils.discord_content.split_message`：不丟內容、
+    優先在換行與空白切、不把暴雷標記 `||` 切壞（2026-10-09 /askai 長回答要切段時，從 Telegram 轉發抽出）。"""
+    return sorted(
+        node.lineno for node in ast.walk(_parse(path))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _SPLITTER_NAME.match(node.name)
+    )
+
+
 def _find_sleep_until(path: Path) -> list[int]:
     return _find_sleep_until_in_tree(_parse(path))
 
@@ -713,6 +725,18 @@ RULES = [
         finder=_find_tool_call_messages,
         canonical="llm.client.tool_calls（assistant_message／tool_message／call_name_and_arguments／parse_arguments）",
         allowed={"llm/client/tool_calls.py"},
+    ),
+    Rule(
+        name="把長文切成 Discord 放得下的多段",
+        finder=_find_message_splitters,
+        canonical="utils.discord_content.split_message",
+        allowed={
+            "utils/discord_content.py",
+            # 搜尋索引的切段是給向量用的（有重疊、每段帶標題），不是切訊息
+            "services/search/chunking.py",
+            # 巴哈轉發的 embed 切段（第一段放標題、首段與後續段上限不同），2026-10-09 抽出共用版時已存在，改到再搬
+            "services/relay/bahamut_monitor.py",
+        },
     ),
     Rule(
         name="定時排程（算出離下一次還有幾秒、睡到那時）",

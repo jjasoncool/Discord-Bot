@@ -64,6 +64,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 描述品質規則 | `persona_description_rules.txt`（各處讀同一個檔） |
 | 人格素描的角色設定 | 疊在 `personality_extraction_prompt.json` 的 `system_prompt` 之上 |
 | 發文到頻道 | `utils.discord_content.post_to_channel`（論壇／文字頻道自動分流、附件分批、失敗退純文字） |
+| 把長文切成 Discord 放得下的多段 | `utils.discord_content.split_message`（不丟內容、優先換行與空白切、不切壞暴雷 `||`；上限常數 `DISCORD_MESSAGE_LIMIT`） |
 | 面板置底 | `utils.panel_bump.PanelBumper`（`bump`／`bump_safe`；有人講話就置底用 `request_bump`） |
 | 已發送去重 | StateDB `sent_content`（`is_content_sent`／`mark_content_as_sent`） |
 | 版本更新時刻 | `services.events.event_scheduler.VersionDateResolver`（`refresh()`、`update_starts()`；只看時間，不看版本號） |

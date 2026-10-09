@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 # 常見圖片副檔名（各 monitor 共用）
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
 
+#: Discord 一則訊息的字數上限
+DISCORD_MESSAGE_LIMIT = 2000
+
 
 def sanitize_forum_thread_title(title: str, content: str = "", fallback: str = "（無標題）") -> str:
     """清理 forum thread 標題（Discord 上限 100 字元）。
@@ -39,6 +42,50 @@ def linkify_image_urls(text: str) -> str:
             return f"[🖼 圖片]({url})"
         return url
     return re.sub(r'https?://[^\s<>"]+', _replace, text)
+
+
+def split_message(text: str, limit: int = DISCORD_MESSAGE_LIMIT) -> list[str]:
+    """把長文切成多段，每段長度 <= limit（Telegram 轉發的長貼文、/askai 的長回答共用）。
+
+    盡量在換行邊界切（其次空白），避免把句子或段落切斷；
+    都太靠前（不到半段）才硬切，以免切出過短的碎段。保留全文不丟內容。
+
+    暴雷標記安全：切點不會落在一對 `||` 中間；切完再平衡每段的 `||`，
+    若暴雷段跨越切點，前段補 `||` 收尾、下段補 `||` 開頭，避免標記破掉、暴雷外洩——這時一段最多會比
+    limit 多 4 個字（前後各補一組），呼叫端要留餘裕。
+    """
+    if len(text) <= limit:
+        return [text]
+
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > limit:
+        window = remaining[:limit]
+        cut = window.rfind("\n")
+        if cut < limit // 2:
+            space_cut = window.rfind(" ")
+            cut = space_cut if space_cut >= limit // 2 else limit
+        # 避免把暴雷標記 || 從兩個 pipe 中間切開（讓整組 || 落到下一段）
+        if 0 < cut < len(remaining) and remaining[cut - 1] == "|" and remaining[cut] == "|":
+            cut -= 1
+        chunks.append(remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip()
+    if remaining:
+        chunks.append(remaining)
+
+    # 平衡暴雷標記：每段 || 數須成對；落單代表暴雷段跨越切點，補成對並接到下一段
+    balanced: list[str] = []
+    carry_open = False
+    for chunk in chunks:
+        if carry_open:
+            chunk = "||" + chunk
+        if chunk.count("||") % 2 == 1:
+            chunk = chunk + "||"
+            carry_open = True
+        else:
+            carry_open = False
+        balanced.append(chunk)
+    return balanced
 
 
 def content_hash(text: str) -> str:

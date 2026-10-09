@@ -30,6 +30,7 @@ import discord
 from services.relay.telegram_filter import MediaFile, Verdict, media_kind
 from telegram_scraper.media_download import MEDIA_HOLD_NOTIFY, MEDIA_RETRY_WINDOW
 from telegram_scraper.tg_config import normalize_channel_identifier
+from utils.discord_content import split_message
 from utils.discord_threads import fetch_thread, reopen_thread
 from utils.media_probe import probe_duration
 
@@ -885,49 +886,6 @@ class TelegramRenderAdapter:
         except Exception:
             return None
 
-    @staticmethod
-    def _split_text(text: str, limit: int) -> list[str]:
-        """把長文切成多段，每段長度 <= limit。
-
-        盡量在換行邊界切（其次空白），避免把句子或段落切斷；
-        都太靠前（不到半段）才硬切，以免切出過短的碎段。保留全文不丟內容。
-
-        暴雷標記安全：切點不會落在一對 `||` 中間；切完再平衡每段的 `||`，
-        若暴雷段跨越切點，前段補 `||` 收尾、下段補 `||` 開頭，避免標記破掉、暴雷外洩。
-        """
-        if len(text) <= limit:
-            return [text]
-
-        chunks: list[str] = []
-        remaining = text
-        while len(remaining) > limit:
-            window = remaining[:limit]
-            cut = window.rfind("\n")
-            if cut < limit // 2:
-                space_cut = window.rfind(" ")
-                cut = space_cut if space_cut >= limit // 2 else limit
-            # 避免把暴雷標記 || 從兩個 pipe 中間切開（讓整組 || 落到下一段）
-            if 0 < cut < len(remaining) and remaining[cut - 1] == "|" and remaining[cut] == "|":
-                cut -= 1
-            chunks.append(remaining[:cut].rstrip())
-            remaining = remaining[cut:].lstrip()
-        if remaining:
-            chunks.append(remaining)
-
-        # 平衡暴雷標記：每段 || 數須成對；落單代表暴雷段跨越切點，補成對並接到下一段
-        balanced: list[str] = []
-        carry_open = False
-        for chunk in chunks:
-            if carry_open:
-                chunk = "||" + chunk
-            if chunk.count("||") % 2 == 1:
-                chunk = chunk + "||"
-                carry_open = True
-            else:
-                carry_open = False
-            balanced.append(chunk)
-        return balanced
-
     def render(
         self,
         message: TelegramMessageRecord,
@@ -970,7 +928,7 @@ class TelegramRenderAdapter:
         content = rendered_text.strip()
         source_name = (message.chat_title or self._get_source_channel_name()) + title_suffix
 
-        chunks = self._split_text(content, self._DESCRIPTION_MAX_CHARS) if content else [""]
+        chunks = split_message(content, self._DESCRIPTION_MAX_CHARS) if content else [""]
         total = len(chunks)
 
         # 切成多段時，用標題「（續）」＋頁碼 footer「i/n」讓讀者看得出是同一篇連續文章；
