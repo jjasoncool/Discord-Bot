@@ -527,6 +527,20 @@ def _find_message_splitters(path: Path) -> list[int]:
     )
 
 
+def _find_direct_searxng_queries(path: Path) -> list[int]:
+    """直接呼叫 `fetch_web_results` 打 SearXNG 的地方。一律走 `llm.retrievers.web.search_web`：哪類題目用哪組引擎、
+    結果太少時換通用引擎補查，都是實測出來的規則，只能有一份（2026-10-09 網路搜尋改成模型用的工具、成為第二個
+    呼叫端時，從 /askai 抽出）。"""
+    found = []
+    for node in ast.walk(_parse(path)):
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name == "fetch_web_results":
+                found.append(node.lineno)
+    return sorted(found)
+
+
 def _find_sleep_until(path: Path) -> list[int]:
     return _find_sleep_until_in_tree(_parse(path))
 
@@ -737,6 +751,12 @@ RULES = [
             # 巴哈轉發的 embed 切段（第一段放標題、首段與後續段上限不同），2026-10-09 抽出共用版時已存在，改到再搬
             "services/relay/bahamut_monitor.py",
         },
+    ),
+    Rule(
+        name="網路搜尋（SearXNG 的引擎路由與結果太少時補查）",
+        finder=_find_direct_searxng_queries,
+        canonical="llm.retrievers.web.search_web",
+        allowed={"llm/retrievers/web/"},
     ),
     Rule(
         name="定時排程（算出離下一次還有幾秒、睡到那時）",
