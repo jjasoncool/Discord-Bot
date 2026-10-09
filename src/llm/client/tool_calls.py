@@ -4,12 +4,12 @@
 OpenAI 相容 API 的協議：模型回 `tool_calls` 後，下一輪的 messages 要先放回那則 assistant 訊息（含
 tool_calls），再對**每個** tool_call_id 各回一則 `role: tool`——少一則或 id 對不上，後端會拒絕或模型會亂掉。
 這份格式只寫一次：人格萃取的 agent 與 /askai 的情報搜尋都用這裡；迴圈怎麼跑、預算怎麼算、工具怎麼執行，
-留給各自的呼叫端。
+留給各自的呼叫端。幾組工具要一起交給同一個工具輪時用 `combine_runners`（/askai 的遊戲情報＋網路搜尋）。
 """
 from __future__ import annotations
 
 import json
-from typing import Any, Protocol
+from typing import Any, Optional, Protocol
 
 
 class ToolRunner(Protocol):
@@ -24,6 +24,49 @@ class ToolRunner(Protocol):
 
     async def execute(self, name: str, arguments: Any) -> str:
         ...
+
+
+class _CombinedTools:
+    """幾組工具合成一組（見 `combine_runners`）。"""
+
+    def __init__(self, runners: list[ToolRunner]):
+        self._runners = runners
+        self._owners: dict[str, ToolRunner] = {}
+        for runner in runners:
+            for tool in runner.tools:
+                name = str((tool.get("function") or {}).get("name") or "")
+                if name in self._owners:
+                    raise ValueError(f"兩組工具都有名為 {name} 的工具，模型呼叫時分不出要交給誰")
+                self._owners[name] = runner
+        self.instructions = "\n\n".join(
+            runner.instructions.strip() for runner in runners if (runner.instructions or "").strip()
+        )
+
+    @property
+    def tools(self) -> list[dict[str, Any]]:
+        return [tool for runner in self._runners for tool in runner.tools]
+
+    async def execute(self, name: str, arguments: Any) -> str:
+        runner = self._owners.get(name)
+        if runner is None:
+            return json.dumps({"error": f"沒有名為 {name} 的工具；可用的是：{', '.join(self._owners)}"},
+                              ensure_ascii=False)
+        return await runner.execute(name, arguments)
+
+
+def combine_runners(*runners: Optional[ToolRunner]) -> Optional[ToolRunner]:
+    """把幾組工具（例如遊戲情報與網路搜尋）合成一組，交給同一個工具輪：模型一次看到全部工具、自己決定查哪邊。
+
+    宣告照傳入的順序接起來（每輪都是同一份，提示詞快取才吃得到）；使用規則依序接、空的略過；呼叫依名稱交給
+    宣告它的那一組。None 與沒有工具的略過（沒有工具時規則也不給，免得模型被要求去查卻沒有工具）；
+    都沒有回 None（照原本的方式回答），只剩一組就回它本身。名稱重複是寫程式的錯，直接丟 ValueError。
+    """
+    present = [runner for runner in runners if runner is not None and runner.tools]
+    if not present:
+        return None
+    if len(present) == 1:
+        return present[0]
+    return _CombinedTools(present)
 
 
 class ToolArgumentError(ValueError):

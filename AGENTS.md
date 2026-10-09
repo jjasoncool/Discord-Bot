@@ -71,6 +71,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | GPU 獨佔（產圖時卸載 LLM） | `llm.client.lemonade_gate.gpu_exclusive(owner, lease_seconds)`（另開的行程、search-mcp 容器也一起排隊：跨行程鎖檔，跨容器靠 compose 掛同一個 `gpu_lock/` 並設 `LEMONADE_GPU_LOCK_PATH`）；沒有 event loop 的同步程式（情報搜尋的批次算向量、MCP）用 `gpu_exclusive_sync()` |
 | 讓模型先用工具查、再回答（決策輪不開思考限長度、正式輪照原設定、每輪帶同一份工具清單、查滿輪數保證有文字） | `LLMService.generate_reply(tool_runner=…)`（工具介面 `llm.client.tool_calls.ToolRunner`；/askai 查情報用它，不要再寫一份迴圈） |
 | 工具呼叫的訊息格式（模型要呼叫工具的 assistant 訊息、`role: tool` 回覆、取工具名稱與解析參數） | `llm.client.tool_calls`（`assistant_message`／`tool_message`／`call_name_and_arguments`／`parse_arguments`；迴圈、預算、工具怎麼跑留給呼叫端。人格萃取 agent 與 /askai 情報搜尋共用） |
+| 幾組工具一起交給同一個工具輪（例：遊戲情報＋網路搜尋） | `llm.client.tool_calls.combine_runners`（宣告照順序接、使用規則依序接、呼叫依名稱交給宣告它的那組；沒工具的連規則一起略過） |
 | 按鈕、指令的操作權限 | `utils.utils.check_guild`（`owner_only`／`admin_only`／`required_role`／`permission="manage_messages"` 這類 Discord 權限；不通過時自己回只有本人看得到的訊息） |
 | 功能開關（開／關、off／dry_run／on） | 值寫在 `settings/switches.json`（手改、下一次用到就生效）；名稱、預設、允許的值定義在 `sys_settings.switches.Switches`，讀用 `switches.current()`；新開關只能放這裡（守衛擋，舊的改到再搬） |
 | 寫 `config.json` | `ChannelConfig.update_config(apply)`（重讀最新內容、只改這次的 key、安全寫入加備份）；讀 `load_config` 回複本、改檔即生效 |
