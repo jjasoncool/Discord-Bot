@@ -698,10 +698,9 @@ class LLMCommands(commands.Cog):
                 trace_id=trace_id,
                 tool_runner=tool_runner,
                 max_tool_rounds=INTEL_SETTINGS.max_tool_rounds,
-                decide_max_tokens=INTEL_SETTINGS.decide_max_tokens,
             )
 
-        # 網路搜尋的工具模式：和情報工具合成一組交給模型（輪數、決策輪長度兩邊共用 INTEL_SETTINGS 的值）
+        # 網路搜尋的工具模式：和情報工具合成一組交給模型（輪數兩邊共用 INTEL_SETTINGS 的值）
         web_tools = WebSearchTools(settings=WEB_SETTINGS) if web_mode == "tool" else None
 
         # 用 asyncio.Task 包裝，取消時可中斷 LLM 的 HTTP 請求；查情報、查網路都在同一個 task 裡，按取消時一起中斷

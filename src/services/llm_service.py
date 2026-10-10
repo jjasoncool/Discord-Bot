@@ -652,7 +652,6 @@ class LLMService:
         timeout: Optional[int] = None,
         keep_alive: Optional[str] = None,
         trace_id: Optional[str] = None,
-        max_tokens: Optional[int] = None,
     ) -> ChatMessageResult:
         """tool-calling 版的底層呼叫：回傳完整 assistant message 而非 content 字串。
 
@@ -670,9 +669,6 @@ class LLMService:
 
         兩者共用模型載入、串流互斥閘與重試——**agent 因此自動遵守「一次只做一件事」**，
         不會與 /askai、插話 搶 GPU。
-
-        `max_tokens`：這次最多輸出幾個 token。/askai 決定要不要查情報的那一輪只需要工具呼叫，限長度免得它
-        先寫完一整篇（會被丟掉的）回答。
 
         Raises: 與 `chat_raw` 相同（LLMAPIError / LlmTimeoutError / LlmConnectionError），
         另外在 content 與 tool_calls 同時為空時拋 `empty_content`。
@@ -694,8 +690,6 @@ class LLMService:
             extra_body["tools"] = tools
         if response_format:
             extra_body["response_format"] = response_format
-        if max_tokens:
-            extra_body["max_tokens"] = max_tokens
 
         trace_label = trace_id or "-"
         choice, completion = await self._chat_completion_checked(
@@ -791,47 +785,39 @@ class LLMService:
         keep_alive: Optional[str],
         trace_id: Optional[str],
         max_tool_rounds: int,
-        decide_max_tokens: int,
     ) -> str:
         """讓模型自己決定要不要先用工具查，再回答。回傳回答；送出的 messages 與工具呼叫紀錄**邊做邊寫進**
         `progress`／`transcript`（呼叫端給的空 list）——中途失敗時，錯誤紀錄才看得到已經查了什麼。
 
-        - 第一輪是「決策輪」：不開思考、限輸出長度，只決定要不要查、查什麼（幾秒內）。沒要查就丟掉這段草稿，
-          用正式設定（照 /askai 原本的思考設定）再問一次——不查的問題回答品質與原本相同
-        - 查過之後的每一輪都用正式設定，也都帶著工具：模型可以再查（最多 `max_tool_rounds` 輪），或直接回答
-        - **每一輪都帶同一份工具清單**：工具宣告插在系統提示詞之後，帶不帶工具會讓後面整段聊天紀錄的提示詞快取
-          失效（要多算幾十秒）；只換思考開關與結尾，前面整段都吃得到快取
+        - **每一輪的設定都一樣**：照 /askai 原本的思考設定、帶同一份工具清單。模型直接回答，或先叫工具
+          （最多 `max_tool_rounds` 輪）；不查的問題就是一次呼叫，和沒有工具時一樣
+        - 為什麼不先用一輪「不開思考、限長度」的短呼叫決定查不查（2026-10-11 拿掉）：思考開關是模板參數，
+          模板可能把它寫進 prompt 的最前面，一切換整份提示詞快取就接不上（線上每題多重讀 15～48 秒）；
+          而開著思考的模型決定要查之前只寫幾十到兩百多個 token，省不到什麼。工具清單同理：宣告排在 prompt
+          前段，帶不帶會讓後面整段快取失效，所以每一輪都帶
         - 工具在兩次模型呼叫之間執行，**不拿著 GPU 鎖**：搜尋端算向量、重排也要排同一把鎖
         - 查滿輪數還想查（就算順手寫了一句「讓我再查一下」也一樣）：提醒一次「不能再查了」；還是只給工具呼叫，
           就改用不帶工具的一般呼叫，保證有文字
-        - 決策輪本身失敗：什麼都沒產出就當作不查；後端拒絕（例如不支援工具）就照原本的方式回答——原本的 /askai
-          在這種情況下答得出來，不能因為多了查情報反而答不出來
+        - 第一次呼叫就被後端拒絕（例如不支援工具）或什麼都沒產出：改用不帶工具的一般呼叫——原本的 /askai
+          在這種情況下答得出來，不能因為多了查情報反而答不出來。模型回過話之後才失敗，就照實往外丟
         """
         progress[:] = list(messages)
         messages = progress
         rounds = 0
-        deciding = max_tool_rounds > 0
+        answered_once = False
         nudged = False
         common = dict(model=model, temperature=temperature, top_p=top_p, num_ctx=num_ctx, timeout=timeout,
                       keep_alive=keep_alive, trace_id=trace_id)
         while True:
             try:
-                result = await self.chat_with_tools(
-                    messages=messages,
-                    tools=runner.tools,
-                    think=False if deciding else think,
-                    max_tokens=decide_max_tokens if deciding else None,
-                    **common,
-                )
+                result = await self.chat_with_tools(messages=messages, tools=runner.tools, think=think, **common)
             except LLMAPIError as exc:
-                if not deciding:
+                if answered_once:
                     raise
-                deciding = False
-                if exc.kind == "empty_content":
-                    logger.warning("工具輪 trace=%s 決策輪沒有產出，當作不查", trace_id or "-")
-                    continue
-                logger.warning("工具輪 trace=%s 決策輪失敗（%s），這次不查、照原本的方式回答", trace_id or "-", exc)
+                logger.warning("工具輪 trace=%s 帶工具的第一次呼叫失敗（%s），這次不查、照原本的方式回答",
+                               trace_id or "-", exc)
                 return await self.chat_raw(messages=messages, think=think, **common)
+            answered_once = True
             if result.tool_calls and rounds < max_tool_rounds:
                 rounds += 1
                 messages.append(assistant_message(result.content, result.tool_calls))
@@ -842,11 +828,6 @@ class LLMService:
                     transcript.append(f"[第 {rounds} 輪] {name} {str(arguments)[:200]} → {payload[:300]}")
                 logger.info("工具輪 trace=%s 第 %d 輪：%s", trace_id or "-", rounds,
                             "、".join(call_name_and_arguments(c)[0] for c in result.tool_calls))
-                deciding = False
-                continue
-            if deciding:
-                # 決策輪沒有要查：這段是沒開思考、可能被截斷的草稿，丟掉，用正式設定回答（吃同一份快取）
-                deciding = False
                 continue
             if result.content.strip() and not result.tool_calls:
                 return result.content
@@ -886,7 +867,6 @@ class LLMService:
         trace_id: Optional[str] = None,
         tool_runner: Optional[ToolRunner] = None,
         max_tool_rounds: int = 2,
-        decide_max_tokens: int = 200,
     ) -> "GenerateReplyResult":
         """/askai 專用：組 prompt bundle → 呼叫 `chat_raw` → 回 GenerateReplyResult。
 
@@ -942,7 +922,6 @@ class LLMService:
                     messages, tool_runner, progress=progress, transcript=transcript_so_far, model=target_model,
                     think=target_think, temperature=temperature, top_p=top_p, num_ctx=num_ctx, timeout=timeout,
                     keep_alive=keep_alive, trace_id=trace_id, max_tool_rounds=max_tool_rounds,
-                    decide_max_tokens=decide_max_tokens,
                 )
                 return text, list(progress), list(transcript_so_far)
             text = await self.chat_raw(

@@ -35,7 +35,7 @@ async def ask(service: LLMService, question: str) -> None:
     async def generate(tool_runner):
         return await service.generate_reply(
             prompt=question, system=load_system_prompt(), tool_runner=tool_runner,
-            max_tool_rounds=INTEL_SETTINGS.max_tool_rounds, decide_max_tokens=INTEL_SETTINGS.decide_max_tokens,
+            max_tool_rounds=INTEL_SETTINGS.max_tool_rounds,
             trace_id=f"it-intel-{int(started)}",
         )
 
