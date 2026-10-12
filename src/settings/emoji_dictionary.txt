@@ -227,11 +227,11 @@ let_me_see_see = 好奇、看看 | think
 New_birdRRRRRRRRRRRR = 震驚、嚇到 | laugh
 
 # === 自動偵測 2026-06-25（待填寫） ===
-wfrog_88 = think
+wfrog_88 = 拜託、求求 | think
 
 # === 自動偵測 2026-07-24（待填寫） ===
 sui_confidence = 自信滿滿 | neutral
-wfrog_gay = laugh
+wfrog_gay = 自嘲、玩梗 | laugh
 yang_confuse = 疑惑不解 | think
 
 # === 自動偵測 2026-07-28（待填寫） ===
@@ -289,3 +289,33 @@ WW_JinhsiSmile = 得意、嘿嘿 | laugh
 rosaliya = 震驚、呆住 | think
 shy_a1 = 害羞、不好意思 | neutral
 155 = 震驚、嚇到 | think
+UN_Dalao = 打招呼、問好 | neutral
+dumbfounded = 傻眼、震驚 | think
+yc_good = 開心、支持 | agree
+KEKW_VeryAngry = 憤怒、不爽 | negative
+emoji_3 = 呆滯、無語 | think
+my_rotate_whitechicken = 呆萌、無辜 | neutral
+E1_Mephi_sweat2 = 緊張、尷尬 | negative
+E_Cat_confused = 困惑、不解 | think
+UN_Potatotriggered = 不爽、生氣 | negative
+UN_BacBacHyper = 震驚、嚇到 | think
+emoji_54 = 得意、炫耀 | laugh
+Suisui = 得意、偷笑 | laugh
+FR30 = 思考、沉思 | think
+yc_doubt = 懷疑 | think
+a_pic_duck01 = 得意、炫耀 | laugh
+moon2 = 呆滯、無語 | neutral
+145 = 歪頭疑惑 | think
+cat26 = 震驚、嚇到 | think
+dog_angry_sad = 生氣難過 | negative
+aworrySpin = 震驚、呆住 | think
+mewo = 呆住、無語 | think
+WW_Rover31 = 嚴肅、認真 | neutral
+yc_stare = 懷疑、審視 | think
+UN_DalaoSuper = 2、第二 | neutral
+emoji_5 = 呆滯、被戳 | neutral
+PGR_LivChanting = 期待、祈禱 | neutral
+1Bad = 反對、不認同 | negative
+Shruge = 無奈、攤手 | negative
+Seirn_look = 得意、偷笑 | laugh
+UN_PoincoSad = 無奈、慘 | negative
