@@ -16,6 +16,7 @@ from typing import Callable, Coroutine, Dict, Optional
 
 from utils.logger_config import get_article_monitor_logger
 from utils.utils import ChannelConfig
+from utils.background_tasks import spawn
 
 logger = get_article_monitor_logger()
 
@@ -105,7 +106,7 @@ class NotifyServer:
                 return web.json_response({"status": "skipped", "source": source, "reason": "already processing"})
 
             # 在背景排程處理，不阻塞 HTTP 回應
-            asyncio.create_task(self._guarded_process(source, payload))
+            spawn(self._guarded_process(source, payload), name=f"通知處理 {source}")
 
             return web.json_response({"status": "accepted", "source": source})
 
@@ -159,9 +160,9 @@ class NotifyServer:
 
             logger.info("巴哈通知：開始背景處理 %s 個討論串", len(threads))
             for thread_data in threads:
-                asyncio.create_task(self._process_single_bahamut(
+                spawn(self._process_single_bahamut(
                     monitor, forum_channel_id, thread_data, board_id,
-                ))
+                ), name=f"巴哈通知處理 {board_id}")
 
         except Exception as e:
             logger.error("巴哈通知背景處理失敗: %s", e, exc_info=True)

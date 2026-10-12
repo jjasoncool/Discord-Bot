@@ -69,6 +69,7 @@ from llm.logger_factory import get_or_create_file_logger
 from services.llm_service import LLMService
 from sys_settings.llm_settings import AmbientChatSettings
 from utils.utils import ChannelConfig
+from utils.background_tasks import spawn
 
 logger = logging.getLogger(__name__)
 
@@ -855,7 +856,7 @@ async def maybe_ambient_reply(bot, message: discord.Message) -> None:
             # create_task 不 await → 不破壞這段的原子性。
             last_mid = state.get("last_reply_message_id")
             if last_mid:
-                asyncio.create_task(asyncio.to_thread(mark_got_reply, last_mid))
+                spawn(asyncio.to_thread(mark_got_reply, last_mid), name="插話互動標記")
             if _SETTINGS.debug_log:
                 logger.info(
                     "ambient 接續 channel=%s：有人接了它的話（chain=%d）",

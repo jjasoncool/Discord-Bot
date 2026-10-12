@@ -33,6 +33,7 @@ from telegram_scraper.tg_config import normalize_channel_identifier
 from utils.discord_content import split_message
 from utils.discord_threads import fetch_thread, reopen_thread
 from utils.media_probe import probe_duration
+from utils.background_tasks import spawn
 
 logger = logging.getLogger(__name__)
 
@@ -1669,7 +1670,7 @@ class MessageRelayWorker:
                         logger.error("收到無效 NOTIFY payload: channel=%s payload=%s", self.notify_channel, payload)
                         return
                     logger.info("收到 NOTIFY: channel=%s message_pk=%s", _channel, message_pk)
-                    asyncio.get_running_loop().create_task(self._enqueue_message_pk(message_pk))
+                    spawn(self._enqueue_message_pk(message_pk), name=f"Telegram 通知入列 {message_pk}")
 
                 await conn.add_listener(self.notify_channel, _on_notify)
                 logger.info("Telegram relay LISTEN 已連線: channel=%s", self.notify_channel)
@@ -2114,7 +2115,7 @@ class MessageRelayWorker:
                     self._active_groups.discard(album_key)
                     if album_key in self._dirty_groups:
                         self._dirty_groups.discard(album_key)
-                        asyncio.get_running_loop().create_task(self._after_restore_followup(record))
+                        spawn(self._after_restore_followup(record), name="Telegram 相簿補發")
 
     async def _after_restore_followup(self, record: TelegramMessageRecord) -> None:
         try:

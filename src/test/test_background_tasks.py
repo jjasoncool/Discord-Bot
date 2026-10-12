@@ -1,0 +1,187 @@
+"""背景任務的統一入口（`utils/background_tasks.py`）：建任務、留參照、結束時看得到結果，該一直跑的掛了就重啟。
+
+守的底線：
+  - `spawn` 留著參照到做完為止（做完就放掉，不會越積越多）
+  - `spawn` 的任務拋例外要記 ERROR，而且記得出是哪一個（名稱）；做完沒事不記；被取消不算失敗
+  - `supervise` 的迴圈拋例外：記 ERROR、等一下重新呼叫 factory；間隔每次加倍、有上限；跑得夠久再掛的間隔重算
+  - `supervise` 的迴圈自己結束：記 WARNING、不重啟
+  - `supervise` 被取消：停下來、不重啟、不記 ERROR
+  - `cancel_all` 取消所有還在跑的
+  - 守衛：結果被丟掉的 `asyncio.create_task(...)` 要被 `test_shared_conventions` 抓到（那條規則在那個檔測）
+
+執行：
+    cd src && python -m unittest test.test_background_tasks -v
+"""
+
+import asyncio
+import os
+import sys
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SRC_DIR = os.path.dirname(HERE)
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
+
+from utils import background_tasks as bg  # noqa: E402
+
+LOGGER = "utils.background_tasks"
+
+
+class SpawnTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncTearDown(self):
+        bg.cancel_all()
+        await bg.wait_all(timeout=1)
+
+    async def test_reference_is_kept_until_done_then_released(self):
+        gate = asyncio.Event()
+
+        async def job():
+            await gate.wait()
+
+        task = bg.spawn(job(), name="等門")
+        await asyncio.sleep(0)
+        self.assertIn("等門", bg.pending())
+        self.assertIn(task, bg._tasks)
+
+        gate.set()
+        await task
+        await asyncio.sleep(0)
+        self.assertNotIn("等門", bg.pending())
+        self.assertNotIn(task, bg._tasks)
+
+    async def test_failure_is_logged_with_the_task_name(self):
+        async def boom():
+            raise ValueError("寫入失敗")
+
+        with self.assertLogs(LOGGER, level="ERROR") as logs:
+            task = bg.spawn(boom(), name="聊天記憶寫入")
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+        self.assertTrue(task.done())
+        self.assertIn("聊天記憶寫入", logs.output[0])
+        self.assertIn("ValueError", logs.output[0])
+        self.assertIn("寫入失敗", logs.output[0])
+
+    async def test_success_and_cancellation_are_not_errors(self):
+        async def fine():
+            return 1
+
+        async def forever():
+            await asyncio.sleep(3600)
+
+        with self.assertNoLogs(LOGGER, level="WARNING"):
+            ok = bg.spawn(fine(), name="沒事")
+            await ok
+            long = bg.spawn(forever(), name="被取消")
+            await asyncio.sleep(0)
+            long.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await long
+            await asyncio.sleep(0)
+        self.assertEqual(bg.pending(), [])
+
+
+class SuperviseTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.calls = 0
+        self.delays: list[float] = []
+        self.now = 0.0
+
+        async def fake_sleep(seconds):
+            self.delays.append(seconds)
+            await asyncio.sleep(0)
+
+        self.sleep = fake_sleep
+        self.clock = lambda: self.now
+
+    async def asyncTearDown(self):
+        bg.cancel_all()
+        await bg.wait_all(timeout=1)
+
+    async def test_crashing_loop_is_logged_and_restarted_with_growing_delay(self):
+        async def loop():
+            self.calls += 1
+            if self.calls <= 3:
+                raise RuntimeError(f"第 {self.calls} 次掛")
+            await asyncio.sleep(3600)
+
+        with self.assertLogs(LOGGER, level="ERROR") as logs:
+            bg.supervise(loop, name="Telegram 監聯", restart_after=5, max_restart_after=12, sleep=self.sleep,
+                         clock=self.clock)
+            for _ in range(12):
+                await asyncio.sleep(0)
+
+        self.assertEqual(self.calls, 4)                          # 掛三次、第四次活著
+        self.assertEqual(self.delays, [5, 10, 12])               # 5 → 10 → 封頂 12
+        self.assertEqual(len(logs.output), 3)
+        self.assertIn("Telegram 監聯", logs.output[0])
+        self.assertIn("第 1 次掛", logs.output[0])
+        self.assertIn("5 秒後重新啟動", logs.output[0])
+
+    async def test_delay_resets_after_a_long_healthy_run(self):
+        async def loop():
+            self.calls += 1
+            if self.calls == 2:
+                self.now += 600                                   # 第二次跑了 600 秒才掛
+            if self.calls <= 2:
+                raise RuntimeError("掛")
+            await asyncio.sleep(3600)
+
+        with self.assertLogs(LOGGER, level="ERROR"):
+            bg.supervise(loop, name="迴圈", restart_after=5, healthy_after=60, sleep=self.sleep, clock=self.clock)
+            for _ in range(10):
+                await asyncio.sleep(0)
+
+        self.assertEqual(self.delays, [5, 5])                    # 第二次沒有變成 10
+
+    async def test_loop_that_returns_is_warned_and_not_restarted(self):
+        async def loop():
+            self.calls += 1
+
+        with self.assertLogs(LOGGER, level="WARNING") as logs:
+            task = bg.supervise(loop, name="忘了 while True", sleep=self.sleep)
+            await task
+
+        self.assertEqual(self.calls, 1)
+        self.assertEqual(self.delays, [])
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("WARNING", logs.output[0])
+        self.assertIn("忘了 while True", logs.output[0])
+
+    async def test_cancel_stops_without_restart_or_error(self):
+        started = asyncio.Event()
+
+        async def loop():
+            self.calls += 1
+            started.set()
+            await asyncio.sleep(3600)
+
+        with self.assertNoLogs(LOGGER, level="WARNING"):
+            task = bg.supervise(loop, name="要關機", sleep=self.sleep)
+            await started.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            await asyncio.sleep(0)
+
+        self.assertEqual(self.calls, 1)
+        self.assertEqual(self.delays, [])
+
+    async def test_cancel_all_cancels_everything_still_running(self):
+        async def forever():
+            await asyncio.sleep(3600)
+
+        bg.spawn(forever(), name="a")
+        bg.spawn(forever(), name="b")
+        bg.supervise(forever, name="c", sleep=self.sleep)
+        await asyncio.sleep(0)
+        self.assertEqual(bg.pending(), ["a", "b", "c"])
+
+        self.assertEqual(bg.cancel_all(), 3)
+        await bg.wait_all(timeout=1)
+        self.assertEqual(bg.pending(), [])
+
+
+if __name__ == "__main__":
+    unittest.main()

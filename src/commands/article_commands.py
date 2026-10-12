@@ -12,6 +12,7 @@ import json
 import io
 from typing import Optional
 from utils.utils import safe_send_interaction_message
+from utils.background_tasks import spawn
 
 logger = logging.getLogger(__name__)
 
@@ -787,7 +788,7 @@ class ArticleCommands(commands.Cog):
                 finally:
                     cog._bahamut_sync_started_at = None
 
-            asyncio.create_task(_batch_sync())
+            spawn(_batch_sync(), name="巴哈批次同步")
 
 
 async def setup(bot):

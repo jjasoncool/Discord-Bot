@@ -18,6 +18,7 @@ import discord
 
 from utils.discord_threads import fetch_thread, reopen_thread
 from utils.panel_bump import load_runtime, update_runtime
+from utils.background_tasks import spawn
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +99,7 @@ class QuarantineThreads:
             except Exception as exc:
                 logger.warning("通知隔離區面板失敗 parent=%s：%s", parent_id, exc)
 
-        asyncio.get_running_loop().create_task(run())
+        spawn(run(), name="隔離區面板通知")
 
     async def thread_for(self, parent: discord.abc.Messageable) -> Optional[discord.Thread]:
         """主頻道底下的隔離 thread（找不到就開一個，封存的先解封）；開不了回 None。"""

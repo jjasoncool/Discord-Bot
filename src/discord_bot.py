@@ -19,6 +19,7 @@ from services.relay.telegram_relay_service import (
     TelegramRenderAdapter,
     build_telegram_pg_dsn_from_env,
 )
+from utils.background_tasks import spawn
 
 # 載入環境變數
 load_dotenv()
@@ -371,7 +372,7 @@ async def on_ready():
         bot._ai_emb_backfill_started = True
         try:
             from llm.storage.ai_interactions_store import backfill_embeddings as _backfill_emb
-            asyncio.create_task(asyncio.to_thread(_backfill_emb))
+            spawn(asyncio.to_thread(_backfill_emb), name="ai_interactions 向量回填")
             logger.info("ai_interactions embedding 背景回填已排程")
         except Exception as _exc:
             logger.error("ai_interactions embedding 回填啟動失敗: %s", _exc, exc_info=True)
@@ -515,7 +516,7 @@ async def on_message(message):
         from llm.storage.store_chat import enqueue_message, flush_buffer, should_flush_now
         enqueue_message(message)
         if should_flush_now():
-            asyncio.create_task(flush_buffer())
+            spawn(flush_buffer(), name="聊天記憶寫入")
 
     # 同步寫入 raw 備份表（獨立於 pgvector，包含純附件/純 embed 訊息）
     if not message.author.bot:
@@ -526,17 +527,17 @@ async def on_message(message):
         )
         enqueue_raw_message(message)
         if should_trigger_flush():
-            asyncio.create_task(flush_raw_buffer())
+            spawn(flush_raw_buffer(), name="原始訊息備份寫入")
 
     # 功能二：AI 偶爾插話 / 閒聊（背景判斷，不阻塞訊息處理；自身過濾白名單頻道與 bot 訊息）
     if not message.author.bot and message.guild is not None:
         from llm.ambient.ambient_reply import maybe_ambient_reply
-        asyncio.create_task(maybe_ambient_reply(bot, message))
+        spawn(maybe_ambient_reply(bot, message), name="插話評估")
 
     # 沒描述的表情／貼圖：背景讓模型看圖補字典（每個只看一次；節流與錯誤自己處理）
     if not message.author.bot and message.guild is not None and (message.stickers or "<" in (message.content or "")):
         from llm.preprocess.emoji_autofill import observe as observe_emoji
-        asyncio.create_task(observe_emoji(message))
+        spawn(observe_emoji(message), name="看圖補表情字典")
 
     # 繼續處理命令
     await bot.process_commands(message)

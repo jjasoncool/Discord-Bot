@@ -323,7 +323,7 @@ class WiredInTests(unittest.TestCase):
     def test_discord_bot_hooks(self):
         with open(os.path.join(SRC_DIR, "discord_bot.py"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("asyncio.create_task(observe_emoji(message))", src)
+        self.assertIn("spawn(observe_emoji(message)", src)
         self.assertIn("async def on_guild_stickers_update(guild, before, after):", src)
         self.assertIn("update_guild(before, after)", src)
 

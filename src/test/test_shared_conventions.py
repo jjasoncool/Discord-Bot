@@ -18,6 +18,8 @@
 """
 
 import ast
+import textwrap
+import tempfile
 import builtins
 import functools
 import os
@@ -68,6 +70,24 @@ class Rule:
         return rel in self.allowed or any(
             a.endswith("/") and rel.startswith(a) for a in self.allowed
         )
+
+
+def _find_discarded_create_task(path: Path) -> list[int]:
+    """`asyncio.create_task(...)`／`loop.create_task(...)`／`ensure_future(...)` 的回傳值直接丟掉的語句。
+
+    丟掉就沒人留參照（event loop 只留弱參照，任務可能被回收），任務裡的例外也只會在被回收時印一行
+    「Task exception was never retrieved」——哪個功能停了沒人知道。要 fire-and-forget 走
+    `utils.background_tasks.spawn`；有留參照（`task = ...`、放進 list、`await`）的不在此限。
+    """
+    hits = []
+    for node in ast.walk(_parse(path)):
+        if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)):
+            continue
+        func = node.value.func
+        name = func.attr if isinstance(func, ast.Attribute) else (func.id if isinstance(func, ast.Name) else "")
+        if name in ("create_task", "ensure_future"):
+            hits.append(node.lineno)
+    return hits
 
 
 @functools.cache
@@ -769,6 +789,16 @@ RULES = [
             "discord_bot.py",
         },
     ),
+    Rule(
+        name="背景任務：結果被丟掉的 create_task（沒人留參照、失敗沒人知道）",
+        finder=_find_discarded_create_task,
+        canonical="utils.background_tasks.spawn（該一直跑的迴圈用 supervise）",
+        allowed={
+            # 獨立容器，看不到 utils
+            "scraper/",
+            "telegram_scraper/",
+        },
+    ),
 ]
 
 
@@ -1029,6 +1059,27 @@ class CanonicalHelperTests(unittest.TestCase):
 
         self.assertEqual(prompt_files.read_text("/nope/missing.txt"), "")
         self.assertIsNone(prompt_files.read_json("/nope/missing.json"))
+
+
+class DiscardedCreateTaskFinderTests(unittest.TestCase):
+    """守衛的 finder 本身：只抓「結果被丟掉」的那幾種寫法，留著參照的不抓（抓錯會讓 gate 紅掉）。"""
+
+    def test_flags_only_statements_that_drop_the_task(self):
+        src = textwrap.dedent("""
+            import asyncio
+            async def f():
+                asyncio.create_task(a())                        # 丟掉
+                asyncio.get_running_loop().create_task(b())     # 丟掉
+                asyncio.ensure_future(c())                      # 丟掉
+                task = asyncio.create_task(d())                 # 留著
+                tasks.append(asyncio.create_task(e()))          # 留著
+                await asyncio.create_task(g())                  # 留著
+                spawn(h(), name="x")                            # 走統一入口
+        """)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "m.py"
+            path.write_text(src, encoding="utf-8")
+            self.assertEqual(_find_discarded_create_task(path), [4, 5, 6])
 
 
 if __name__ == "__main__":
