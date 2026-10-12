@@ -1,4 +1,4 @@
-"""搜尋評估（`services/search/evaluate.py`）：Hit Rate@k 與 MRR@10 的算法。
+"""搜尋評估（`services/search/eval/evaluate.py`）：Hit Rate@k 與 MRR@10 的算法。
 
 守的底線：
   - 名次是「第一篇正確答案」的位置；考卷裡任何一篇正確答案都算，「只答一半」的不算
@@ -24,7 +24,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from services.search.evaluate import (  # noqa: E402
+from services.search.eval.evaluate import (  # noqa: E402
     QuestionResult,
     evaluate,
     first_relevant_rank,

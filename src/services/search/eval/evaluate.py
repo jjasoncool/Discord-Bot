@@ -1,13 +1,13 @@
-"""搜尋評估：拿考卷（`eval/questions.json`）考搜尋，算 Hit Rate@k、MRR@10、Recall@10、nDCG@10。
+"""搜尋評估：拿考卷（同資料夾的 `questions.json`）考搜尋，算 Hit Rate@k、MRR@10、Recall@10、nDCG@10。
 
-用法（search-mcp 容器裡）：`python -m services.search.evaluate --label 基準線`
-報告寫到 `services/search/eval/reports/<時間>-<名稱>.json`（設定、各模式的分數、每題正確答案排第幾、
+用法（search-mcp 容器裡）：`python -m services.search.eval.evaluate --label 基準線`
+報告寫到這個資料夾的 `reports/<時間>-<名稱>.json`（設定、各模式的分數、每題正確答案排第幾、
 搜尋回了哪些文件）；表格只印到畫面。結論與數字記在 `AI_HANDOFF_AND_TODO.md` 的 `mcp-search-tools` 區塊，
 不另存 Markdown 報告（使用者 2026-10-08：markdown 收成一份就好）。
 
 兩種模式（預設兩種都考）：
   - 原句：群友怎麼問就怎麼搜，整句丟進去——沒有人幫忙改寫時，搜尋本身找不找得到
-  - 關鍵字：用 `eval/keyword_queries.json` 裡的關鍵字搜——模擬呼叫搜尋的 LLM 先把問題改寫成關鍵字，
+  - 關鍵字：用 `keyword_queries.json` 裡的關鍵字搜——模擬呼叫搜尋的 LLM 先把問題改寫成關鍵字，
     並附上原句（MCP `search` 的 `question`，只給重新排序用；2026-10-08 起，之前的報告重排用的是關鍵字）
 排名看的是搜尋實際回傳的那一串（含每種來源的筆數上限），也就是模型真正會看到的結果。
 「只答一半」的文件不算命中（考卷的 `partial`）。
@@ -31,7 +31,8 @@ from sys_settings.time_settings import APP_TZ
 
 logger = logging.getLogger(__name__)
 
-EVAL_DIR = Path(__file__).resolve().parent / "eval"
+#: 考卷與報告和這支程式放在同一個資料夾
+EVAL_DIR = Path(__file__).resolve().parent
 DEFAULT_QUESTIONS = EVAL_DIR / "questions.json"
 DEFAULT_KEYWORDS = EVAL_DIR / "keyword_queries.json"
 MODES = ("原句", "關鍵字")

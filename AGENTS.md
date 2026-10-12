@@ -43,7 +43,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 
 ## 資料與環境（硬規則）
 
-- **Docker 只做唯讀查詢**：`ps`、`logs --since …`、`exec` 查詢、`inspect`。`compose up/down/restart/build`、`rm`、`rmi` 給指令讓使用者執行。例外：在 `search-mcp` 容器裡（`docker exec search-mcp …`）的情報搜尋指令可以直接執行——stdio 備用的 MCP server（`python -m llm.mcp_server`）、手動同步索引（`python -m services.search`）、搜尋評估（`python -m services.search.evaluate`）與批次算向量（`python -m services.search.embed`），它們只寫自己的索引檔（repo 根目錄 `search_data/`）、評估報告 `services/search/eval/reports/` 與 pgvector 的 `data_search_chunks` 表（不碰其他表）。discord-bot 容器沒掛 `search_data/`，在那裡跑會失敗。
+- **Docker 只做唯讀查詢**：`ps`、`logs --since …`、`exec` 查詢、`inspect`。`compose up/down/restart/build`、`rm`、`rmi` 給指令讓使用者執行。例外：在 `search-mcp` 容器裡（`docker exec search-mcp …`）的情報搜尋指令可以直接執行——stdio 備用的 MCP server（`python -m llm.mcp_server`）、手動同步索引（`python -m services.search`）、搜尋評估（`python -m services.search.eval.evaluate`）與批次算向量（`python -m services.search.embed`），它們只寫自己的索引檔（repo 根目錄 `search_data/`）、評估報告 `services/search/eval/reports/` 與 pgvector 的 `data_search_chunks` 表（不碰其他表）。discord-bot 容器沒掛 `search_data/`，在那裡跑會失敗。
 - **每天 04:00～約 07:30 是維護時段**（人格萃取、persona agent），這段時間請使用者不要重啟 discord-bot。
 - **bot 會長時間不重啟**：會變的外部資料（官方公告、設定）每次用到時重讀，不在啟動時只讀一次。
 - 讀 `articles.db` 用 `mode=ro`：它是 WAL 模式，`immutable=1` 會看不到還在 WAL 裡的新資料。
