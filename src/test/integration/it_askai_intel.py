@@ -28,20 +28,27 @@ DEFAULT_QUESTIONS = [
 ]
 
 
-async def ask(service: LLMService, question: str) -> None:
+async def answer(service: LLMService, question: str, *, trace_id: str):
+    """走 /askai 工具模式同一條路回答一題。回傳（回答結果、查情報的經過、網路搜尋工具）。
+    Agent 評估（`it_askai_agent_eval`）也用這個，兩邊量的才是同一條路。"""
     meta: dict = {"mode": "on"}
-    started = time.monotonic()
 
     async def generate(tool_runner):
         return await service.generate_reply(
             prompt=question, system=load_system_prompt(), tool_runner=tool_runner,
             max_tool_rounds=INTEL_SETTINGS.max_tool_rounds,
-            trace_id=f"it-intel-{int(started)}",
+            trace_id=trace_id,
         )
 
     web = WebSearchTools(settings=WEB_SETTINGS)
     result = await run_with_intel(generate, question=question, enabled=True, meta=meta, settings=INTEL_SETTINGS,
                                   also=[web])
+    return result, meta, web
+
+
+async def ask(service: LLMService, question: str) -> None:
+    started = time.monotonic()
+    result, meta, web = await answer(service, question, trace_id=f"it-intel-{int(started)}")
     print("=" * 70)
     print(f"問：{question}（{time.monotonic() - started:.1f} 秒，連上 search-mcp：{meta.get('connected')}）")
     for call in meta.get("calls") or []:
