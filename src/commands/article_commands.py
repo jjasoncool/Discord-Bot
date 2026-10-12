@@ -12,7 +12,7 @@ import json
 import io
 from typing import Optional
 from utils.utils import safe_send_interaction_message
-from utils.background_tasks import spawn
+from utils.background_tasks import spawn, supervise
 
 logger = logging.getLogger(__name__)
 
@@ -212,11 +212,12 @@ class ArticleCommands(commands.Cog):
 
             try:
                 # 啟動監控任務
-                self.monitoring_task = asyncio.create_task(
-                    self.article_monitor.start_monitoring(
+                self.monitoring_task = supervise(
+                    lambda: self.article_monitor.start_monitoring(
                         channel_ids=self.monitored_channels,
                         check_interval=interval
-                    )
+                    ),
+                    name="monitoring_task",
                 )
 
                 await safe_send_interaction_message(

@@ -19,7 +19,7 @@ from services.relay.telegram_relay_service import (
     TelegramRenderAdapter,
     build_telegram_pg_dsn_from_env,
 )
-from utils.background_tasks import spawn
+from utils.background_tasks import spawn, supervise
 
 # 載入環境變數
 load_dotenv()
@@ -137,7 +137,7 @@ async def on_ready():
                     await flush_buffer()
                 except Exception as exc:
                     logger.warning("定期 flush 聊天 buffer 失敗: %s", exc)
-        bot._chat_persist_task = asyncio.create_task(_periodic_flush())
+        bot._chat_persist_task = supervise(_periodic_flush, name="聊天記憶定期寫入")
         bot._chat_persist_task_started = True
         logger.info("聊天訊息定期持久化已啟動（每 %d 秒）", FLUSH_INTERVAL_SECONDS)
 
@@ -151,7 +151,7 @@ async def on_ready():
                     await flush_raw_buffer()
                 except Exception as exc:
                     logger.warning("定期 flush raw 訊息 buffer 失敗: %s", exc)
-        bot._raw_persist_task = asyncio.create_task(_periodic_raw_flush())
+        bot._raw_persist_task = supervise(_periodic_raw_flush, name="原始訊息備份定期寫入")
         bot._raw_persist_task_started = True
         logger.info("raw 訊息備份定期 flush 已啟動（每 %d 秒）", RAW_FLUSH_INTERVAL_SECONDS)
 
@@ -168,7 +168,7 @@ async def on_ready():
                     await _ambient_memory_flush()
                 except Exception as exc:
                     logger.warning("定期 flush 插話記憶 buffer 失敗: %s", exc)
-        bot._ambient_memory_task = asyncio.create_task(_periodic_ambient_memory_flush())
+        bot._ambient_memory_task = supervise(_periodic_ambient_memory_flush, name="插話記憶定期抽取")
         bot._ambient_memory_task_started = True
         logger.info("插話記憶定期抽取已啟動（每 %.0f 秒檢查）", _ambient_flush_interval)
 
@@ -347,7 +347,7 @@ async def on_ready():
                     # 失敗後等 1 小時再試
                     await asyncio.sleep(3600)
 
-        bot._personality_task = asyncio.create_task(_personality_schedule())
+        bot._personality_task = supervise(_personality_schedule, name="每日維護排程")
         bot._personality_task_started = True
         logger.info("人格萃取定期排程已啟動（每日 04:00 UTC+8，含啟動補跑檢查）")
 
@@ -404,7 +404,7 @@ async def on_ready():
                     logger.error("AI 日記排程失敗: %s", exc, exc_info=True)
                     await asyncio.sleep(3600)  # 失敗後等 1 小時再試
 
-        bot._diary_task = asyncio.create_task(_diary_schedule())
+        bot._diary_task = supervise(_diary_schedule, name="日記排程")
         bot._diary_task_started = True
         logger.info("AI 日記定期排程已啟動（每日 00:00 UTC+8）")
 
@@ -752,7 +752,7 @@ async def _auto_start_monitor_task(
         logger.info(already_running_log)
         return
 
-    new_task = asyncio.create_task(start_coro_factory(channel_id))
+    new_task = supervise(lambda: start_coro_factory(channel_id), name=task_attr)
     setattr(task_owner, task_attr, new_task)
     logger.info(success_log_factory(channel, channel_id))
 

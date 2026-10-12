@@ -37,6 +37,7 @@ from sys_settings.time_settings import APP_TZ
 from utils.discord_content import DISCORD_MESSAGE_LIMIT, split_message
 from utils.dm_notifier import send_dm
 from utils.utils import safe_send_interaction_message, check_guild
+from utils.background_tasks import supervise
 
 logger = logging.getLogger(__name__)
 
@@ -313,7 +314,7 @@ class LLMCommands(commands.Cog):
     def _ensure_askai_worker(self) -> None:
         """確保處理 AI 請求的背景任務正在運行。"""
         if self._askai_worker_task is None or self._askai_worker_task.done():
-            self._askai_worker_task = asyncio.create_task(self._askai_worker())
+            self._askai_worker_task = supervise(self._askai_worker, name="askai_worker")
 
     @app_commands.command(name="askai", description="向 AI 詢問問題")
     @app_commands.describe(

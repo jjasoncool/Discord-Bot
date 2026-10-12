@@ -36,6 +36,7 @@ from services.events.periodic_reminder import (
 from sys_settings.periodic_reminder_settings import PeriodicReminderSettings, VersionStageItem
 from utils.panel_bump import PanelBumper, load_runtime, update_runtime
 from utils.utils import ChannelConfig
+from utils.background_tasks import supervise
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +81,7 @@ class PeriodicReminderCommands(commands.Cog):
     async def cog_load(self):
         self.bot.add_view(ReminderPanelView(self))
         if self.settings.enabled:
-            self._task = asyncio.create_task(self._schedule_loop(), name="periodic_reminder")
+            self._task = supervise(self._schedule_loop, name="periodic_reminder")
 
     async def cog_unload(self):
         if self._task:

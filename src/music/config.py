@@ -5,6 +5,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Optional, Callable, Awaitable
+from utils.background_tasks import supervise
 
 logger = logging.getLogger(__name__)
 
@@ -224,7 +225,7 @@ class RuntimeMusicConfig:
         """背景 watcher：每 5 秒檢查兩個檔案是否變更"""
         if cls._watch_task and not cls._watch_task.done():
             return
-        cls._watch_task = asyncio.create_task(cls._watch_loop())
+        cls._watch_task = supervise(cls._watch_loop, name="音樂設定檔監看")
 
     @classmethod
     async def stop_watcher(cls):

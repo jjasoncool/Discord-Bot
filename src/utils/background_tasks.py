@@ -9,9 +9,10 @@ event loop 只留弱參照），以及任務裡沒接住的例外只會在被回
     supervise(lambda: relay.listen_loop(), name="Telegram 監聽")  # 該一直跑：掛了記 ERROR、等一下重啟
 
   - `spawn`：被取消不算失敗（關機、逾時中止都是正常路徑）。
-  - `supervise`：`factory` 每次重啟都重新呼叫（coroutine 用過一次就不能再 await）。重啟間隔從 `restart_after`
-    起每次加倍、到 `max_restart_after` 為止；跑滿 `healthy_after` 秒才掛掉的，視為新的一次故障、間隔重算。
-    迴圈自己正常結束記 WARNING、不重啟（正常的迴圈不該結束，多半是忘了 `while True`）。
+  - `supervise`：`factory` 每次重啟都重新呼叫（coroutine 用過一次就不能再 await）。第一次在 `supervise()` 裡
+    當場呼叫——和原本 `create_task(coro)` 的時機一樣，參數寫錯會立刻在呼叫端炸，不會躲進背景每 5 秒重試一次。
+    重啟間隔從 `restart_after` 起每次加倍、到 `max_restart_after` 為止；跑滿 `healthy_after` 秒才掛掉的，
+    視為新的一次故障、間隔重算。迴圈自己正常結束記 WARNING、不重啟（正常的迴圈不該結束，多半是忘了 `while True`）。
   - 這裡只管「建、留、記、重啟」。工作本身的節流、去重、等 GPU 都留給呼叫端；`run_due_loop` 管的是
     「什麼時候醒來」，兩者是搭配不是取代。
 
@@ -20,6 +21,7 @@ event loop 只留弱參照），以及任務裡沒接住的例外只會在被回
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from typing import Awaitable, Callable, Coroutine, Optional
@@ -58,13 +60,14 @@ def supervise(
     clock: Callable[[], float] = time.monotonic,
 ) -> asyncio.Task:
     """讓一個該一直跑的迴圈真的一直跑：掛了記 ERROR、等一下重新呼叫 `factory`；被取消才停。回傳的 task 可以 cancel。"""
+    first = factory()   # 現在就建第一個 coroutine：factory 本身寫錯（參數不對）在這裡就炸，不會躲進背景重試
 
-    async def _run() -> None:
+    async def _run(current) -> None:
         delay = restart_after
         while True:
             started = clock()
             try:
-                await factory()
+                await current
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -74,11 +77,15 @@ def supervise(
                              exc_info=exc)
                 await sleep(delay)
                 delay = min(delay * 2, max_restart_after)
+                current = factory()
                 continue
             logger.warning("背景迴圈「%s」自己結束了（正常的迴圈不該結束），不再重啟", name)
             return
 
-    return spawn(_run(), name=name)
+    task = spawn(_run(first), name=name)
+    # 任務還沒輪到執行就被取消時，第一個 coroutine 不會被 await 到；關掉它，不然 Python 會抱怨「never awaited」
+    task.add_done_callback(lambda _t: first.close() if inspect.getcoroutinestate(first) == inspect.CORO_CREATED else None)
+    return task
 
 
 def pending() -> list[str]:

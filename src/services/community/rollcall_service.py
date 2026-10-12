@@ -15,6 +15,7 @@ from typing import Callable, Dict, List, Optional, Set
 import discord
 
 from utils.dm_notifier import send_dm
+from utils.background_tasks import supervise
 
 logger = logging.getLogger(__name__)
 
@@ -144,8 +145,8 @@ class RollCallService:
         if self._tasks:
             return
         self._tasks = [
-            asyncio.create_task(self._weekly_pick_loop(), name="rollcall_weekly_pick"),
-            asyncio.create_task(self._expire_check_loop(), name="rollcall_expire_check"),
+            supervise(self._weekly_pick_loop, name="rollcall_weekly_pick"),
+            supervise(self._expire_check_loop, name="rollcall_expire_check"),
         ]
         logger.info("幽靈點名服務已啟動背景排程")
 

@@ -25,6 +25,7 @@ from services.community.trade_service import (
 from sys_settings.trade_settings import TradeSettings
 from utils.due_loop import run_due_loop
 from utils.utils import safe_send_interaction_message
+from utils.background_tasks import supervise
 
 logger = logging.getLogger(__name__)
 
@@ -100,8 +101,8 @@ class ForumMonitor(commands.Cog):
     async def cog_load(self):
         self.bot.add_dynamic_items(TradeButton)
         self.bot.add_view(LegacyTransactionView(self))
-        self._deadline_task = asyncio.create_task(
-            run_due_loop(
+        self._deadline_task = supervise(
+            lambda: run_due_loop(
                 "交易領收期限",
                 self.trade.run_receipt_deadlines,
                 wait_ready=self.bot.wait_until_ready,

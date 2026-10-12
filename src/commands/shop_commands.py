@@ -42,6 +42,7 @@ from sys_settings.shop_settings import ShopSettings
 from sys_settings.time_settings import APP_TZ
 from utils.due_loop import run_due_loop
 from utils.utils import safe_send_interaction_message
+from utils.background_tasks import supervise
 
 logger = logging.getLogger(__name__)
 
@@ -690,9 +691,9 @@ class ShopCommands(commands.Cog):
         trade_cog.trade.add_source_kind(self.shop.source)
         self.bot.add_dynamic_items(*_DYNAMIC_ITEMS)
         self.bot.add_view(GuideView())
-        self._task = asyncio.create_task(
-            run_due_loop("商品預購截止", self.shop.run_preorder_cutoffs, wait_ready=self.bot.wait_until_ready,
-                         max_sleep=self.settings.cutoff_check_max_sleep_seconds, wake=self.shop.cutoffs_changed),
+        self._task = supervise(
+            lambda: run_due_loop("商品預購截止", self.shop.run_preorder_cutoffs, wait_ready=self.bot.wait_until_ready,
+                                 max_sleep=self.settings.cutoff_check_max_sleep_seconds, wake=self.shop.cutoffs_changed),
             name="shop_preorder_cutoffs",
         )
 

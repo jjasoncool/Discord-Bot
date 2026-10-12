@@ -6,6 +6,7 @@
   - `supervise` 的迴圈拋例外：記 ERROR、等一下重新呼叫 factory；間隔每次加倍、有上限；跑得夠久再掛的間隔重算
   - `supervise` 的迴圈自己結束：記 WARNING、不重啟
   - `supervise` 被取消：停下來、不重啟、不記 ERROR
+  - `supervise` 第一次呼叫 factory 是當場呼叫：factory 本身寫錯會在呼叫端立刻炸，不會躲進背景一直重試
   - `cancel_all` 取消所有還在跑的
   - 守衛：結果被丟掉的 `asyncio.create_task(...)` 要被 `test_shared_conventions` 抓到（那條規則在那個檔測）
 
@@ -89,6 +90,10 @@ class SuperviseTests(unittest.IsolatedAsyncioTestCase):
         self.now = 0.0
 
         async def fake_sleep(seconds):
+            # 被取消之後還來睡＝把取消當成故障要重啟。這種任務殺不死，連測試收尾（取消所有任務）都會卡住，
+            # 所以在這裡炸掉讓測試紅，而不是卡住。正確的實作被取消後不會再呼叫 sleep
+            if asyncio.current_task().cancelling():
+                raise AssertionError(f"取消後不該重啟（還去睡 {seconds} 秒）")
             self.delays.append(seconds)
             await asyncio.sleep(0)
 
@@ -167,6 +172,22 @@ class SuperviseTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.calls, 1)
         self.assertEqual(self.delays, [])
+
+    async def test_factory_is_called_right_away_so_bad_arguments_fail_fast(self):
+        order = []
+
+        def factory():
+            order.append("factory")
+            return asyncio.sleep(3600)
+
+        bg.supervise(factory, name="立刻建", sleep=self.sleep)
+        self.assertEqual(order, ["factory"])                   # 還沒讓 event loop 跑，factory 就已經被叫了
+
+        def broken():
+            raise TypeError("參數錯了")
+
+        with self.assertRaises(TypeError):
+            bg.supervise(broken, name="寫錯", sleep=self.sleep)  # 在呼叫端炸，不是躲進背景
 
     async def test_cancel_all_cancels_everything_still_running(self):
         async def forever():

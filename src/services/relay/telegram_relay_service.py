@@ -33,7 +33,7 @@ from telegram_scraper.tg_config import normalize_channel_identifier
 from utils.discord_content import split_message
 from utils.discord_threads import fetch_thread, reopen_thread
 from utils.media_probe import probe_duration
-from utils.background_tasks import spawn
+from utils.background_tasks import spawn, supervise
 
 logger = logging.getLogger(__name__)
 
@@ -1579,10 +1579,10 @@ class MessageRelayWorker:
         self._running = True
 
         self._tasks = [
-            asyncio.create_task(self._listen_loop(), name="telegram_relay_listen"),
-            asyncio.create_task(self._poll_loop(), name="telegram_relay_poll"),
-            asyncio.create_task(self._process_loop(), name="telegram_relay_process"),
-            asyncio.create_task(self._recheck_loop(), name="telegram_relay_recheck"),
+            supervise(self._listen_loop, name="telegram_relay_listen"),
+            supervise(self._poll_loop, name="telegram_relay_poll"),
+            supervise(self._process_loop, name="telegram_relay_process"),
+            supervise(self._recheck_loop, name="telegram_relay_recheck"),
         ]
         logger.info("Telegram Relay Worker 已啟動（notify=%s poll=%ss）", self.notify_channel, self.poll_interval_sec)
         if bootstrap_count > 0:
