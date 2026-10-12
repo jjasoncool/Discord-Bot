@@ -6,6 +6,7 @@
 
 | 日期 | 區塊 | 關鍵字 |
 |---|---|---|
+| 2026-10-12 | [Agent 評估：實作、第一次執行與評估程式搬家（歸檔 2026-10-12）](#agent-評估實作第一次執行與評估程式搬家歸檔-2026-10-12) | 從 handoff 歸檔, Agent 評估, agent_eval, it_askai_agent_eval, 模型自己寫的查詢重放, 逾時後自動重試佔顯示卡 15 分鐘, 評估程式搬進 services/search/eval |
 | 2026-10-08 | [MCP／搜尋工具化：討論與實作紀錄（歸檔 2026-10-08，原 2026-09-29～10-08）](#mcp搜尋工具化討論與實作紀錄歸檔-2026-10-08原-2026-09-2910-08) | 從 handoff 歸檔, R2～R12 每一輪, MCP 放哪, search＋fetch, FTS5 trigram, 兩字組, 考卷擬題, KV cache R7／R8, --parallel 查證, 程式碼審查 workflow, reranker 批次上限 |
 | 2026-08-20 | [指令收斂與管理 Dashboard（改寫前原文）](#指令收斂與管理-dashboard改寫前原文歸檔-2026-10-02原-2026-08-20) | 從 handoff 歸檔, subcommand group, /persona, 管理面板, notify_server dashboard, M3/M4 時機（已過時） |
 | 2026-03-31 | [Discord Bot 管理入口與指令整理 TODO（改寫前原文）](#discord-bot-管理入口與指令整理-todo改寫前原文歸檔-2026-10-02原-2026-03-31) | 從 handoff 歸檔, /panel admin, test_commands dev-only, 權限檢查五種寫法盤點, require_permission, 9/04 已還原 |
@@ -72,6 +73,24 @@
 | 2026-03-26 | [Telegram 已解決問題集](#telegram-relay-通道連線問題2026-03-26-已解決) | 通道連線, 媒體重複, 時序, 副檔名, route key |
 | 2026-03-25 | [Telegram Relay 設計定案](#telegram-relay-設計定案--架構設定相容流程盤點2026-03-25已完成歸檔) | 架構, config, 路由, 六層設計 |
 | 2026-03-22 | [Telegram Scraper 專案交接](#telegram-scraper-專案交接2026-03-22已完成歸檔) | Docker, 模組化, forward 過濾, session |
+
+---
+
+
+## Agent 評估：實作、第一次執行與評估程式搬家（歸檔 2026-10-12）
+
+> 從 `AI_HANDOFF_AND_TODO.md` 情報搜尋區塊待做第 9 項搬來的已完成部分（原文）。**數字、限制與還沒定案的三題（放寬查詢輪數、工具說明、逾時重試）留在交接檔第 9 項**；評估結果表也在交接檔。commit：`a918ff4`（評估程式搬進 `eval/`）、`f9364c8`（Agent 評估、測試、三份報告）。
+
+- **要補的缺口**：81% 的查詢字是外部 agent 寫的，不是正式模型；回答對不對、該查的有沒有查都沒量過。
+- **機制**：考卷 42 題加 6 題不該查的閒聊，用正式模型跑完整的 /askai 工具輪（和 `it_askai_intel` 同一條路：遊戲情報＋網路搜尋兩組工具、沒有聊天紀錄與人物卡、每題一次），從模型實際收到的對話整理出每個工具呼叫，再算分。
+- **量什麼**：①該查的題目有幾題查了遊戲情報、幾題只查網路、幾題沒查；②模型自己寫的查詢 Hit@1／5／10、MRR@10——「第一次 search」與「任一次 search 裡最好的」各算一次，分母是全部題目（沒查算沒找到），另報「只算有查的」；③回答有沒有附連結、有沒有附到正確答案那篇、有沒有附不在任何工具結果裡的連結；④有沒有用 fetch 讀到正確答案；⑤閒聊題有沒有亂查；⑥每題秒數、查了幾輪。回答內容對不對不由程式判：跑完後對照 `eval/private/questions_with_evidence.json` 的證據句逐題初判，再請使用者看有疑問的。
+- **定案與理由**：(a) 名次看模型實際看到的結果（客戶端每次最多給 6 筆，`AskAIIntelSettings.search_limit`），所以 Hit@5 可以直接比、MRR@10 會略低估；要和 81% 用同一把尺（前 20 筆、重排讀原句），就把報告檔當 `--keywords` 交給 `python -m services.search.eval.evaluate --mode 關鍵字 --rerank on` 重放——報告裡的 `queries`（題號 → 第一次 search 的查詢字，沒查的給空字串）格式和 `keyword_queries.json` 相同。同一天也重跑一次外部 agent 那份當對照（索引和向量自 10-08 以來有新增）。(b) Hit／MRR 沿用 `evaluate.py` 的 `summarize`，不另寫一份。(c) 報告（`eval/reports/`，可進 git）只放分數、查詢字、文件 id、網址；回答全文與模型看到的論壇內容寫在 `eval/private/…-經過.jsonl`（不進 git，和考卷證據句同一個規則）。(d) 一題跑完就寫一行，`--resume` 接著跑、`--score-only` 只重算分數——跑一趟要一小時，中斷或改算分規則都不必重跑模型。
+- **程式**：`services/search/eval/agent_eval.py`（只算分，不碰模型與索引；10-12 和 `evaluate.py` 一起搬進 `eval/`）、`test/integration/it_askai_agent_eval.py`（跑題目與寫報告，手動執行）、`test/integration/it_askai_intel.py`（把「回答一題」抽成 `answer`，兩支腳本共用同一條路）。
+- **測試**：`test/test_search_agent_eval.py` 21 項，16 個突變全紅；完整 1,404 項（09:2x 連跑五次，四次全過、**一次有 1 項失敗沒抓到是哪一項、之後沒再重現**，待查是不是某個和時間有關的測試）。容器內用假的經過檔乾跑過 `--score-only`（讀考卷、寫報告、印摘要都正常，假檔已刪）。
+- **怎麼跑的**：主機上的背景行程等到 07:40（避開維護時段）→ 試跑 2 題＋1 題閒聊通過 → 07:45 跑整份 → 第 42 題卡住被中止（見下「事故」）→ 09:04 用 `--resume` 接著跑剩下 7 題 → 重放模型的查詢 → 重跑外部 agent 對照，09:18 結束。試跑的兩個檔已刪。之後要重跑：`docker exec -w /app discord-bot python -m test.integration.it_askai_agent_eval --label <名稱>`（約 1.5 小時、避開維護時段；`--resume`／`--score-only` 帶 `eval/private/` 的經過檔）。
+- **算分修過一次**：原本把「公告內文裡的網址」（例：直播連結）算成模型自己生的連結，2 題誤判；改成工具結果的網址欄位與內文都沒出現才算，補測試＋突變。
+- **事故與新發現：對話請求逾時後自動重試，會把一次寫不停的回答拖到 15 分鐘（未定案，線上 /askai 同一條路）**。第 42 題被提醒「不能再查了」後的那次回答，Lemonade 紀錄顯示：08:48:56 開始 → 08:53:56 滿 300 秒被客戶端中止（已寫約 8,600 token 沒寫完）→ 自動重試 → 08:58:57 又滿 300 秒中止（約 6,300 token）→ 第 3 次到 09:03:44 被 Claude 中止評估行程（7,013 token；它本來 09:03:56 也會逾時結束）。整段都拿著顯示卡鎖，bot 的一個工作（看圖補貼圖字典）等了 12 分半；bot 等滿 15 分鐘會不等鎖直接送，可能撞在一起，所以先中止。原因兩個：`LlmHttpClient` 預設重試 2 次、逾時也重試；對話請求沒有長度上限（`max_tokens`）。**選項**：(a) 對話請求逾時不重試（逾時代表模型還在寫，不是連線問題）；(b) 給 /askai 的回答一個長度上限；(c) 兩個都做。**建議 (c)**，這不是調分數，是會讓 bot 的 AI 卡 15 分鐘的問題；要不要在面試前動由使用者決定。評估腳本已加每題 10 分鐘上限（`--question-timeout`），超過就中止那一題、記成逾時。
+- **已定案並完成：評估程式搬進 `services/search/eval/`（10-12 使用者問「既然是評估用的程式，為什麼不放到 test 內」→ 聽完選項後「搬」）**。`evaluate.py`、`agent_eval.py` 和考卷、報告放在同一個資料夾（多一個 `__init__.py` 說明內容），指令改成 `python -m services.search.eval.evaluate`；`EVAL_DIR` 改成程式所在的資料夾；測試、整合腳本、AGENTS.md 的路徑一起改。直接在主目錄搬、沒開工作副本、不用重啟：先查過執行中的 bot 與 search-mcp 都沒有 import 這兩支（只有手動評估與測試用）。搬之前的討論：算分原本在 `services/search/agent_eval.py`（照 `evaluate.py` 的擺法，自己有單元測試）、跑題目 `test/integration/it_askai_agent_eval.py`（要真的模型，和 `it_askai_intel` 共用 `answer`）。沒放 `test/` 的理由：本專案的 `test/` 是「會紅會綠的檢查」（`test_*.py` 進啟動 gate、`it_*.py` 手動），評估是量分數、沒有對錯；算分程式本身要被測試與突變。使用者的質疑有道理的部分：評估不是 bot 執行時會用到的東西，放 `services/` 也不算名正言順（`evaluate.py` 同樣如此）。選項：(a) 不動；(b) 兩支評估程式一起搬進 `services/search/eval/`（和考卷、報告放一起）；(c) 搬到 `test/`。原建議 (a)；使用者選搬，照 (b) 做。
 
 ---
 
@@ -253,7 +272,7 @@ affects: /askai、網頁查詢、官網公告、論壇（PTT／巴哈）
   - 攻略題的難點（P2 要看的）：問句只有暱稱（「家主」＝坎特蕾拉、「汐汐」「水母」）；一個字的角色名（椿）；「全限定五星角色簡評」討論串每個角色一層，但各層的討論串標題相同、不含角色名；答案隨版本改變（相里要 4C）；倍率數字常只在圖片裡。
 - **評估集 42 題全部確認（2026-10-08）**：使用者對 12 題攻略題回「好」，`questions_draft.json` 全部標 `reviewed: true`、`status: reviewed`。可以開始 P2。
 - **opencc 已裝上（使用者 10-08 12:00 重建重啟）**：簡轉繁測試現在會跑且通過（突變：拿掉轉換→紅）；索引自動偵測正規化方式改變並整份重建（`nfkc+s2t`，112,216 份）。
-- **P2 評估程式完成（2026-10-08）**：`services/search/evaluate.py`（`python -m services.search.evaluate --label 名稱`，報告寫 `services/search/eval/reports/<時間>-<名稱>.md／.json`）；測試 `test_search_eval.py` 5 項，4 個突變全紅；`AGENTS.md` Docker 例外加上這個指令。查詢字＝群友原句，排名看實際回傳（含來源上限），只答一半不算。
+- **P2 評估程式完成（2026-10-08）**：`services/search/eval/evaluate.py`（`python -m services.search.eval.evaluate --label 名稱`；2026-10-12 以前在上一層的 `services/search/evaluate.py`，報告寫 `services/search/eval/reports/<時間>-<名稱>.md／.json`）；測試 `test_search_eval.py` 5 項，4 個突變全紅；`AGENTS.md` Docker 例外加上這個指令。查詢字＝群友原句，排名看實際回傳（含來源上限），只答一半不算。
 - **P1 基準線（2026-10-08 12:03，`20261008-1203-P1-FTS5基準線`）**：42 題 **Hit@1 14%、Hit@5 21%、Hit@10 36%、MRR@10 0.195**；情報 30 題 Hit@5 30%／MRR 0.273；**攻略 12 題全部 0**；字面 Hit@5 36%、換句話說 18%、短詞 9%；平均 23 ms、p95 72 ms。
   - **主因（查證）**：中文句子沒有空格，`parse_terms` 把整句當成一個關鍵字（「卜靈是什麼身分」→ 一個詞），只能走三字組模糊比對，被「是什麼」「要怎麼」這類常見片段淹沒；真正的兩字詞（卜靈、長離、合軸）從沒被單獨搜。用空白分開的關鍵字（「長離 相里要 合軸」）就會正確切成三個詞。P1 的設計原本假設客戶端會給關鍵字（工具說明有寫），原句模式是「難模式」。
   - **待決（第 9 輪，2026-10-08）**：
