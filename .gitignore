@@ -16,6 +16,7 @@ src/settings/item_prices.json
 src/settings/intro_panel_runtime.json
 src/settings/intro_submission_runtime.json
 staged_diff.txt
+doc/interview/
 
 # Telethon session（避免把登入憑證提交到版本庫）
 src/telegram_scraper/session/
@@ -30,11 +31,8 @@ src/settings/periodic_reminder_runtime.json
 src/settings/telegram_quarantine_runtime.json
 src/settings/telegram_quarantine_panel_runtime.json
 
-# 情報搜尋的索引：從 articles.db 建出來的衍生資料，刪掉會自動重建（search-mcp 容器掛 /search_data）
+# search-mcp 情報搜尋的索引：從 articles.db 建出來的衍生資料，刪掉會自動重建（容器掛 /search_data）
 search_data/
-# 舊位置（2026-10-08 搬到 search_data/ 之前）
-src/services/search/data/
 # discord-bot 與 search-mcp 共用的 GPU 鎖檔
 gpu_lock/
-# 評估考卷的證據句與標題（論壇原文）：公開 repo 只放問題與文章編號（eval/questions.json）
 src/services/search/eval/private/
