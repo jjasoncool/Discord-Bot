@@ -319,3 +319,4 @@ PGR_LivChanting = 期待、祈禱 | neutral
 Shruge = 無奈、攤手 | negative
 Seirn_look = 得意、偷笑 | laugh
 UN_PoincoSad = 無奈、慘 | negative
+DrinkTea = 享受喝茶、放鬆 | neutral
