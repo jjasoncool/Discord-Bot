@@ -324,3 +324,4 @@ wuwa_frog11 = 驚訝、呆住 | think
 Z_Funny = 開心大笑 | laugh
 a_pic_ox = 嘿嘿偷笑 | laugh
 cz = 害羞、心動 | agree
+cmon = 懷疑、不信 | think
