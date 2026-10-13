@@ -4,8 +4,9 @@ import asyncio
 import functools
 import json
 import time
+from dataclasses import dataclass
 from datetime import datetime
-from typing import NamedTuple
+from typing import Any, NamedTuple
 import base64
 import io
 import discord
@@ -304,6 +305,307 @@ class _AskaiCancelButton(discord.ui.View):
                 item.disabled = True
 
 
+@dataclass
+class _AskaiInputs:
+    """一次 /askai 收集完、要交給模型的東西，加上記錄要用的 meta（第 1 段的產出，第 2～4 段只讀它）。"""
+
+    trace_id: str
+    question: str                 # 使用者打的原句：回覆、記錄用
+    resolved_question: str        # <@id> 換成「名字#尾碼」：檢索、工具輪用
+    llm_question: str             # 再加上 X 貼文、別的伺服器表情的說明：給模型的問題
+    system_prompt: str
+    chat_context: list[str] | None
+    bot_history: list[str] | None
+    persona_context: list[str] | None
+    target_profiles: list[str] | None
+    asker_profile: str
+    asker_display_name: str
+    web_mode: str
+    web_context: list[str] | None
+    web_meta: dict[str, object]
+    image_payload: list[str] | None
+    image_meta: dict[str, str | int | bool] | None
+    discord_context: list[dict[str, str]]
+    discord_meta: dict[str, object]
+    rag_context: list[dict[str, object]]
+    rag_meta: dict[str, object]
+    interaction: Any = None       # 記錄回應歷史要 guild／channel／user
+    model: str | None = None      # 第 2 段決定後填回，第 3 段記錄用
+    think: bool | None = None
+
+
+def _context_limits(*, has_image: bool) -> dict[str, int]:
+    """聊天紀錄要抓多少、送多少。視覺請求時縮短，降低 token 與 timeout 風險。
+
+    `max_context_to_send` 在 retriever 內代表「聊天訊息數」，另會保留 1 行 header，
+    所以最終 sent_count 可能是 6（1 header + 5 聊天）。
+    """
+    limits = {
+        "max_context_messages": ASKAI_SETTINGS.max_context_messages,
+        "min_recent_context": ASKAI_SETTINGS.min_recent_context,
+        "max_relevant_context": ASKAI_SETTINGS.max_relevant_context,
+        "max_context_to_send": ASKAI_SETTINGS.max_context_to_send,
+    }
+    if has_image:
+        limits["max_context_messages"] = min(limits["max_context_messages"], 20)
+        limits["min_recent_context"] = min(limits["min_recent_context"], 5)
+        limits["max_relevant_context"] = min(limits["max_relevant_context"], 5)
+        limits["max_context_to_send"] = 5
+    return limits
+
+
+def _resolve_mentions(question: str, guild) -> tuple[str, list[str]]:
+    """把問題裡的 <@id> 換成「顯示名稱#尾碼」，跟 chat_history / persona card 的錨點對齊。
+
+    否則 LLM 看到問題裡的「二口氣上吧」對不上卡標題「NNN#7489」（display_name vs alias 不同字串）。
+    回傳 (換過的問題, 被提到的 user_id 字串清單)。
+    """
+    mentioned_user_ids = extract_mentioned_user_ids(question)
+    resolved_question = question
+    if mentioned_user_ids and guild:
+        for uid_str in mentioned_user_ids:
+            member = guild.get_member(int(uid_str))
+            if member:
+                name_with_id = person_anchor.label(member.display_name, uid_str)
+                resolved_question = resolved_question.replace(f"<@{uid_str}>", name_with_id).replace(
+                    f"<@!{uid_str}>", name_with_id
+                )
+    return resolved_question, mentioned_user_ids
+
+
+def _start_web_search(resolved_question: str):
+    """網路搜尋（開關 askai_web_search_mode）：keyword＝關鍵字判斷要不要查、背景先查好塞進 prompt（與 discord / rag
+    檢索並行）；tool＝做成工具，由模型和遊戲情報一起決定查哪邊（兩邊不會同時塞資料，見 run_with_intel）；off＝不查。
+
+    回傳 (web_mode, intent, run_web, 背景查詢的 task 或 None)。
+    """
+    web_mode = switches.current().askai_web_search_mode
+    intent = should_search(resolved_question)
+    run_web = web_mode == "keyword" and intent.triggered
+
+    web_task: asyncio.Task | None = None
+    if run_web:
+        # 送給 SearXNG 的 query 用 cleaned_query（已剝除贅字／改寫成關鍵字）；引擎、類別、時間範圍照 intent 的路由，
+        # 窄路由結果太少時由 search_web 換通用引擎補查
+        web_task = asyncio.create_task(
+            search_web(
+                intent.cleaned_query or resolved_question,
+                settings=WEB_SETTINGS,
+                categories=intent.categories,
+                time_range=intent.time_range,
+                language=intent.language,
+                logger_override=logger,
+            )
+        )
+    return web_mode, intent, run_web, web_task
+
+
+async def _collect_web(web_task, *, web_mode: str, run_web: bool, intent) -> tuple[list[str] | None, dict[str, object]]:
+    """回收背景 web_task 結果（若有觸發），組 web_context 與 web_meta。"""
+    web_context: list[str] | None = None
+    # 工具模式也記下關鍵字會不會觸發（reason、trigger_keyword…），方便和模型實際的決定對照
+    web_meta: dict[str, object] = {
+        "mode": web_mode,
+        "triggered": run_web,
+        "reason": intent.reason,
+        "trigger_keyword": intent.trigger_keyword,
+        "cleaned_query": intent.cleaned_query,
+        "categories": intent.categories,
+        "time_range": intent.time_range,
+        "language": intent.language,
+    }
+    if web_task is not None:
+        try:
+            outcome = await web_task
+            web_meta.update(outcome.meta)
+            if outcome.results or outcome.answers:
+                web_context = format_web_context_lines(outcome.results, outcome.answers)
+                # 記錄前 3 筆 preview 方便日後 debug：判斷 LLM 到底看到什麼
+                web_meta["results_preview"] = [
+                    {
+                        "title": r.title,
+                        "url": r.url,
+                        "engine": r.engine,
+                        "published_date": r.published_date,
+                    }
+                    for r in outcome.results[:3]
+                ]
+        except Exception as exc:
+            logger.warning("web_task 收尾失敗: %s", exc, exc_info=True)
+            web_meta["error"] = f"await_failed:{type(exc).__name__}"
+    return web_context, web_meta
+
+
+def _participant_ids(discord_context: list[dict]) -> list[int]:
+    """聊天紀錄裡的發言者 id，去重、照出現順序。"""
+    ids: list[int] = []
+    for item in discord_context:
+        author_id_raw = str(item.get("author_id", "")).strip()
+        if author_id_raw.isdigit():
+            ids.append(int(author_id_raw))
+    return list(dict.fromkeys(ids))
+
+
+def _split_persona(rag_context: list[dict], asker_uid: str, mentioned_user_ids: list[str] | None):
+    """人物卡三路分流（依優先序）：發問者本人的卡 → asker_profile；發問者明確 mention 的對象 → target_profiles，
+    緊鄰問題；其餘參與者 → persona_context，背景資訊。
+
+    回傳 (發問者的卡文字或 None, 被 @ 的人的卡清單, 其餘的卡清單或 None, 有卡的被 @ 的 id 集合)。
+    """
+    mentioned = set(mentioned_user_ids or [])
+    asker_persona_text: str | None = None
+    target_items: list[str] = []
+    other_items: list[str] = []
+    matched: set[str] = set()
+    for item in rag_context or []:
+        content = item.get("content")
+        if not content or item.get("metadata") == "persona_card_header":
+            continue
+        person_id = item.get("person_id")
+        if person_id == asker_uid and asker_persona_text is None:
+            asker_persona_text = content
+        elif person_id in mentioned:
+            target_items.append(content)
+            matched.add(person_id)
+        else:
+            other_items.append(content)
+    return asker_persona_text, target_items, (other_items or None), matched
+
+
+def _mention_hints(unmatched_mention_ids: set[str], guild) -> list[str]:
+    """mention 了但 DB 沒卡：放退場提示，避免 LLM 反問或硬猜（新進群、未填自介、AI 觀察未跑、或已不在群內）。"""
+    hints: list[str] = []
+    for uid in unmatched_mention_ids:
+        member = guild.get_member(int(uid)) if guild else None
+        label = person_anchor.label(member.display_name if member else "某人", uid)
+        hints.append(
+            f"「{label}」— 群內尚無此人的 persona 紀錄；"
+            f"可從 chat_history 推測，否則請老實說對此人不熟悉"
+        )
+    return hints
+
+
+def _asker_profile_text(interaction: discord.Interaction, asker_display_name: str, asker_persona_text: str | None) -> str:
+    """可信的發問者身份資訊（給 system block）。display_name 永遠帶 #XXXX，跟 chat_history / persona card 對齊。"""
+    now_str = datetime.now(APP_TZ).strftime("%Y-%m-%d %H:%M (UTC+8)")
+    guild_name = interaction.guild.name if interaction.guild else "(DM)"
+    channel_name = getattr(interaction.channel, "name", "") or "(unknown)"
+    lines = [
+        "<asker_profile>",
+        f"display_name: {asker_display_name}",
+        f"user_id: {interaction.user.id}",
+        "roles: (未啟用)",
+        f"persona_summary: {asker_persona_text or '（無）'}",
+        f"current_time: {now_str}",
+        f"guild_name: {guild_name}",
+        f"channel_name: {channel_name}",
+        "</asker_profile>",
+        "",
+        "這是本次發問者的可信身份資訊。回覆時可個人化互動；但 user_id 與內部欄位不得對外揭露。",
+    ]
+    return "\n".join(lines)
+
+
+# ── 第 3 段：記錄 ───────────────────────────────────────────────────────
+def _askai_record(inputs: "_AskaiInputs", result, *, intel_meta: dict[str, object], web_tools) -> None:
+    """三份紀錄：askai_prompt.txt（真正送出的 prompt）、askai_prompt_debug.txt（檢索／融合細節）、回應歷史 jsonl。
+    任何一份寫失敗只記 WARNING，不影響回覆。"""
+    trace_id = inputs.trace_id
+    try:
+        prompt_trace_logger = get_or_create_file_logger(
+            name="askai_prompt_trace",
+            log_path=PROMPT_LOG_PATH,
+            mode="time",
+            when=ASKAI_SETTINGS.prompt_log_when,
+            interval=ASKAI_SETTINGS.prompt_log_interval,
+            backup_count=ASKAI_SETTINGS.prompt_log_backup_count,
+        )
+        prompt_trace_logger.info(_format_log_block(title=f"ASKAI_PROMPT trace={trace_id}", body=result.prompt_record_log))
+    except Exception as exc:
+        logger.warning("寫入 askai prompt 失敗 trace=%s: %s", trace_id, exc)
+
+    try:
+        retrieval_debug = inputs.discord_meta.get("retrieval_debug")
+        prompt_debug_text = build_askai_prompt_log(
+            system_prompt=inputs.system_prompt,
+            question=inputs.question,
+            discord_context=inputs.discord_context,
+            rag_context=inputs.rag_context,
+            discord_meta=inputs.discord_meta,
+            rag_meta=inputs.rag_meta,
+            retrieval_debug=retrieval_debug if isinstance(retrieval_debug, dict) else None,
+            image_meta=inputs.image_meta,
+            max_context_messages=ASKAI_SETTINGS.max_context_messages,
+            discord_context_begin=ASKAI_SETTINGS.discord_context_begin,
+            discord_context_end=ASKAI_SETTINGS.discord_context_end,
+            rag_context_begin=ASKAI_SETTINGS.rag_context_begin,
+            rag_context_end=ASKAI_SETTINGS.rag_context_end,
+        )
+        prompt_debug_logger = get_or_create_file_logger(
+            name="askai_prompt_debug",
+            log_path=Path(ASKAI_SETTINGS.prompt_debug_log_path),
+            mode="size",
+            max_bytes=ASKAI_SETTINGS.prompt_debug_log_max_bytes,
+            backup_count=ASKAI_SETTINGS.prompt_debug_log_backup_count,
+        )
+        prompt_debug_logger.info(
+            _format_log_block(
+                title=f"ASKAI_PROMPT_DEBUG trace={trace_id}",
+                body=(
+                    f"<prompt_record_log>\n{result.prompt_record_log}\n</prompt_record_log>\n"
+                    f"<debug>\n{prompt_debug_text}\n</debug>"
+                ),
+            )
+        )
+    except Exception as exc:
+        logger.warning("寫入 askai prompt debug 失敗 trace=%s: %s", trace_id, exc)
+
+    try:
+        append_askai_response_log(
+            interaction=inputs.interaction,
+            question=inputs.question,
+            reply=result.reply,
+            model=inputs.model,
+            think=inputs.think,
+            discord_meta=inputs.discord_meta,
+            rag_meta=inputs.rag_meta,
+            web_meta=inputs.web_meta,
+            trace_id=trace_id,
+            messages_sent=result.messages_sent,
+            error_kind=result.error_kind,
+            intel_meta=intel_meta,
+        )
+    except Exception as exc:
+        logger.warning("寫入 askai response history 失敗 trace=%s: %s", trace_id, exc)
+
+
+# ── 第 4 段：送出 ───────────────────────────────────────────────────────
+async def _askai_send(interaction: discord.Interaction, inputs: "_AskaiInputs", reply: str, image, cancel_view, thinking_msg) -> None:
+    """用 followup 回覆（避免互動超時）：@ 發問者、問題、回答、附圖網址；完成後把取消按鈕改成「已完成」。"""
+    response_lines = [
+        f"{interaction.user.mention}",
+        f"❓ **問題：** {inputs.question}",
+        f"💬 **回答：** {reply}",
+    ]
+    if image and image.url:
+        response_lines.append(f"🖼️ **圖片：** {image.url}")
+    response_text = "\n".join(response_lines)
+
+    await send_followup_in_parts(interaction, response_text)
+
+    if cancel_view and thinking_msg:
+        for item in cancel_view.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+                item.label = "已完成"
+                item.style = discord.ButtonStyle.success
+        cancel_view.stop()
+        try:
+            await thinking_msg.edit(content="✅ AI 已回覆。", view=cancel_view)
+        except Exception:
+            pass
+
+
 class LLMCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -390,7 +692,11 @@ class LLMCommands(commands.Cog):
         image: discord.Attachment | None,
         cancel_event: asyncio.Event | None = None,
     ):
-        """實際處理 AI 回覆流程（在隊列鎖內執行）"""
+        """處理一次 /askai（在排隊工作者裡執行）：收集上下文 → 生成 → 記錄 → 送出。
+
+        四段各自是一個函式，這裡只排順序；哪一段要改，改那一段就好。取消檢查放在
+        「上下文收集完、叫模型前」與「生成途中」兩處。
+        """
         # trace_id 串接所有 askai log（discord_bot.log / askai_prompt.txt /
         # askai_response_history.jsonl / llm_anomaly.log）— 出錯時複製此 ID 即可一次定位
         trace_id = f"ask-{str(interaction.user.id)[-4:]}-{int(time.time() * 1000)}"
@@ -399,12 +705,7 @@ class LLMCommands(commands.Cog):
         # 標記前景（大模型）活動：功能二的背景插話會在此窗口內讓位，避免換模型 ping-pong
         note_foreground_activity()
 
-        system_prompt = load_system_prompt()
-
-        cancel_view = None
-        if cancel_event:
-            cancel_view = _AskaiCancelButton(interaction.user.id, cancel_event)
-
+        cancel_view = _AskaiCancelButton(interaction.user.id, cancel_event) if cancel_event else None
         thinking_msg = await interaction.followup.send(
             "🔄 AI 思考中，請耐心等候...",
             ephemeral=True,
@@ -412,87 +713,65 @@ class LLMCommands(commands.Cog):
             wait=True,
         )
 
-        # 取得歷史聊天上下文（統一契約：list[dict[str, str]]）
-        # 視覺請求時縮短聊天上下文，降低 token 與 timeout 風險。
-        # 注意：max_context_to_send 在 retriever 內代表「聊天訊息數」，
-        # 另會保留 1 行 header，因此最終 sent_count 可能是 6（1 header + 5 聊天）。
-        max_context_messages = ASKAI_SETTINGS.max_context_messages
-        min_recent_context = ASKAI_SETTINGS.min_recent_context
-        max_relevant_context = ASKAI_SETTINGS.max_relevant_context
-        max_context_to_send = ASKAI_SETTINGS.max_context_to_send
+        inputs = await self._askai_gather(interaction, question, image, trace_id=trace_id)
+        if inputs is None:
+            return  # 圖不合格，已回覆使用者
 
-        if image is not None:
-            max_context_messages = min(max_context_messages, 20)
-            min_recent_context = min(min_recent_context, 5)
-            max_relevant_context = min(max_relevant_context, 5)
-            max_context_to_send = 5
+        # 取消檢查：context 檢索完、LLM 呼叫前
+        if cancel_event and cancel_event.is_set():
+            return
 
-        mentioned_user_ids = extract_mentioned_user_ids(question)
+        generated = await self._askai_generate(inputs, interaction, cancel_event, thinking_msg)
+        if generated is None:
+            return  # 使用者取消、或底層連帶取消（已回覆）
+        result, intel_meta, web_tools = generated
 
-        # 將 <@id> 解析為「顯示名稱#XXXX」，跟 chat_history / persona card 的錨點對齊
-        # 否則 LLM 看到問題裡的「二口氣上吧」對不上卡標題「NNN#7489」（display_name vs alias 不同字串）
-        resolved_question = question
-        if mentioned_user_ids and interaction.guild:
-            for uid_str in mentioned_user_ids:
-                member = interaction.guild.get_member(int(uid_str))
-                if member:
-                    name_with_id = person_anchor.label(member.display_name, uid_str)
-                    resolved_question = resolved_question.replace(
-                        f"<@{uid_str}>", name_with_id
-                    ).replace(
-                        f"<@!{uid_str}>", name_with_id
-                    )
+        _askai_record(inputs, result, intel_meta=intel_meta, web_tools=web_tools)
+        await _askai_send(interaction, inputs, result.reply, image, cancel_view, thinking_msg)
 
-        # 網路搜尋（開關 askai_web_search_mode）：keyword＝關鍵字判斷要不要查、背景先查好塞進 prompt（與 discord / rag
-        # 檢索並行）；tool＝做成工具，由模型和遊戲情報一起決定查哪邊（兩邊不會同時塞資料，見下方 run_with_intel）；off＝不查
-        web_mode = switches.current().askai_web_search_mode
-        intent = should_search(resolved_question)
-        run_web = web_mode == "keyword" and intent.triggered
+    # ── 第 1 段：收集上下文 ────────────────────────────────────────────────
+    async def _askai_gather(
+        self,
+        interaction: discord.Interaction,
+        question: str,
+        image: discord.Attachment | None,
+        *,
+        trace_id: str,
+    ) -> "_AskaiInputs | None":
+        """把要給模型的東西收齊：聊天紀錄、人物卡、名字對照、發問者資料、網搜（keyword 模式）、圖。
 
-        web_task: asyncio.Task | None = None
-        if run_web:
-            # 送給 SearXNG 的 query 用 cleaned_query（已剝除贅字／改寫成關鍵字）；引擎、類別、時間範圍照 intent 的路由，
-            # 窄路由結果太少時由 search_web 換通用引擎補查
-            web_task = asyncio.create_task(
-                search_web(
-                    intent.cleaned_query or resolved_question,
-                    settings=WEB_SETTINGS,
-                    categories=intent.categories,
-                    time_range=intent.time_range,
-                    language=intent.language,
-                    logger_override=logger,
-                )
-            )
+        順序刻意保留：網搜先在背景起跑，和聊天／人物卡檢索並行；人物卡檢索要等聊天紀錄
+        回來（參與者名單從那裡來）。圖不合格回 None（已回覆使用者）。
+        """
+        system_prompt = load_system_prompt()
+        guild = interaction.guild
+        resolved_question, mentioned_user_ids = _resolve_mentions(question, guild)
+        web_mode, intent, run_web, web_task = _start_web_search(resolved_question)
 
+        limits = _context_limits(has_image=image is not None)
         discord_context, bot_history_context, discord_meta = await retrieve_discord_context(
             interaction,
             resolved_question,
-            max_context_messages=max_context_messages,
-            min_recent_context=min_recent_context,
-            max_relevant_context=max_relevant_context,
-            max_context_to_send=max_context_to_send,
+            max_context_messages=limits["max_context_messages"],
+            min_recent_context=limits["min_recent_context"],
+            max_relevant_context=limits["max_relevant_context"],
+            max_context_to_send=limits["max_context_to_send"],
             taipei_tz=APP_TZ,
             logger=logger,
         )
-
-        participant_user_ids: list[int] = []
-        for item in discord_context:
-            author_id_raw = str(item.get("author_id", "")).strip()
-            if author_id_raw.isdigit():
-                participant_user_ids.append(int(author_id_raw))
-        participant_user_ids = list(dict.fromkeys(participant_user_ids))
+        participant_user_ids = _participant_ids(discord_context)
 
         # retrieve_rag_context 內部呼叫 LlamaIndex 同步 API（embedding + pgvector），
         # 在 executor 中執行以避免阻塞 event loop（影響語音 heartbeat 等）。
         # mentioned_user_ids 必須顯式傳入：resolved_question 已把 <@id> 換成 display_name，
         # 內部重抽會失敗，會導致 +35 mention boost 永遠不生效（2026-04-27 修正）
-        member_names = member_names_from_guild(interaction.guild)
+        member_names = member_names_from_guild(guild)
         rag_context, rag_meta = await asyncio.get_running_loop().run_in_executor(
             None,
             functools.partial(
                 retrieve_rag_context_sync,
                 resolved_question,
-                interaction.guild.id if interaction.guild else None,
+                guild.id if guild else None,
                 interaction.user.id if interaction.user else None,
                 participant_user_ids,
                 logger,
@@ -502,98 +781,26 @@ class LLMCommands(commands.Cog):
             ),
         )
 
-        # 回收背景 web_task 結果（若有觸發），組 web_context 與 web_meta
-        web_context: list[str] | None = None
-        # 工具模式也記下關鍵字會不會觸發（reason、trigger_keyword…），方便和模型實際的決定對照
-        web_meta: dict[str, object] = {
-            "mode": web_mode,
-            "triggered": run_web,
-            "reason": intent.reason,
-            "trigger_keyword": intent.trigger_keyword,
-            "cleaned_query": intent.cleaned_query,
-            "categories": intent.categories,
-            "time_range": intent.time_range,
-            "language": intent.language,
-        }
-        if web_task is not None:
-            try:
-                outcome = await web_task
-                web_meta.update(outcome.meta)
-                if outcome.results or outcome.answers:
-                    web_context = format_web_context_lines(outcome.results, outcome.answers)
-                    # 記錄前 3 筆 preview 方便日後 debug：判斷 LLM 到底看到什麼
-                    web_meta["results_preview"] = [
-                        {
-                            "title": r.title,
-                            "url": r.url,
-                            "engine": r.engine,
-                            "published_date": r.published_date,
-                        }
-                        for r in outcome.results[:3]
-                    ]
-            except Exception as exc:
-                logger.warning("web_task 收尾失敗: %s", exc, exc_info=True)
-                web_meta["error"] = f"await_failed:{type(exc).__name__}"
+        web_context, web_meta = await _collect_web(web_task, web_mode=web_mode, run_web=run_web, intent=intent)
 
         # 聊天記錄：每行已是「顯示名稱#尾碼: 內容」（_build_discord_context_item）。其他叫法
         # （自介暱稱、全域名稱…）統一放 persona_context 尾端的「名字對照」，不再逐行加註——
         # 以前只有拿到人物卡的人才有加註，卡最多 3 張
-        chat_context: list[str] | None = None
-        if discord_context:
-            chat_context = [item["content"] for item in discord_context if item.get("content")] or None
+        chat_context = [item["content"] for item in discord_context if item.get("content")] or None
+        bot_history = [item["content"] for item in bot_history_context if item.get("content")] or None
 
-        # Bot 自身回覆歷史（獨立於 chat_history 額度外）
-        bot_history: list[str] | None = None
-        if bot_history_context:
-            bot_history = [
-                item["content"] for item in bot_history_context
-                if item.get("content")
-            ] or None
-
-        # 人物描述：由 persona card builder 產出的自然語言
-        # 三路分流（依優先序）：
-        # 1. 發問者本人的卡（asker_persona_text）→ 注入 asker_profile system block
-        # 2. 發問者明確 mention 的對象（target_profiles）→ 放 <target_profile>，緊鄰問題
-        # 3. 其餘參與者（persona_context）→ 放 <other_member_profiles>，背景資訊
         asker_uid_str = str(interaction.user.id)
-        mentioned_uid_set = set(mentioned_user_ids or [])
-        asker_persona_text: str | None = None
-        target_items: list[str] = []
-        persona_context: list[str] | None = None
-        matched_mention_ids: set[str] = set()
-        if rag_context:
-            other_items: list[str] = []
-            for item in rag_context:
-                content = item.get("content")
-                if not content or item.get("metadata") == "persona_card_header":
-                    continue
-                person_id = item.get("person_id")
-                if person_id == asker_uid_str and asker_persona_text is None:
-                    asker_persona_text = content
-                elif person_id in mentioned_uid_set:
-                    target_items.append(content)
-                    matched_mention_ids.add(person_id)
-                else:
-                    other_items.append(content)
-            persona_context = other_items or None
-
-        # mention 了但 DB 沒卡：放退場提示，避免 LLM 反問或硬猜
-        # 例：新進群、未填自介、AI 觀察未跑、或 user_id 已不在群內
-        unmatched_mention_ids = mentioned_uid_set - matched_mention_ids
-        for uid in unmatched_mention_ids:
-            member = interaction.guild.get_member(int(uid)) if interaction.guild else None
-            label = person_anchor.label(member.display_name if member else "某人", uid)
-            target_items.append(
-                f"「{label}」— 群內尚無此人的 persona 紀錄；"
-                f"可從 chat_history 推測，否則請老實說對此人不熟悉"
-            )
+        asker_persona_text, target_items, persona_context, matched_mention_ids = _split_persona(
+            rag_context, asker_uid_str, mentioned_user_ids,
+        )
+        target_items += _mention_hints(set(mentioned_user_ids or []) - matched_mention_ids, guild)
         target_profiles = target_items or None
 
         # 名字對照：發問者、聊天裡的人、被提到的人、有卡的人，誰還有別的叫法
         name_map = await asyncio.get_running_loop().run_in_executor(
             None,
             name_map_lines,
-            interaction.guild.id if interaction.guild else 0,
+            guild.id if guild else 0,
             [
                 asker_uid_str,
                 *(item.get("author_id") for item in discord_context or []),
@@ -601,39 +808,20 @@ class LLMCommands(commands.Cog):
                 *(item.get("person_id") for item in rag_context or []),
             ],
             member_names,
-        ) if interaction.guild else []
+        ) if guild else []
         if name_map:
             persona_context = [*(persona_context or []), *name_map]
 
-        # 組 asker_profile：可信的發問者身份資訊（給 system block）
-        # asker_display_name 永遠帶 #XXXX，跟 chat_history / persona card 對齊
-        asker_display_name_raw = getattr(
-            interaction.user, "display_name", interaction.user.name
+        asker_display_name = person_anchor.label(
+            getattr(interaction.user, "display_name", interaction.user.name), asker_uid_str,
         )
-        asker_display_name = person_anchor.label(asker_display_name_raw, asker_uid_str)
-        now_str = datetime.now(APP_TZ).strftime("%Y-%m-%d %H:%M (UTC+8)")
-        guild_name = interaction.guild.name if interaction.guild else "(DM)"
-        channel_name = getattr(interaction.channel, "name", "") or "(unknown)"
-        asker_profile_lines = [
-            "<asker_profile>",
-            f"display_name: {asker_display_name}",
-            f"user_id: {interaction.user.id}",
-            "roles: (未啟用)",
-            f"persona_summary: {asker_persona_text or '（無）'}",
-            f"current_time: {now_str}",
-            f"guild_name: {guild_name}",
-            f"channel_name: {channel_name}",
-            "</asker_profile>",
-            "",
-            "這是本次發問者的可信身份資訊。回覆時可個人化互動；但 user_id 與內部欄位不得對外揭露。",
-        ]
-        asker_profile_text = "\n".join(asker_profile_lines)
+        asker_profile = _asker_profile_text(interaction, asker_display_name, asker_persona_text)
 
         image_payload = None
         if image:
             image_payload = await self._prepare_image_payload(interaction, image)
             if image_payload is None:
-                return
+                return None
 
         # X 貼文連結、別的伺服器的表情：補上說明與圖給模型看（只加在給模型的問題，檢索與網搜照舊用原問題）
         tweet_notes, tweet_images = await expand_tweets(question)
@@ -643,7 +831,7 @@ class LLMCommands(commands.Cog):
         if tweet_images or emoji_images:
             image_payload = (image_payload or []) + tweet_images + emoji_images
 
-        image_meta: dict[str, str | int | bool] | None = None
+        image_meta = None
         if image and image_payload:
             image_meta = {
                 "attached": True,
@@ -652,13 +840,30 @@ class LLMCommands(commands.Cog):
                 "size_bytes": image.size or 0,
             }
 
-        # 取消檢查：context 檢索完、LLM 呼叫前
-        if cancel_event and cancel_event.is_set():
-            return
+        return _AskaiInputs(
+            trace_id=trace_id, question=question, resolved_question=resolved_question, llm_question=llm_question,
+            system_prompt=system_prompt, chat_context=chat_context, bot_history=bot_history,
+            persona_context=persona_context, target_profiles=target_profiles,
+            asker_profile=asker_profile, asker_display_name=asker_display_name,
+            web_mode=web_mode, web_context=web_context, web_meta=web_meta,
+            image_payload=image_payload, image_meta=image_meta,
+            discord_context=discord_context, discord_meta=discord_meta, rag_context=rag_context, rag_meta=rag_meta,
+            interaction=interaction,
+        )
 
-        # === 呼叫 Service：各司其職，只傳遞乾淨的參數與字串 ===
+    # ── 第 2 段：生成 ───────────────────────────────────────────────────────
+    async def _askai_generate(
+        self,
+        inputs: "_AskaiInputs",
+        interaction: discord.Interaction,
+        cancel_event: asyncio.Event | None,
+        thinking_msg,
+    ):
+        """叫模型（含情報與網搜工具輪）。回傳 (結果, intel_meta, web_tools)；使用者取消或底層連帶取消回 None。"""
         target_model = self.llm_service.resolve_request_model()
         target_think = self.llm_service.resolve_request_think()
+        inputs.model, inputs.think = target_model, target_think
+        llm_question = inputs.llm_question
 
         # Bot 自身身份：伺服器暱稱優先 → 全域 username → None（僅極端情境）。
         # 帶 #XXXX 錨點，與 <bot_history> 區塊內各行的 name_with_anchor 格式一致，
@@ -677,17 +882,17 @@ class LLMCommands(commands.Cog):
         async def _generate(tool_runner=None):
             return await self.llm_service.generate_reply(
                 prompt=llm_question,
-                system=system_prompt,
-                chat_context=chat_context,
-                bot_history=bot_history,
-                persona_context=persona_context,
-                target_profiles=target_profiles,
-                web_context=web_context,
-                images=image_payload,
+                system=inputs.system_prompt,
+                chat_context=inputs.chat_context,
+                bot_history=inputs.bot_history,
+                persona_context=inputs.persona_context,
+                target_profiles=inputs.target_profiles,
+                web_context=inputs.web_context,
+                images=inputs.image_payload,
                 model=target_model,
                 think=target_think,
-                asker_profile=asker_profile_text,
-                asker_display_name=asker_display_name,
+                asker_profile=inputs.asker_profile,
+                asker_display_name=inputs.asker_display_name,
                 bot_display_name=bot_display_name,
                 # 閒置 1h 後才釋放 VRAM，避開反覆 unload/reload 觸發的 Windows
                 # ephemeral port 與 runner crash（Ollama 時代的實戰教訓，值刻意保留）。
@@ -695,17 +900,18 @@ class LLMCommands(commands.Cog):
                 # `_build_chat_extra_body` 丟進 ignored。Lemonade 下要讓出 VRAM 只有
                 # 一條路——產圖排程在 `gpu_exclusive` 內呼叫 `LLMService.release_model()`。
                 keep_alive="1h",
-                trace_id=trace_id,
+                trace_id=inputs.trace_id,
                 tool_runner=tool_runner,
                 max_tool_rounds=INTEL_SETTINGS.max_tool_rounds,
             )
 
         # 網路搜尋的工具模式：和情報工具合成一組交給模型（輪數兩邊共用 INTEL_SETTINGS 的值）
+        web_mode = inputs.web_mode
         web_tools = WebSearchTools(settings=WEB_SETTINGS) if web_mode == "tool" else None
 
         # 用 asyncio.Task 包裝，取消時可中斷 LLM 的 HTTP 請求；查情報、查網路都在同一個 task 裡，按取消時一起中斷
         llm_task = asyncio.create_task(run_with_intel(
-            _generate, question=resolved_question, enabled=intel_mode == "on", meta=intel_meta,
+            _generate, question=inputs.resolved_question, enabled=intel_mode == "on", meta=intel_meta,
             settings=INTEL_SETTINGS, also=[web_tools] if web_tools else (),
         ))
 
@@ -721,136 +927,33 @@ class LLMCommands(commands.Cog):
             # 確保被取消的 task 完全結束，釋放 HTTP 連線資源
             await asyncio.gather(llm_task, cancel_waiter, return_exceptions=True)
             if cancel_event.is_set():
-                return
+                return None
         else:
             await asyncio.wait([llm_task])
         if llm_task.cancelled():
             # 不是使用者按的取消，回答卻被取消了（例如底層連線出錯時的連帶取消）：當成這次失敗、正常結束，
             # 別讓 CancelledError 一路穿出去——排隊的工作者接不到它會整個結束，後面排隊的人都卡住
-            logger.error("askai 回答意外被取消 trace=%s", trace_id)
+            logger.error("askai 回答意外被取消 trace=%s", inputs.trace_id)
             if thinking_msg:
                 try:
                     await thinking_msg.edit(content="⚠️ 這次沒有順利回答，請再試一次。", view=None)
                 except Exception:
                     pass
-            return
+            return None
         llm_result = llm_task.result()
 
-        reply = llm_result.reply
-        prompt_record_log = llm_result.prompt_record_log
         if intel_mode == "on":
             intel_calls = intel_meta.get("calls") or []
-            logger.info("askai 查情報 trace=%s 連上=%s 呼叫=%s", trace_id, intel_meta.get("connected"),
+            logger.info("askai 查情報 trace=%s 連上=%s 呼叫=%s", inputs.trace_id, intel_meta.get("connected"),
                         [(c.get("tool"), c.get("elapsed_ms"), c.get("error") or len(c.get("result_ids") or []))
                          for c in intel_calls])
         if web_tools is not None:
-            web_meta["calls"] = web_tools.calls
-            logger.info("askai 網路搜尋 trace=%s 呼叫=%s", trace_id,
+            inputs.web_meta["calls"] = web_tools.calls
+            logger.info("askai 網路搜尋 trace=%s 呼叫=%s", inputs.trace_id,
                         [(c.get("kind"), c.get("query"), c.get("elapsed_ms"),
                           c.get("error") or f"{c.get('result_count')} 筆＋答案 {c.get('answer_count', 0)}")
                          for c in web_tools.calls])
-        messages_sent = llm_result.messages_sent
-        error_kind = llm_result.error_kind
-
-        # askai_prompt.txt：只記錄「真正送給 Ollama 的文字」
-        try:
-            prompt_trace_logger = get_or_create_file_logger(
-                name="askai_prompt_trace",
-                log_path=PROMPT_LOG_PATH,
-                mode="time",
-                when=ASKAI_SETTINGS.prompt_log_when,
-                interval=ASKAI_SETTINGS.prompt_log_interval,
-                backup_count=ASKAI_SETTINGS.prompt_log_backup_count,
-            )
-            prompt_trace_logger.info(
-                _format_log_block(
-                    title=f"ASKAI_PROMPT trace={trace_id}",
-                    body=prompt_record_log,
-                )
-            )
-        except Exception as exc:
-            logger.warning("寫入 askai prompt 失敗 trace=%s: %s", trace_id, exc)
-
-        # askai_prompt_debug.txt：記錄檢索/融合等 debug 細節
-        try:
-            retrieval_debug = discord_meta.get("retrieval_debug")
-            prompt_debug_text = build_askai_prompt_log(
-                system_prompt=system_prompt,
-                question=question,
-                discord_context=discord_context,
-                rag_context=rag_context,
-                discord_meta=discord_meta,
-                rag_meta=rag_meta,
-                retrieval_debug=retrieval_debug if isinstance(retrieval_debug, dict) else None,
-                image_meta=image_meta,
-                max_context_messages=ASKAI_SETTINGS.max_context_messages,
-                discord_context_begin=ASKAI_SETTINGS.discord_context_begin,
-                discord_context_end=ASKAI_SETTINGS.discord_context_end,
-                rag_context_begin=ASKAI_SETTINGS.rag_context_begin,
-                rag_context_end=ASKAI_SETTINGS.rag_context_end,
-            )
-            prompt_debug_logger = get_or_create_file_logger(
-                name="askai_prompt_debug",
-                log_path=Path(ASKAI_SETTINGS.prompt_debug_log_path),
-                mode="size",
-                max_bytes=ASKAI_SETTINGS.prompt_debug_log_max_bytes,
-                backup_count=ASKAI_SETTINGS.prompt_debug_log_backup_count,
-            )
-            prompt_debug_logger.info(
-                _format_log_block(
-                    title=f"ASKAI_PROMPT_DEBUG trace={trace_id}",
-                    body=(
-                        f"<prompt_record_log>\n{prompt_record_log}\n</prompt_record_log>\n"
-                        f"<debug>\n{prompt_debug_text}\n</debug>"
-                    ),
-                )
-            )
-        except Exception as exc:
-            logger.warning("寫入 askai prompt debug 失敗 trace=%s: %s", trace_id, exc)
-
-        # 記錄回應歷史
-        try:
-            append_askai_response_log(
-                interaction=interaction,
-                question=question,
-                reply=reply,
-                model=target_model,
-                think=target_think,
-                discord_meta=discord_meta,
-                rag_meta=rag_meta,
-                web_meta=web_meta,
-                trace_id=trace_id,
-                messages_sent=messages_sent,
-                error_kind=error_kind,
-                intel_meta=intel_meta,
-            )
-        except Exception as exc:
-            logger.warning("寫入 askai response history 失敗 trace=%s: %s", trace_id, exc)
-
-        # 使用 followup 回覆，避免互動超時，並組合最終排版
-        response_lines = [
-            f"{interaction.user.mention}",
-            f"❓ **問題：** {question}",
-            f"💬 **回答：** {reply}",
-        ]
-        if image and image.url:
-            response_lines.append(f"🖼️ **圖片：** {image.url}")
-        response_text = "\n".join(response_lines)
-
-        await send_followup_in_parts(interaction, response_text)
-
-        # 回覆完成後停用取消按鈕
-        if cancel_view and thinking_msg:
-            for item in cancel_view.children:
-                if isinstance(item, discord.ui.Button):
-                    item.disabled = True
-                    item.label = "已完成"
-                    item.style = discord.ButtonStyle.success
-            cancel_view.stop()
-            try:
-                await thinking_msg.edit(content="✅ AI 已回覆。", view=cancel_view)
-            except Exception:
-                pass
+        return llm_result, intel_meta, web_tools
 
     async def _prepare_image_payload(
         self,
