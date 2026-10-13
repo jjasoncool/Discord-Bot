@@ -125,7 +125,7 @@
   - 基礎（26）：`utils/*`、`sys_settings/*`、`settings/channel_registry`、`constants`（層內可互 import）
   - 用這張表掃 148 個模組（略過 `if TYPE_CHECKING:` 裡的 import）：**只剩 3 條跨容器**（`telegram_relay_service`、`channel_registry` → `telegram_scraper`），M6 處理前先列例外。
   - 下一步（等使用者看過表）：`test/test_layering.py` 守衛（表寫在測試裡、違規列檔與行、例外要寫理由）、AGENTS「程式碼」加這張表、計畫頁第 1 段改成五層。
-- **節點與重啟（10-13 11:1x～11:2x）**：使用者「先讓現在當成是一個節點」→ 字典 `60c4744`、交接檔 `732eb9d` commit，標籤 `checkpoint-20261013-m2a`（M1＋M2a，重啟前完整測試 1,426 全過）。使用者 11:20 重啟 discord-bot 與 search-mcp：gate 1,426 項 87.6 秒全過、11:21:51 上線，五個定期排程、官網／PTT 監控、Telegram relay、notify server 都起來，上線後沒有 ERROR（啟動 log 裡的 ERROR 全是測試故意製造的「boom」「db down」）；search-mcp 11:21:08 起、背景同步正常。M1 的 supervise 與 M2a 的 hot_files 從這次起生效。
+- **節點與重啟（10-13 11:1x～11:2x）**：使用者「先讓現在當成是一個節點」→ 字典 `60c4744`、交接檔 `2d6523d` commit，標籤 `checkpoint-20261013-m2a`（M1＋M2a，重啟前完整測試 1,426 全過）。使用者 11:20 重啟 discord-bot 與 search-mcp：gate 1,426 項 87.6 秒全過、11:21:51 上線，五個定期排程、官網／PTT 監控、Telegram relay、notify server 都起來，上線後沒有 ERROR（啟動 log 裡的 ERROR 全是測試故意製造的「boom」「db down」）；search-mcp 11:21:08 起、背景同步正常。M1 的 supervise 與 M2a 的 hot_files 從這次起生效。
 - **M2d 做完、等使用者看（10-13 11:4x）**：`test/test_layering.py`——`LAYERS` 表（模組前綴 → 五層，先符合先算，每條附理由）、import 只能同層或往下（函式內的也算、`if TYPE_CHECKING:` 不算）、每個模組都要登記到層（新資料夾沒登記就紅）、跨容器 import 一律不准（現有 3 條列 `CROSS_CONTAINER_ALLOWED` 寫理由，M6 清）、例外清單裡不存在的邊也紅（不留殭屍）；另有兩個測表格解讀的小測試。6 個突變全紅（技術層偷 import 介面層、服務層在函式裡偷 import 功能層、新資料夾沒登記、新的跨容器邊、殭屍例外、TYPE_CHECKING 當真）。第一版範例字串 `utils.a` 被 import 解析守衛抓到（字串裡長得像模組路徑的會查），改成真的模組名。完整 1,432 項全過。AGENTS「程式碼」加分層方向一段；計畫頭第 1 段重畫成五層（`services/` 跨兩層、`llm/` 跨三層）並更正「21 條」為 0 條往上＋3 條跨容器；M2 的狀態改成 M2a 已上線、M2b 退回、M2c 取消、M2d 等看。不用重啟（只有測試與文件）。
 
 ---
