@@ -1,22 +1,19 @@
-"""Discord 原始訊息批次持久化到 postgres raw 表（discord_messages_raw）。
+"""Discord 原始訊息備份：每則訊息、編輯、刪除、表情反應全量寫進 postgres 的 discord_messages_raw 表。
 
-職責：
-- on_message             → 全量寫入（不做 pgvector 那種過濾）
-- on_message_edit        → 更新 content / embeds / stickers
-- on_raw_message_delete  → 軟刪標記（is_deleted=TRUE）
-- on_raw_reaction_add/remove → 即時更新 reaction 結構化資料
+架構定位：功能層（`llm/storage`），吃 Discord 訊息物件、寫資料庫。和 `store_chat`（篩選後的語意索引）並列、互不依賴；
+raw 表是備份層，也是互動（反應）的真相來源。
+  - 上層（誰呼叫）：`discord_bot` 的 on_message／on_message_edit／on_raw_message_delete／on_raw_reaction_add／remove
+    （各自的 `enqueue_*`，滿門檻就 `flush_raw_buffer`）與 on_ready（用 `utils.background_tasks.periodic` 定期呼叫 `flush_raw_buffer`）；
+    要看一則訊息被按了多少反應的功能查 `get_reaction_salience`。
+  - 下層（呼叫誰）：psycopg2 連線池（獨立 pool，不和 pgvector 的 LlamaIndex 共用）、`llm.preprocess.sticker_cache`。
 
-和 store_chat（寫 LlamaIndex pgvector）並列，兩者互不依賴。
-raw 表是「備份層 + 互動真相來源」，pgvector 表是「篩選後的語意索引」。
+介面：`enqueue_raw_message`、`enqueue_raw_edit`、`enqueue_raw_delete`、`enqueue_reaction_change`、`should_trigger_flush`、
+  `flush_raw_buffer`、`get_reaction_salience`、`buffer_sizes`／`total_buffer_size`。
 
-Buffer 策略：
-- 閾值 50 則或 60 秒任一滿足就 flush（reaction 要夠即時）
-- 不同事件類型（insert/edit/delete/reaction）各自獨立 buffer，單次 flush 合併處理
-
-DB 連線：
-- 走獨立 ThreadedConnectionPool，不和 pgvector LlamaIndex 共用 pool
-- 純 SQL，不觸發 embedding
+規則：四種事件各自一個緩衝，任一滿 50 則或每 60 秒寫一批（反應要夠即時），單次 flush 合併處理；
+  純 SQL、不算 embedding；刪除是軟刪（is_deleted=TRUE）。
 """
+
 from __future__ import annotations
 
 import asyncio

@@ -1,13 +1,22 @@
-"""AI 每日日記回顧（v1）。
+"""AI 每日日記：每天在日記頻道用 bot 的人格寫一段當天感想——純表達、不改行為。
 
-每天在專屬頻道用琇紫口吻寫一段當天感想——**純表達、不改行為**：只反映它對今天的
-感受，不影響它對任何人的插話態度。與 ambient 共用人格/守則 prompt（只換最後一層為
-日記行為）；社交來源預設＝插話頻道（ambient_chat_channel_id）。
+架構定位：功能層（`llm/ambient`）。
+  - 上層（誰呼叫）：`discord_bot` 的 on_ready（用 `supervise` 掛 `schedule_loop`）、指令 /ai_diary（`run_daily_reflection`）。
+  - 下層（呼叫誰）：`llm.ambient.ambient_reply._get_llm`（共用插話的 LLMService 與人格／守則 prompt，只換最後一層成日記行為）、
+    `llm.storage.ai_interactions_store.fetch_recent`、`llm.preprocess.chat_line.fetch_recent_lines`、
+    `utils.utils.ChannelConfig`（頻道設定）、`llm.logger_factory`（日記 debug log）。
 
-流程（每天 00:00 台北時區，或 /ai_diary 手動觸發）：
-    讀社交頻道過去 24h 互動 → 組日記 prompt → LLMService.generate_reply（持單流鎖）
-    → po 到日記頻道。
+介面：
+  - `run_daily_reflection(bot)`：跑一次——讀社交頻道過去 24 小時的互動 → 組日記 prompt → 生成 → 發到日記頻道，回傳日記文字。
+  - `schedule_loop(bot)`：每天 `DiaryReflectionSettings.schedule_hour:schedule_minute`（本機時區）跑一次，失敗 1 小時後再試。
+
+規則：只反映它對今天的感受，不影響它對任何人的插話態度；社交來源預設是插話頻道（ambient_chat_channel_id）；
+  沒設日記頻道就略過。
+
+例外與決策：排程還是手寫的 sleep 迴圈（守衛 `test_shared_conventions` 列為例外），TR-Q9 待搬到 `utils.due_loop.run_due_loop`；
+  日記的設計與調整紀錄見交接檔 `ambient-chat`。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -227,3 +236,20 @@ async def run_daily_reflection(bot) -> Optional[str]:
         diary_cid, len(diary), len(transcript), trace_id,
     )
     return diary
+
+async def schedule_loop(bot) -> None:
+    """等 90 秒讓其他服務就緒，之後每天到設定的時刻寫一篇；失敗記 ERROR、1 小時後再試。給 `supervise`，由 `discord_bot` 掛上。"""
+    await asyncio.sleep(90)
+    while True:
+        try:
+            now = datetime.now(APP_TZ)
+            target = now.replace(hour=_SETTINGS.schedule_hour, minute=_SETTINGS.schedule_minute, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+            wait_seconds = (target - now).total_seconds()
+            logger.info("AI 日記排程：下次 %s（等待 %.0f 秒）", target.isoformat(), wait_seconds)
+            await asyncio.sleep(wait_seconds)
+            await run_daily_reflection(bot)
+        except Exception as exc:
+            logger.error("AI 日記排程失敗: %s", exc, exc_info=True)
+            await asyncio.sleep(3600)

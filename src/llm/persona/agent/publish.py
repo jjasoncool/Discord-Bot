@@ -23,7 +23,7 @@
     有新發言的人，舊條目只有這一關擋得到。本人自己的名字不算（自稱不是誤認）。
 
 **隱私不在這裡擋**：健康、性向、感情家庭、政治、具體行程只靠 `persona_description_rules.txt`
-要 ③④ 別寫；住哪裡、宗教、財務、職業不限制。發言本來就是群裡公開講的，管理員認為舊條目留著
+要 agent 別寫；住哪裡、宗教、財務、職業不限制。發言本來就是群裡公開講的，管理員認為舊條目留著
 沒差（2026-10-01 決定），不另做關鍵字過濾。
 
 **預算＝一行的上限扣掉標籤、自介與印象**：插話那一行是「「標籤」— 自介。印象。AI觀察」，
@@ -36,17 +36,11 @@ AI觀察排最後、最先被切。bot 讀取時撈到哪幾則印象、什麼�
 自介／印象時可能超過，要等下一晚重算——那時插話的截斷會切在最後一個「；」或「。」，
 不切半句（`ambient_reply._rag_to_persona_lines`）。
 
-**誰歸 ⑤、誰歸 ③**：發布開啟時，精簡版不是空的人由 ⑤ 寫，③ 與手動萃取跳過他們
-（`production_skip_list`），不然會把精簡版蓋回 production 的描述。名單每次重算、跟 ⑤ 用同一套
-計算（`build_plans`），不看「誰被發布過」——精簡版後來變空的人（例如自介變長、預算放不下任何
-一條）才會回到 ③ 手上，不會兩邊都不更新。名單在 ③ 之前算，當晚 ④ 的新版本要下一晚才反映，
-所以這種人最多多留一天舊的描述（之前的精簡版；從沒發布過的人則是前一晚 production 的描述）。
+**精簡版是空的人**：不寫、維持最後一版描述（2026-10-13 起 production 萃取已拆掉，新成員要等 agent 寫出條目才有描述，PR-Q3 接受這段空窗）。
+名單每次重算、不看「誰被發布過」——精簡版後來變空的人（例如自介變長、預算放不下任何一條）就停在上一版。
 
-**寫入時記的萃取時間是當下**：啟動補跑看 `last_extracted_at` 的最大值
-（`personality_extractor.get_last_extraction_time`）。發布開啟後 ③ 會跳過大部分的人，沿用
-舊時間的話，補跑檢查會以為很久沒萃取、每次重啟都補跑。代價：③ 把 LLM 錯誤吞掉、正常回傳
-空結果的那晚（④ 通常也一起失敗），⑤ 照樣記下當下時間，當天重啟就不會補跑。③ 丟例外時整個
-維護會中止、⑤ 不會跑，不受影響。
+**寫入時記的萃取時間是當下**：啟動補跑看 `last_extracted_at` 的最大值（`personality_extractor.get_last_extraction_time`），
+這裡是現在唯一每晚寫 auto_personality 的一步；沿用舊時間的話補跑檢查會以為很久沒寫、每次重啟都補跑。
 """
 from __future__ import annotations
 
@@ -361,19 +355,6 @@ def member_nicknames(
     return out
 
 
-def split_uncovered(
-    results: dict[str, dict[str, Any]], covered: set[str]
-) -> tuple[dict[str, dict[str, Any]], list[str]]:
-    """手動萃取的結果分成「照寫」與「跳過」。回傳 `(照寫, 跳過的人的別名)`。
-
-    `covered` 是 `production_skip_list` 的結果：手動萃取照寫的話會把精簡版蓋回 production
-    的描述，直到下一晚 ⑤ 才換回來。
-    """
-    kept = {uid: data for uid, data in results.items() if str(uid) not in covered}
-    skipped = [str(data.get("alias") or uid) for uid, data in results.items() if str(uid) in covered]
-    return kept, skipped
-
-
 @dataclass
 class PublishPlan:
     author_id: str
@@ -402,7 +383,7 @@ def plan_for(
     person = person or {}
     autos = person.get("auto_personality", [])
     existing_md = dict(autos[0]["metadata"]) if autos else {}
-    # 別名以當下的顯示名稱為準：發布開啟後 ③ 不再寫這個人，沿用文件裡的舊別名就永遠不會更新
+    # 別名以當下的顯示名稱為準：只有這裡會寫這個人，沿用文件裡的舊別名就永遠不會更新
     alias = str(display_name or existing_md.get("alias") or "")
     intros = person.get("intro_profile", [])[:1]
     # bot 讀取時撈到哪幾則（語意檢索可能撈到任何一則）、什麼順序都可能變：拿清理後最長的
@@ -445,8 +426,7 @@ def build_plans(
 ) -> tuple[dict[str, PublishPlan], dict[str, Exception]]:
     """每個有 agent 版本的人要發布什麼。回傳 `(計畫, 算失敗的人與例外)`。
 
-    同步（讀 DB），呼叫端丟 executor。⑤ 與 `production_skip_list` 共用這一份，兩邊才會一致——
-    所以兩邊要傳同一份名字。`member_names` 見 `member_names.member_names_from_guild`（第一個是顯示名稱）；
+    同步（讀 DB），呼叫端丟 executor。`member_names` 見 `member_names.member_names_from_guild`（第一個是顯示名稱）；
     只給 `display_names` 時當成每人只有一個名字。
     """
     from llm.persona.persona_card_builder import PERSONA_MAX_CARD_CHARS
@@ -480,31 +460,12 @@ def build_plans(
 def effective_publish_mode() -> Mode:
     """實際生效的發布模式：`PersonaAgentSettings.publish_mode`，但 ④ 關掉時一律當 off。
 
-    ④ 不跑就不會有新版本，發布只會一直寫同一份舊的精簡版，而 ③ 又跳過這些人——兩邊都不更新。
+    ④ 不跑就不會有新版本，發布只會一直寫同一份舊的精簡版。
     """
     from sys_settings.llm_settings import PersonaAgentSettings
 
     settings = PersonaAgentSettings()
     return settings.publish_mode if settings.enabled else "off"
-
-
-async def production_skip_list(
-    guild_id: int,
-    *,
-    display_names: Optional[Mapping[str, str]] = None,
-    member_names: Optional[Mapping[str, list[str]]] = None,
-) -> set[str]:
-    """③ 與手動萃取寫入時要跳過的人：發布開啟時，⑤ 會寫精簡版的人；沒開啟時是空的。
-
-    讀 DB 失敗會丟例外，由呼叫端決定怎麼處理（③ 照常全寫、手動萃取這次不寫）。
-    算失敗的人不跳過——⑤ 也寫不了他們，交給 ③。
-    """
-    if effective_publish_mode() != "on":
-        return set()
-    from llm.persona.agent.agent import run_db
-
-    plans, _ = await run_db(build_plans, guild_id, display_names=display_names, member_names=member_names)
-    return {author_id for author_id, plan in plans.items() if plan.lite.text}
 
 
 # ── 發布（04:00 排程的第 ⑤ 步）──────────────────────────────────────────────
@@ -520,7 +481,7 @@ async def run_publish(
 
     - `off`：什麼都不做
     - `dry_run`：算出來、寫 log，不寫入——上線前先看挑出來的東西對不對
-    - `on`：寫入；精簡版是空的人不動，③ 照常更新他們（見 `production_skip_list`）
+    - `on`：寫入；精簡版是空的人不動（維持最後一版描述）
 
     不依賴當晚 ④ 有沒有跑：發布的是每個人**最新的**版本，當晚沒輪到的人也照樣發布。
     `display_names` 是 author_id → 當下的顯示名稱，用來更新別名；`member_names` 見
@@ -547,7 +508,7 @@ async def run_publish(
             "persona 精簡版%s author=%s v%d 預算 %d → %d 條 %d 字（基本 %d／近況 %d，過門檻 %d 條）：%s",
             "試算" if mode == "dry_run" else "", author_id, plan.version, plan.budget,
             len(lite.items), len(lite.text), core, len(lite.items) - core, lite.eligible,
-            lite.text[:200] or "（空，不寫入，交給 ③）",
+            lite.text[:200] or "（空，不寫入，維持原描述）",
         )
         for reason, text in lite.withheld:
             logger.info("persona 精簡版擋下 author=%s（%s）：%s", author_id, reason, text[:120])

@@ -786,7 +786,8 @@ RULES = [
         allowed={
             "commands/periodic_reminder_commands.py",
             "services/community/rollcall_service.py",
-            "discord_bot.py",
+            "llm/persona/daily_maintenance.py",   # 2026-10-13 從 discord_bot.on_ready 搬出來（M4），迴圈本身沒改
+            "llm/ambient/ambient_diary.py",       # 同上
         },
     ),
     Rule(

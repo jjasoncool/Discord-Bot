@@ -7,6 +7,7 @@
   - `supervise` 的迴圈自己結束：記 WARNING、不重啟
   - `supervise` 被取消：停下來、不重啟、不記 ERROR
   - `supervise` 第一次呼叫 factory 是當場呼叫：factory 本身寫錯會在呼叫端立刻炸，不會躲進背景一直重試
+  - `periodic` 每隔固定秒數做一次、做失敗記 WARNING（含名稱）繼續、被取消就停
   - `cancel_all` 取消所有還在跑的
   - 守衛：結果被丟掉的 `asyncio.create_task(...)` 要被 `test_shared_conventions` 抓到（那條規則在那個檔測）
 
@@ -202,6 +203,36 @@ class SuperviseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bg.cancel_all(), 3)
         await bg.wait_all(timeout=1)
         self.assertEqual(bg.pending(), [])
+
+
+class PeriodicTests(unittest.IsolatedAsyncioTestCase):
+    """固定間隔的定期工作：每隔幾秒做一次、失敗記 WARNING 繼續、取消就停。"""
+
+    def setUp(self):
+        self.slept: list[float] = []
+        self.runs = 0
+
+        async def fake_sleep(seconds):
+            self.slept.append(seconds)
+            if len(self.slept) >= 3:
+                raise asyncio.CancelledError()   # 像 supervise 收掉迴圈
+
+        async def job():
+            self.runs += 1
+            if self.runs == 1:
+                raise RuntimeError("後端連不上")
+
+        self.sleep, self.job = fake_sleep, job
+
+    async def test_runs_every_interval_and_survives_a_failure(self):
+        with self.assertLogs(LOGGER, level="WARNING") as logs:
+            with self.assertRaises(asyncio.CancelledError):
+                await bg.periodic(300, self.job, name="聊天記憶定期寫入", sleep=self.sleep)
+        self.assertEqual(self.slept, [300, 300, 300])
+        self.assertEqual(self.runs, 2, "第一次失敗後下一輪照常再做")
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("聊天記憶定期寫入", logs.output[0])
+        self.assertIn("後端連不上", logs.output[0])
 
 
 if __name__ == "__main__":

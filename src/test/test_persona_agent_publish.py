@@ -5,7 +5,7 @@
   - 基本個性（證據跨度長）先挑、最多一半預算；其餘條目依對話次數填滿，用不完的互讓
   - 預算扣掉標籤、自介與印象，發布當下插話那一行不超過上限——用 bot 讀取時的同一套函式驗
   - 寫入時標上來源與版本；寫入失敗算失敗，不能算成功
-  - 發布開啟後，production 萃取（③／手動）跳過 ⑤ 要寫的人，③ 連 LLM 都不送；精簡版變空的人回到 ③ 手上
+  - 精簡版是空的人不寫、維持原描述（2026-10-13 起已沒有 production 萃取補寫他們）
   - 群內流行語不當成個人特色：同一個詞在 ≥2 人的描述裡都被寫成口頭禪，那幾條都不發；
     講貼圖的條目不算；擋下的不佔預算
   - 把別的群友的名字寫成口頭禪的條目不發（本人的名字不算、單字不算）
@@ -22,7 +22,6 @@ import os
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -217,7 +216,7 @@ class PlanForTests(unittest.TestCase):
             "source": "sql_identity", "text": "[Auto Personality]\nalias: 舊名字\npersonality: 舊的"}
 
     def test_current_display_name_wins(self):
-        """發布開啟後 ③ 不再寫這個人，別名要跟著顯示名稱更新，不能沿用文件裡的舊別名。"""
+        """只有發布會寫這個人，別名要跟著顯示名稱更新，不能沿用文件裡的舊別名。"""
         plan = publish.plan_for("1", self.ROW, {"auto_personality": [self.AUTO]},
                                 line_max_chars=500, card_field_chars=600, display_name="米拉",
                                 now=NOW)
@@ -374,60 +373,10 @@ class RunPublishTests(unittest.TestCase):
             self.assertEqual((stats["written"], stats["failed"]), (0, 1))
 
     def test_empty_lite_is_not_written(self):
-        """第 2 人沒有任何條目過門檻——不寫，交給 ③。"""
+        """第 2 人沒有任何條目過門檻——不寫，維持原描述。"""
         _, store = self._run("on")
         written_for = [c.kwargs["author_id"] for c in store.index_auto_personality.call_args_list]
         self.assertNotIn(2, written_for)
-
-
-class ProductionSkipListTests(unittest.TestCase):
-    """③ 與手動萃取要跳過誰：只有 ⑤ 這一晚真的會寫精簡版的人。"""
-
-    VERSIONS = {
-        "1": {"version": 13, "changes": [item("常用低能貶稱", ago(1), ago(3))]},
-        # 之前發布過（文件標著 written_by），但現在精簡版是空的
-        "2": {"version": 5, "changes": [item("只講過一次", ago(1))]},
-    }
-    PERSONS = {"2": {"auto_personality": [{
-        "metadata": {"profile_kind": "auto_personality", "author_id": "2", "alias": "克羅",
-                     "written_by": "persona_agent", "agent_version": "4"},
-        "source": "sql_identity", "text": "[Auto Personality]\nalias: 克羅\npersonality: 舊的精簡版"}]}}
-
-    def _skip(self, publish_mode="on", enabled=True):
-        settings = SimpleNamespace(publish_mode=publish_mode, enabled=enabled)
-        with mock.patch("sys_settings.llm_settings.PersonaAgentSettings", return_value=settings), \
-             mock.patch.object(publish, "load_guild_state",
-                               return_value=(self.VERSIONS, self.PERSONS)) as load:
-            return asyncio.run(publish.production_skip_list(9)), load
-
-    def test_only_people_with_a_lite_are_skipped(self):
-        skip, _ = self._skip()
-        self.assertEqual(skip, {"1"})
-
-    def test_published_person_whose_lite_became_empty_goes_back_to_production(self):
-        """審查時的重現：看「誰被發布過」的話，第 2 人 ③ 永遠跳過、⑤ 又不寫——兩邊都不更新。"""
-        skip, _ = self._skip()
-        self.assertNotIn("2", skip)
-
-    def test_nothing_is_skipped_unless_publishing_is_on(self):
-        for mode, enabled in (("off", True), ("dry_run", True), ("on", False)):
-            skip, load = self._skip(mode, enabled)
-            self.assertEqual(skip, set(), f"{mode=} {enabled=}")
-            load.assert_not_called()
-
-    def test_agent_disabled_turns_publishing_off(self):
-        """④ 關掉就沒有新版本：⑤ 只會一直寫同一份舊的精簡版、③ 又跳過——兩邊都不更新。"""
-        settings = SimpleNamespace(publish_mode="on", enabled=False)
-        with mock.patch("sys_settings.llm_settings.PersonaAgentSettings", return_value=settings):
-            self.assertEqual(publish.effective_publish_mode(), "off")
-
-
-class SplitUncoveredTests(unittest.TestCase):
-    def test_covered_people_are_skipped_and_listed(self):
-        results = {"1": {"alias": "米拉", "personality": "p"}, "2": {"alias": "克羅", "personality": "p"}}
-        kept, skipped = publish.split_uncovered(results, {"1"})
-        self.assertEqual(list(kept), ["2"])
-        self.assertEqual(skipped, ["米拉"])
 
 
 class AutoPersonalityMetadataTests(unittest.TestCase):
@@ -465,52 +414,6 @@ class AutoPersonalityMetadataTests(unittest.TestCase):
     def test_reports_failure(self):
         self.assertFalse(self._write(None, fail=True)[0])
         self.assertFalse(self._write(None, ready=False)[0])
-
-
-class ProductionExtractionTests(unittest.TestCase):
-    """③／手動萃取這一側：跳過 ⑤ 要寫的人、只把真的寫進去的算成功。"""
-
-    def test_excluded_people_are_not_sent_to_the_llm(self):
-        """實測 9/30、10/01：③ 對 37／34 人跑了約 12 分鐘 LLM，全部被跳過、寫入 0——要在送 LLM 前就拿掉。"""
-        from llm.persona import personality_extractor as pe
-        guild = mock.MagicMock()
-        guild.id = 9
-
-        async def extract(**kw):
-            return {uid: {"alias": "a", "personality": "p"} for uid in kw["user_groups"]}
-
-        save = mock.AsyncMock(return_value=1)
-        extract_mock = mock.AsyncMock(side_effect=extract)
-        with mock.patch.object(pe, "fetch_recent_messages", return_value=[{"m": 1}]), \
-             mock.patch.object(pe, "group_by_user", return_value={"1": [], "2": []}), \
-             mock.patch.object(pe, "_fetch_aliases_from_db", return_value={}), \
-             mock.patch.object(pe, "extract_personalities", extract_mock), \
-             mock.patch.object(pe, "save_personality_results", save):
-            out = asyncio.run(pe._run_personality_extraction_impl(
-                guild=guild, days=14, model="m", exclude_author_ids={"1"}))
-        self.assertEqual(list(extract_mock.call_args.kwargs["user_groups"]), ["2"])
-        self.assertEqual(list(out), ["2"])
-        self.assertEqual(list(save.call_args.kwargs["results"]), ["2"])
-
-    def test_everyone_excluded_means_no_llm_call(self):
-        from llm.persona import personality_extractor as pe
-        extract_mock = mock.AsyncMock()
-        with mock.patch.object(pe, "fetch_recent_messages", return_value=[{"m": 1}]), \
-             mock.patch.object(pe, "group_by_user", return_value={"1": []}), \
-             mock.patch.object(pe, "extract_personalities", extract_mock):
-            out = asyncio.run(pe._run_personality_extraction_impl(
-                guild=mock.MagicMock(), days=14, model="m", exclude_author_ids={"1"}))
-        self.assertEqual(out, {})
-        extract_mock.assert_not_called()
-
-    def test_only_successful_writes_are_counted(self):
-        from llm.persona import personality_extractor as pe
-        store = mock.MagicMock()
-        store.index_auto_personality = mock.AsyncMock(side_effect=[True, False, RuntimeError("x")])
-        results = {str(i): {"alias": "a", "personality": "p"} for i in (1, 2, 3)}
-        with mock.patch("llm.storage.member_profile_store.get_member_profile_store", return_value=store):
-            written = asyncio.run(pe.save_personality_results(guild_id=9, results=results))
-        self.assertEqual(written, 1)
 
 
 class GroupSlangTests(unittest.TestCase):

@@ -8,7 +8,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
-from sys_settings.llm_settings import LLMServiceSettings, load_llm_runtime_config
 from utils.logger_config import configure_logging  # import 即套用 settings/logging.json
 from utils.utils import safe_send_interaction_message
 from services.relay.telegram_relay_service import (
@@ -19,7 +18,7 @@ from services.relay.telegram_relay_service import (
     TelegramRenderAdapter,
     build_telegram_pg_dsn_from_env,
 )
-from utils.background_tasks import spawn, supervise
+from utils.background_tasks import periodic, spawn, supervise
 
 # 載入環境變數
 load_dotenv()
@@ -29,7 +28,6 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 configure_logging()
 # 主程式以 `python discord_bot.py` 執行，__name__ 會是 __main__，所以這裡明確命名
 logger = logging.getLogger("discord_bot")
-LLM_SETTINGS = LLMServiceSettings()
 
 # 記錄環境變數和系統信息（安全方式）
 logger.info(f"Discord 機器人啟動於 {time.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -98,11 +96,27 @@ bot = MyBot()
 
 @bot.event
 async def on_ready():
+    """連上 Discord 後把該啟動的東西依序掛上。
+
+    這裡只決定「什麼時候跑什麼、順序、接線」；每一步的實作在各自的模組（維護五步在
+    `llm.persona.daily_maintenance`、日記在 `llm.ambient.ambient_diary`、三個定期寫入在各自的 store）。
+    on_ready 在 reconnect 時會再觸發，長跑迴圈與背景工作都只掛一次。
+    """
     logger.info(f'機器人 {bot.user.name} 已連接到 Discord!')
     logger.info(f'機器人 ID: {bot.user.id}')
     _refresh_person_anchors()
+    _log_invite_url()
+    await _preload_stickers()
+    _start_background_loops()
+    await _ensure_tables()
+    _start_embedding_backfill()
+    await auto_start_article_monitor(bot)
+    await auto_start_telegram_relay(bot)
+    await auto_start_notify_server(bot)   # 接收 Scraper webhook 通知
+    await _log_registered_commands()
 
-    # 創建邀請連結
+
+def _log_invite_url() -> None:
     permissions = discord.Permissions(
         send_messages=True,
         read_messages=True,
@@ -113,316 +127,92 @@ async def on_ready():
         connect=True,
         speak=True,
     )
-
     invite_url = discord.utils.oauth_url(
         bot.user.id,
         permissions=permissions,
-        scopes=("bot", "applications.commands")  # 重要：需要包含 applications.commands 範圍
+        scopes=("bot", "applications.commands"),  # 要含 applications.commands，斜線命令才會出現
     )
-
     logger.info(f"邀請連結: {invite_url}")
     logger.info("如果斜線命令未顯示，請使用上面的連結重新邀請機器人，確保包含應用程序命令權限")
 
-    # 預載貼圖描述快取：向 Discord 要清單是介面層的事，快取本身（技術層）不認 Discord
+
+async def _preload_stickers() -> None:
+    """預載貼圖描述快取：向 Discord 要清單是介面層的事，快取本身（技術層）不認 Discord。"""
     from llm.preprocess.sticker_cache import remember as remember_stickers
-    loaded_stickers = 0
+    loaded = 0
     for guild in bot.guilds:
         try:
-            loaded_stickers += remember_stickers(await guild.fetch_stickers())
+            loaded += remember_stickers(await guild.fetch_stickers())
         except Exception as exc:
             logger.warning("載入伺服器 %s 的貼圖失敗: %s", guild.id, exc)
-    logger.info("已載入 %d 個貼圖描述", loaded_stickers)
+    logger.info("已載入 %d 個貼圖描述", loaded)
 
-    # 啟動聊天訊息定期持久化 flush
-    from llm.storage.store_chat import flush_buffer, FLUSH_INTERVAL_SECONDS
-    if not getattr(bot, '_chat_persist_task_started', False):
-        async def _periodic_flush():
-            while True:
-                await asyncio.sleep(FLUSH_INTERVAL_SECONDS)
-                try:
-                    await flush_buffer()
-                except Exception as exc:
-                    logger.warning("定期 flush 聊天 buffer 失敗: %s", exc)
-        bot._chat_persist_task = supervise(_periodic_flush, name="聊天記憶定期寫入")
-        bot._chat_persist_task_started = True
-        logger.info("聊天訊息定期持久化已啟動（每 %d 秒）", FLUSH_INTERVAL_SECONDS)
 
-    # 啟動 raw 訊息備份表定期 flush（含 reaction 事件）
-    from llm.storage.raw_message_store import flush_raw_buffer, RAW_FLUSH_INTERVAL_SECONDS
-    if not getattr(bot, '_raw_persist_task_started', False):
-        async def _periodic_raw_flush():
-            while True:
-                await asyncio.sleep(RAW_FLUSH_INTERVAL_SECONDS)
-                try:
-                    await flush_raw_buffer()
-                except Exception as exc:
-                    logger.warning("定期 flush raw 訊息 buffer 失敗: %s", exc)
-        bot._raw_persist_task = supervise(_periodic_raw_flush, name="原始訊息備份定期寫入")
-        bot._raw_persist_task_started = True
-        logger.info("raw 訊息備份定期 flush 已啟動（每 %d 秒）", RAW_FLUSH_INTERVAL_SECONDS)
+def _start_once(task_attr: str, name: str, factory, started_log: str) -> None:
+    """掛一個該一直跑的迴圈，只掛一次：task 記在 `bot.<task_attr>`、旗標記在 `bot.<task_attr>_started`。"""
+    flag = f"{task_attr}_started"
+    if getattr(bot, flag, False):
+        return
+    setattr(bot, task_attr, supervise(factory, name=name))
+    setattr(bot, flag, True)
+    logger.info(started_log)
 
-    # 啟動功能二記憶（偏好事實）定期批次抽取（閒置才真的呼叫模型）
-    from llm.ambient.ambient_memory import maybe_flush as _ambient_memory_flush
-    from sys_settings.llm_settings import AmbientChatSettings as _AmbientSettings
-    if not getattr(bot, '_ambient_memory_task_started', False):
-        _ambient_flush_interval = _AmbientSettings().memory_flush_interval_seconds
 
-        async def _periodic_ambient_memory_flush():
-            while True:
-                await asyncio.sleep(_ambient_flush_interval)
-                try:
-                    await _ambient_memory_flush()
-                except Exception as exc:
-                    logger.warning("定期 flush 插話記憶 buffer 失敗: %s", exc)
-        bot._ambient_memory_task = supervise(_periodic_ambient_memory_flush, name="插話記憶定期抽取")
-        bot._ambient_memory_task_started = True
-        logger.info("插話記憶定期抽取已啟動（每 %.0f 秒檢查）", _ambient_flush_interval)
+def _start_background_loops() -> None:
+    """五個該一直跑的迴圈，照原本的順序掛上；三個定期寫入用 `periodic`，兩個要算時刻的排程在各自的模組。"""
+    from llm.ambient import ambient_diary, ambient_memory
+    from llm.persona import daily_maintenance
+    from llm.storage import raw_message_store, store_chat
+    from sys_settings.llm_settings import AmbientChatSettings
 
-    # 啟動人格萃取定期排程
-    if not getattr(bot, '_personality_task_started', False):
-        from datetime import datetime, timedelta
-        from sys_settings.time_settings import APP_TZ
+    chat_every = store_chat.FLUSH_INTERVAL_SECONDS
+    raw_every = raw_message_store.RAW_FLUSH_INTERVAL_SECONDS
+    memory_every = AmbientChatSettings().memory_flush_interval_seconds
+    _start_once("_chat_persist_task", "聊天記憶定期寫入",
+                lambda: periodic(chat_every, store_chat.flush_buffer, name="聊天記憶定期寫入"),
+                "聊天訊息定期持久化已啟動（每 %d 秒）" % chat_every)
+    _start_once("_raw_persist_task", "原始訊息備份定期寫入",
+                lambda: periodic(raw_every, raw_message_store.flush_raw_buffer, name="原始訊息備份定期寫入"),
+                "raw 訊息備份定期 flush 已啟動（每 %d 秒）" % raw_every)
+    _start_once("_ambient_memory_task", "插話記憶定期抽取",
+                lambda: periodic(memory_every, ambient_memory.maybe_flush, name="插話記憶定期抽取"),
+                "插話記憶定期抽取已啟動（每 %.0f 秒檢查）" % memory_every)
+    _start_once("_personality_task", "每日維護排程", lambda: daily_maintenance.schedule_loop(bot),
+                "每日維護排程已啟動（每日 04:00 UTC+8，含啟動補跑檢查）")
+    _start_once("_diary_task", "日記排程", lambda: ambient_diary.schedule_loop(bot),
+                "AI 日記定期排程已啟動（每日 00:00 UTC+8）")
 
-        async def _run_daily_maintenance_once():
-            """每日維護：五個步驟。①②④⑤ 各自 try / except，失敗不拖累後面；③ 遇鎖只
-            log 後返回，其他例外會中止整個維護（④⑤ 不跑，等下一次 04:00；期間重啟的話
-            啟動補跑檢查會補跑）。
 
-              ① emoji 字典自動更新（讀 guild.emojis → 補空值項目）
-              ② 招牌梗衰減 sweep（純 SQL GC／降級）
-              ③ 人格萃取（production，寫 auto_personality；發布開啟後跳過 ⑤ 要寫精簡版的人）
-              ④ persona agent（寫獨立表，`PersonaAgentSettings.enabled` 控制）
-              ⑤ 發布 agent 精簡版到 auto_personality（`PersonaAgentSettings.publish_mode` 控制）
-
-            ①②③ 彼此無相依，④ 例外：它要拿 ③ 剛寫好的描述當第一次 diff 的基準，
-            也跟 ③ 搶同一顆 GPU，所以刻意排在 ③ 之後、且 ③ 遇鎖返回時連帶跳過。
-            ⑤ 排在最後：把每個人最新的精簡版寫進 auto_personality；精簡版是空的人不動，
-            由 ③ 照常更新。
-
-            2026-08-18 拆分：原本 ② 藏在 ③ 內部（共用 `_extraction_running` 鎖、不另開排程），
-            但 ①②③ 無資料相依。拆開後 ③ 日後換成 persona agent 實作時，只需替換這一步，
-            ①② 不受影響。
-
-            排程與啟動補跑共用此函式。③ 若遇到鎖（`PersonalityExtractionInProgressError`）
-            只 log INFO 後返回，不視為錯誤。
-            """
-            guild = bot.guilds[0] if bot.guilds else None
-            if not guild:
-                logger.warning("每日維護：無可用 guild")
-                return
-
-            # ① emoji 字典
-            try:
-                from llm.persona.personality_extractor import refresh_emoji_dictionary
-                refresh_emoji_dictionary(guild)
-            except Exception as exc:
-                logger.warning("emoji 字典自動更新失敗: %s", exc)
-
-            # ② 招牌梗衰減 sweep（不佔 GPU，失敗不影響 ③）
-            try:
-                from llm.persona.signature_tag_extractor import run_signature_tag_sweep
-                await run_signature_tag_sweep(guild)
-            except Exception as exc:
-                logger.warning("招牌梗 sweep 失敗: %s", exc)
-
-            # ③ 人格萃取
-            from llm.persona.personality_extractor import (
-                PersonalityExtractionInProgressError,
-                run_personality_extraction,
-            )
-            # 發布開啟時，⑤ 要寫精簡版的人 ③ 不寫：否則每晚 ③ 會先把精簡版蓋回 production
-            # 的描述，要等 ④ 跑完、⑤ 才換回來（約 3 小時）；這段時間重啟的話，補跑檢查看到
-            # ③ 已經跑過就不補，整天都是 production 的版本。讀名單失敗就照舊全寫。
-            def _member_names() -> dict[str, list[str]]:
-                # 顯示名稱＋伺服器暱稱＋全域名稱：④ 的名字表與 ⑤ 的擋名字規則都靠它，
-                # ③ 的跳過名單也要用同一份，才會跟 ⑤ 實際寫的人一致
-                from llm.persona.member_names import member_names_from_guild
-                return member_names_from_guild(guild)
-
-            skip: set[str] = set()
-            try:
-                from llm.persona.agent.publish import production_skip_list
-
-                skip = await production_skip_list(guild.id, member_names=_member_names())
-            except Exception as exc:
-                logger.warning("讀取精簡版名單失敗，③ 照常寫入所有人: %s", exc)
-            try:
-                results = await run_personality_extraction(
-                    guild=guild, days=14, exclude_author_ids=skip,
-                )
-            except PersonalityExtractionInProgressError:
-                logger.info("人格萃取略過：已有萃取正在執行中")
-                return
-
-            personality_cog = bot.get_cog("PersonalityCommands")
-            if personality_cog:
-                runtime_config = load_llm_runtime_config(LLM_SETTINGS.llm_runtime_model_path)
-                scheduled_model = runtime_config.personality_model or runtime_config.model
-                personality_cog.register_scheduled_result(
-                    guild_id=guild.id,
-                    results=results,
-                    model=scheduled_model,
-                    days=14,
-                )
-            logger.info("人格萃取排程完成：萃取 %d 位使用者", len(results))
-
-            # ④ persona agent（寫獨立資料表，不碰 auto_personality——那是 ⑤ 的事）
-            #    刻意排在 ③ 之後：兩者都吃 GPU，序列執行才不會互搶；而且 agent 的
-            #    diff 要拿 production 剛寫好的描述當第一次的基準。
-            try:
-                from llm.persona.agent.batch import run_batch
-                from sys_settings.llm_settings import PersonaAgentSettings
-
-                agent_settings = PersonaAgentSettings()
-                if agent_settings.enabled:
-                    runtime_config = load_llm_runtime_config(
-                        LLM_SETTINGS.llm_runtime_model_path
-                    )
-                    await run_batch(
-                        guild_id=guild.id,
-                        model=runtime_config.personality_model or runtime_config.model,
-                        settings=agent_settings,
-                        member_names=_member_names(),
-                    )
-            except Exception as exc:
-                # agent 失敗不該影響任何既有功能
-                logger.error("persona agent 批次失敗（不影響 production）: %s", exc, exc_info=True)
-
-            # ⑤ 發布精簡版：每個人 agent **最新**版本挑出來的精簡版（當晚 ④ 沒輪到的人也算），
-            #    見 `llm.persona.agent.publish`。失敗時 ③ 跳過的人維持原本的描述，下一晚再寫。
-            try:
-                from llm.persona.agent.publish import effective_publish_mode, run_publish
-
-                await run_publish(
-                    guild_id=guild.id,
-                    mode=effective_publish_mode(),
-                    member_names=_member_names(),
-                )
-            except Exception as exc:
-                logger.error("persona 精簡版發布失敗（production 描述不受影響）: %s", exc, exc_info=True)
-
-        async def _personality_schedule():
-            # 啟動後等 60 秒再開始，讓其他服務先就緒
-            await asyncio.sleep(60)
-
-            # 啟動補跑檢查：若上次排程被錯過（容器重啟 / 中斷），立即補一次
-            try:
-                from llm.persona.personality_extractor import get_last_extraction_time
-                guild_for_check = bot.guilds[0] if bot.guilds else None
-                if guild_for_check:
-                    now = datetime.now(APP_TZ)
-                    # 「上一個應該跑的 04:00」：如果現在還沒過今天 04:00，上個就是昨天 04:00
-                    last_scheduled_run = now.replace(hour=4, minute=0, second=0, microsecond=0)
-                    if now < last_scheduled_run:
-                        last_scheduled_run -= timedelta(days=1)
-
-                    last_extract_utc = get_last_extraction_time(guild_for_check.id)
-                    # metadata 存的是 UTC；轉台北時區再比
-                    last_extract_local = (
-                        last_extract_utc.astimezone(APP_TZ)
-                        if last_extract_utc else None
-                    )
-
-                    if last_extract_local is None or last_extract_local < last_scheduled_run:
-                        logger.info(
-                            "啟動補跑檢查：last_extract=%s, 上個排程=%s → 立即補跑",
-                            last_extract_local, last_scheduled_run.isoformat(),
-                        )
-                        await _run_daily_maintenance_once()
-                    else:
-                        logger.info(
-                            "啟動補跑檢查：last_extract=%s ≥ 上個排程=%s，跳過",
-                            last_extract_local, last_scheduled_run.isoformat(),
-                        )
-            except Exception as exc:
-                logger.error("啟動補跑檢查失敗: %s", exc, exc_info=True)
-
-            while True:
-                try:
-                    now = datetime.now(APP_TZ)
-                    # 計算到下一個 04:00 的秒數
-                    target = now.replace(hour=4, minute=0, second=0, microsecond=0)
-                    if now >= target:
-                        target += timedelta(days=1)
-                    wait_seconds = (target - now).total_seconds()
-                    logger.info("人格萃取排程：下次執行 %s（等待 %.0f 秒）", target.isoformat(), wait_seconds)
-                    await asyncio.sleep(wait_seconds)
-                    await _run_daily_maintenance_once()
-                except Exception as exc:
-                    logger.error("人格萃取排程失敗: %s", exc, exc_info=True)
-                    # 失敗後等 1 小時再試
-                    await asyncio.sleep(3600)
-
-        bot._personality_task = supervise(_personality_schedule, name="每日維護排程")
-        bot._personality_task_started = True
-        logger.info("人格萃取定期排程已啟動（每日 04:00 UTC+8，含啟動補跑檢查）")
-
-    # 確保 ai_interactions 互動紀錄表存在（插話寫入 + 日記讀取都靠它）
+async def _ensure_tables() -> None:
+    """建表都是 idempotent、失敗只記 log：寫入功能不該拖垮 bot 啟動。"""
     try:
-        from llm.storage.ai_interactions_store import ensure_table as _ensure_ai_interactions
-        await asyncio.to_thread(_ensure_ai_interactions)
-    except Exception as _exc:
-        logger.error("ai_interactions 建表啟動失敗: %s", _exc, exc_info=True)
-
-    # persona agent 的兩張表（比照上面的 ai_interactions；建表 idempotent、
-    # 失敗只 log 不 raise——agent 不該拖垮 bot 啟動）
+        # 插話寫入 + 日記讀取都靠它
+        from llm.storage.ai_interactions_store import ensure_table as ensure_ai_interactions
+        await asyncio.to_thread(ensure_ai_interactions)
+    except Exception as exc:
+        logger.error("ai_interactions 建表啟動失敗: %s", exc, exc_info=True)
     try:
-        from llm.persona.agent.store import ensure_table as _ensure_persona_agent
-        await asyncio.to_thread(_ensure_persona_agent)
+        from llm.persona.agent.store import ensure_table as ensure_persona_agent
+        await asyncio.to_thread(ensure_persona_agent)
     except Exception as exc:
         logger.warning("persona agent 資料表初始化失敗（agent 將無法寫入）: %s", exc)
 
-    # v2 風格召回：背景回填既有列的 embedding（idempotent；embed 端就緒後逐批做，不阻塞啟動）。
-    # on_ready 可能 reconnect 重觸發 → 用 flag 避免重複起背景工作（回填本身也 idempotent，雙保險）。
-    if not getattr(bot, "_ai_emb_backfill_started", False):
-        bot._ai_emb_backfill_started = True
-        try:
-            from llm.storage.ai_interactions_store import backfill_embeddings as _backfill_emb
-            spawn(asyncio.to_thread(_backfill_emb), name="ai_interactions 向量回填")
-            logger.info("ai_interactions embedding 背景回填已排程")
-        except Exception as _exc:
-            logger.error("ai_interactions embedding 回填啟動失敗: %s", _exc, exc_info=True)
 
-    # 啟動 AI 每日日記排程（每天 00:00 台北時區，在日記頻道寫一段當天感想）
-    if not getattr(bot, '_diary_task_started', False):
-        from datetime import datetime as _dt, timedelta as _td
-        from sys_settings.time_settings import APP_TZ
-
-        async def _diary_schedule():
-            await asyncio.sleep(90)  # 等其他服務就緒
-            from llm.ambient.ambient_diary import run_daily_reflection
-            from sys_settings.llm_settings import DiaryReflectionSettings
-            ds = DiaryReflectionSettings()
-            while True:
-                try:
-                    now = _dt.now(APP_TZ)
-                    target = now.replace(
-                        hour=ds.schedule_hour, minute=ds.schedule_minute,
-                        second=0, microsecond=0,
-                    )
-                    if now >= target:
-                        target += _td(days=1)
-                    wait_seconds = (target - now).total_seconds()
-                    logger.info("AI 日記排程：下次 %s（等待 %.0f 秒）", target.isoformat(), wait_seconds)
-                    await asyncio.sleep(wait_seconds)
-                    await run_daily_reflection(bot)
-                except Exception as exc:
-                    logger.error("AI 日記排程失敗: %s", exc, exc_info=True)
-                    await asyncio.sleep(3600)  # 失敗後等 1 小時再試
-
-        bot._diary_task = supervise(_diary_schedule, name="日記排程")
-        bot._diary_task_started = True
-        logger.info("AI 日記定期排程已啟動（每日 00:00 UTC+8）")
-
-    # 自動啟動官方文章更新
-    await auto_start_article_monitor(bot)
-    await auto_start_telegram_relay(bot)
-
-    # 啟動 Notify Server（接收 Scraper webhook 通知）
-    await auto_start_notify_server(bot)
-
+def _start_embedding_backfill() -> None:
+    """v2 風格召回：背景回填既有互動紀錄的 embedding（idempotent，embed 端就緒後逐批做，不阻塞啟動）。"""
+    if getattr(bot, "_ai_emb_backfill_started", False):
+        return
+    bot._ai_emb_backfill_started = True
     try:
-        # 列出已註冊的命令
+        from llm.storage.ai_interactions_store import backfill_embeddings
+        spawn(asyncio.to_thread(backfill_embeddings), name="ai_interactions 向量回填")
+        logger.info("ai_interactions embedding 背景回填已排程")
+    except Exception as exc:
+        logger.error("ai_interactions embedding 回填啟動失敗: %s", exc, exc_info=True)
+
+
+async def _log_registered_commands() -> None:
+    try:
         commands = await bot.tree.fetch_commands()
         logger.info(f"已註冊 {len(commands)} 個全局斜線命令:")
         for cmd in commands:

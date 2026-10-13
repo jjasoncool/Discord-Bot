@@ -1,10 +1,18 @@
-"""功能二記憶串接（Phase C-3）：把插話頻道訊息收進緩衝 → 閒置批次抽取沉澱 → 召回。
+"""插話的記憶膠水：插話頻道的訊息先進緩衝，閒置時批次抽成偏好事實，生成前再召回給 prompt。
 
-走 `MemoryService` 門面，本檔只負責「訊息來源緩衝 + 排程 flush + 召回格式」這層膠水：
-  - enqueue_for_memory：on_message 流裡，插話頻道每則（非 bot、有內容）收進緩衝。
-  - maybe_flush：背景排程週期呼叫；緩衝夠量且**前景(/askai)閒置**時才真的跑模型抽取（避免換模型）。
-  - recall_lines：插話生成前，召回該發話者的 trusted 偏好，注入 persona_context。
+架構定位：功能層（`llm/ambient`）。記憶本身走 `services.memory_service` 門面，這裡只管訊息來源的緩衝、排程 flush 與召回的格式。
+  - 上層（誰呼叫）：`llm.ambient.ambient_reply`——插話頻道每則真人訊息進來時 `enqueue_for_memory`，生成前
+    `recall_lines`、`recall_signature_tags`；`discord_bot` 的 on_ready 用 `utils.background_tasks.periodic` 定期呼叫 `maybe_flush`。
+  - 下層（呼叫誰）：`services.memory_service`、`services.llm_service`（抽取用的模型）、`llm.client.lemonade_gate`（前景忙不忙）、
+    `llm.storage.member_profile_store`、`llm.preprocess.person_anchor`。
+
+介面：`enqueue_for_memory(message)`、`maybe_flush(force=)`、`recall_lines(guild_id, user_id)`、
+  `recall_signature_tags(...)`。
+
+規則：抽取只在緩衝夠量、而且前景（/askai、串流）閒置時才真的跑模型，避免換模型；排程每 `memory_flush_interval_seconds` 秒檢查一次。
+  政策（2026-06-21 定案）：只記本人講自己的中性偏好，敏感類一律不存——見交接檔 `ambient-chat`「偏好事實（C）的政策與接口」。
 """
+
 from __future__ import annotations
 
 import asyncio

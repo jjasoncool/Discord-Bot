@@ -256,22 +256,6 @@ class PromptLayeringTests(unittest.TestCase):
                 f"「{duplicated}」屬於共用層，agent 層不該再抄一份",
             )
 
-    def test_extraction_placeholder_is_substituted(self):
-        """萃取那邊的 {description_rules} 必須代入——漏掉會把佔位符原樣送給模型。"""
-        from llm.persona.personality_extractor import (
-            MAX_PERSONALITY_CHARS,
-            _load_extract_prompts,
-            load_description_rules,
-        )
-
-        rendered = (
-            _load_extract_prompts()["user_prompt_template"]
-            .replace("{description_rules}", load_description_rules())
-            .replace("{max_chars}", str(MAX_PERSONALITY_CHARS))
-        )
-        self.assertNotIn("{description_rules}", rendered)
-        self.assertIn("嚴禁出現", rendered)
-        self.assertIn(f"不超過 {MAX_PERSONALITY_CHARS} 字", rendered)
 
     def test_description_rules_file_is_not_empty(self):
         from llm.persona.personality_extractor import load_description_rules
@@ -313,7 +297,7 @@ class NicknameNoteTests(unittest.TestCase):
         self.assertNotIn("群友的稱呼", svc.calls[0]["messages"][1]["content"])
 
     def test_shared_rules_refer_to_the_same_table(self):
-        """規則檔（③④ 共用）教模型怎麼用這張表，靠的是表頭名稱；改了一邊另一邊要跟著改。"""
+        """規則檔教模型怎麼用這張表，靠的是表頭名稱；改了一邊另一邊要跟著改。"""
         from llm.persona.personality_extractor import load_description_rules
 
         header = self.NOTE.splitlines()[0]
@@ -532,7 +516,6 @@ class BlockingCallTests(unittest.TestCase):
         ("agent.run_and_persist", "run_and_persist", {"store", "validation"}),
         ("batch.run_batch", "run_batch", {"store", "validation"}),
         ("publish.run_publish", "run_publish", {"store", "validation"}),
-        ("publish.production_skip_list", "production_skip_list", {"store", "validation"}),
     ]
 
     def test_no_bare_sync_db_call_in_async(self):
@@ -541,8 +524,7 @@ class BlockingCallTests(unittest.TestCase):
 
         from llm.persona.agent import batch, publish
 
-        modules = {"run_and_persist": agent, "run_batch": batch, "run_publish": publish,
-                   "production_skip_list": publish}
+        modules = {"run_and_persist": agent, "run_batch": batch, "run_publish": publish}
         # 裸呼叫的同步函式（非 module.attr 形式）也要擋
         bare_names = {"select_targets", "load_guild_state", "build_plans"}
         offenders = []

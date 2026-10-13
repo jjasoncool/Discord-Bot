@@ -129,7 +129,7 @@ def nickname_note(
     **本人那一行標出來、排第一**：指示裡只有 user_id，模型原本不知道本人叫什麼，別人喊
     「一野」時分不出是叫本人還是叫別人（實測把叫糯糯的「一野」寫成另一個人的暱稱）。
     **不放 user_id、不編號**：使用者 ID 跟訊息 ID 一樣是長串數字，給了會被抄成證據；編號會跟
-    條目的 ref 混在一起。怎麼用這張表寫在 `persona_description_rules.txt`（③④ 共用）。
+    條目的 ref 混在一起。怎麼用這張表寫在 `persona_description_rules.txt`。
     """
     lines = []
     for pid, (label, nicks) in nicknames.items():

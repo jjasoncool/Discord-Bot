@@ -98,7 +98,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 取模型回答的最後一行結論 | `llm.prompt.answer_line.final_line`（去思考區塊與「第二行：」這類照抄格式的前綴；prompt 讓模型先寫理由、最後一行才寫結論） |
 | 改寫使用者也會手改的文字檔 | `utils.safe_write.replace_text`（暫存檔換名、每天第一次改寫前備份） |
 | 解析使用者在視窗打的日期／時間（Discord 沒有日期選擇器） | `utils.user_dates.parse_user_date`／`parse_user_datetime`（全形、`/` `-` `.`、年月日都收；讀不懂回 None，訊息與規則留給呼叫端） |
-| 背景任務（做完就結束的 fire-and-forget、該一直跑的迴圈） | `utils.background_tasks.spawn`（留參照、失敗記 ERROR、取消不算失敗）／`supervise`（掛了記 ERROR、間隔加倍重啟、取消才停）；結果被丟掉的 `create_task` 守衛擋 |
+| 背景任務（做完就結束的 fire-and-forget、該一直跑的迴圈、固定間隔做一件事） | `utils.background_tasks.spawn`（留參照、失敗記 ERROR、取消不算失敗）／`supervise`（掛了記 ERROR、間隔加倍重啟、取消才停）／`periodic(seconds, job, name=)`（定期寫入這類固定間隔的工作，失敗記 WARNING 繼續；要算下一個時刻的用 `run_due_loop`）；結果被丟掉的 `create_task` 守衛擋 |
 | 定時排程（睡到下一個時刻、啟動時補做、出錯不中斷） | `utils.due_loop.run_due_loop`（tick 處理到期的事、回傳下一個時刻；到期項目途中變了就設 `wake` 讓它提早重算；週期提醒、點名、人格萃取、日記四份舊迴圈待搬） |
 | 開交易 thread、領收、取消、封存（自由市場接單、商品購買） | `services.community.trade_service.TradeService`（`open_trade` 等；流程見根目錄 `TRADE_FLOW.md`） |
 | 讀交易 thread（開單身分、有效的領收通知、交易按鈕、bot 的訊息） | `TradeService.read` → `TradeThreadLog`（一律讀完整串；交易與商品模組不自己翻歷史，守衛擋） |

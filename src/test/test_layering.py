@@ -37,6 +37,7 @@ LAYERS = [
     ("llm.ambient", FEATURE),                       # 插話、日記、罵人應對
     ("llm.persona.agent", FEATURE),                 # 每晚的人格萃取 agent
     ("llm.persona.personality_extractor", FEATURE),  # 每晚的人格萃取（舊流程）
+    ("llm.persona.daily_maintenance", FEATURE),     # 每日 04:00 維護的編排（五步順序、補跑）
     ("llm.preprocess.emoji_autofill", FEATURE),     # 看圖補字典（on_message 觸發）
     ("llm.storage.store_chat", FEATURE),            # Discord 訊息寫進聊天向量庫
     ("llm.storage.raw_message_store", FEATURE),     # Discord 訊息寫進原始備份表

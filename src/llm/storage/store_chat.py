@@ -1,16 +1,24 @@
-"""Discord 聊天訊息批次持久化到 pgvector。
+"""Discord 聊天訊息批次寫進 pgvector 的聊天向量庫：on_message 先進緩衝，滿 30 則或每 5 分鐘寫一批。
 
-提供 buffer 機制，on_message 時加入 buffer，
-滿 FLUSH_THRESHOLD 則或每 FLUSH_INTERVAL_SECONDS 秒自動 flush。
+架構定位：功能層（`llm/storage`），吃 Discord 訊息物件、寫資料庫。
+  - 上層（誰呼叫）：`discord_bot` 的 on_message／on_message_edit（`enqueue_message`、`enqueue_message_edit`，滿門檻就
+    `flush_buffer`）與 on_ready（用 `utils.background_tasks.periodic` 定期呼叫 `flush_buffer`）。
+  - 下層（呼叫誰）：`llm.client.lemonade_gate`（GPU 閘門）、`llm.client.http_client.is_unreachable`、
+    `llm.preprocess`（表情描述、貼圖描述）、`llm.retrievers.context_retriever`（共用的已寫入 id 集合）、LlamaIndex 的 pgvector 索引。
 
-embedding 後端或 pgvector 連不上時，沒寫成的訊息放回 buffer 等下一輪定期 flush；
-buffer 有上限（MAX_BUFFER_SIZE），斷太久就丟最舊的。
+介面：`enqueue_message(msg)`、`enqueue_message_edit(after)`、`should_flush_now()`、`flush_buffer()`。
 
-寫入時拿著 GPU 閘門（算 embedding 要用顯示卡），插話與 /askai 都在後面排隊，所以佔用時間有上限：
-embedding 用「拿著閘門」模式（`make_safe_llm_embedding(holding_gpu_gate=True)`：短逾時、不重試），
-一次 flush 最多寫 FLUSH_GPU_BUDGET_SECONDS，時間到就放鎖，沒寫完的留到下一輪
-（2026-10-09 Lemonade 卡住時，這裡拿著閘門一個多小時、整個 bot 的 AI 全卡）。
+規則：
+  - 寫入時拿著 GPU 閘門（算 embedding 要用顯示卡），插話與 /askai 都在後面排隊，所以一次 flush 最多寫
+    FLUSH_GPU_BUDGET_SECONDS 秒，時間到就放鎖、沒寫完的留到下一輪；embedding 用「拿著閘門」模式
+    （`make_safe_llm_embedding(holding_gpu_gate=True)`：短逾時、不重試）。
+  - 後端連不上時沒寫成的放回緩衝等定期 flush；緩衝有上限（MAX_BUFFER_SIZE），斷太久丟最舊的。
+  - 同一時間只跑一個 flush；上一輪因連不上而中止後，一段時間內不因滿門檻提早 flush。
+
+例外與決策：2026-10-09 Lemonade 卡住時這裡拿著閘門一個多小時、整個 bot 的 AI 全卡 → 寫入預算與短逾時；
+  連線錯誤放回緩衝與上限 1,000 的取捨見交接檔「Lemonade 後端與寫入緩衝的待決」。
 """
+
 from __future__ import annotations
 
 import asyncio

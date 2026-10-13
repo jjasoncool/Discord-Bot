@@ -535,10 +535,9 @@ class AmbientChatSettings(BaseSettings):
 class PersonaAgentSettings(BaseSettings):
     """人格擷取 agent 的排程設定。
 
-    與 production 萃取的關係：兩者序列執行（③ production → ④ agent → ⑤ 發布）。agent 的
-    完整描述寫自己的表（`persona_agent_versions`），bot 讀不到；⑤ 在 `publish_mode="on"`
-    時才把挑過的精簡版寫進 production 的 `auto_personality`，③ 則跳過由精簡版負責的人
-    （見 `llm.persona.agent.publish`）。agent 失敗不影響 production，反之亦然。
+    agent 的完整描述寫自己的表（`persona_agent_versions`），bot 讀不到；發布在 `publish_mode="on"`
+    時才把挑過的精簡版寫進 `auto_personality`（見 `llm.persona.agent.publish`）。2026-10-13 起沒有
+    production 萃取備援：agent 沒寫到的人維持最後一版描述。
 
     **只吃 class 預設值，不吃環境變數**（同 `AmbientChatSettings` /
     `DiaryReflectionSettings`）。少了下面那組 `model_config` 的話，欄位名會直接變成
@@ -578,7 +577,7 @@ class PersonaAgentSettings(BaseSettings):
 
     #: M7：把精簡版寫進 `auto_personality` 給插話／askai 讀（04:00 排程的第 ⑤ 步，見
     #: `llm.persona.agent.publish`）。off＝不做；dry_run＝只算、寫 log，不寫入——上線前先看
-    #: 挑出來的東西對不對；on＝寫入。on 時 ③ 與手動萃取會跳過 ⑤ 要寫精簡版的人，不把它蓋回去。
+    #: 挑出來的東西對不對；on＝寫入。
     #: `enabled` 關掉時一律當 off（`publish.effective_publish_mode`）：沒有新版本可發布。
     publish_mode: Literal["off", "dry_run", "on"] = "on"
 
