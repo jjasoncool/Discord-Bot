@@ -123,9 +123,15 @@ async def on_ready():
     logger.info(f"邀請連結: {invite_url}")
     logger.info("如果斜線命令未顯示，請使用上面的連結重新邀請機器人，確保包含應用程序命令權限")
 
-    # 預載貼圖描述快取
-    from llm.preprocess.sticker_cache import load_guild_stickers
-    await load_guild_stickers(bot)
+    # 預載貼圖描述快取：向 Discord 要清單是介面層的事，快取本身（技術層）不認 Discord
+    from llm.preprocess.sticker_cache import remember as remember_stickers
+    loaded_stickers = 0
+    for guild in bot.guilds:
+        try:
+            loaded_stickers += remember_stickers(await guild.fetch_stickers())
+        except Exception as exc:
+            logger.warning("載入伺服器 %s 的貼圖失敗: %s", guild.id, exc)
+    logger.info("已載入 %d 個貼圖描述", loaded_stickers)
 
     # 啟動聊天訊息定期持久化 flush
     from llm.storage.store_chat import flush_buffer, FLUSH_INTERVAL_SECONDS

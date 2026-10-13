@@ -196,6 +196,15 @@ class StickerCacheKnownTests(unittest.TestCase):
 
 
 class StickerCacheUpdateTests(unittest.TestCase):
+    def test_remember_takes_plain_objects_and_counts(self):
+        # 啟動時由 discord_bot 向每個伺服器要清單再交進來；快取只認 id、name、description，不認 discord 型別
+        batch = [SimpleNamespace(id=601, name="開心", description="笑到瞇眼"), SimpleNamespace(id=602, name="沒描述", description="")]
+        self.addCleanup(sticker_cache.update_guild, batch, [])
+        self.assertEqual(sticker_cache.remember(batch), 2)
+        self.assertEqual(sticker_cache.get_sticker_text(sticker(601, "開心")), "[貼圖：開心｜笑到瞇眼]")
+        self.assertEqual(sticker_cache.get_sticker_text(sticker(602, "沒描述")), "[貼圖：沒描述｜沒描述]")
+        self.assertTrue(sticker_cache.is_known(602))
+
     def test_follows_server_changes(self):
         def gs(sid, name, desc):
             return SimpleNamespace(id=sid, name=name, description=desc)

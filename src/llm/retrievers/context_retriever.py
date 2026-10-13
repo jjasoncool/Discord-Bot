@@ -9,9 +9,10 @@ import json
 import threading
 from collections import defaultdict
 from datetime import timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import discord
+if TYPE_CHECKING:  # 只給型別註解；服務層不認 discord，Discord 物件由指令層傳進來（守衛 test_layering）
+    import discord
 
 from llm.preprocess.chat_line import format_chat_line
 from llm.preprocess.tokenization import tokenize_for_retrieval, tokens_for_debug
@@ -474,7 +475,10 @@ async def retrieve_discord_context(
     }
 
     try:
-        if not isinstance(interaction.channel, (discord.TextChannel, discord.Thread)):
+        # 只在伺服器裡有歷史可讀的頻道（文字頻道、thread）抓脈絡；私訊沒有 guild、分類與論壇頻道沒有 history。
+        # 看能力不看型別：這層不 import discord。
+        channel = interaction.channel
+        if getattr(channel, "guild", None) is None or not callable(getattr(channel, "history", None)):
             return context, bot_context, meta
 
         bot_user_id = interaction.client.user.id if interaction.client.user else None

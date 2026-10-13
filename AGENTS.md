@@ -117,6 +117,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 - async 裡的同步 DB 或檔案 I/O 丟到執行緒（`asyncio.to_thread`；persona agent 用 `run_db`）。音樂、Discord 心跳、插話都在同一個 event loop 上。
 - 新增欄位或改介面時，列出所有牽動點並逐一確認。
 - 細項設定放 `sys_settings/` 的 pydantic settings（frozen）；功能開關放 `settings/switches.json`（見共用元件表）。
+- **分層方向**（`src/test/test_layering.py` 守衛，啟動 gate 會跑）：基礎（`utils/`、`sys_settings/`、`settings/`、`constants`）← 技術 ← 服務 ← 功能 ← 介面（`commands/`、`discord_bot.py`、`music/`），import 只能指向同層或更下層，函式內的延遲 import 也算。`llm/` 與 `services/` 各自橫跨三層（`services/`＝服務，但 `relay`／`events`／`community`／`notify_server` 是功能；`llm/`＝LLM 技術，但 `ambient`、`persona/agent`、`emoji_autofill`、`store_chat` 是功能，`member_profile_store`、`context_retriever`、`llm_service` 的零件是服務），所以分類寫在那個測試的 `LAYERS` 表，到子資料夾／模組。新資料夾要先登記層級；下層需要上層的東西，由上層交進來（介面、callback），不往上 import。跨容器（`scraper/`、`telegram_scraper/`）的 import 一律不准，現有例外列在 `CROSS_CONTAINER_ALLOWED` 並寫理由。**技術層與服務層不可 import discord**（`if TYPE_CHECKING:` 裡的型別註解不算）：要 Discord 物件就由功能層或介面層傳進來，向 Discord 要資料的那段寫在呼叫端；功能層與介面層是 Discord 應用本身，可以；基礎層只有列在 `DISCORD_HELPERS_IN_BASE` 的 Discord 工具（`utils.utils`、`discord_content`、`discord_threads`、`dm_notifier`、`panel_bump`、`channel_registry`）可以。
 
 ## 測試
 
