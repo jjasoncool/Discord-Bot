@@ -1,6 +1,6 @@
 """網路搜尋（SearXNG）做成給模型用的工具：/askai 由模型自己決定要不要查、查什麼（開關 `askai_web_search_mode=tool`）。
 
-為什麼改成工具（使用者 10-09「改 我怕打架」）：關鍵字模式會先把網路結果塞進 prompt，模型自己查的遊戲情報又是另一份，
+為什麼改成工具：關鍵字模式會先把網路結果塞進 prompt，模型自己查的遊戲情報又是另一份，
 兩邊說法不同時模型不知道該信誰。改成工具後，遊戲情報與網路搜尋在同一個工具輪裡（`combine_runners`）由模型挑，
 先後與出處的規則寫在 `settings/prompts/askai_web_rules.txt`，只在有這個工具時才給模型。
 
@@ -23,7 +23,7 @@ import time
 from typing import Any, Optional
 
 from llm.client.tool_calls import ToolArgumentError, parse_arguments
-from llm.prompt import prompt_files
+from utils import hot_files
 
 from .intent import clean_query
 from .search import search_web
@@ -100,7 +100,7 @@ class WebSearchTools:
         #: 怎麼用這個工具（接在系統提示詞後面，見 `LLMService.generate_reply`）
         self.instructions = (
             instructions if instructions is not None
-            else prompt_files.read_text(settings.rules_path, label="網路搜尋規則")
+            else hot_files.read_text(settings.rules_path, label="網路搜尋規則")
         )
         #: 這次請求呼叫過的工具與結果摘要（寫進 /askai 的回應紀錄）
         self.calls: list[dict[str, Any]] = []

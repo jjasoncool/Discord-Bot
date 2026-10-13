@@ -1038,32 +1038,32 @@ class PromptFileLoaderTests(unittest.TestCase):
     """共用的 prompt 載入器（收斂掉三份一字不差的 mtime 快取實作）。"""
 
     def test_missing_file_is_not_fatal_for_text(self):
-        from llm.prompt import prompt_files
+        from utils import hot_files
 
-        self.assertEqual(prompt_files.read_text("/nope/missing.txt"), "")
+        self.assertEqual(hot_files.read_text("/nope/missing.txt"), "")
 
     def test_missing_file_returns_none_for_json(self):
-        from llm.prompt import prompt_files
+        from utils import hot_files
 
-        self.assertIsNone(prompt_files.read_json("/nope/missing.json"))
+        self.assertIsNone(hot_files.read_json("/nope/missing.json"))
 
     def test_cache_returns_same_object_until_mtime_changes(self):
         import os
         import tempfile
 
-        from llm.prompt import prompt_files
+        from utils import hot_files
 
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
                                          encoding="utf-8") as fh:
             fh.write("第一版")
             path = fh.name
         try:
-            self.assertEqual(prompt_files.read_text(path), "第一版")
+            self.assertEqual(hot_files.read_text(path), "第一版")
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write("第二版")
             # mtime 解析度可能不足以區分連續兩次寫入 → 明確往前推
             stat = os.stat(path)
             os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
-            self.assertEqual(prompt_files.read_text(path), "第二版", "改檔要即時生效")
+            self.assertEqual(hot_files.read_text(path), "第二版", "改檔要即時生效")
         finally:
             os.unlink(path)

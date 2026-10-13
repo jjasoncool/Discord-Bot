@@ -33,7 +33,7 @@ from llm.preprocess import emoji_autofill as af  # noqa: E402
 from llm.preprocess import emoji_dictionary as ed  # noqa: E402
 from llm.preprocess import sticker_cache  # noqa: E402
 from llm.preprocess import sticker_dictionary as sd  # noqa: E402
-from llm.prompt import prompt_files  # noqa: E402
+from utils import hot_files  # noqa: E402
 from sys_settings.llm_settings import EmojiAutofillSettings  # noqa: E402
 from sys_settings.time_settings import APP_TZ  # noqa: E402
 
@@ -73,8 +73,8 @@ class FilesTestBase(unittest.TestCase):
             patcher = mock.patch.object(target, attr, value)
             patcher.start()
             self.addCleanup(patcher.stop)
-        prompt_files.forget(self.emoji_path)
-        prompt_files.forget(self.sticker_path)
+        hot_files.forget(self.emoji_path)
+        hot_files.forget(self.sticker_path)
 
     def lines(self):
         return self.emoji_path.read_text(encoding="utf-8").split("\n")

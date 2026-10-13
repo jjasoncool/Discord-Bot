@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 from typing import Any, List, Optional
 
@@ -29,8 +30,8 @@ from sys_settings.llm_settings import (
     LLMRuntimeConfig,
     LLMServiceSettings,
     load_context_safety_rules,
-    load_llm_runtime_config,
 )
+from utils import hot_files
 
 logger = logging.getLogger(__name__)
 anomaly_logger = logging.getLogger("llm_anomaly")
@@ -224,38 +225,21 @@ class LLMService:
             base_url=self.base_url,
             timeout=float(self.timeout),
         )
-        self._runtime_config_cached: Optional[LLMRuntimeConfig] = None
-        self._runtime_model_cached_mtime_ns: Optional[int] = None
 
     def _load_runtime_config_cached(self) -> Optional[LLMRuntimeConfig]:
-        """讀取 runtime config 並依 mtime 快取（檔案沒變不重讀）。"""
-        runtime_config_path = Path(self.settings.llm_runtime_model_path)
+        """讀取 runtime config（檔案沒變不重讀，壞檔沿用上次；機制在 `utils.hot_files`）。缺檔或沒有模型名稱回 None。"""
 
-        try:
-            if not runtime_config_path.exists():
-                self._runtime_config_cached = None
-                self._runtime_model_cached_mtime_ns = None
-                return None
+        def parse(raw: str) -> LLMRuntimeConfig:
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                raise ValueError("runtime config 內容必須為 JSON object")
+            return LLMRuntimeConfig.model_validate(data)
 
-            current_mtime_ns = runtime_config_path.stat().st_mtime_ns
-            if (
-                self._runtime_model_cached_mtime_ns == current_mtime_ns
-                and self._runtime_config_cached is not None
-            ):
-                return self._runtime_config_cached
-
-            runtime_config = load_llm_runtime_config(runtime_config_path)
-            if not runtime_config.model.strip():
-                self._runtime_config_cached = None
-                self._runtime_model_cached_mtime_ns = None
-                return None
-
-            self._runtime_config_cached = runtime_config
-            self._runtime_model_cached_mtime_ns = current_mtime_ns
-            return runtime_config
-        except Exception as exc:
-            logger.warning("讀取 runtime config 失敗: %s", exc)
+        runtime_config = hot_files.read_parsed(self.settings.llm_runtime_model_path, parse=parse,
+                                               label="LLM runtime config", missing_ok=True)
+        if runtime_config is None or not runtime_config.model.strip():
             return None
+        return runtime_config
 
     def _resolve_runtime_model(self, override_model: Optional[str] = None) -> str:
         """解析本次請求模型：call override > runtime file > 預設。"""

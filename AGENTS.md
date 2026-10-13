@@ -59,7 +59,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 遊戲公告的時間 | `services.events.event_time_parser.SERVER_TZ`（值同為 UTC+8，但語意不同，兩者不可合併） |
 | 連 pgvector | `LLMServiceSettings().pgvector_connect()` |
 | 實體表名 | `HYBRID_RETRIEVAL_SETTINGS.chat_table()`／`.source_table(key)`／`.physical_table(name)`（含 identifier 消毒） |
-| 讀 prompt 檔、會被手改的設定檔 | `llm.prompt.prompt_files.read_text()`／`read_json()`／`read_parsed(path, parse=…)`（mtime 快取，改檔即生效） |
+| 讀會被手改、改了就要生效的檔案（prompt、字典、開關、config.json、LLM runtime 設定） | 機制只有一份：`utils.hot_files.read_text()`／`read_json()`／`read_parsed(path, parse=…)`（mtime 快取、壞檔沿用上次）。各檔的解析、驗證、寫入在呼叫端：config.json 走 `ChannelConfig.load_config`／`update_config`、開關走 `switches.current()`、runtime 設定走 `LLMService`、字典走 `emoji_dictionary`／`sticker_dictionary`；不要在 `hot_files` 加認得特定檔案的函式 |
 | 清理聊天文字 | `llm.persona.personality_extractor._clean_text_for_extraction()` |
 | 描述品質規則 | `persona_description_rules.txt`（各處讀同一個檔） |
 | 人格素描的角色設定 | 疊在 `personality_extraction_prompt.json` 的 `system_prompt` 之上 |
@@ -107,6 +107,13 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 ## 程式碼
 
 - 註解用繁體中文，寫「為什麼」；不寫具體模型名稱或規格（模型會一直換）。
+- 模組開頭的說明照這個格式（2026-10-13 起；新寫、搬動的模組一定照做，舊的碰到再改）：
+  1. 一句話：這個模組做什麼。
+  2. 架構定位：在哪一層、能依賴什麼；上層（誰呼叫，寫種類與例子）；下層（呼叫誰）。
+  3. 介面：對外的函式各一行。
+  4. 規則：呼叫端要遵守的約定、不做的事。
+  5. 例外與決策：不收斂的例外寫在這；決策的理由與日期寫交接檔、這裡只留區塊 id。
+  範例：`src/utils/hot_files.py`。歷史敘述（「原本是…後來…」）不寫在程式裡。
 - async 裡的同步 DB 或檔案 I/O 丟到執行緒（`asyncio.to_thread`；persona agent 用 `run_db`）。音樂、Discord 心跳、插話都在同一個 event loop 上。
 - 新增欄位或改介面時，列出所有牽動點並逐一確認。
 - 細項設定放 `sys_settings/` 的 pydantic settings（frozen）；功能開關放 `settings/switches.json`（見共用元件表）。

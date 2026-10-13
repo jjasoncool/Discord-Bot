@@ -4,7 +4,7 @@
 只寫一個類別字（`wfrog_stock_decline = agree`）＝只填了類別、描述待填——使用者新表情多半這樣填，
 以前被當成描述 `agree`：聊天文字變成 `:agree:`、按反應時類別從描述推斷成 neutral，使用者的類別沒生效。
 
-**檔案改了就重讀**（`prompt_files.read_parsed` 看修改時間）：使用者會手動維護描述，以前只有
+**檔案改了就重讀**（`hot_files.read_parsed` 看修改時間）：使用者會手動維護描述，以前只有
 04:00 偵測到新表情時才重載，手改要等 bot 重啟才生效。
 
 以前 `emoji_text_utils`（描述）、`reaction_classifier`（情緒類別）、`personality_extractor`（名稱清單）
@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from llm.prompt import prompt_files
+from utils import hot_files
 from utils.safe_write import replace_text
 
 logger = logging.getLogger(__name__)
@@ -75,12 +75,12 @@ def parse_text(raw: str) -> dict[str, EmojiEntry]:
 
 def entries() -> dict[str, EmojiEntry]:
     """名稱 → 字典項目（含待填的佔位）。檔案修改時間變了就重讀。"""
-    return prompt_files.read_parsed(EMOJI_DICT_PATH, parse=parse_text, label="emoji 字典") or {}
+    return hot_files.read_parsed(EMOJI_DICT_PATH, parse=parse_text, label="emoji 字典") or {}
 
 
 def reload() -> int:
     """強制重讀（修改時間解析度不夠時的保險）。回傳項目數。"""
-    prompt_files.forget(EMOJI_DICT_PATH)
+    hot_files.forget(EMOJI_DICT_PATH)
     return len(entries())
 
 
@@ -107,7 +107,7 @@ def fill(name: str, description: str, category: Optional[str], *, backup_dir: st
     else:
         lines = _append_to_ai_section(lines, _format(name, description, category))
     replace_text(path, "\n".join(lines), backup_dir=backup_dir, keep=backup_keep)
-    prompt_files.forget(path)
+    hot_files.forget(path)
     return True
 
 

@@ -75,9 +75,9 @@ def load_description_rules() -> str:
     讀檔失敗時回空字串而非拋錯：少了這段規則描述品質會變差，但整個 04:00 排程
     不該因為一個附加檔案不見就停擺。
     """
-    from llm.prompt import prompt_files
+    from utils import hot_files
 
-    return prompt_files.read_text(_DESCRIPTION_RULES_PATH, label="描述品質規則")
+    return hot_files.read_text(_DESCRIPTION_RULES_PATH, label="描述品質規則")
 
 
 def _get_db_conn():

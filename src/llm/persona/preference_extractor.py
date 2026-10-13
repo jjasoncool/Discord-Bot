@@ -18,7 +18,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from llm.prompt import prompt_files
+from utils import hot_files
 from llm.storage.member_profile_store import get_member_profile_store
 from services.llm_service import LLMService
 from sys_settings.llm_settings import AmbientChatSettings
@@ -38,7 +38,7 @@ def _get_llm() -> LLMService:
 
 def _load_extractor_prompt() -> str:
     """讀抽取守門 prompt（mtime 快取）；缺檔回空字串（呼叫端會略過抽取）。"""
-    return prompt_files.read_text(
+    return hot_files.read_text(
         _SETTINGS.extractor_prompt_path, label="preference extractor prompt"
     )
 

@@ -82,9 +82,9 @@ def current() -> Switches:
     """目前的開關（檔案改了才重新解析）；沒有檔案或讀不到時全部用預設。"""
     global _missing_warned
     # 用到時才匯入：sys_settings 要能被 llm 底下的模組匯入（之後搬開關時），在模組層匯入 llm 會互相匯入
-    from llm.prompt import prompt_files
+    from utils import hot_files
 
-    value = prompt_files.read_parsed(SWITCHES_PATH, parse=_parse, label="功能開關", missing_ok=True)
+    value = hot_files.read_parsed(SWITCHES_PATH, parse=_parse, label="功能開關", missing_ok=True)
     if isinstance(value, Switches):
         _missing_warned = False
         return value

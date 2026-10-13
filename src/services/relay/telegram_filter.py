@@ -34,7 +34,7 @@ from typing import Iterable, Optional, Sequence
 from llm.client import lemonade_gate
 from llm.client.http_client import LlmConnectionError, LlmTimeoutError
 from llm.preprocess.vision_image import extract_key_frames, fit_for_vision, video_key_frames
-from llm.prompt import prompt_files
+from utils import hot_files
 from llm.prompt.answer_line import answer_lines, final_line
 from sys_settings import switches
 from sys_settings.telegram_relay_settings import TelegramFilterSettings
@@ -172,7 +172,7 @@ def _user_message(text: str, image_count: int) -> str:
 
 
 async def _ask_model(text: str, images: list[bytes], trace_id: str) -> str:
-    system = prompt_files.read_text(_SETTINGS.prompt_path, label="Telegram 過濾 prompt")
+    system = hot_files.read_text(_SETTINGS.prompt_path, label="Telegram 過濾 prompt")
     if not system:
         raise RuntimeError("讀不到 prompt")
     llm = _get_llm()

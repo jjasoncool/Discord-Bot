@@ -9,6 +9,7 @@ import threading
 import discord
 
 from utils.safe_write import replace_text
+from utils import hot_files
 
 # 獲取 logger
 logger = logging.getLogger(__name__)
@@ -119,7 +120,6 @@ class ChannelConfig:
     """
     DEFAULT_ID = 1234567890  # 預設佔位符 ID
     #: {config_file: (修改時間 ns, 設定)}
-    _cache: dict = {}
     #: 同一個行程裡的寫入排隊（讀檔、改、寫回這三步不能交錯）
     _write_lock = threading.Lock()
     BACKUP_DIR = "/logs/config_backup"
@@ -127,26 +127,25 @@ class ChannelConfig:
 
     @staticmethod
     def load_config(config_file="config.json", caller="unknown") -> dict:
-        """讀取完整設定檔（檔案沒改就用快取）；回傳複本。讀不到時回上次的正確內容，從來沒讀到過就回空 dict。"""
-        try:
-            mtime_ns = os.stat(config_file).st_mtime_ns
-        except FileNotFoundError:
+        """讀取完整設定檔（檔案沒改就用快取）；回傳複本。讀不到時回上次的正確內容，從來沒讀到過就回空 dict。
+
+        快取與「壞檔沿用上次」在 `utils.hot_files`（和 prompt、字典、開關同一份機制）；這裡只負責驗證最外層是物件、
+        附上呼叫者記 log、回複本。"""
+        if not os.path.exists(config_file):
             logger.warning(f"配置文件 {config_file} 不存在，回傳空設定 (調用者: {caller})")
             return {}
-        cached = ChannelConfig._cache.get(config_file)
-        if cached is not None and cached[0] == mtime_ns:
-            return copy.deepcopy(cached[1])
-        logger.debug(f"從磁碟讀取設定檔: {config_file} (調用者: {caller})")
-        try:
-            with open(config_file, "r", encoding="utf-8") as f:
-                config = json.load(f)
+
+        def parse(raw: str) -> dict:
+            config = json.loads(raw)
             if not isinstance(config, dict):
                 raise ValueError("最外層不是 JSON 物件")
-        except Exception as e:
-            logger.error(f"無法讀取 {config_file}（沿用上次讀到的內容）：{e} (調用者: {caller})")
-            return copy.deepcopy(cached[1]) if cached is not None else {}
-        ChannelConfig._cache[config_file] = (mtime_ns, config)
-        return copy.deepcopy(config)
+            logger.debug(f"從磁碟讀取設定檔: {config_file} (調用者: {caller})")
+            return config
+
+        config = hot_files.read_parsed(
+            config_file, parse=parse, label="設定檔", missing_ok=True,
+            on_error=lambda exc: logger.error(f"無法讀取 {config_file}（沿用上次讀到的內容）：{exc} (調用者: {caller})"))
+        return copy.deepcopy(config) if config is not None else {}
 
     @staticmethod
     def _update_sync(apply, config_file: str, caller: str) -> dict:
@@ -168,7 +167,7 @@ class ChannelConfig:
             except OSError as e:
                 # 備份目錄不能寫、磁碟滿：原檔不動，讓呼叫端回覆使用者（不然按了沒反應）
                 raise ConfigWriteError(f"{config_file} 寫入失敗，沒有寫入：{e}") from e
-            ChannelConfig._cache[config_file] = (path.stat().st_mtime_ns, config)
+            hot_files.forget(config_file)   # 剛寫的內容下次讀一定重新載入（修改時間解析度不夠時的保險）
             logger.info(f"設定檔已寫入: {config_file} (調用者: {caller})")
             return copy.deepcopy(config)
 

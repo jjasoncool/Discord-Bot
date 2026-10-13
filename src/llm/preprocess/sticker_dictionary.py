@@ -13,7 +13,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from llm.prompt import prompt_files
+from utils import hot_files
 from utils.safe_write import replace_text
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ def parse_text(raw: str) -> dict[int, str]:
 
 def entries() -> dict[int, str]:
     """貼圖 ID → 「名稱｜描述」。還沒寫過（檔案不存在）時是空的。"""
-    return prompt_files.read_parsed(STICKER_DICT_PATH, parse=parse_text, label="貼圖字典", missing_ok=True) or {}
+    return hot_files.read_parsed(STICKER_DICT_PATH, parse=parse_text, label="貼圖字典", missing_ok=True) or {}
 
 
 def lookup(sticker_id: int) -> Optional[str]:
@@ -57,5 +57,5 @@ def add(sticker_id: int, name: str, description: str, *, backup_dir: str, backup
     if not raw.endswith("\n"):
         raw += "\n"
     replace_text(path, f"{raw}{int(sticker_id)} = {name}｜{description}\n", backup_dir=backup_dir, keep=backup_keep)
-    prompt_files.forget(path)
+    hot_files.forget(path)
     return True

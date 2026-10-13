@@ -23,7 +23,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from llm.prompt import prompt_files
+from utils import hot_files
 from sys_settings import switches
 
 
@@ -40,7 +40,7 @@ class SwitchesTests(unittest.TestCase):
         self.path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         st = self.path.stat()
         os.utime(self.path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))   # 確保修改時間不同
-        prompt_files.forget(self.path)
+        hot_files.forget(self.path)
 
     def test_missing_file_uses_defaults_and_warns_once(self):
         with mock.patch.object(switches, "_missing_warned", False):
@@ -51,7 +51,7 @@ class SwitchesTests(unittest.TestCase):
 
     def test_broken_json_uses_defaults_and_warns_once(self):
         self.path.write_text('{"telegram_filter_mode": "on",,}', encoding="utf-8")
-        prompt_files.forget(self.path)
+        hot_files.forget(self.path)
         with self.assertLogs("sys_settings.switches", "WARNING") as logs:
             for _ in range(3):
                 self.assertEqual(switches.current().telegram_filter_mode, "off")

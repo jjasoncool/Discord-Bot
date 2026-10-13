@@ -25,7 +25,7 @@ from typing import Any, Awaitable, Callable, Optional, Sequence, TypeVar
 from mcp.client.client import Client
 
 from llm.client.tool_calls import ToolArgumentError, ToolRunner, combine_runners, parse_arguments
-from llm.prompt import prompt_files
+from utils import hot_files
 from sys_settings.llm_settings import AskAIIntelSettings
 
 logger = logging.getLogger(__name__)
@@ -143,7 +143,7 @@ async def prepare_intel_session(*, question: str, settings: Optional[AskAIIntelS
     except Exception as exc:
         logger.warning("連不上情報搜尋服務（%s），這次不查：%s: %s", settings.mcp_url, type(exc).__name__, exc)
         return None
-    instructions = prompt_files.read_text(settings.rules_path, label="情報查詢規則")
+    instructions = hot_files.read_text(settings.rules_path, label="情報查詢規則")
     return IntelSearchSession(target, list(listed.tools), question=question, settings=settings,
                               instructions=instructions)
 

@@ -23,7 +23,7 @@ from typing import Any, Optional
 from llm.preprocess import emoji_dictionary, sticker_cache, sticker_dictionary
 from llm.preprocess.external_emoji import custom_emojis, sticker_image_url
 from llm.preprocess.vision_image import download_images
-from llm.prompt import prompt_files
+from utils import hot_files
 from llm.prompt.answer_line import final_line
 from sys_settings.llm_settings import EmojiAutofillSettings
 from sys_settings.time_settings import APP_TZ
@@ -158,7 +158,7 @@ def _get_llm():
 
 
 async def _ask_model(t: Target, image: str, context: list[str]) -> str:
-    system = prompt_files.read_text(_SETTINGS.prompt_path, label="看圖補字典 prompt")
+    system = hot_files.read_text(_SETTINGS.prompt_path, label="看圖補字典 prompt")
     if not system:
         return ""
     kind = "表情" if t.kind == "emoji" else "貼圖"

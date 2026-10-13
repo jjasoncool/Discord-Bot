@@ -28,6 +28,7 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from utils.utils import ChannelConfig, ConfigWriteError
+from utils import hot_files  # noqa: E402
 
 
 class ConfigTestBase(unittest.IsolatedAsyncioTestCase):
@@ -40,7 +41,7 @@ class ConfigTestBase(unittest.IsolatedAsyncioTestCase):
         patcher = mock.patch.object(ChannelConfig, "BACKUP_DIR", str(self.backup))
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.addCleanup(ChannelConfig._cache.pop, str(self.path), None)
+        self.addCleanup(hot_files.forget, str(self.path))   # 快取在 hot_files
 
     def write(self, data, raw=None):
         self.path.write_text(raw if raw is not None else json.dumps(data, indent=2), encoding="utf-8")
@@ -79,6 +80,14 @@ class ConfigTests(ConfigTestBase):
         with self.assertLogs("utils.utils", "ERROR"):
             self.assertEqual(self.load()["a_channel_id"], 1, "沿用上次讀到的正確內容")
 
+    async def test_write_is_visible_even_if_mtime_did_not_move(self):
+        # 同一瞬間改兩次、檔案系統的修改時間解析度不夠時，mtime 可能沒變；寫完一定要丟掉快取，不然讀到的是舊的
+        before = os.stat(self.path).st_mtime_ns
+        self.load()
+        await ChannelConfig.update_config(lambda c: c.__setitem__("b_channel_id", 2), str(self.path), caller="test")
+        os.utime(self.path, ns=(before, before))
+        self.assertEqual(self.load()["b_channel_id"], 2, "剛寫進去的內容要讀得到")
+
     async def test_reads_are_copies(self):
         self.load()["role_mapping"]["Trader"].append(99)
         self.assertEqual(self.load()["role_mapping"]["Trader"], [5])
@@ -112,7 +121,7 @@ class ConfigTests(ConfigTestBase):
 
     async def test_missing_file_reads_empty(self):
         self.path.unlink()
-        ChannelConfig._cache.pop(str(self.path), None)
+        hot_files.forget(str(self.path))
         self.assertEqual(self.load(), {})
 
 

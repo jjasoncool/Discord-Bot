@@ -81,7 +81,7 @@ _DESCRIPTION_RULES_PATH = "/app/settings/prompts/persona_description_rules.txt"
 
 
 def load_prompts() -> dict[str, str]:
-    """組裝 system prompt（三層疊加）。各層由 `prompt_files` 做 mtime 快取，改檔即生效。
+    """組裝 system prompt（三層疊加）。各層由 `hot_files` 做 mtime 快取，改檔即生效。
 
     **刻意不自己重寫共用規則**——原本這支的 prompt 把角色設定、繁中限制、不編造、
     自訂表情規則、描述品質規則全部複製一份，13 條核心規則與 production 萃取完全重疊。
@@ -100,16 +100,16 @@ def load_prompts() -> dict[str, str]:
 
     回傳 `{"system_prompt", "user_prompt_template", "final_prompt"}`。
     """
-    from llm.prompt import prompt_files
+    from utils import hot_files
     from llm.persona.personality_extractor import _load_extract_prompts
 
-    own = prompt_files.read_json(_PROMPT_PATH, label="persona agent prompt")
+    own = hot_files.read_json(_PROMPT_PATH, label="persona agent prompt")
     if own is None:
         raise FileNotFoundError(f"找不到或無法解析 persona agent prompt: {_PROMPT_PATH}")
 
     layers = [
         _load_extract_prompts()["system_prompt"].strip(),
-        prompt_files.read_text(_DESCRIPTION_RULES_PATH, label="描述品質規則"),
+        hot_files.read_text(_DESCRIPTION_RULES_PATH, label="描述品質規則"),
         own["system_layer"].strip(),
     ]
     return {
