@@ -155,7 +155,7 @@ class WiredInTests(unittest.TestCase):
     def test_ambient_and_askai_use_it(self):
         from llm.ambient import ambient_reply
         self.assertIn("expand_tweets(content)", inspect.getsource(ambient_reply._media_context))
-        src = inspect.getsource(ambient_reply._run_one_ambient_pass)
+        src = inspect.getsource(ambient_reply._gather_inputs)
         self.assertIn("await _media_context(replied_msg)", src)
         self.assertIn("await _media_context(message)", src)
         with open(os.path.join(SRC_DIR, "commands", "llm_commands.py"), encoding="utf-8") as f:

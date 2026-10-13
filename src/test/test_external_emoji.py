@@ -117,7 +117,7 @@ class WiredInTests(unittest.TestCase):
         media = inspect.getsource(ambient_reply._media_context)
         self.assertIn("expand_tweets(content)", media)
         self.assertIn("external_emoji_context(content", media)
-        main = inspect.getsource(ambient_reply._run_one_ambient_pass)
+        main = inspect.getsource(ambient_reply._gather_inputs)
         self.assertIn("await _media_context(replied_msg)", main)
         self.assertIn("await _media_context(message)", main)
         with open(os.path.join(SRC_DIR, "commands", "llm_commands.py"), encoding="utf-8") as f:

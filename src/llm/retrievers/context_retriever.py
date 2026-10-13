@@ -1,4 +1,27 @@
-"""LLM 對話上下文檢索。"""
+"""給 /askai 與插話撈「上下文」：這個頻道最近與相關的聊天行，和在場、被問到的人的人物卡。
+
+架構定位：服務層（`llm/retrievers`）。上層：功能層與介面層（/askai 的 `commands.llm_commands`、插話的
+`llm.ambient.ambient_reply`）。下層：pgvector（`LLMServiceSettings.pgvector_connect`）、LlamaIndex 向量索引、
+`llm.persona.persona_card_builder`（卡片）、`llm.persona.member_names`（名字對照）、`utils.rank_fusion`（混合排名）。
+不 import discord：Discord 物件由上層傳進來，這裡只讀屬性（守衛 `test_layering`）。
+
+介面：
+- `retrieve_discord_context(channel, question, ...)`：頻道近期訊息 → 最近幾則＋關鍵字與向量混合挑出的相關幾則，
+  bot 自己的回覆另一段；回 (context, bot_context, meta)。
+- `retrieve_rag_context_sync(question, guild_id, requester, participants, logger, top_k, mentioned_user_ids, member_names)`：
+  人物卡。四段：`_parse_profile_question`（誰在問、提到誰、在場誰）→ `_collect_profile_candidates`
+  （三路 SQL：本人、在場的人、提到的人與別名；一路語意 `_vector_profile_route`）→ `_dedup_profile_docs`
+  → `_profile_cards_context`（每人一張卡、裁到額度）；回 (context, meta)，meta 是各段的計數。
+- `search_chat(...)`：聊天紀錄的混合檢索（關鍵字＋向量，RRF 合併）。
+
+規則：
+- 同步、會碰 DB：呼叫端放到執行緒（`asyncio.to_thread`／executor）。
+- 每一路檢索失敗只記 WARNING、其他路照常；向量索引跨呼叫共用（`_VECTOR_INDEX_CACHE`），不每次重建。
+- 呼叫端若已把問句裡的 <@id> 換成名字，`mentioned_user_ids` 要顯式傳入，這裡重抽會抽不到。
+
+例外與決策：去重後的排序只認本人 → 提到的人 → 語意，在場者那一路沒有名次排最後（現況，M4d 拆段時沒改）；
+決策與日期見交接檔 `askai-context` 相關區塊。
+"""
 
 from __future__ import annotations
 
@@ -8,6 +31,7 @@ import logging
 import json
 import threading
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import timezone
 from typing import TYPE_CHECKING, Any
 
@@ -701,8 +725,11 @@ def _retrieve_rag_context_impl(
     mentioned_user_ids: list[str] | None = None,
     member_names: dict[str, list[str]] | None = None,
 ) -> tuple[list[dict[str, str]], dict[str, int | bool | str]]:
-    """檢索 member_profile RAG（guild scoped + identity aware + persona cards）。"""
+    """檢索 member_profile RAG（guild scoped + identity aware + persona cards）。
 
+    四段：解析問句（誰在問、提到誰、在場誰）→ 四路撈候選（三路 SQL、一路語意）→ 去重排序
+    → 組卡片並裁到額度。每段各一個函式，`meta` 一路帶著記計數。
+    """
     meta: dict[str, int | bool | str] = {
         "enabled": True,
         "intent": "general",
@@ -725,288 +752,259 @@ def _retrieve_rag_context_impl(
     if not question.strip() or not guild_id:
         logger.info("/askai member-profile RAG skipped: empty question or missing guild")
         return [], meta
-
     source = HYBRID_RETRIEVAL_SETTINGS.get_source("member_profile")
     if source is None:
         meta["enabled"] = False
         logger.info("/askai member-profile RAG skipped: source disabled")
         return [], meta
 
-    intent = classify_persona_intent(question)
-    meta["intent"] = intent
+    q = _parse_profile_question(question, requester_user_id, participant_user_ids, mentioned_user_ids, member_names)
+    meta["intent"] = q.intent
+    meta["participant_count"] = len(q.participant_ids)
 
-    table_name = source.table_name
-    physical_table = HYBRID_RETRIEVAL_SETTINGS.physical_table(table_name)
+    physical_table = HYBRID_RETRIEVAL_SETTINGS.physical_table(source.table_name)
+    collected = _collect_profile_candidates(q, guild_id, physical_table, source.table_name, top_k, logger, meta)
+    dedup_docs = _dedup_profile_docs(collected)
+    meta["dedup_hits"] = len(dedup_docs)
+    _count_profile_matches(dedup_docs, q, meta)
+
+    rag_context = _profile_cards_context(dedup_docs, q, top_k, member_names, meta)
+    logger.info(
+        "/askai member-profile RAG stats: guild=%s requester=%s intent=%s participant=%s alias_hints=%s sql_identity=%s sql_participant=%s sql_alias=%s vector=%s dedup=%s cards=%s self=%s target=%s alias=%s sent=%s",
+        guild_id, requester_user_id, q.intent, meta["participant_count"], len(q.alias_hints),
+        meta["sql_identity_hits"], meta["sql_participant_hits"], meta["sql_alias_hits"], meta["vector_hits"],
+        meta["dedup_hits"], meta["cards_sent"], meta["self_match_count"], meta["target_match_count"],
+        meta["alias_match_count"], meta["sent_count"],
+    )
+    if meta["sent_count"] == 0:
+        logger.info(
+            "/askai member-profile RAG miss: guild=%s requester=%s reason=no_docs_after_filter",
+            guild_id, requester_user_id,
+        )
+    return rag_context, meta
+
+
+@dataclass(frozen=True)
+class _ProfileQuestion:
+    """問句解析結果：誰在問、問句裡提到誰（<@id>、Discord 名字、別名片段）、在場誰。"""
+    question: str
+    intent: str
+    requester_user_id: int | None
+    alias_hints: list[str]
+    mentioned_user_ids: list[str]
+    named_ids: list[str]          # 提到的人：<@id> 與 Discord 名字對到的，去重
+    participant_ids: list[str]
+
+
+def _parse_profile_question(
+    question: str, requester_user_id: int | None, participant_user_ids: list[int] | None,
+    mentioned_user_ids: list[str] | None, member_names: dict[str, list[str]] | None,
+) -> _ProfileQuestion:
     alias_hints = expand_alias_candidates(question)
-    # mentioned_user_ids 優先採 caller 傳入（從原始 <@id> 抽出）；否則從 question 重抽
+    # mentioned_user_ids 優先採 caller 傳入（從原始 <@id> 抽出）；否則從 question 重抽——
     # caller 若已將 question 替換成 display_name，重抽會失敗，必須顯式傳入
     if mentioned_user_ids is None:
         mentioned_user_ids = extract_mentioned_user_ids(question)
-    # 問句裡的詞對到 Discord 名字的人（自介、印象的別名由下面 Stage 2 的 SQL 比對）
+    # 問句裡的詞對到 Discord 名字的人（自介、印象的別名由別名那一路的 SQL 比對）
     alias_user_ids = match_members(member_names or {}, alias_hints)
     participant_ids = [str(uid) for uid in (participant_user_ids or []) if uid]
     participant_ids = list(dict.fromkeys(participant_ids))[:PERSONA_MAX_PARTICIPANTS]
-    meta["participant_count"] = len(participant_ids)
+    return _ProfileQuestion(
+        question=question, intent=classify_persona_intent(question), requester_user_id=requester_user_id,
+        alias_hints=alias_hints, mentioned_user_ids=list(mentioned_user_ids),
+        named_ids=list(dict.fromkeys([*mentioned_user_ids, *alias_user_ids])),
+        participant_ids=participant_ids,
+    )
 
+
+def _rows_to_docs(rows, source: str) -> list[dict[str, Any]]:
+    """SQL 撈回的 (id, text, metadata_) 轉成候選文件；metadata_ 可能是 JSON 字串。"""
+    docs = []
+    for row_id, row_text, row_meta in rows:
+        parsed_meta = row_meta
+        if isinstance(parsed_meta, str):
+            parsed_meta = json.loads(parsed_meta)
+        docs.append({
+            "db_id": row_id,
+            "text": row_text or "",
+            "metadata": parsed_meta if isinstance(parsed_meta, dict) else {},
+            "source": source,
+        })
+    return docs
+
+
+def _sql_profile_route(sql: str, params, source: str, label: str, logger: logging.Logger) -> list[dict[str, Any]]:
+    """跑一路 SQL 候選查詢；失敗只記 WARNING、回空清單，其他路照常。"""
+    try:
+        with _pgvector_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return _rows_to_docs(cur.fetchall(), source)
+    except Exception as exc:
+        logger.warning("member-profile SQL %s retrieval 失敗: %s", label, exc)
+        return []
+
+
+_PROFILE_WHERE = """
+    WHERE metadata_->>'doc_type' = 'member_profile'
+      AND metadata_->>'guild_id' = %s
+"""
+
+
+def _collect_profile_candidates(
+    q: _ProfileQuestion, guild_id: int, physical_table: str, table_name: str,
+    top_k: int, logger: logging.Logger, meta: dict,
+) -> list[dict[str, Any]]:
+    """四路撈候選：發問者本人 → 在場的人 → 問句提到的人與別名 → 語意檢索。各路有沒有查看條件；計數記進 meta。"""
     collected: list[dict[str, Any]] = []
+    # 本人：自介與 AI 觀察看 author_id，別人寫給他的印象看 target_user_id
+    kinds_of = """
+          (
+                (metadata_->>'profile_kind' = 'intro_profile' AND metadata_->>'author_id' = {p})
+             OR (metadata_->>'profile_kind' = 'auto_personality' AND metadata_->>'author_id' = {p})
+             OR (metadata_->>'profile_kind' = 'impression' AND metadata_->>'target_user_id' = {p})
+          )
+    """
+    if psycopg2 is not None and q.requester_user_id is not None:
+        sql = (f"SELECT id, text, metadata_ FROM {physical_table}" + _PROFILE_WHERE
+               + " AND " + kinds_of.format(p="%s") + " ORDER BY id DESC LIMIT %s")
+        rid = str(q.requester_user_id)
+        docs = _sql_profile_route(sql, (str(guild_id), rid, rid, rid, max(3, top_k)), "sql_identity", "identity", logger)
+        meta["sql_identity_hits"] = len(docs)
+        collected += docs
 
-    # Stage 1: 高精度 identity SQL
-    if psycopg2 is not None and requester_user_id is not None:
-        try:
-            with _pgvector_connect() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        f"""
-                        SELECT id, text, metadata_
-                        FROM {physical_table}
-                        WHERE metadata_->>'doc_type' = 'member_profile'
-                          AND metadata_->>'guild_id' = %s
-                          AND (
-                                (metadata_->>'profile_kind' = 'intro_profile' AND metadata_->>'author_id' = %s)
-                             OR (metadata_->>'profile_kind' = 'auto_personality' AND metadata_->>'author_id' = %s)
-                             OR (metadata_->>'profile_kind' = 'impression' AND metadata_->>'target_user_id' = %s)
-                          )
-                        ORDER BY id DESC
-                        LIMIT %s
-                        """,
-                        (
-                            str(guild_id),
-                            str(requester_user_id),
-                            str(requester_user_id),
-                            str(requester_user_id),
-                            max(3, top_k),
-                        ),
-                    )
-                    for row_id, row_text, row_meta in cur.fetchall():
-                        parsed_meta = row_meta
-                        if isinstance(parsed_meta, str):
-                            parsed_meta = json.loads(parsed_meta)
-                        collected.append(
-                            {
-                                "db_id": row_id,
-                                "text": row_text or "",
-                                "metadata": parsed_meta if isinstance(parsed_meta, dict) else {},
-                                "source": "sql_identity",
-                            }
-                        )
-            meta["sql_identity_hits"] = len(collected)
-        except Exception as exc:
-            logger.warning("member-profile SQL identity retrieval 失敗，改走 vector: %s", exc)
+    if psycopg2 is not None and q.participant_ids:
+        sql = (f"SELECT id, text, metadata_ FROM {physical_table}" + _PROFILE_WHERE
+               + " AND " + kinds_of.format(p="ANY(%s)") + " ORDER BY id DESC LIMIT %s")
+        ids = q.participant_ids
+        docs = _sql_profile_route(sql, (str(guild_id), ids, ids, ids, max(8, top_k + 3)), "sql_participant", "participant", logger)
+        meta["sql_participant_hits"] = len(docs)
+        collected += docs
 
-    # Stage 0: 聊天參與者關聯（除了 requester 以外的近期主角）
-    if psycopg2 is not None and participant_ids:
-        try:
-            with _pgvector_connect() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        f"""
-                        SELECT id, text, metadata_
-                        FROM {physical_table}
-                        WHERE metadata_->>'doc_type' = 'member_profile'
-                          AND metadata_->>'guild_id' = %s
-                          AND (
-                                (metadata_->>'profile_kind' = 'intro_profile' AND metadata_->>'author_id' = ANY(%s))
-                             OR (metadata_->>'profile_kind' = 'auto_personality' AND metadata_->>'author_id' = ANY(%s))
-                             OR (metadata_->>'profile_kind' = 'impression' AND metadata_->>'target_user_id' = ANY(%s))
-                          )
-                        ORDER BY id DESC
-                        LIMIT %s
-                        """,
-                        (
-                            str(guild_id),
-                            participant_ids,
-                            participant_ids,
-                            participant_ids,
-                            max(8, top_k + 3),
-                        ),
-                    )
-                    part_rows = cur.fetchall()
-                    for row_id, row_text, row_meta in part_rows:
-                        parsed_meta = row_meta
-                        if isinstance(parsed_meta, str):
-                            parsed_meta = json.loads(parsed_meta)
-                        collected.append(
-                            {
-                                "db_id": row_id,
-                                "text": row_text or "",
-                                "metadata": parsed_meta if isinstance(parsed_meta, dict) else {},
-                                "source": "sql_participant",
-                            }
-                        )
-            meta["sql_participant_hits"] = len(part_rows)
-        except Exception as exc:
-            logger.warning("member-profile SQL participant retrieval 失敗: %s", exc)
+    if psycopg2 is not None and (q.alias_hints or q.named_ids):
+        like_values = [f"%{hint}%" for hint in q.alias_hints] or ["%__never_match__%"]
+        placeholders = ",".join(["%s"] * len(like_values))
+        # 按 profile_kind 分流：自介／AI 觀察用 author_id（被提到的人本人），印象用 target_user_id
+        # （別人寫給他的）。不用扁平 author_id ANY，避免「被提到的人寫給別人的印象」被歸到別人卡裡。
+        sql = (f"SELECT id, text, metadata_ FROM {physical_table}" + _PROFILE_WHERE + f"""
+          AND (
+                metadata_->>'alias' ILIKE ANY(ARRAY[{placeholders}])
+             OR metadata_->>'target_alias' ILIKE ANY(ARRAY[{placeholders}])
+             OR (metadata_->>'profile_kind' IN ('intro_profile', 'auto_personality')
+                 AND metadata_->>'author_id' = ANY(%s))
+             OR (metadata_->>'profile_kind' = 'impression'
+                 AND metadata_->>'target_user_id' = ANY(%s))
+          )
+        ORDER BY id DESC
+        LIMIT %s
+        """)
+        named = q.named_ids or ["0"]
+        params = [str(guild_id), *like_values, *like_values, named, named, max(6, top_k + 2)]
+        docs = _sql_profile_route(sql, params, "sql_alias", "alias", logger)
+        meta["sql_alias_hits"] = len(docs)
+        collected += docs
 
-    # Stage 2: alias SQL 輔助
-    named_ids = list(dict.fromkeys([*(mentioned_user_ids or []), *alias_user_ids]))
-    if psycopg2 is not None and (alias_hints or named_ids):
-        try:
-            with _pgvector_connect() as conn:
-                with conn.cursor() as cur:
-                    like_values = [f"%{hint}%" for hint in alias_hints] or ["%__never_match__%"]
-                    placeholders = ",".join(["%s"] * len(like_values))
-                    # Stage 2 按 profile_kind 分流：
-                    # - intro_profile / auto_personality 用 author_id（被 tag 者本人寫的 / AI 觀察的）
-                    # - impression 用 target_user_id（別人寫給被 tag 者的印象）
-                    # 不再用扁平 author_id ANY，避免「被 tag 者寫給別人的印象」被歸到別人卡裡
-                    cur.execute(
-                        f"""
-                        SELECT id, text, metadata_
-                        FROM {physical_table}
-                        WHERE metadata_->>'doc_type' = 'member_profile'
-                          AND metadata_->>'guild_id' = %s
-                          AND (
-                                metadata_->>'alias' ILIKE ANY(ARRAY[{placeholders}])
-                             OR metadata_->>'target_alias' ILIKE ANY(ARRAY[{placeholders}])
-                             OR (metadata_->>'profile_kind' IN ('intro_profile', 'auto_personality')
-                                 AND metadata_->>'author_id' = ANY(%s))
-                             OR (metadata_->>'profile_kind' = 'impression'
-                                 AND metadata_->>'target_user_id' = ANY(%s))
-                          )
-                        ORDER BY id DESC
-                        LIMIT %s
-                        """,
-                        [
-                            str(guild_id),
-                            *like_values,
-                            *like_values,
-                            named_ids or ["0"],
-                            named_ids or ["0"],
-                            max(6, top_k + 2),
-                        ],
-                    )
-                    alias_rows = cur.fetchall()
-                    for row_id, row_text, row_meta in alias_rows:
-                        parsed_meta = row_meta
-                        if isinstance(parsed_meta, str):
-                            parsed_meta = json.loads(parsed_meta)
-                        collected.append(
-                            {
-                                "db_id": row_id,
-                                "text": row_text or "",
-                                "metadata": parsed_meta if isinstance(parsed_meta, dict) else {},
-                                "source": "sql_alias",
-                            }
-                        )
-            meta["sql_alias_hits"] = len(alias_rows)
-        except Exception as exc:
-            logger.warning("member-profile SQL alias retrieval 失敗: %s", exc)
+    collected += _vector_profile_route(q.question, guild_id, table_name, top_k, logger, meta)
+    return collected
 
-    # Stage 3: 語意檢索（LlamaIndex PGVectorStore）
-    vector_nodes: list[Any] = []
-    if VectorStoreIndex is not None and PGVectorStore is not None:
-        try:
-            index = _get_or_build_vector_index(table_name, logger)
-            if index is not None:
-                retriever = index.as_retriever(
-                    similarity_top_k=max(top_k * 2, HYBRID_RETRIEVAL_SETTINGS.hybrid_candidate_pool // 2)
-                )
-                vector_nodes = retriever.retrieve(question)
-                meta["vector_hits"] = len(vector_nodes)
-                for node in vector_nodes:
-                    md = node.metadata if isinstance(node.metadata, dict) else {}
-                    if str(md.get("guild_id", "")) != str(guild_id):
-                        continue
-                    # node.metadata 不含 ref_doc_id（LlamaIndex 把它放在 node 本身），要從 node 取，
-                    # 才會跟 SQL 撈到的同一份文件去重——否則同一則印象會在卡片裡出現兩次
-                    ref_doc_id = getattr(getattr(node, "node", node), "ref_doc_id", None)
-                    collected.append(
-                        {
-                            "db_id": ref_doc_id or md.get("ref_doc_id") or md.get("doc_id") or md.get("document_id") or "",
-                            "text": node.text or "",
-                            "metadata": md,
-                            "source": "vector",
-                        }
-                    )
-        except Exception as exc:
-            logger.warning("member-profile vector retrieval 失敗（保留 SQL 結果）: %s", exc)
 
+def _vector_profile_route(
+    question: str, guild_id: int, table_name: str, top_k: int, logger: logging.Logger, meta: dict,
+) -> list[dict[str, Any]]:
+    """語意檢索（LlamaIndex PGVectorStore）：撈得比額度寬，只收本伺服器的；失敗保留 SQL 結果。"""
+    if VectorStoreIndex is None or PGVectorStore is None:
+        return []
+    docs: list[dict[str, Any]] = []
+    try:
+        index = _get_or_build_vector_index(table_name, logger)
+        if index is None:
+            return []
+        retriever = index.as_retriever(
+            similarity_top_k=max(top_k * 2, HYBRID_RETRIEVAL_SETTINGS.hybrid_candidate_pool // 2)
+        )
+        vector_nodes = retriever.retrieve(question)
+        meta["vector_hits"] = len(vector_nodes)
+        for node in vector_nodes:
+            md = node.metadata if isinstance(node.metadata, dict) else {}
+            if str(md.get("guild_id", "")) != str(guild_id):
+                continue
+            # node.metadata 不含 ref_doc_id（LlamaIndex 把它放在 node 本身），要從 node 取，
+            # 才會跟 SQL 撈到的同一份文件去重——否則同一則印象會在卡片裡出現兩次
+            ref_doc_id = getattr(getattr(node, "node", node), "ref_doc_id", None)
+            docs.append({
+                "db_id": ref_doc_id or md.get("ref_doc_id") or md.get("doc_id") or md.get("document_id") or "",
+                "text": node.text or "",
+                "metadata": md,
+                "source": "vector",
+            })
+    except Exception as exc:
+        logger.warning("member-profile vector retrieval 失敗（保留 SQL 結果）: %s", exc)
+    return docs
+
+
+# 同一份文件兩路都撈到時留哪一筆：精度高的來源（卡片的來源加分也看它）
+_DEDUP_PRIORITY = {"sql_identity": 4, "sql_alias": 3, "sql_participant": 2, "vector": 1}
+# 去重後的排序：本人 → 提到的人 → 語意；沒列的（在場者那一路）排最後，同來源新的在前
+_SORT_PRIORITY = {"sql_identity": 0, "sql_alias": 1, "vector": 2}
+
+
+def _dedup_profile_docs(collected: list[dict[str, Any]]) -> list[dict[str, Any]]:
     dedup: dict[str, dict[str, Any]] = {}
     for item in collected:
         md = item.get("metadata") or {}
         dedup_key = str(
-            md.get("ref_doc_id")
-            or md.get("doc_id")
-            or md.get("document_id")
-            or item.get("db_id")
-            or hash(item.get("text", ""))
+            md.get("ref_doc_id") or md.get("doc_id") or md.get("document_id")
+            or item.get("db_id") or hash(item.get("text", ""))
         )
-        if dedup_key not in dedup:
-            dedup[dedup_key] = item
-            continue
-
-        # 保留更高精度來源（sql_participant 排在 vector 之上：同一份文件兩路都撈到時，
-        # 留 SQL 那筆，卡片的來源加分才不會掉到 vector 的）
-        priority = {"sql_identity": 4, "sql_alias": 3, "sql_participant": 2, "vector": 1}
-        if priority.get(item.get("source", ""), 0) > priority.get(dedup[dedup_key].get("source", ""), 0):
+        kept = dedup.get(dedup_key)
+        if kept is None or _DEDUP_PRIORITY.get(item.get("source", ""), 0) > _DEDUP_PRIORITY.get(kept.get("source", ""), 0):
             dedup[dedup_key] = item
 
-    dedup_docs = list(dedup.values())
-    meta["dedup_hits"] = len(dedup_docs)
+    def _row_no(d) -> int:
+        db_id = str(d.get("db_id") or "")
+        return int(db_id) if db_id.isdigit() else 0
 
-    # 按優先度+新舊排序
-    source_priority = {"sql_identity": 0, "sql_alias": 1, "vector": 2}
-    dedup_docs.sort(key=lambda d: (source_priority.get(d.get("source", "vector"), 9), -int(d.get("db_id") or 0 if str(d.get("db_id") or "").isdigit() else 0)))
+    docs = list(dedup.values())
+    docs.sort(key=lambda d: (_SORT_PRIORITY.get(d.get("source", "vector"), 9), -_row_no(d)))
+    return docs
 
-    for doc in dedup_docs:
+
+def _count_profile_matches(docs: list[dict[str, Any]], q: _ProfileQuestion, meta: dict) -> None:
+    """統計撈到的文件是關於誰的（本人寫的、寫給本人的、對到問句別名的），只進 log 與 meta。"""
+    rid = str(q.requester_user_id) if q.requester_user_id is not None else None
+    for doc in docs:
         md = doc.get("metadata") or {}
-        author_id = str(md.get("author_id", ""))
-        target_user_id = str(md.get("target_user_id", ""))
         alias = str(md.get("alias", "") or md.get("target_alias", "")).strip()
-
-        if requester_user_id is not None and author_id == str(requester_user_id):
+        if rid is not None and str(md.get("author_id", "")) == rid:
             meta["self_match_count"] += 1
-        if requester_user_id is not None and target_user_id == str(requester_user_id):
+        if rid is not None and str(md.get("target_user_id", "")) == rid:
             meta["target_match_count"] += 1
-        if alias and any(h in normalize_alias_text(alias) for h in alias_hints):
+        if alias and any(h in normalize_alias_text(alias) for h in q.alias_hints):
             meta["alias_match_count"] += 1
 
+
+def _profile_cards_context(
+    docs: list[dict[str, Any]], q: _ProfileQuestion, top_k: int,
+    member_names: dict[str, list[str]] | None, meta: dict,
+) -> list[dict[str, str]]:
+    """候選文件 → 每人一張卡 → 給模型的 context 行（第一行是表頭）；多於額度只留最後幾張。"""
+    card_budget = min(max(1, top_k), PERSONA_MAX_CARDS)
     persona_cards = build_persona_cards(
-        docs=dedup_docs,
-        requester_user_id=requester_user_id,
-        participant_user_ids=participant_ids,
-        mentioned_user_ids=mentioned_user_ids,
-        intent=intent,
-        alias_hints=alias_hints,
-        max_cards=min(max(1, top_k), PERSONA_MAX_CARDS),
+        docs=docs,
+        requester_user_id=q.requester_user_id,
+        participant_user_ids=q.participant_ids,
+        mentioned_user_ids=q.mentioned_user_ids,
+        intent=q.intent,
+        alias_hints=q.alias_hints,
+        max_cards=card_budget,
         display_names=display_names(member_names),
     )
     meta["cards_generated"] = len(persona_cards)
-
     rag_context = format_persona_cards_for_context(persona_cards)
     meta["cards_sent"] = max(0, len(rag_context) - 1 if rag_context else 0)
-
     meta["selected_count_before_trim"] = len(rag_context)
-    card_budget = min(max(1, top_k), PERSONA_MAX_CARDS)
     if len(rag_context) > card_budget + 1:
         meta["trimmed_count"] = len(rag_context) - (card_budget + 1)
         rag_context = [rag_context[0], *rag_context[-card_budget:]]
-
     meta["sent_count"] = len(rag_context)
-    logger.info(
-        "/askai member-profile RAG stats: guild=%s requester=%s intent=%s participant=%s alias_hints=%s sql_identity=%s sql_participant=%s sql_alias=%s vector=%s dedup=%s cards=%s self=%s target=%s alias=%s sent=%s",
-        guild_id,
-        requester_user_id,
-        intent,
-        meta["participant_count"],
-        len(alias_hints),
-        meta["sql_identity_hits"],
-        meta["sql_participant_hits"],
-        meta["sql_alias_hits"],
-        meta["vector_hits"],
-        meta["dedup_hits"],
-        meta["cards_sent"],
-        meta["self_match_count"],
-        meta["target_match_count"],
-        meta["alias_match_count"],
-        meta["sent_count"],
-    )
-
-    if meta["sent_count"] == 0:
-        logger.info(
-            "/askai member-profile RAG miss: guild=%s requester=%s reason=no_docs_after_filter",
-            guild_id,
-            requester_user_id,
-        )
-
-    return rag_context, meta
+    return rag_context

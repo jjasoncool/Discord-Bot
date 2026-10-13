@@ -1,31 +1,30 @@
-"""功能二：AI 偶爾插話 / 閒聊（Phase A 骨架）。
+"""AI 偶爾插話／閒聊：看群裡最新的對話，決定要不要開口、開口說什麼、回到哪一則。
 
-掛在 `discord_bot.on_message`，以背景 task 執行，不阻塞訊息處理。
+架構定位：功能層（`llm/ambient`）。上層：介面層的 `discord_bot.on_message`（背景 task 執行，不阻塞訊息處理）。
+下層：`services.llm_service.LLMService`（生成）、`ambient_hooks`（鉤子閘）、`ambient_memory`（偏好與招牌梗召回）、
+`ambient_insult`（被罵的應對與記仇名單）、`llm.preprocess`（聊天行格式、人名錨點、貼文與表情描述）、
+`llm.storage.ai_interactions_store`（互動紀錄）、`llm.client.lemonade_gate`（前景讓位）。
 
-觸發哲學（由便宜到貴，任一關卡不過就 return，多數訊息連模型都不勞動）：
-    硬性過濾（零成本）→ **靜默期**（等對話停一下再擷取脈絡）→ 內容閘（看整段 burst）
-    → 冷卻 / 每小時上限 → foreground 讓位 → **鉤子閘**（零成本，決定值不值得花那 ~120s）
-    → 模型判斷（回 / [PASS] 沉默）
+介面：
+- `maybe_ambient_reply(bot, message)`：入口。硬過濾、靜默期合併 burst、判斷被點名／接續，然後交給單次評估。
+- `note_typing(channel_id, user_id)`：有人在打字，靜默期據此等一下。
+- `_run_one_ambient_pass(bot, message, model, directed, burst, followup)`：單次評估，依序六段，任一段回 None 就不開口：
+  `_pass_gates`（內容、冷卻、每小時上限、讓位、記仇）→ `_gather_inputs`（近期脈絡、降溫硬閘、鉤子閘、圖、被回覆
+  的訊息、召回；最新一則怎麼包見 `_frame_latest`）→ `_generate`（叫模型、判讀 reply／pass／insult／error）→
+  `_react_to_insult` 或 `_deliver`（被點名 reply 回去、自發錨定模型選的那一則、失效就裸送）→ `_bookkeep`
+  （冷卻與額度、武裝接續）→ `_record_ambient_interaction`。
 
-靜默期依對話節奏切換：慢節奏等到「夠久沒新訊息且沒人在打字」，熱聊只等一小段就開跑
-（熱聊等不到靜默，而且插話本來就不需要空檔）。一段 burst 合併成一次評估。
+規則：
+- 觸發由便宜到貴：零成本的閘門先擋，多數訊息連模型都不勞動；插不插最終由模型的 `[PASS]` 說了算，鉤子閘只管
+  「要不要喚醒它」，`hook_threshold` 是話多話少的主旋鈕，冷卻是防洗版的安全網。
+- 三種來源閘門不同：自發走全部；被 @／reply 只走 must-reply；接續（它自己起的頭）仍要過讓位、降溫硬閘、每小時
+  上限，不吃冷卻。只有自發計入冷卻與額度，接續只計額度。
+- 生成走 `LLMService.generate_reply(model=ambient_model)`，與 /askai 共用 `stream_exclusive` 序列化；/askai 活躍
+  窗口內背景插話讓位，避免換模型 ping-pong。
+- 模型判定被惡意辱罵：不回文字、按表情、記仇；標記夾在文字裡則整則不送。
 
-節奏由「對話內容」決定，不由計時器決定：鉤子閘（`ambient_hooks`）算這一刻有沒有值得開口的
-訊號，`hook_threshold` 是話多話少的主旋鈕；冷卻退居防洗版的安全網。插不插最終仍由模型的
-`[PASS]` 說了算，鉤子只管「要不要喚醒它」。
-（歷史：曾有 `judge_sampling_rate` 純機率減壓閥，隨機丟棄評估——會丟掉好時機、留下爛時機，
-被有判斷依據的鉤子閘完全取代，已移除。）
-
-特例：被 @ 或 reply 機器人 → must-reply，覆蓋冷卻（但仍走同一條 Lemonade 單流）。
-模型判定被惡意辱罵的例外：不回文字、按個表情，之後幾天不主動接那個人的話（`ambient_insult`）。
-
-模型協調（對齊「只有 P0 才換大模型」共識）：
-    - 生成走 `LLMService.generate_reply(model=ambient_model)`，內部經 `chat_raw` 持 `stream_exclusive()`，
-      與 /askai 自動序列化、不並流。
-    - `/askai`（前景）活躍窗口內，背景插話暫停（`foreground_recently_active`），避免把 /askai 的模型
-      換成插話模型、下次 /askai 又換回去的 swap ping-pong。
-
-Phase A 記憶＝近期 `channel.history` 短期對話脈絡（不碰 RAG / persona card；那是 Phase B）。
+例外與決策：靜默期依對話節奏切換（熱聊只等一小段）；曾有的純機率減壓閥已被鉤子閘取代。決策與日期見交接檔
+`ambient-chat` 區塊。
 """
 from __future__ import annotations
 
@@ -38,6 +37,7 @@ import random
 import re
 import time
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -50,7 +50,7 @@ from llm.storage.ai_interactions_store import (
     record_interaction,
 )
 from llm.ambient import ambient_insult
-from llm.ambient.ambient_hooks import evaluate as evaluate_hook
+from llm.ambient.ambient_hooks import HookDecision, evaluate as evaluate_hook
 from llm.ambient.ambient_memory import enqueue_for_memory, recall_lines, recall_signature_tags
 from llm.preprocess.chat_line import (
     fetch_recent_lines,
@@ -1123,11 +1123,44 @@ def _passes_content_gate(msg: discord.Message) -> bool:
     return _SETTINGS.min_chars <= len(stripped) <= _SETTINGS.max_chars
 
 
+@dataclass
+class _Gate:
+    """閘門放行後往下帶的狀態：這頻道的節流計數器、記仇名單（整張與只要 id 的集合）。"""
+    tracker: dict
+    grudges: dict
+    cold_ids: set
+
+
+@dataclass
+class _Inputs:
+    """交給模型的所有材料；`_gather_inputs` 組好，生成與送出只讀不改。"""
+    trace_id: str
+    system_prompt: str
+    prompt_text: str
+    chat_context: Optional[list]
+    thread_map: dict
+    hook: Optional[HookDecision]
+    image_payload: Optional[list]
+    replied_msg: Optional[discord.Message]
+    replied_to_from: Optional[str]
+    replied_to_text: Optional[str]
+    asker_for_bundle: Optional[str]
+    bot_display_name: Optional[str]
+    persona_context: Optional[list]
+    recalled_context: Optional[list]
+    style_refs: Optional[list]
+    grudge: object
+    # 只給 debug 摘要用的計數
+    persona_count: int = 0
+    memory_count: int = 0
+
+
 async def _run_one_ambient_pass(
     bot, message: discord.Message, ambient_model: str, directed: bool,
     burst: Optional[list] = None, followup: bool = False,
 ) -> None:
-    """單一插話評估：閘門（內容/冷卻/讓位/鉤子）→ 生成 → 送出。
+    """單一插話評估：閘門（內容/冷卻/讓位/記仇）→ 蒐集脈絡（降溫、鉤子、圖、被回覆、召回）
+    → 生成與判讀 → 送出 → 記帳。每段各一個函式，任一段回 None 就是這次不開口。
 
     message 已通過入口硬過濾（功能開、非 bot、白名單頻道、ambient_model 有設）；
     directed 由入口判好傳入。記憶沉澱也已在入口做過。
@@ -1143,59 +1176,89 @@ async def _run_one_ambient_pass(
     stripped = _message_text(message)
     has_image = _has_image(message)
 
+    gate = await _pass_gates(bot, message, directed, followup, burst)
+    if gate is None:
+        return
+    inputs = await _gather_inputs(bot, message, directed, followup, gate, stripped, has_image)
+    if inputs is None:
+        return
+    outcome, line_choice, reply = await _generate(inputs, ambient_model, directed)
+    if outcome == "insult":
+        await _react_to_insult(bot, message, directed, followup, inputs)
+        return
+    if outcome != "reply":
+        return
+    sent = await _deliver(message, directed, inputs, gate, line_choice, reply)
+    if sent is None:
+        return
+    sent_msg, anchor = sent
+    _bookkeep(message, directed, followup, gate.tracker, inputs, line_choice, anchor, sent_msg)
+    await _record_ambient_interaction(
+        message=message, directed=directed, stripped=stripped, has_image=has_image,
+        chat_context=inputs.chat_context, reply=reply, sent_msg=sent_msg, trace_id=inputs.trace_id,
+        explore_sample=bool(inputs.hook is not None and inputs.hook.explore),
+        followup=followup,
+    )
+
+
+def _roll_hour(tracker: dict, now: float) -> None:
+    """每小時額度是滾動一小時的窗口：過了一小時就從頭數。"""
+    if now - tracker["hour_start"] >= 3600:
+        tracker["hour_start"] = now
+        tracker["hour_count"] = 0
+
+
+async def _pass_gates(bot, message, directed: bool, followup: bool, burst: Optional[list]) -> Optional[_Gate]:
+    """零成本的閘門：內容、冷卻、每小時上限、讓位、記仇。擋下就記 log（方便查「為什麼沒插話」）回 None。"""
     cid = message.channel.id
-    # ── 非被點名：再過內容/冷卻/讓位（跳過原因都記 log，方便 debug）────
+    tracker = _get_tracker(bot, cid)
     if not directed:
         # 內容閘看「整段 burst」：靜默期會把一串訊息合併成一次評估，若只看最後一則，
         # 剛好收尾是貼圖或「笑死」就會把整段有料的對話一起刷掉。任一則有料就放行。
         candidates = burst or [message]
         if not any(_passes_content_gate(m) for m in candidates):
             _log_skip(cid, f"整段 burst（{len(candidates)} 則）都沒有可聊的內容")
-            return
-
-        tracker = _get_tracker(bot, cid)
+            return None
         now = time.monotonic()
         if now - tracker["last_ts"] < _SETTINGS.cooldown_seconds:
             remain = _SETTINGS.cooldown_seconds - (now - tracker["last_ts"])
             _log_skip(cid, f"冷卻中（剩 {remain:.0f}s）")
-            return
-        if now - tracker["hour_start"] >= 3600:
-            tracker["hour_start"] = now
-            tracker["hour_count"] = 0
+            return None
+        _roll_hour(tracker, now)
         if tracker["hour_count"] >= _SETTINGS.hourly_cap:
             _log_skip(cid, f"已達每小時上限（{_SETTINGS.hourly_cap}）")
-            return
-
+            return None
         # foreground（/askai、功能一）正在用模型或剛用過 → 讓位，避免換模型 ping-pong
         if stream_busy() or foreground_recently_active(_SETTINGS.askai_grace_seconds):
             _log_skip(cid, "前景活躍/串流忙，讓位")
-            return
-
-    else:
-        tracker = _get_tracker(bot, cid)
-        if followup:
-            # 接續是它自己起的頭，不是使用者主動要的 → 不能拿 must-reply 的免死金牌繞過
-            # 讓位與每小時上限（降溫硬閘在下面 chat_context 取得後一起判）。不吃冷卻。
-            if stream_busy() or foreground_recently_active(_SETTINGS.askai_grace_seconds):
-                _log_skip(cid, "前景活躍/串流忙，讓位（接續）")
-                return
-            now = time.monotonic()
-            if now - tracker["hour_start"] >= 3600:
-                tracker["hour_start"] = now
-                tracker["hour_count"] = 0
-            if tracker["hour_count"] >= _SETTINGS.hourly_cap:
-                _log_skip(cid, f"已達每小時上限（{_SETTINGS.hourly_cap}），接續收手")
-                return
+            return None
+    elif followup:
+        # 接續是它自己起的頭，不是使用者主動要的 → 不能拿 must-reply 的免死金牌繞過
+        # 讓位與每小時上限（降溫硬閘在 chat_context 取得後一起判）。不吃冷卻。
+        if stream_busy() or foreground_recently_active(_SETTINGS.askai_grace_seconds):
+            _log_skip(cid, "前景活躍/串流忙，讓位（接續）")
+            return None
+        _roll_hour(tracker, time.monotonic())
+        if tracker["hour_count"] >= _SETTINGS.hourly_cap:
+            _log_skip(cid, f"已達每小時上限（{_SETTINGS.hourly_cap}），接續收手")
+            return None
 
     # 最近點名罵過它的人（記仇中）：不主動接他的話——這裡擋「最新一則是他的」，生成後再擋「模型選了
-    # 他的那一則來接」。他點名照回，但帶著心情（下面疊進 system prompt）。見 ambient_insult。
+    # 他的那一則來接」。他點名照回，但帶著心情（疊進 system prompt）。見 ambient_insult。
     grudges = await ambient_insult.grudges(message.guild.id)
     cold_ids = set(grudges)
     if (not directed or followup) and message.author.id in cold_ids:
         _log_skip(cid, f"最新一則是最近罵過它的人（{_SETTINGS.insult_cold_days} 天內），不主動接")
-        return
+        return None
+    return _Gate(tracker=tracker, grudges=grudges, cold_ids=cold_ids)
 
-    # ── 生成（走 generate_reply → chat_raw 持 stream_exclusive）──
+
+async def _gather_inputs(
+    bot, message: discord.Message, directed: bool, followup: bool, gate: _Gate,
+    stripped: str, has_image: bool,
+) -> Optional[_Inputs]:
+    """把要給模型看的材料全部備齊；途中的降溫硬閘、鉤子閘、「沒東西可接」擋下就回 None。"""
+    cid = message.channel.id
     # 帶 #XXXX 錨點（與 chat_history 裡 bot 自己的行 name_with_anchor 一致）→ 讓模型能精準
     # 認出 chat_history 裡哪幾行是自己講的。guild.me 是 discord.py 即時提供的 bot Member（動態暱稱）。
     bot_display_name = None
@@ -1203,7 +1266,6 @@ async def _run_one_ambient_pass(
         bot_display_name = name_with_anchor(message.guild.me)
     elif bot.user is not None:
         bot_display_name = name_with_anchor(bot.user)
-
     # 讓琇紫知道「當下是誰在跟它講話」——帶發話者顯示名稱 + #XXXX 錨點（跟 chat_history、
     # persona card 對齊，多人也分得清）。guardrails 已說明 #XXXX 是內部碼、不可對外講出。
     asker_display_name = name_with_anchor(message.author)
@@ -1216,10 +1278,10 @@ async def _run_one_ambient_pass(
     # （被 @/reply 的 directed 不受影響：對方主動找它仍照常回。）
     # （接續也要判：群裡已經喊停時，不該因為「有人接了它的話」就一路聊下去。）
     if (not directed or followup) and _has_chime_backoff_signal(message, chat_context):
-        _log_skip(message.channel.id, "偵測到降溫訊號（尬聊/叫停）→ 收手")
-        return
+        _log_skip(cid, "偵測到降溫訊號（尬聊/叫停）→ 收手")
+        return None
 
-    # ── 鉤子閘：值不值得花那 ~120s 去想。零成本結構演算法 + 少量 regex + k-NN，不動 LLM。
+    # 鉤子閘：值不值得花那 ~120s 去想。零成本結構演算法 + 少量 regex + k-NN，不動 LLM。
     # 位置在這裡＝已有完整脈絡可算特徵，但還沒付出生成代價。開不開口最終仍由模型 [PASS] 決定，
     # 所以門檻可以寬鬆；ε-greedy 探索比例會無視分數放行，避免鉤子偏好自我強化。
     hook = None
@@ -1230,21 +1292,21 @@ async def _run_one_ambient_pass(
         if not hook.passed:
             reason = hook.veto or f"p={hook.prob:.2f}<{_SETTINGS.hook_threshold}"
             _log_skip(cid, f"鉤子閘未過（{reason}）")
-            return
+            return None
 
     system_prompt = _load_ambient_prompt()
-    grudge = grudges.get(message.author.id) if (directed and not followup) else None
+    grudge = gate.grudges.get(message.author.id) if (directed and not followup) else None
     if grudge is not None:
         # 記仇中的人點名：照回，但帶著心情（怎麼回寫在插話 prompt 的「被 @ 或被回覆時」）
         system_prompt = f"{system_prompt}\n\n{ambient_insult.mood_note(grudge, datetime.now(timezone.utc))}"
-    trace_id = f"amb-{message.channel.id}-{int(time.time() * 1000)}"
+    trace_id = f"amb-{cid}-{int(time.time() * 1000)}"
 
     # 看圖：有圖就準備 vision payload（插話模型本身支援 vision，不必換模型）
     image_payload = await _prepare_images(message) if has_image else None
     if not stripped and not image_payload and not directed:
-        return  # 圖沒抓成功又沒文字 → 沒東西可接
+        return None  # 圖沒抓成功又沒文字 → 沒東西可接
 
-    # ── 被回覆訊息（Discord 原生 reply）：把指涉對象明確帶進 prompt，避免「他/這個」無錨點亂答 ──
+    # 被回覆訊息（Discord 原生 reply）：把指涉對象明確帶進 prompt，避免「他/這個」無錨點亂答。
     # directed（@/reply 機器人）與自發插話都適用；best-effort，抓不到就略過。
     replied_to_from: Optional[str] = None
     replied_to_text: Optional[str] = None
@@ -1264,7 +1326,7 @@ async def _run_one_ambient_pass(
             if ref_imgs:
                 image_payload = ((image_payload or []) + ref_imgs)[:_SETTINGS.image_max_count]
 
-    # ── 模型原本看不懂的東西：X 貼文連結、別的伺服器的表情與貼圖（見 `_media_context`）──
+    # 模型原本看不懂的東西：X 貼文連結、別的伺服器的表情與貼圖（見 `_media_context`）
     reply_notes, reply_imgs = await _media_context(replied_msg) if replied_msg is not None else ([], [])
     latest_notes, latest_imgs = await _media_context(message)
     if reply_notes and replied_to_text is not None:
@@ -1272,13 +1334,46 @@ async def _run_one_ambient_pass(
     if latest_imgs or reply_imgs:   # 群友自己貼的圖優先，整體受 image_max_count 上限
         image_payload = ((image_payload or []) + latest_imgs + reply_imgs)[:_SETTINGS.image_max_count]
 
-    # ── 「最新訊息」框架（P1-5）：自發 vs 被點名分開包 ──
-    # 被 @/reply（directed）：對方真的在跟你說話 → 維持 <latest_user_message from=發話者>。
-    # 自發插話：把觸發訊息併進「你旁觀到的對話」，latest 換成中性自我提示、且不帶 from——
-    # 否則結構上會把「別人對別人說的話」（尤其含「你」）誤讀成在問機器人本人（→ 答非所問/尬聊）。
+    prompt_text, chat_context, asker_for_bundle = _frame_latest(
+        message, directed, stripped, image_payload, latest_notes, chat_context, thread_map, asker_display_name,
+    )
+
+    # 認得人——召回在場成員 persona card（best-effort；用真正的觸發文字當檢索 query）
     retrieval_query = stripped or "(圖片或無文字)"
+    persona_cards = await _build_persona_context(message, retrieval_query, participant_ids)
+    # 發話者的 trusted 偏好事實（best-effort）
+    memory_lines = await recall_lines(message.guild.id, message.author.id)
+    # 招牌梗：在場成員的 trusted 標籤（衰減+三道閘；spicy 在 dark-launch 期間不召回）
+    tag_lines = await recall_signature_tags(message.guild.id, participant_ids, message.guild)
+    # 本頻道歷史 callback（實驗，預設關；三因子 gate 後的模糊印象）→ 獨立 <recalled_context>
+    callback_lines = await _build_chat_callback_context(message, stripped)
+    # 風格召回——撈「被群裡按過讚、語意相近」的舊插話當靈感（學味道別照抄；shadow 可關）
+    style_ref_lines = await _build_style_refs(stripped)
+    persona_context = (
+        (persona_cards or []) + (memory_lines or []) + (tag_lines or [])
+    ) or None
+
+    return _Inputs(
+        trace_id=trace_id, system_prompt=system_prompt, prompt_text=prompt_text,
+        chat_context=chat_context, thread_map=thread_map, hook=hook, image_payload=image_payload,
+        replied_msg=replied_msg, replied_to_from=replied_to_from, replied_to_text=replied_to_text,
+        asker_for_bundle=asker_for_bundle, bot_display_name=bot_display_name,
+        persona_context=persona_context, recalled_context=callback_lines, style_refs=style_ref_lines,
+        grudge=grudge, persona_count=len(persona_cards or []), memory_count=len(memory_lines or []),
+    )
+
+
+def _frame_latest(
+    message, directed: bool, stripped: str, image_payload: Optional[list], latest_notes: list,
+    chat_context: Optional[list], thread_map: dict, asker_display_name: str,
+) -> tuple[str, Optional[list], Optional[str]]:
+    """「最新訊息」怎麼包：被點名與自發分開。回 (prompt_text, chat_context, asker_for_bundle)。
+
+    被 @/reply：對方真的在跟你說話 → 維持 <latest_user_message from=發話者>。
+    自發插話：把觸發訊息併進「你旁觀到的對話」，latest 換成中性自我提示、且不帶 from——
+    否則結構上會把「別人對別人說的話」（尤其含「你」）誤讀成在問機器人本人（→ 答非所問/尬聊）。
+    """
     if directed:
-        asker_for_bundle = asker_display_name
         if stripped:
             prompt_text = stripped
         elif image_payload:
@@ -1287,123 +1382,119 @@ async def _run_one_ambient_pass(
             prompt_text = "(對方只 @ 了我，沒有文字)"
         if latest_notes:
             prompt_text = prompt_text + "\n" + "\n".join(latest_notes)
-    else:
-        asker_for_bundle = None
-        _ts = message.created_at.astimezone(APP_TZ).strftime("%H:%M")
-        # 觸發訊息附在脈絡末尾時也要給編號並登記進 thread_map——否則模型想接「最新這一則」
-        # 卻指不到它（reply 錨定就落空）。編號接續 _fetch_recent 已用掉的最大號。
-        _next_no = (max(thread_map) if thread_map else 0) + 1
-        if stripped:
-            # 觸發訊息本體不截斷（time_only 不帶日期，與近期視窗一致）；compact=False 保留原貌
-            chat_context = (chat_context or []) + [
-                format_chat_line(
-                    message, APP_TZ, time_only=True, compact=False,
-                    prefix=f"#{_next_no} ",
-                ) + "".join(f" {n}" for n in latest_notes)
-            ]
-            thread_map[_next_no] = message
-        elif image_payload:
-            chat_context = (chat_context or []) + [
-                f"#{_next_no} [{_ts}] {asker_display_name}: (貼了一張圖)"
-            ]
-            thread_map[_next_no] = message
-        prompt_text = (
-            "（以上是你在群裡旁觀到的最新對話。最新一則是群友彼此在講話、不一定是對你說的——"
-            "先判斷適不適合插話；要插就接整段對話裡的具體一點，否則只輸出 [PASS]。）"
-        )
+        return prompt_text, chat_context, asker_display_name
 
-    # Phase B：認得人——召回在場成員 persona card（best-effort；用真正的觸發文字當檢索 query）
-    persona_cards = await _build_persona_context(message, retrieval_query, participant_ids)
-    # Phase C：召回發話者的 trusted 偏好事實（best-effort）
-    memory_lines = await recall_lines(message.guild.id, message.author.id)
-    # 招牌梗：召回在場成員的 trusted 標籤（衰減+三道閘；spicy 在 dark-launch 期間不召回）
-    tag_lines = await recall_signature_tags(message.guild.id, participant_ids, message.guild)
-    # Phase D（實驗，預設關）：本頻道歷史 callback（三因子 gate 後的模糊印象）；用真正文字當 query
-    callback_lines = await _build_chat_callback_context(message, stripped)  # → 獨立 <recalled_context>
-    # Phase v2：風格召回——撈「被群裡按過讚、語意相近」的舊插話當靈感（學味道別照抄；shadow 可關）
-    style_ref_lines = await _build_style_refs(stripped)
-    persona_context = (
-        (persona_cards or []) + (memory_lines or []) + (tag_lines or [])
-    ) or None
+    ts = message.created_at.astimezone(APP_TZ).strftime("%H:%M")
+    # 觸發訊息附在脈絡末尾時也要給編號並登記進 thread_map——否則模型想接「最新這一則」
+    # 卻指不到它（reply 錨定就落空）。編號接續 _fetch_recent 已用掉的最大號。
+    next_no = (max(thread_map) if thread_map else 0) + 1
+    if stripped:
+        # 觸發訊息本體不截斷（time_only 不帶日期，與近期視窗一致）；compact=False 保留原貌
+        chat_context = (chat_context or []) + [
+            format_chat_line(message, APP_TZ, time_only=True, compact=False, prefix=f"#{next_no} ")
+            + "".join(f" {n}" for n in latest_notes)
+        ]
+        thread_map[next_no] = message
+    elif image_payload:
+        chat_context = (chat_context or []) + [f"#{next_no} [{ts}] {asker_display_name}: (貼了一張圖)"]
+        thread_map[next_no] = message
+    prompt_text = (
+        "（以上是你在群裡旁觀到的最新對話。最新一則是群友彼此在講話、不一定是對你說的——"
+        "先判斷適不適合插話；要插就接整段對話裡的具體一點，否則只輸出 [PASS]。）"
+    )
+    return prompt_text, chat_context, None
 
+
+async def _generate(inputs: _Inputs, ambient_model: str, directed: bool) -> tuple[str, Optional[int], str]:
+    """叫模型，判讀它說了什麼。回 (outcome, 它宣告要接的行號, 要講的話)；
+    outcome ∈ reply／pass／insult／error:<kind>，prompt 與原樣輸出一律寫進 debug 檔。"""
+    hook = inputs.hook
     # debug 摘要（discord_bot.log）：一眼看出各層 context 各抓到幾筆 + 有沒有圖 + 有沒有接到被回覆訊息
     logger.info(
         "ambient 生成 trace=%s directed=%s model=%s | chat=%d persona=%d memory=%d "
         "callback=%d style=%d signals=%d img=%d reply_to=%d mood=%d",
-        trace_id, directed, ambient_model,
-        len(chat_context or []), len(persona_cards or []), len(memory_lines or []),
-        len(callback_lines or []), len(style_ref_lines or []),
+        inputs.trace_id, directed, ambient_model,
+        len(inputs.chat_context or []), inputs.persona_count, inputs.memory_count,
+        len(inputs.recalled_context or []), len(inputs.style_refs or []),
         len(hook.signals) if hook is not None else 0,
-        len(image_payload or []), 1 if replied_to_text else 0, 1 if grudge is not None else 0,
+        len(inputs.image_payload or []), 1 if inputs.replied_to_text else 0, 1 if inputs.grudge is not None else 0,
     )
-
     result = await _get_llm().generate_reply(
-        prompt=prompt_text,
-        system=system_prompt,
-        chat_context=chat_context,
-        persona_context=persona_context,
-        recalled_context=callback_lines,
-        style_refs=style_ref_lines,
+        prompt=inputs.prompt_text,
+        system=inputs.system_prompt,
+        chat_context=inputs.chat_context,
+        persona_context=inputs.persona_context,
+        recalled_context=inputs.recalled_context,
+        style_refs=inputs.style_refs,
         # 鉤子量到的事實（誰問了沒人回、誰連講沒人接、誰跟誰在來回）→ 卸掉模型自己推導
         # 時間關係的負擔，判斷仍歸它。directed 時 hook 為 None，不帶（對方在直接跟它說話）。
         situation_signals=(hook.signals if hook is not None else None) or None,
-        images=image_payload,
+        images=inputs.image_payload,
         model=ambient_model,
-        bot_display_name=bot_display_name,
-        asker_display_name=asker_for_bundle,
-        replied_to_from=replied_to_from,
-        replied_to_text=replied_to_text,
+        bot_display_name=inputs.bot_display_name,
+        asker_display_name=inputs.asker_for_bundle,
+        replied_to_from=inputs.replied_to_from,
+        replied_to_text=inputs.replied_to_text,
         # 生成 timeout＝鎖內生成的上限（chat_raw 的 timeout 在 stream_exclusive 取得後才開始算，
         # 天生不含「等鎖排隊」時間）→ 取代外層 watchdog，避免排在 /askai 後面被誤砍。
         timeout=int(_SETTINGS.pass_timeout_seconds),
-        trace_id=trace_id,
+        trace_id=inputs.trace_id,
     )
 
     # 模型第一行宣告「我在接第幾則」→ 剝出來當 reply 錨點，其餘才是要講的話
     raw_reply = (result.reply or "").strip()
     line_choice, reply = _parse_line_choice(raw_reply)
-    sentinel = _SETTINGS.silence_sentinel
     if result.error_kind:
         outcome = f"error:{result.error_kind}"
-    elif _is_silence(reply, sentinel):
+    elif _is_silence(reply, _SETTINGS.silence_sentinel):
         outcome = "pass"
     elif ambient_insult.is_marker(reply):
         outcome = "insult"
     elif ambient_insult.mentions_marker(reply):
         outcome = "pass"   # 標記夾在文字裡：拿不定主意 → 不送、不按表情、不記仇
-        logger.info("ambient 回答夾著 [INSULT] 標記，整則不送 trace=%s", trace_id)
+        logger.info("ambient 回答夾著 [INSULT] 標記，整則不送 trace=%s", inputs.trace_id)
     else:
         outcome = "reply"
 
     # 把完整 prompt（含三層 context）寫進 ambient_prompt.txt，reply/pass/error 都記，方便 debug
     # （reply 記模型原樣輸出＝含 `#N`，才看得出它到底選了哪一條線、選得對不對）
     _write_ambient_debug(
-        trace_id=trace_id, prompt_record_log=result.prompt_record_log,
+        trace_id=inputs.trace_id, prompt_record_log=result.prompt_record_log,
         outcome=outcome, reply=raw_reply,
     )
-
     if result.error_kind:
-        logger.info("ambient 生成失敗 kind=%s trace=%s，略過", result.error_kind, trace_id)
-        return
-    if outcome == "pass":
-        # 模型自判「沒梗」→ 不發送（Phase C 之後在此轉傾聽/抽記憶）
-        return
-    if outcome == "insult":
-        # 模型判定被惡意辱罵 → 不回文字，按嘲諷表情、記下這個人（見 ambient_insult）。
-        # 規則只講被點名的情況；自發、接續時冒出這個標記，或開關沒開，一樣不把它當文字送出去。
-        if directed and not followup and ambient_insult.enabled():
-            to_bot = (replied_msg is not None and bot.user is not None
-                      and replied_msg.author.id == bot.user.id)
-            await ambient_insult.respond(message, insulted_reply_id=str(replied_msg.id) if to_bot else None)
-        return
+        logger.info("ambient 生成失敗 kind=%s trace=%s，略過", result.error_kind, inputs.trace_id)
+    return outcome, line_choice, reply
 
-    sent_msg = None
+
+async def _react_to_insult(bot, message, directed: bool, followup: bool, inputs: _Inputs) -> None:
+    """模型判定被惡意辱罵 → 不回文字，按嘲諷表情、記下這個人（見 ambient_insult）。
+
+    規則只講被點名的情況；自發、接續時冒出這個標記，或開關沒開，一樣不把它當文字送出去。"""
+    if not (directed and not followup and ambient_insult.enabled()):
+        return
+    replied_msg = inputs.replied_msg
+    to_bot = (replied_msg is not None and bot.user is not None and replied_msg.author.id == bot.user.id)
+    await ambient_insult.respond(message, insulted_reply_id=str(replied_msg.id) if to_bot else None)
+
+
+async def _deliver(
+    message, directed: bool, inputs: _Inputs, gate: _Gate, line_choice: Optional[int], reply: str,
+) -> Optional[tuple[discord.Message, Optional[discord.Message]]]:
+    """把話送進頻道。回 (送出的訊息, 錨定的那則或 None)；沒送出回 None。
+
+    被點名：reply 回觸發訊息；原訊息已刪就直接發頻道。
+    自發：錨定到模型宣告要接的那一則（`#N`）。生成要 ~120 秒，活躍頻道早已翻頁，
+    裸送必然像亂入；用 reply 指出「我在回這句」，遲到兩分鐘也讀得懂——這正是真人在忙碌群裡的做法。
+    錨點失效（訊息被刪／沒給編號）就退回裸送；錨點是最近罵過它的人的話就整則不送。"""
+    trace_id = inputs.trace_id
     anchor = None   # 自發時模型選的那則（reply 錨點）；directed 時維持 None
     if not directed and line_choice is not None:
-        anchor = thread_map.get(line_choice)
-        if anchor is not None and anchor.author.id in cold_ids:
-            _log_skip(cid, f"模型選了 #{line_choice}，是最近罵過它的人的話 → 不送")
-            return
+        anchor = inputs.thread_map.get(line_choice)
+        if anchor is not None and anchor.author.id in gate.cold_ids:
+            _log_skip(message.channel.id, f"模型選了 #{line_choice}，是最近罵過它的人的話 → 不送")
+            return None
+    sent_msg = None
     try:
         if directed:
             try:
@@ -1411,17 +1502,9 @@ async def _run_one_ambient_pass(
             except discord.HTTPException as reply_exc:
                 # 原訊息可能已被刪除（reply reference 失效，50035 Unknown message）→
                 # 退而求其次直接發到頻道，照樣回得到、只是沒有 reply 串接
-                logger.info(
-                    "ambient reply 失敗（原訊息可能已刪？）trace=%s：%s → 改直接發頻道",
-                    trace_id, reply_exc,
-                )
-                sent_msg = await message.channel.send(
-                    reply, allowed_mentions=discord.AllowedMentions.none()
-                )
+                logger.info("ambient reply 失敗（原訊息可能已刪？）trace=%s：%s → 改直接發頻道", trace_id, reply_exc)
+                sent_msg = await message.channel.send(reply, allowed_mentions=discord.AllowedMentions.none())
         else:
-            # 自發插話錨定到它宣告要接的那一則（`#N`）。生成要 ~120 秒，活躍頻道早已翻頁，
-            # 裸送必然像亂入；用 reply 指出「我在回這句」，遲到兩分鐘也讀得懂——這正是
-            # 真人在忙碌群裡的做法。錨點失效（訊息被刪/沒給編號）就退回原本的裸送。
             if anchor is not None:
                 try:
                     sent_msg = await anchor.reply(reply, mention_author=False)
@@ -1431,13 +1514,18 @@ async def _run_one_ambient_pass(
                         line_choice, trace_id, anchor_exc,
                     )
             if sent_msg is None:
-                sent_msg = await message.channel.send(
-                    reply, allowed_mentions=discord.AllowedMentions.none()
-                )
+                sent_msg = await message.channel.send(reply, allowed_mentions=discord.AllowedMentions.none())
     except discord.HTTPException as exc:
         logger.warning("ambient 送出回覆失敗 trace=%s：%s", trace_id, exc)
-        return
+        return None
+    return sent_msg, anchor
 
+
+def _bookkeep(
+    message, directed: bool, followup: bool, tracker: dict, inputs: _Inputs,
+    line_choice: Optional[int], anchor, sent_msg,
+) -> None:
+    """送出後的記帳：冷卻與每小時額度、武裝「接續」、記一行 log。"""
     # 只有「自發插話」才計入冷卻/每小時額度；被 @ 是 user 主動要的，不該吃掉自發的額度（否則
     # 一直 @ 它測試就會把自發插話餓死、整個小時靜默）。
     if not directed:
@@ -1447,7 +1535,7 @@ async def _run_one_ambient_pass(
 
     # 武裝「接續」——它發言後的第一則真人訊息若在 window 內、且來自它剛回的那個人，就當成
     # 在接它的話。只有 followup 會累加 chain；自發或被 @ 都代表新的一串 → 歸零。
-    state = _get_proc_state(cid)
+    state = _get_proc_state(message.channel.id)
     state["followup_armed"] = True
     state["last_reply_mono"] = time.monotonic()
     state["last_reply_message_id"] = str(sent_msg.id) if sent_msg is not None else None
@@ -1465,15 +1553,7 @@ async def _run_one_ambient_pass(
         anchor_desc = "無（模型沒給編號→裸送）"
     logger.info(
         "ambient 已插話 trace=%s 頻道=%s kind=%s 錨定=%s",
-        trace_id, message.channel.id,
+        inputs.trace_id, message.channel.id,
         ("followup" if followup else ("directed" if directed else "spontaneous")),
         anchor_desc,
-    )
-
-    # 互動紀錄（best-effort、不阻塞）：記下「自己這次說了什麼、對誰、在聊什麼」→ 日記/好感度的素材
-    await _record_ambient_interaction(
-        message=message, directed=directed, stripped=stripped, has_image=has_image,
-        chat_context=chat_context, reply=reply, sent_msg=sent_msg, trace_id=trace_id,
-        explore_sample=bool(hook is not None and hook.explore),
-        followup=followup,
     )
