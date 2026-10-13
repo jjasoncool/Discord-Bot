@@ -322,3 +322,5 @@ UN_PoincoSad = 無奈、慘 | negative
 DrinkTea = 享受喝茶、放鬆 | neutral
 wuwa_frog11 = 驚訝、呆住 | think
 Z_Funny = 開心大笑 | laugh
+a_pic_ox = 嘿嘿偷笑 | laugh
+cz = 害羞、心動 | agree
