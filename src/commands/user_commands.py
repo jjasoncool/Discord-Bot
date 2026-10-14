@@ -6,20 +6,18 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from constants import ITEMS
+from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, check_guild
+from utils.dm_notifier import notify_keyword_hit
+from services.community import item_prices
+from sys_settings.paths import runtime_path
+from utils import runtime_file
 
 # 獲取 logger
 logger = logging.getLogger(__name__)
 
 # 監控頻道的字典，格式: {guild_id: {channel_id: [{關鍵字列表, 使用者ID, 通知設定}]}}
 monitored_channels = {}
-monitored_channels_file = settings_file("monitored_channels.json")
-
-import json
-import os
-from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, check_guild
-from utils.dm_notifier import notify_keyword_hit
-from services.community import item_prices
-from sys_settings.paths import settings_file
+monitored_channels_file = runtime_path("monitored_channels.json")
 
 
 class WatchKeywordsView(discord.ui.View):
@@ -128,24 +126,19 @@ class ForgetTagView(discord.ui.View):
 def load_monitored_channels():
     """從檔案中讀取監控設定"""
     global monitored_channels
-    if os.path.exists(monitored_channels_file):
-        try:
-            with open(monitored_channels_file, 'r') as f:
-                # 將鍵轉換為整數
-                data = json.load(f)
-                monitored_channels = {
-                    int(guild_id): {
-                        int(channel_id): settings if isinstance(settings, list) else [settings]
-                        for channel_id, settings in channels.items()
-                    }
-                    for guild_id, channels in data.items()
-                }
-        except json.JSONDecodeError:
-            logger.error(f"無法讀取 {monitored_channels_file}，將使用空設定")
-            monitored_channels = {}
-        except Exception as e:
-            logger.error(f"讀取監控設定時發生錯誤: {str(e)}")
-            monitored_channels = {}
+    data = runtime_file.load(monitored_channels_file)   # 缺檔、壞檔都回空
+    try:
+        # 將鍵轉換為整數
+        monitored_channels = {
+            int(guild_id): {
+                int(channel_id): settings if isinstance(settings, list) else [settings]
+                for channel_id, settings in channels.items()
+            }
+            for guild_id, channels in data.items()
+        }
+    except Exception as e:
+        logger.error(f"讀取監控設定時發生錯誤: {str(e)}")
+        monitored_channels = {}
 
 def save_monitored_channels():
     """將監控設定保存到檔案"""
@@ -158,8 +151,7 @@ def save_monitored_channels():
             }
             for guild_id, channels in monitored_channels.items()
         }
-        with open(monitored_channels_file, 'w') as f:
-            json.dump(data, f, indent=2)
+        runtime_file.save(monitored_channels_file, data)
     except Exception as e:
         logger.error(f"保存監控設定時發生錯誤: {str(e)}")
 
