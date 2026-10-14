@@ -23,7 +23,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from sys_settings.paths import APP_ROOT, TELEGRAM_SCRAPER_DIR
-from utils.utils import CONFIG_FILE
+from utils import hot_files
+from utils.utils import CONFIG_FILE, ChannelConfig
 from typing import Optional
 from urllib.parse import quote_plus
 
@@ -723,22 +724,11 @@ class MessageRouteResolver:
         return normalize_channel_identifier(str(raw or "")).lower()
 
     def _load_telegram_runtime_config(self) -> dict:
-        if not self.telegram_runtime_config_path.exists():
-            return {}
-        try:
-            return json.loads(self.telegram_runtime_config_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            logger.error("讀取 telegram runtime_config 失敗: %s", exc, exc_info=True)
-            return {}
+        """爬蟲那邊人手改的 runtime_config（頻道名稱等）；缺檔回空，改了下一次讀就生效。"""
+        return hot_files.read_json(self.telegram_runtime_config_path, label="telegram runtime_config") or {}
 
     def _load_config(self) -> dict:
-        if not self.config_path.exists():
-            return {}
-        try:
-            return json.loads(self.config_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            logger.error("讀取 config.json 失敗: %s", exc, exc_info=True)
-            return {}
+        return ChannelConfig.load_config(str(self.config_path), caller="telegram_relay")
 
     def is_telegram_relay_enabled(self) -> bool:
         config = self._load_config()
@@ -860,13 +850,10 @@ class TelegramRenderAdapter:
         self._runtime_config_path = self.app_root / "telegram_scraper" / "runtime_config.json"
 
     def _get_source_channel_name(self) -> str:
-        """從 telegram runtime_config.json 讀取頻道名稱。"""
-        try:
-            data = json.loads(self._runtime_config_path.read_text(encoding="utf-8"))
-            name = str(data.get("source_channel", "")).strip()
-            return name if name else "Telegram"
-        except Exception:
-            return "Telegram"
+        """從 telegram runtime_config.json 讀取頻道名稱；讀不到就叫 Telegram。"""
+        data = hot_files.read_json(self._runtime_config_path, label="telegram runtime_config") or {}
+        name = str(data.get("source_channel", "")).strip()
+        return name if name else "Telegram"
 
     def check_media_root(self) -> bool:
         media_root = self.app_root / "telegram_scraper" / "media"
