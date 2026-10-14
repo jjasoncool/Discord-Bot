@@ -28,6 +28,7 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from llm.client import lemonade_gate as gate  # noqa: E402
+from test import timing_sensitive  # noqa: E402
 from services.llm_service import LLMService  # noqa: E402
 from sys_settings.llm_settings import LLMRuntimeConfig  # noqa: E402
 
@@ -139,6 +140,7 @@ class CrossProcessQueueTests(_GateTestCase):
         poller.wait()
         self.assertEqual(order[0], "got", f"外部行程要在下一件之前插進來：{order}")
 
+    @timing_sensitive
     async def test_long_wait_is_logged_and_capped(self):
         other = self.hold_in_other_process()
         try:
@@ -149,12 +151,13 @@ class CrossProcessQueueTests(_GateTestCase):
                         pass
             self.assertTrue(any("已等" in line for line in logs.output), logs.output)
             self.assertTrue(any("不等了" in line for line in logs.output), "別的行程卡住時不能讓 bot 的 AI 整個停住")
-            # 等滿上限放行後，下一個呼叫不能又從頭等（排在後面的會等 N 倍）
+            # 等滿上限放行後，下一個呼叫不能又從頭等（排在後面的會等 N 倍）。上限拉到 2 秒：真的又從頭等
+            # 會花 2 秒以上，沒等只有讓位的 0.2 秒加排程誤差——門檻放 1 秒，啟動 gate 的負載下也分得開
             started = asyncio.get_running_loop().time()
-            with mock.patch.object(gate, "_CROSS_PROCESS_MAX_WAIT_S", 0.5):
+            with mock.patch.object(gate, "_CROSS_PROCESS_MAX_WAIT_S", 2.0):
                 async with gate.stream_exclusive():
                     pass
-            self.assertLess(asyncio.get_running_loop().time() - started, 0.4)
+            self.assertLess(asyncio.get_running_loop().time() - started, 1.0)
         finally:
             other.communicate("\n")
 
@@ -316,14 +319,17 @@ class LeaseTests(_GateTestCase):
         self.assertFalse(gate.stream_busy(), "租約到期後閘門必須放掉")
         self.assertIsNone(gate.current_owner())
 
+    @timing_sensitive
     async def test_renew_keeps_long_job_alive(self):
         """持續心跳的長工作不可以被誤殺——租約長度與工作總長解耦。"""
         finished = False
 
         async def polling_holder():
             nonlocal finished
-            async with gate.gpu_exclusive("imagegen", lease_seconds=0.5) as lease:
-                for _ in range(6):          # 總長 0.6s > 單次租約 0.5s
+            # 租約 2 秒、每 0.1 秒續一次：總長 2.5 秒 > 單次租約，證明續租有效；續租間隔只有租約的 1/20，
+            # 啟動 gate 把 event loop 卡住零點幾秒也不會被 watchdog 誤殺（之前 0.5 秒租約在負載下被收掉過）
+            async with gate.gpu_exclusive("imagegen", lease_seconds=2.0) as lease:
+                for _ in range(25):
                     await asyncio.sleep(0.1)
                     lease.renew()           # 模擬 ComfyUI 輪詢成功
                 finished = True

@@ -16,7 +16,7 @@ services:
     command: >
       bash -c "
       echo '--- running startup tests (auto-discover) ---' &&
-      python -m unittest discover -s test -t . -p 'test_*.py' &&
+      APP_STARTUP_GATE=1 python -m unittest discover -s test -t . -p 'test_*.py' &&
       echo '--- tests OK, starting bot ---' &&
       exec python discord_bot.py
       "

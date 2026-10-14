@@ -20,6 +20,7 @@ if SRC_DIR not in sys.path:
 
 from services.relay.telegram_relay_service import MessageRelayWorker
 from telegram_scraper.media_download import MEDIA_RETRY_WINDOW
+from test import timing_sensitive
 from test.telegram_relay_fakes import CHANNEL, make_worker, media_of
 
 
@@ -32,9 +33,13 @@ class ScraperAgreementTests(unittest.TestCase):
 
 class MediaGroupCollectTests(unittest.IsolatedAsyncioTestCase):
 
+    @timing_sensitive
     async def test_members_written_one_by_one_are_sent_together(self):
         # 重現 GameData #3223：8 張逐則進來，每張「列先到、媒體後到」，間隔短於安靜期
         worker, repo, _, publisher = make_worker()
+        # 安靜期要比餵料間隔（0.06 秒）長很多：啟動 gate 的負載下餵料會拖慢，0.1 秒的安靜期曾被誤判成到齊
+        worker._GROUP_QUIET_SEC = 0.5
+        worker._GROUP_MAX_WAIT_SEC = 3.0
         pks = list(range(901, 909))
         repo.add_ready(pks[0], 5001, text="相簿說明")
 
