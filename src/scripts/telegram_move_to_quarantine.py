@@ -1,4 +1,4 @@
-"""一次性：已經貼在主頻道的 Telegram 轉發，用 LLM 判斷，判成垃圾的移進「垃圾訊息」thread（使用者 2026-10-07）。
+"""一次性：已經貼在主頻道的 Telegram 轉發，用 LLM 判斷，判成垃圾的移進「垃圾訊息」thread。
 
 每個 pk（相簿給哪一張都行，整本一起判、一起搬）：
 1. 判斷：清單檔有寫判定的照清單（使用者看過的，不重判：模型每次判的不一定一樣）；沒寫的用跟轉發同一套的判斷
@@ -36,7 +36,7 @@ from typing import Optional
 
 SRC_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SRC_DIR))
-os.chdir(SRC_DIR)   # config.json 等相對路徑跟 bot 一樣以 src 為準
+os.chdir(SRC_DIR)   # 工作目錄和 bot 一樣是 src
 
 from utils.logger_config import configure_logging  # noqa: E402,F401  import 即套用 settings/logging.json
 
@@ -85,7 +85,7 @@ async def run(targets: dict[int, Optional[Verdict]], apply: bool) -> None:
     repo = TelegramMessageRepository(build_telegram_pg_dsn_from_env())
     await repo.connect()
     try:
-        resolver = MessageRouteResolver(config_path="config.json")
+        resolver = MessageRouteResolver()
         records = {}
         for pk in targets:
             record = await repo.get_message_by_pk(pk)
@@ -103,7 +103,7 @@ async def run(targets: dict[int, Optional[Verdict]], apply: bool) -> None:
         quarantine = QuarantineThreads(client, RUNTIME_PATH)
         worker = MessageRelayWorker(
             bot=client, repository=repo, route_resolver=resolver,
-            render_adapter=TelegramRenderAdapter(app_root=str(SRC_DIR)),
+            render_adapter=TelegramRenderAdapter(),
             publisher=_Publisher(guild.filesize_limit - 512 * 1024),
             dsn="", content_filter=RelayFilter(), quarantine=quarantine,
         )

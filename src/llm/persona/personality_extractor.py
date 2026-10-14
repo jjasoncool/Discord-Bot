@@ -12,8 +12,7 @@
   `personality_extraction_prompt.json` 的 system_prompt 是人格素描的角色設定，agent 疊在它之上。
 
 例外與決策：2026-10-13 拆掉原本在這裡的「production 人格萃取」pipeline（整批送 LLM、直接寫 auto_personality，
-  04:00 維護的第 ③ 步與 /personality_extract 指令），由 persona agent 與發布精簡版取代；檔名沿用。
-  經過見交接檔 `persona-extraction-agent`。
+  04:00 維護的第 ③ 步與 /personality_extract 指令），由 persona agent 與發布精簡版取代（精簡版連續 12 晚沒失敗、備援每晚只剩 1 人且寫入 0）；檔名沿用。
 """
 from __future__ import annotations
 
@@ -29,15 +28,16 @@ from llm.preprocess.emoji_text_utils import (
 )
 from sys_settings.llm_settings import LLMServiceSettings
 from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
+from sys_settings.paths import prompt_file
 
 logger = logging.getLogger(__name__)
 
 
-_EXTRACT_PROMPT_PATH = "/app/settings/prompts/personality_extraction_prompt.json"
+_EXTRACT_PROMPT_PATH = prompt_file("personality_extraction_prompt.json")
 # 「描述要寫成什麼樣」的規則抽成共用檔：persona agent 需要同一份規則，
 # 各自複製一份的話，日後調整其中一邊會靜默分岔。比照 persona_examples.txt
 # 被 /askai 與插話共用的做法——共用的是**檔案**，兩邊各自讀。
-_DESCRIPTION_RULES_PATH = "/app/settings/prompts/persona_description_rules.txt"
+_DESCRIPTION_RULES_PATH = prompt_file("persona_description_rules.txt")
 _extract_prompts: dict[str, str] | None = None
 
 

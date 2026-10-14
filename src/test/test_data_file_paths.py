@@ -1,11 +1,10 @@
-"""資料檔的位置不能因為搬動程式檔而改變。
+"""資料檔的位置只由專案根目錄（`sys_settings.paths.APP_ROOT`）決定，不隨程式檔搬動而變。
 
 守的底線：
-  下面這幾個模組用「自己這個程式檔所在的位置」去找資料檔。只要有人搬動或改名這些程式檔，
-  算出來的就會是另一個位置——最危險的是 `services/state_db.py`：它會默默開一個新的空
-  `sent_articles.db`，所有轉發都以為沒發過，把舊文章重發一遍。這裡把每個資料檔的實際位置
-  釘死，搬檔時啟動 gate 就擋下來（bot 起不來），而不是上線後才發現。
-  真的要搬這些程式檔時，把路徑改成不依賴程式檔位置的寫法，並確認資料檔本身不動。
+  這幾個資料檔以前用「自己這個程式檔所在的位置」去找，搬動或改名程式檔就會算到另一個位置——
+  最危險的是 `services/state_db.py`：它會默默開一個新的空 `sent_articles.db`，所有轉發都以為沒發過，
+  把舊文章重發一遍。現在它們都從 `APP_ROOT` 推（容器裡是 /app），這裡釘住每個檔相對根目錄的位置：
+  有人改回看程式檔位置、或把檔搬到別的子目錄，啟動 gate 就擋下來，而不是上線後才發現。
 
 只比對位置、不要求檔案存在：這些多半是不進版控的執行期資料，乾淨的副本裡本來就沒有。
 """
@@ -23,7 +22,8 @@ if str(SRC_DIR) not in sys.path:
 class DataFileLocationTests(unittest.TestCase):
 
     def assertLocation(self, actual, *expected_parts):
-        self.assertEqual(Path(actual).resolve(), SRC_DIR.joinpath(*expected_parts).resolve())
+        from sys_settings.paths import APP_ROOT
+        self.assertEqual(Path(actual), APP_ROOT.joinpath(*expected_parts))
 
     def test_sent_articles_db(self):
         from services import state_db

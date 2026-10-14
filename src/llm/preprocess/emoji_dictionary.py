@@ -19,6 +19,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+
+from sys_settings.paths import settings_file
 from typing import Optional
 
 from utils import hot_files
@@ -26,7 +28,7 @@ from utils.safe_write import replace_text
 
 logger = logging.getLogger(__name__)
 
-EMOJI_DICT_PATH = "/app/settings/emoji_dictionary.txt"
+EMOJI_DICT_PATH = settings_file("emoji_dictionary.txt")
 VALID_CATEGORIES = frozenset({"agree", "laugh", "think", "negative", "neutral"})
 #: 別的伺服器的表情由 AI 看圖補，集中放在檔尾這一區（使用者可以直接改）
 AI_SECTION_HEADER = "# === 別的伺服器的表情（AI 看圖補的，可直接改） ==="

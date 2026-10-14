@@ -9,6 +9,7 @@ import json
 import logging
 import discord
 from pathlib import Path
+from sys_settings.paths import SETTINGS_DIR
 from typing import List, Dict, Optional
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
@@ -29,7 +30,7 @@ class PTTMonitor(BaseContentMonitor):
     """PTT 貼文 → Discord Forum Channel 監控器"""
 
     PTT_FORUM_TAG_NAME = "PTT"
-    ARTICLE_RUNTIME_CONFIG_PATH = Path("/app/settings/article_runtime.json")
+    ARTICLE_RUNTIME_CONFIG_PATH = SETTINGS_DIR / "article_runtime.json"
 
     def __init__(self, bot, scraper_api_url: str = "http://scraper:8000"):
         super().__init__(bot, scraper_api_url)

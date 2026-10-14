@@ -4,12 +4,13 @@ import glob
 import logging
 import yt_dlp
 import asyncio
+from sys_settings.paths import APP_ROOT
 from .exceptions import YTDLError
 from .models import Song
 
 logger = logging.getLogger(__name__)
 
-CACHE_DIR = os.path.join(os.path.dirname(__file__), 'cache')
+CACHE_DIR = str(APP_ROOT / "music" / "cache")
 
 
 class YTDLSource:

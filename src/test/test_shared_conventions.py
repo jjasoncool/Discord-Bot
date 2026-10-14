@@ -181,6 +181,46 @@ def _find_hardcoded_utc_offsets(path: Path) -> list[int]:
         return []
 
 
+def _find_hardcoded_app_root(path: Path) -> list[int]:
+    """找寫死的專案根目錄 `"/app"`、`"/app/..."`（字串裡的東西 regex 看不到，走 AST）。
+
+    容器裡 `/app` 永遠對，但主機上的腳本、未來的 CI 找不到；掛載一改就要翻 38 處。
+    根目錄只有 `sys_settings.paths` 一處知道，其他地方問它。
+    """
+    hits = []
+    for node in ast.walk(_parse(path)):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and (node.value == "/app" or node.value.startswith("/app/"))):
+            hits.append(node.lineno)
+    return hits
+
+
+def _find_raw_runtime_json_io(path: Path) -> list[int]:
+    """自己 `open()`／`read_text()`／`write_text()` 一個 `*_runtime.json`（或價格表）的那幾行。
+
+    看的是開檔那一行的參數文字：直接寫檔名、或變數名帶 RUNTIME／runtime／PRICES。這些是程式自己寫的
+    狀態檔；各寫一套讀寫，就會有的直接覆寫、有的自己快取、有的相對路徑。機制只有 `utils.runtime_file`
+    一份（面板置底的 `load_runtime`／`update_runtime` 轉呼叫它；價格表的 `item_prices` 也建在它上面）。
+    人手改的 `article_runtime.json` 走熱讀檔，另有 `base_monitor` 自己的快取，列在 allowed。
+    """
+    hits = []
+    for node in ast.walk(_parse(path)):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        f = node.func
+        opens_file = (isinstance(f, ast.Name) and f.id == "open") or (
+            isinstance(f, ast.Attribute) and f.attr in ("read_text", "write_text"))
+        if isinstance(f, ast.Attribute) and f.attr in ("read_text", "write_text"):
+            target = ast.unparse(f.value)
+        elif opens_file:
+            target = ast.unparse(node.args[0])
+        else:
+            continue
+        if "_runtime.json" in target or "RUNTIME" in target or "runtime" in target or "PRICES" in target or "prices_file" in target:
+            hits.append(node.lineno)
+    return hits
+
+
 def _find_hardcoded_article_urls(path: Path) -> list[int]:
     """找寫死的官方公告網址。
 
@@ -319,7 +359,7 @@ def _find_thread_unarchive(path: Path) -> list[int]:
 
 def _find_config_json_writes(path: Path) -> list[int]:
     """自己寫 config.json：`open(...config.json..., "w")` 或舊的整份覆寫 `save_config`。一律走
-    `ChannelConfig.update_config`：寫入前重讀最新內容、只改這次的 key、安全寫入加備份（使用者 10-06 SW-Q4；
+    `ChannelConfig.update_config`：寫入前重讀最新內容、只改這次的 key、安全寫入加備份（
     以前整份寫回快取，手改的內容會被蓋掉，檔案壞掉時會被寫成只剩一個 key）。"""
     hits = set()
     for node in ast.walk(_parse(path)):
@@ -338,7 +378,7 @@ def _find_config_json_writes(path: Path) -> list[int]:
     return sorted(hits)
 
 
-# 2026-10-06 開關集中到 settings/switches.json 時已有的開關欄位：之後改到哪個功能就搬過去、從這裡移除（使用者 SW-Q2：
+# 2026-10-06 開關集中到 settings/switches.json 時已有的開關欄位：之後改到哪個功能就搬過去、從這裡移除（
 # 有改到才搬）。改了要重啟或重建容器才生效，是它們該搬的原因。
 _LEGACY_SWITCH_FIELDS = {
     "sys_settings/llm_settings.py:AmbientChatSettings.enabled",
@@ -369,8 +409,8 @@ _SWITCH_FIELD = re.compile(r"^(enabled|mode|dry_run|use_.*|enable_.*|.*_enabled|
 
 def _find_switch_fields(path: Path) -> list[int]:
     """sys_settings 裡新加的開關欄位（enabled、mode、dry_run…）。功能開關一律放 `settings/switches.json`
-    （名稱、預設、允許的值寫在 `sys_settings.switches.Switches`）：改了就生效、不用重啟，也只有一個地方找
-    （使用者 10-06 SW-Q1～Q2）。細項參數（逾時、張數）不算開關，照舊放各自的 sys_settings 類別。"""
+    （名稱、預設、允許的值寫在 `sys_settings.switches.Switches`）：改了就生效、不用重啟，也只有一個地方找。
+    細項參數（逾時、張數）不算開關，照舊放各自的 sys_settings 類別。"""
     rel = Path(path).relative_to(SRC_DIR).as_posix()
     if not rel.startswith("sys_settings/"):
         return []
@@ -584,6 +624,36 @@ RULES = [
         allowed=set(),
     ),
     Rule(
+        name="專案根目錄的路徑（寫死 /app 在容器外就找不到檔）",
+        finder=_find_hardcoded_app_root,
+        canonical="sys_settings.paths（APP_ROOT、SETTINGS_DIR、prompt_file()…）",
+        allowed={
+            "sys_settings/paths.py",
+            # 爬蟲是獨立容器（各自掛子目錄到 /app），看不到 sys_settings
+            "scraper/",
+            "telegram_scraper/",
+            # 在容器裡手動跑的一次性腳本
+            "scripts/",
+            "test/",
+        },
+    ),
+    Rule(
+        name="狀態 JSON（*_runtime.json、價格表）的讀寫",
+        finder=_find_raw_runtime_json_io,
+        canonical="utils.runtime_file.load / save / update（面板走 panel_bump 的 load_runtime / update_runtime）",
+        allowed={
+            "utils/runtime_file.py",
+            # 人手改的設定，走自己的 5 分鐘快取（不是程式寫的狀態）
+            "services/relay/base_monitor.py",
+            "services/relay/ptt_monitor.py",
+            # 爬蟲是獨立容器，看不到 utils
+            "scraper/",
+            "telegram_scraper/",
+            "scripts/",
+            "test/",
+        },
+    ),
+    Rule(
         name="pgvector 連線",
         pattern=r"psycopg2\.connect\(",
         canonical="LLMServiceSettings.pgvector_connect()",
@@ -781,12 +851,12 @@ RULES = [
         name="定時排程（算出離下一次還有幾秒、睡到那時）",
         finder=_find_sleep_until,
         canonical="utils.due_loop.run_due_loop（tick 回傳下一次的時刻）",
-        # 2026-10-03 抽出 run_due_loop 時已有這四份，各自處理補跑、空轉與出錯（TR-Q9 決定逐步搬，
+        # 2026-10-03 抽出 run_due_loop 時已有這四份，各自處理補跑、空轉與出錯（決定逐步搬，
         # 搬完就從這裡移除）。人格萃取與日記在 04:00 維護時段跑，搬的時候要避開重啟時段。
         allowed={
             "commands/periodic_reminder_commands.py",
             "services/community/rollcall_service.py",
-            "llm/persona/daily_maintenance.py",   # 2026-10-13 從 discord_bot.on_ready 搬出來（M4），迴圈本身沒改
+            "llm/persona/daily_maintenance.py",   # 2026-10-13 從 discord_bot.on_ready 搬出來，迴圈本身沒改
             "llm/ambient/ambient_diary.py",       # 同上
         },
     ),

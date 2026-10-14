@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+
+from sys_settings.paths import settings_file
 from typing import Optional
 
 from utils import hot_files
@@ -18,7 +20,7 @@ from utils.safe_write import replace_text
 
 logger = logging.getLogger(__name__)
 
-STICKER_DICT_PATH = "/app/settings/sticker_dictionary.txt"
+STICKER_DICT_PATH = settings_file("sticker_dictionary.txt")
 _HEADER = """# 別的伺服器的貼圖描述（AI 看圖補的，可直接改）
 # 格式：貼圖ID = 名稱｜描述
 # 本伺服器的貼圖描述請在 Discord 伺服器設定裡改，不寫在這裡。

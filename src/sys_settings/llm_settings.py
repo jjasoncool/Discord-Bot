@@ -12,6 +12,8 @@ from urllib.parse import quote_plus
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from sys_settings.paths import SYS_SETTINGS_DIR, prompt_file
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,11 +58,11 @@ class LLMServiceSettings(BaseSettings):
         validation_alias="PGVECTOR_PASSWORD",
     )
     llm_context_safety_rules_path: str = Field(
-        default="/app/settings/prompts/llm_context_safety_rules.json",
+        default=prompt_file("llm_context_safety_rules.json"),
     )
     # 可熱更新模型設定：直接修改此 JSON 檔即可生效（無須重啟容器）
     llm_runtime_model_path: str = Field(
-        default="/app/sys_settings/llm_runtime_config.json",
+        default=str(SYS_SETTINGS_DIR / "llm_runtime_config.json"),
     )
 
     default_temperature: float = 0.85
@@ -210,10 +212,10 @@ class AskAICommandSettings(BaseSettings):
         "回覆時只能使用繁體中文，避免使用英文或簡體中文。"
     )
 
-    prompt_file_path: str = "/app/settings/prompts/askai_system_prompt.txt"
-    identity_file_path: str = "/app/settings/prompts/persona_identity.txt"
-    guardrails_file_path: str = "/app/settings/prompts/persona_guardrails.txt"
-    examples_file_path: str = "/app/settings/prompts/persona_examples.txt"
+    prompt_file_path: str = prompt_file("askai_system_prompt.txt")
+    identity_file_path: str = prompt_file("persona_identity.txt")
+    guardrails_file_path: str = prompt_file("persona_guardrails.txt")
+    examples_file_path: str = prompt_file("persona_examples.txt")
     prompt_log_path: str = "/logs/askai_prompt.txt"
     # askai_prompt：以時間輪替，並只保留固定份數
     prompt_log_when: str = "midnight"
@@ -284,7 +286,7 @@ class AskAIWebSettings(BaseSettings):
     fallback_min_results: int = 3
     language: str = "zh-TW"
     #: 工具模式（模型自己決定要不要查）時，怎麼用 web_search 的規則；只在有這個工具時接在系統提示詞後面
-    rules_path: str = "/app/settings/prompts/askai_web_rules.txt"
+    rules_path: str = prompt_file("askai_web_rules.txt")
 
     model_config = SettingsConfigDict(
         extra="ignore",
@@ -326,7 +328,7 @@ class AskAIIntelSettings(BaseSettings):
     #: search-mcp 每頁的字數（SEARCH_SETTINGS.fetch_page_chars）不能超過這個值，否則每頁後段永遠讀不到
     fetch_max_chars: int = 2500
     #: 怎麼用情報工具的規則：只在真的有工具時接在系統提示詞後面（改檔即生效）
-    rules_path: str = "/app/settings/prompts/askai_intel_rules.txt"
+    rules_path: str = prompt_file("askai_intel_rules.txt")
 
     model_config = SettingsConfigDict(extra="forbid", frozen=True)
 
@@ -355,16 +357,16 @@ class AmbientChatSettings(BaseSettings):
     # 綁定頻道的 config.json key（由 channel_registry「AI 插話頻道」寫入）
     channel_config_key: str = "ambient_chat_channel_id"
     # 插話「行為」規則（簡短、允許沉默…）；人設身份另由 identity_path 疊上
-    prompt_path: str = "/app/settings/prompts/ambient_reply_prompt.txt"
+    prompt_path: str = prompt_file("ambient_reply_prompt.txt")
     # 插話人設＝共用人格 + 共用守則 + 插話行為（模組化拼裝）。不載 askai 的「深聊風格」那層，
     # 所以 ambient 天生比較不端著，不必另維護一份精簡人格。
     use_shared_identity: bool = True
-    identity_path: str = "/app/settings/prompts/persona_identity.txt"
-    guardrails_path: str = "/app/settings/prompts/persona_guardrails.txt"
+    identity_path: str = prompt_file("persona_identity.txt")
+    guardrails_path: str = prompt_file("persona_guardrails.txt")
     # 風格對照範例（與 /askai 共用同一份 persona_examples.txt，人設共通不另維護）：
     # 教模型別跟著頻道互嗆口吻下場補刀、保持隔一層看戲的熟女調性。
     use_examples: bool = True
-    examples_path: str = "/app/settings/prompts/persona_examples.txt"
+    examples_path: str = prompt_file("persona_examples.txt")
 
     # ── 風格召回（v2）：撈「被群裡按過讚、且與當下情境語意相近」的舊插話，當靈感注入（學味道別照抄）。
     #    走 ai_interactions.embedding（pgvector cosine）。保守起步：注入少、距離地板嚴；先 shadow 觀察。
@@ -486,7 +488,7 @@ class AmbientChatSettings(BaseSettings):
     image_max_bytes: int = 5 * 1024 * 1024
 
     # ── Phase C 記憶寫入（preference_fact）──
-    extractor_prompt_path: str = "/app/settings/prompts/preference_extractor_prompt.txt"
+    extractor_prompt_path: str = prompt_file("preference_extractor_prompt.txt")
     memory_min_confidence: float = 0.6   # 低於此不寫入（寧缺勿濫）
     trusted_promote_at: int = 2          # 不同批次提到達此次數 → tentative 升 trusted（才會被召回）
     memory_flush_threshold: int = 30     # 插話頻道訊息累積達此量觸發一次抽取批次
@@ -495,7 +497,7 @@ class AmbientChatSettings(BaseSettings):
     memory_buffer_max: int = 300         # 記憶緩衝上限，超過丟最舊
 
     # ── 招牌梗 signature_tag（持久印象層；corroboration + 慢衰減；與 preference_fact 平行）──
-    tag_extractor_prompt_path: str = "/app/settings/prompts/signature_tag_extractor_prompt.txt"
+    tag_extractor_prompt_path: str = prompt_file("signature_tag_extractor_prompt.txt")
     tag_min_confidence: float = 0.7        # 比偏好嚴
     tag_promote_at_low: int = 3            # low（外號/口頭禪）升 trusted 門檻
     tag_promote_at_spicy: int = 5          # spicy（身材/調情）門檻更高；本人認領由守門階段保證，計數同樣每日去重
@@ -559,15 +561,15 @@ class PersonaAgentSettings(BaseSettings):
     #: agent 06:13 結束，離 07:00 還有 47 分緩衝。最壞情況（每人都跑滿最慢的 339 秒）
     #: 是 169 分，撞到 deadline 也只是把剩下的記 `unrun` 留到明晚，不會失控。
     #:
-    #: **為什麼不是 6**：6 人時 68 人的池子要 11 晚才輪完一圈，一週的 M5 會產出
+    #: **為什麼不是 6**：6 人時 68 人的池子要 11 晚才輪完一圈，一週下來會產出
     #: 42 個人的 v1、**零個 v2**——而 agent 的核心假設正是「累積式 diff 會不會越修
     #: 越準」，那一週完全驗不到。26 人輪一圈只要 2.6 晚，一週每人跑 2.7 次，
     #: 廣度（68 人全覆蓋）與深度（v2、v3）同時拿得到。
     #:
     #: 另一個好處是統計：6 個樣本時一個異常值就能歪掉當晚的幻覺率（8/31 那晚
-    #: 假證據 5 個，數字直接翻三倍），26 個樣本才撐得起 M6 的評比。
+    #: 假證據 5 個，數字直接翻三倍），26 個樣本才撐得起評比。
     #:
-    #: M6 決定採用之後再往上調——那時關心的是覆蓋率，不再是版本演化。
+    #: 評比決定採用之後再往上調——那時關心的是覆蓋率，不再是版本演化。
     sample_size: int = 26
 
     #: 硬停時間（本地時；跨過就停手，沒跑到的人明晚優先）。
@@ -575,7 +577,7 @@ class PersonaAgentSettings(BaseSettings):
     #: 那時群裡開始有人聊天，agent 每步禮讓十分鐘再硬上反而最擾民。
     deadline_hour: int = 7
 
-    #: M7：把精簡版寫進 `auto_personality` 給插話／askai 讀（04:00 排程的第 ⑤ 步，見
+    #: 發布：把精簡版寫進 `auto_personality` 給插話／askai 讀（04:00 排程的第 ⑤ 步，見
     #: `llm.persona.agent.publish`）。off＝不做；dry_run＝只算、寫 log，不寫入——上線前先看
     #: 挑出來的東西對不對；on＝寫入。
     #: `enabled` 關掉時一律當 off（`publish.effective_publish_mode`）：沒有新版本可發布。
@@ -623,9 +625,9 @@ class DiaryReflectionSettings(BaseSettings):
 
     # 日記人設＝共用人格 + 共用守則 + 日記行為（與 ambient 同源，只換最後一層）
     use_shared_identity: bool = True
-    identity_path: str = "/app/settings/prompts/persona_identity.txt"
-    guardrails_path: str = "/app/settings/prompts/persona_guardrails.txt"
-    prompt_path: str = "/app/settings/prompts/diary_reflection_prompt.txt"
+    identity_path: str = prompt_file("persona_identity.txt")
+    guardrails_path: str = prompt_file("persona_guardrails.txt")
+    prompt_path: str = prompt_file("diary_reflection_prompt.txt")
 
     # 排程（台北時區）：每天幾點寫日記
     schedule_hour: int = 0
@@ -689,7 +691,7 @@ class EmojiAutofillSettings(BaseSettings):
     #: 給模型看的訊息每則截斷長度
     max_context_chars: int = 200
 
-    prompt_path: str = "/app/settings/prompts/emoji_autofill_prompt.txt"
+    prompt_path: str = prompt_file("emoji_autofill_prompt.txt")
     #: 每天第一次改寫字典前備份到這裡，各保留 `backup_keep` 份
     backup_dir: str = "/logs/dictionary_backup"
     backup_keep: int = 14

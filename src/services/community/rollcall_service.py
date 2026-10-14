@@ -10,6 +10,10 @@ import os
 import random
 from datetime import datetime, timedelta
 from pathlib import Path
+
+from sys_settings.paths import settings_file
+from utils import runtime_file
+from utils.utils import ChannelConfig
 from typing import Callable, Dict, List, Optional, Set
 
 import discord
@@ -19,7 +23,7 @@ from utils.background_tasks import supervise
 
 logger = logging.getLogger(__name__)
 
-RUNTIME_FILE = Path(__file__).parents[2] / "settings" / "rollcall_runtime.json"  # services/community/ 往上兩層是 src/
+RUNTIME_FILE = Path(settings_file("rollcall_runtime.json"))  # services/community/ 往上兩層是 src/
 # 點名回覆期限（天）
 RESPONSE_DEADLINE_DAYS = 7
 # 通過點名後的豁免期（天）
@@ -62,10 +66,10 @@ class RollCallRuntime:
     # ── 持久化 ──
 
     def _load(self):
-        if not RUNTIME_FILE.exists():
+        data = runtime_file.load(RUNTIME_FILE)
+        if not data:
             return
         try:
-            data = json.loads(RUNTIME_FILE.read_text(encoding="utf-8"))
             self.enabled = data.get("enabled", False)
             self.admin_panel_message_id = data.get("admin_panel_message_id")
             self.channel_id = data.get("channel_id")
@@ -79,7 +83,6 @@ class RollCallRuntime:
 
     def save(self):
         try:
-            os.makedirs(RUNTIME_FILE.parent, exist_ok=True)
             data = {
                 "enabled": self.enabled,
                 "admin_panel_message_id": self.admin_panel_message_id,
@@ -90,10 +93,7 @@ class RollCallRuntime:
                 "last_rollcall_date": self.last_rollcall_date,
                 "last_manual_rollcall_date": self.last_manual_rollcall_date,
             }
-            RUNTIME_FILE.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            runtime_file.save(RUNTIME_FILE, data)
         except Exception as e:
             logger.error(f"寫入 rollcall_runtime.json 失敗: {e}", exc_info=True)
 
@@ -224,11 +224,7 @@ class RollCallService:
 
     def _get_config(self) -> dict:
         """讀取 config.json 取得 rollcall 設定"""
-        try:
-            with open("config.json", "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
+        return ChannelConfig.load_config(caller="rollcall")
 
     def _get_target_role_ids(self) -> List[int]:
         config = self._get_config()

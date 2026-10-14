@@ -10,10 +10,12 @@ from typing import Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from sys_settings.paths import SCRAPER_DIR
+
 
 class SearchSettings(BaseSettings):
     #: scraper 的資料庫；只用唯讀方式開（`mode=ro`，見 `services.search.index`）
-    articles_db_path: Path = Path("/app/scraper/articles.db")
+    articles_db_path: Path = SCRAPER_DIR / "articles.db"
     #: 搜尋索引：從 articles.db 建出來的衍生資料，刪掉會自動重建，不算使用者資料。
     #: 放在 repo 根目錄的 `search_data/`（docker-compose 只掛給 search-mcp），不放 src/：幾百 MB 的
     #: 衍生資料不該跟程式碼混在一起。沒掛這個資料夾的容器用到時會直接失敗，不會悄悄另建一份
@@ -37,7 +39,7 @@ class SearchSettings(BaseSettings):
     # 開關在 settings/switches.json 的 search_vector_mode（改了就生效）；這裡只放細項參數
     #: pgvector 的邏輯表名（實體表名由 HYBRID_RETRIEVAL_SETTINGS.physical_table 加前綴並消毒）
     vector_table: str = "search_chunks"
-    #: 只把這天之後的文章算向量。先做最近的（比例原則，使用者 2026-10-08），舊資料之後再補
+    #: 只把這天之後的文章算向量。先做最近的（最常被問到），舊資料之後再補
     vector_since: str = "2026-01-01"
     #: 巴哈只算這幾類討論串（標題開頭的【】）；閒聊串量大、答案少
     vector_bahamut_categories: tuple[str, ...] = ("攻略", "心得", "情報", "問題")
@@ -49,7 +51,7 @@ class SearchSettings(BaseSettings):
     #: 向量那一路撈幾段（同一篇多段只算一次，所以實際文件數會更少）
     vector_candidates: int = 60
     #: 向量那一路的門檻：餘弦距離（1－相似度）超過就不算，None＝不設。0.35 是 2026-10-08 依距離分布與考卷
-    #: A／B 兩半選出來的（沒門檻時，不相關的新文章會把關鍵字找對的結果擠下去），見 AI_HANDOFF_AND_TODO.md 的 mcp-search-tools 區塊
+    #: A／B 兩半選出來的（沒門檻時，不相關的新文章會把關鍵字找對的結果擠下去）
     vector_max_distance: Optional[float] = 0.35
     #: 名次融合（RRF）的 k 與兩路權重
     rrf_k: int = 60

@@ -1,5 +1,8 @@
 import os
 import json
+
+from sys_settings.paths import settings_file
+from utils import runtime_file
 import logging
 import discord
 from .models import Song
@@ -8,7 +11,7 @@ from utils.dm_notifier import notify_song_liked
 
 logger = logging.getLogger(__name__)
 
-MUSIC_RUNTIME_PATH = "settings/music_runtime.json"
+MUSIC_RUNTIME_PATH = settings_file("music_runtime.json")
 
 
 def _is_in_music_channel(cog, user) -> bool:
@@ -379,28 +382,17 @@ class Announcer:
     def _save_panel_id(message_id: int | None):
         """將面板訊息 ID 存入 music_runtime.json"""
         try:
-            if os.path.exists(MUSIC_RUNTIME_PATH):
-                with open(MUSIC_RUNTIME_PATH, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-            else:
-                data = {"music": {}}
+            data = runtime_file.load(MUSIC_RUNTIME_PATH)
+            music = data.setdefault("music", {})
             if message_id:
-                data["music"]["panel_message_id"] = message_id
+                music["panel_message_id"] = message_id
             else:
-                data["music"].pop("panel_message_id", None)
-            with open(MUSIC_RUNTIME_PATH, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+                music.pop("panel_message_id", None)
+            runtime_file.save(MUSIC_RUNTIME_PATH, data)
         except Exception as e:
             logger.warning(f"[Announcer] 儲存面板 ID 失敗: {e}")
 
     @staticmethod
     def _load_panel_id() -> int | None:
         """從 music_runtime.json 讀取面板訊息 ID"""
-        try:
-            if os.path.exists(MUSIC_RUNTIME_PATH):
-                with open(MUSIC_RUNTIME_PATH, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                return data.get("music", {}).get("panel_message_id")
-        except Exception:
-            pass
-        return None
+        return runtime_file.load(MUSIC_RUNTIME_PATH).get("music", {}).get("panel_message_id")

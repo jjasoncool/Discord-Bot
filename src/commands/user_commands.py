@@ -12,12 +12,14 @@ logger = logging.getLogger(__name__)
 
 # 監控頻道的字典，格式: {guild_id: {channel_id: [{關鍵字列表, 使用者ID, 通知設定}]}}
 monitored_channels = {}
-monitored_channels_file = "settings/monitored_channels.json"
+monitored_channels_file = settings_file("monitored_channels.json")
 
 import json
 import os
 from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, check_guild
 from utils.dm_notifier import notify_keyword_hit
+from services.community import item_prices
+from sys_settings.paths import settings_file
 
 
 class WatchKeywordsView(discord.ui.View):
@@ -467,7 +469,7 @@ class UserCommands(commands.Cog):
             from utils.utils import get_trade_forum_channel_id
             # 獲取交易論壇頻道 ID
             try:
-                trade_forum_channel_id = await get_trade_forum_channel_id(config_file="config.json", caller="UserCommands")
+                trade_forum_channel_id = await get_trade_forum_channel_id(caller="UserCommands")
             except Exception as e:
                 logger.error(f"無法獲取交易論壇頻道 ID: {str(e)}")
                 trade_forum_channel_id = None
@@ -624,21 +626,10 @@ class UserCommands(commands.Cog):
 
     async def get_user_item_prices(self, user_id: int, guild: discord.Guild = None) -> dict:
         """根據用戶 ID 獲取物品價格資訊"""
-        prices_file_path = "/app/settings/item_prices.json"
-        prices = {}
-        if os.path.exists(prices_file_path):
-            try:
-                with open(prices_file_path, 'r', encoding='utf-8') as f:
-                    prices = json.load(f)
-            except Exception as e:
-                logger.error(f"讀取價格檔案時發生錯誤: {str(e)}")
-                return {}
-
-        user_id_str = str(user_id)
-        if user_id_str not in prices:
+        user_prices = item_prices.user_prices(user_id)
+        if not user_prices:
             return {}
 
-        user_prices = prices.get(user_id_str, {})
         result = {}
         for item in ITEMS:
             price = user_prices.get(item['value'], "無價格設定")
@@ -658,17 +649,7 @@ class UserCommands(commands.Cog):
         if not await check_guild(interaction):
             return
 
-        prices_file_path = "/app/settings/item_prices.json"
-        prices = {}
-        if os.path.exists(prices_file_path):
-            try:
-                with open(prices_file_path, 'r', encoding='utf-8') as f:
-                    prices = json.load(f)
-            except Exception as e:
-                logger.error(f"讀取價格檔案時發生錯誤: {str(e)}")
-                await safe_send_interaction_message(interaction, "無法讀取價格設定，請稍後再試。", ephemeral=True)
-                return
-
+        prices = item_prices.all_prices()
         if not prices:
             await safe_send_interaction_message(interaction, "目前沒有設定任何物品價格。", ephemeral=True)
             return

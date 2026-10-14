@@ -19,32 +19,23 @@ from typing import Awaitable, Callable, Iterable, Optional
 
 import discord
 
+from utils import runtime_file
+
 logger = logging.getLogger(__name__)
 
 SendPanel = Callable[[discord.abc.Messageable], Awaitable[discord.Message]]
 
 
 def load_runtime(path: str) -> dict:
-    """讀 runtime json；沒有檔案或壞掉都回空 dict。"""
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception as e:
-        logger.warning("讀取 runtime 檔失敗 (%s): %s", path, e)
-        return {}
+    """讀 runtime json；沒有檔案或壞掉都回空 dict（機制在 `utils.runtime_file`）。"""
+    return runtime_file.load(path)
 
 
 def update_runtime(path: str, **fields) -> None:
-    """把欄位合併寫回 runtime json（保留檔案裡的其他欄位）。"""
-    data = load_runtime(path)
-    data.update(fields)
+    """把欄位合併寫回 runtime json（保留檔案裡的其他欄位）；寫失敗記 log、不往外丟——面板位置記不住
+    下次會重掃頻道找回來，不值得讓置底本身失敗。"""
     try:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        runtime_file.update(path, **fields)
     except Exception as e:
         logger.error("寫入 runtime 檔失敗 (%s): %s", path, e)
 

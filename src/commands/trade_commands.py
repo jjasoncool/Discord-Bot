@@ -6,6 +6,8 @@ import traceback
 # 從 constants.py 導入物品選項配置
 from constants import ITEMS
 from utils.utils import safe_send_interaction_message
+from services.community import item_prices
+from sys_settings.paths import STATIC_DIR
 
 # 獲取 logger
 logger = logging.getLogger(__name__)
@@ -50,7 +52,7 @@ class SelectItemFinalConfirmView(discord.ui.View):
         # 檢查是否已設定交易論壇頻道
         from utils.utils import get_trade_forum_channel_id
         logger.debug("準備調用 get_trade_forum_channel_id 函數 (調用者: TradeCommands)")
-        forum_channel_id = await get_trade_forum_channel_id(config_file="config.json", caller="TradeCommands")
+        forum_channel_id = await get_trade_forum_channel_id(caller="TradeCommands")
         logger.debug(f"從 get_trade_forum_channel_id 函數返回的 forum_channel_id: {forum_channel_id} (調用者: TradeCommands)")
         if forum_channel_id == 1234567890:
             await safe_send_interaction_message(
@@ -233,27 +235,9 @@ class TradeCommands(commands.Cog):
         if not await check_guild(interaction, owner_only=False, required_role="Trader"):
             return
 
-        import json
-        import os
-
-        # 確保 settings 目錄存在
-        os.makedirs("/app/settings", exist_ok=True)
-        prices_file_path = "/app/settings/item_prices.json"
-
-        # 讀取現有的價格設定
-        seller_prices = {}
-        if os.path.exists(prices_file_path):
-            try:
-                with open(prices_file_path, 'r', encoding='utf-8') as f:
-                    seller_prices = json.load(f)
-            except Exception as e:
-                logger.error(f"讀取價格檔案時發生錯誤: {str(e)}")
-                await safe_send_interaction_message(interaction, "無法讀取價格設定，請稍後再試。", ephemeral=True)
-                return
-
+        # 這位賣家現有的價格（讀寫都走 item_prices，別的賣家的那幾組不會被動到）
         user_id = str(interaction.user.id)
-        if user_id not in seller_prices:
-            seller_prices[user_id] = {}
+        seller_prices = {user_id: item_prices.user_prices(user_id)}
 
         # 分頁設定
         items_per_page = 5
@@ -339,8 +323,12 @@ class TradeCommands(commands.Cog):
                                 return
                             seller_prices[user_id][value] = price
 
-                        with open(prices_file_path, 'w', encoding='utf-8') as f:
-                            json.dump(seller_prices, f, ensure_ascii=False, indent=2)
+                        try:
+                            item_prices.set_user_prices(user_id, seller_prices[user_id])
+                        except Exception as e:
+                            logger.error(f"寫入價格檔案時發生錯誤: {e}")
+                            await safe_send_interaction_message(interaction, "價格沒有存成功，請稍後再試。", ephemeral=True)
+                            return
 
                         await safe_send_interaction_message(interaction, "已更新所有物品價格。", ephemeral=True)
                         await interaction.followup.edit_message(
@@ -378,7 +366,7 @@ class TradeCommands(commands.Cog):
             color=discord.Color.blue()
         )
         # 從本地上傳圖片文件
-        file = discord.File("/app/static/items.png", filename="items.png")
+        file = discord.File(STATIC_DIR / "items.png", filename="items.png")
         embed.set_image(url="attachment://items.png")
 
         select = discord.ui.Select(

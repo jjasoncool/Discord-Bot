@@ -1,6 +1,6 @@
 """商品上架：觀星者在商品論壇上架商品，買家挑選下單後，用交易模組開私人交易 thread。
 
-決定（使用者 2026-10-03，交接文件 TR-Q6～Q24）：
+設計決定：
   - 入口是商品論壇置頂「上架說明」裡的「上架商品」按鈕，只有觀星者能按；bot 代發商品貼文。
   - 一篇商品放同一系列的多個品項；買家用下拉只挑自己要的，一次最多 5 種，填數量、確認後下單。
   - 下單就預留數量，取消時還回去；一篇商品可以賣給很多人，每位買家一個交易 thread、加購沿用。
@@ -49,13 +49,13 @@ from sys_settings.shop_settings import ShopSettings
 from sys_settings.time_settings import APP_TZ
 from utils.discord_content import post_to_channel
 from utils.utils import ChannelConfig, check_role
+from sys_settings.paths import APP_ROOT
 
 logger = logging.getLogger(__name__)
 
 CLOSED_PREFIX = "【已下架】"
-#: 幣別的範例：擋下來時與欄位說明都用這組（使用者 2026-10-03 指定 NT$、USD$、JPY¥；欄位名稱同日改叫「幣別」）
+#: 幣別的範例：擋下來時與欄位說明都用這組（NT$、USD$、JPY¥；欄位叫「幣別」）
 UNIT_EXAMPLES = "NT$、USD$、JPY¥、PY幣"
-_SRC_DIR = Path(__file__).resolve().parents[2]
 _RECORD_FAILED = "交易紀錄沒能自動保存，請通知管理員。"
 
 
@@ -163,7 +163,7 @@ class ShopService:
 
     async def _guide_image(self) -> Optional[tuple[str, bytes]]:
         """置頂說明的橫幅圖：（貼文上的檔名, 內容）。檔名帶內容的雜湊，換了圖重綁時才認得出要更新。"""
-        path = _SRC_DIR / self.settings.guide_image
+        path = APP_ROOT / self.settings.guide_image
         try:
             data = await asyncio.to_thread(path.read_bytes)
         except OSError:
@@ -239,7 +239,7 @@ class ShopService:
         if len(title) > TITLE_LIMIT:
             raise ShopError(f"標題最多 {TITLE_LIMIT} 個字。")
         unit = (unit or "").strip() or self.settings.default_unit
-        # 幣別只是金額前面的符號，金額在各品項各自填；擋數字，免得上架者把金額填在這裡（使用者 2026-10-03）
+        # 幣別只是金額前面的符號，金額在各品項各自填；擋數字，免得上架者把金額填在這裡
         if any(ch.isdigit() for ch in unit):
             raise ShopError(f"幣別不能有數字，只填金額前面的符號，例如 {UNIT_EXAMPLES}。"
                             "金額請在加入品項時各自填。")
@@ -368,7 +368,7 @@ class ShopService:
 
     async def edit_variant(self, listing_id: int, actor: discord.Member, key: int, draft: Draft) -> Listing:
         """編輯品項。draft.limit 是「剩餘數量」（還要賣幾個，None＝不限量）：
-        存的上限＝已下單＋剩餘，補貨 5 個就填 5，不用自己算（使用者 2026-10-03，TR-Q27）。"""
+        存的上限＝已下單＋剩餘，補貨 5 個就填 5，不用自己算。"""
         async with self._lock(listing_id):
             thread, message, listing = await self._load_for_manage(listing_id, actor)
             variant = listing.variant(key)
@@ -495,7 +495,7 @@ class ShopService:
             raise ShopError("不能買自己上架的商品。")
 
     def _order_text(self, buyer, owner, listing: Listing, rows: list[str], lines) -> str:
-        # 總計寫在底下的按鈕上，文字裡不再寫一次（使用者 2026-10-04，TR-Q40）
+        # 總計寫在底下的按鈕上，文字裡不再寫一次
         text = (f"🧾 {buyer.mention} 向 {owner.mention} 下單（{listing.title}）：\n"
                 + "\n".join(f"・{row}" for row in rows))
         if any(variant.preorder for variant, _ in lines):
@@ -522,9 +522,9 @@ class ShopService:
         """商品交易完成時在封存頻道留底：每筆下單（下單當時的價格）＋交易對話的連結，不附對話內容。
 
         封存頻道所有觀星者都看得到：價格公開透明，但對話裡可能有遊戲帳號、付款資料、寄送地址，
-        只留在私人交易對話裡（雙方＋管理員看得到，結束後鎖定保留，就是備份）（使用者 2026-10-05，TR-Q44／Q45）。
+        只留在私人交易對話裡（雙方＋管理員看得到，結束後鎖定保留，就是備份）。
         商品貼文本身不動（還要賣給別人）；自由市場是把需求方公開的貼文搬過去，這裡是另發一篇。
-        回傳要加在完成訊息裡的說明：成功就不說，沒保存到才請大家通知管理員，原因寫在 log（使用者 2026-10-04）。"""
+        回傳要加在完成訊息裡的說明：成功就不說，沒保存到才請大家通知管理員，原因寫在 log。"""
         try:
             names = await self.trade.display_names(thread.guild, (ref.requester_id, ref.supplier_id))
             requester = names.get(ref.requester_id) or str(ref.requester_id)

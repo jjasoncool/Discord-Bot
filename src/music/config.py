@@ -1,6 +1,10 @@
 import os
 import re
 import json
+
+from sys_settings.paths import settings_file
+from utils.utils import CONFIG_FILE
+from utils import runtime_file
 import asyncio
 import logging
 from dataclasses import dataclass, field
@@ -10,9 +14,9 @@ from utils.background_tasks import supervise
 logger = logging.getLogger(__name__)
 
 # 頻道設定來源（與其他頻道設定一致）
-CONFIG_JSON_PATH = "config.json"
+CONFIG_JSON_PATH = CONFIG_FILE
 # 歌單等音樂專屬設定
-MUSIC_RUNTIME_PATH = "settings/music_runtime.json"
+MUSIC_RUNTIME_PATH = settings_file("music_runtime.json")
 
 
 def playlist_key(url: str) -> str:
@@ -121,17 +125,9 @@ class RuntimeMusicConfig:
             return False
 
         # 讀取歌單、音訊模式、shuffle（from music_runtime.json）
-        runtime_data = {}
-        audio_mode = "pcm"
-        shuffle = False
-        if os.path.exists(MUSIC_RUNTIME_PATH):
-            try:
-                with open(MUSIC_RUNTIME_PATH, 'r', encoding='utf-8') as f:
-                    runtime_data = json.load(f).get("music", {})
-                audio_mode = runtime_data.get("audio_mode", "pcm")
-                shuffle = runtime_data.get("shuffle", False)
-            except Exception as e:
-                logger.warning(f"[MusicConfig] 讀取 music_runtime.json 失敗: {e}")
+        runtime_data = runtime_file.load(MUSIC_RUNTIME_PATH).get("music", {})
+        audio_mode = runtime_data.get("audio_mode", "pcm")
+        shuffle = runtime_data.get("shuffle", False)
 
         playlists = cls._parse_playlists(runtime_data)
         active_keys = cls._resolve_active(runtime_data, playlists)
@@ -248,11 +244,9 @@ class RuntimeMusicConfig:
                 with open(CONFIG_JSON_PATH, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 snapshot['voice_channel_id'] = data.get('music_voice_channel_id', 0)
-            if os.path.exists(MUSIC_RUNTIME_PATH):
-                with open(MUSIC_RUNTIME_PATH, 'r', encoding='utf-8') as f:
-                    runtime_data = json.load(f).get('music', {})
-                for key in cls._watched_keys:
-                    snapshot[key] = runtime_data.get(key)
+            runtime_data = runtime_file.load(MUSIC_RUNTIME_PATH).get('music', {})
+            for key in cls._watched_keys:
+                snapshot[key] = runtime_data.get(key)
         except Exception:
             pass
         return snapshot

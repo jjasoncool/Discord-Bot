@@ -14,12 +14,13 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
+from sys_settings.paths import APP_ROOT
 from utils.logger_config import get_article_monitor_logger
 
 logger = get_article_monitor_logger()
 
 # 預設 DB 路徑
-DEFAULT_DB_PATH = Path(__file__).parent / "sent_articles.db"
+DEFAULT_DB_PATH = APP_ROOT / "services" / "sent_articles.db"   # 位置由 test_data_file_paths 釘住
 
 _CREATE_TABLES_SQL = """
 -- 通用：已發送內容去重（所有來源共用）

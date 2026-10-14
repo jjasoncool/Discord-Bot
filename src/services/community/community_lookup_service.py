@@ -19,10 +19,11 @@ import aiosqlite
 
 from services.source_urls import bahamut_floor_url
 from services.state_db import StateDB
+from sys_settings.paths import SCRAPER_DIR
 
 
-# ── 預設常數（由 AI_HANDOFF_AND_TODO.md 定案）──
-DEFAULT_SCRAPER_DB_PATH = Path("/app/scraper/articles.db")
+# ── 預設常數 ──
+DEFAULT_SCRAPER_DB_PATH = SCRAPER_DIR / "articles.db"
 PTT_POST_MIN = 20
 PTT_COMMENT_MIN = 100
 BAHAMUT_POST_MIN = 20

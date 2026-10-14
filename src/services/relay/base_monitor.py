@@ -18,13 +18,14 @@ from urllib.parse import urlparse
 
 from utils.logger_config import get_article_monitor_logger
 from services.state_db import StateDB, get_shared_state_db
+from sys_settings.paths import SETTINGS_DIR
 
 logger = get_article_monitor_logger()
 
 # article_runtime.json 共用快取（TTL 5 分鐘）
 _article_runtime_cache: Dict = {}
 _article_runtime_cache_time: float = 0
-_ARTICLE_RUNTIME_PATH = Path(__file__).parents[2] / "settings" / "article_runtime.json"  # services/relay/ 往上兩層是 src/
+_ARTICLE_RUNTIME_PATH = SETTINGS_DIR / "article_runtime.json"
 _ARTICLE_RUNTIME_TTL = 300
 
 

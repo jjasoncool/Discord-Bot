@@ -1,14 +1,14 @@
 """功能開關：值放 `settings/switches.json`（使用者手改，改了下一次用到就生效、不用重啟），名稱、預設與允許的值定義在這裡。
 
-**為什麼另開一個檔**（使用者 2026-10-06 SW-Q1～Q2）：開關原本散在 config.json、sys_settings、環境變數、各種 runtime
+**為什麼另開一個檔**：開關原本散在 config.json、sys_settings、環境變數、各種 runtime
 檔，改了有的要重啟、有的要重建容器。開關集中一處、不做 Discord 指令，需要時直接改檔。不放進 config.json：那份
 會被 Discord 存設定整份寫回，常切換的開關放進去容易被蓋掉。
 - 細項參數（逾時、張數、門檻）仍在各自的 sys_settings 類別，重啟可接受。
-- 之後改到哪個功能，就把它的開關搬進來（守衛擋新的開關放到別處）；還沒搬的見清查（AI_HANDOFF_AND_TODO.md）。
+- 之後改到哪個功能，就把它的開關搬進來（守衛擋新的開關放到別處）；還沒搬的列在 `test_shared_conventions` 的 `_LEGACY_SWITCH_FIELDS`。
 
 **值寫錯時**：那一項記 warning 並用預設（其他項照用）；不認得的名稱也記 warning（多半是打錯字）；整份不是合法
 JSON 時全部用預設並明講。檔案內以 `_` 開頭的 key 是說明文字，不會被當成開關：每個開關上面放一個
-「_名稱 可以填」列出可填的值和意思（使用者 10-07：手改時不用回來翻程式），新增開關時一併加上。只在檔案修改後檢查一次、
+「_名稱 可以填」列出可填的值和意思（手改時不用回來翻程式），新增開關時一併加上。只在檔案修改後檢查一次、
 檔案不見只記一次，不會每則訊息都洗 log。**任何寫錯都不會讓 bot 起不來**（啟動測試不驗這個檔）。
 """
 from __future__ import annotations
@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+
+from sys_settings.paths import SETTINGS_DIR
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
@@ -26,7 +28,7 @@ logger = logging.getLogger(__name__)
 _missing_warned = False
 
 #: services/、sys_settings/ 都在 src/ 底下；開關檔跟 config.json 一樣是使用者會手改的設定
-SWITCHES_PATH = Path(__file__).parents[1] / "settings" / "switches.json"
+SWITCHES_PATH = SETTINGS_DIR / "switches.json"
 
 
 class Switches(BaseModel):

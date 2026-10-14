@@ -1,4 +1,4 @@
-"""Telegram 過濾的隔離區：每個轉發主頻道底下一個「垃圾訊息」thread（使用者 10-05 定案）。
+"""Telegram 過濾的隔離區：每個轉發主頻道底下一個「垃圾訊息」thread。
 
 - 判成垃圾的訊息送進這裡，發送紀錄記這個 thread 的 id（不建新表）。
 - **記住歷來所有隔離 thread**（runtime 檔）：認「這筆紀錄是不是隔離」要看 id 是不是在這份清單裡，不能用
@@ -18,13 +18,14 @@ import discord
 
 from utils.discord_threads import fetch_thread, reopen_thread
 from utils.panel_bump import load_runtime, update_runtime
+from sys_settings.paths import settings_file
 from utils.background_tasks import spawn
 
 logger = logging.getLogger(__name__)
 
 THREAD_NAME = "垃圾訊息"
 #: 隔離 thread 與面板位置（bot 自己寫的狀態，不進版控）
-RUNTIME_PATH = str(Path(__file__).parents[2] / "settings" / "telegram_quarantine_runtime.json")  # services/relay/ 往上兩層是 src/
+RUNTIME_PATH = settings_file("telegram_quarantine_runtime.json")  # services/relay/ 往上兩層是 src/
 #: 一週沒人講話才封存（Discord 允許的最長值）
 _AUTO_ARCHIVE_MINUTES = 10080
 

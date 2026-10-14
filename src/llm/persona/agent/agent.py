@@ -31,6 +31,7 @@ from services.llm_service import LLMAPIError
 from llm.persona.agent import tools as agent_tools
 from llm.persona.agent.schema import build_response_format
 from sys_settings.llm_settings import AmbientChatSettings
+from sys_settings.paths import prompt_file
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +77,8 @@ YIELD_MAX_WAIT_SECONDS = 600.0
 # token（33 tok/s），300 秒的預設不夠用 → 比照人格萃取拉到 600 秒。
 FINAL_TIMEOUT_SECONDS = 600
 
-_PROMPT_PATH = "/app/settings/prompts/persona_agent_prompt.json"
-_DESCRIPTION_RULES_PATH = "/app/settings/prompts/persona_description_rules.txt"
+_PROMPT_PATH = prompt_file("persona_agent_prompt.json")
+_DESCRIPTION_RULES_PATH = prompt_file("persona_description_rules.txt")
 
 
 def load_prompts() -> dict[str, str]:
@@ -193,7 +194,7 @@ async def _call_model(service: Any, *, messages: list[dict[str, object]],
 
 @dataclass(frozen=True)
 class StepTrace:
-    """單一工具呼叫的紀錄，供事後檢查 agent 的決策路徑（M3 寫進 runs 表）。"""
+    """單一工具呼叫的紀錄，供事後檢查 agent 的決策路徑（寫進 runs 表）。"""
 
     step: int
     tool: str
@@ -472,7 +473,7 @@ async def run_for_user(
 
 
 
-# ── 驗證 + 寫入（M3）────────────────────────────────────────────────────
+# ── 驗證 + 寫入 ────────────────────────────────────────────────────────
 #: 連續失敗時的預算降級。**重點不是省 GPU（一人一晚約 3 分鐘），是避免沉默失敗**——
 #: 確定性失敗（例如某人的資料量就是撐爆 context）每晚重跑都一樣爆，而沒人會發現。
 #: 降到第 3 次仍失敗就隔離，讓它浮出來變成維運報告上的一行。
@@ -625,7 +626,7 @@ async def run_db(fn, *args, **kwargs):
     呼叫會**卡住整個 event loop**（音樂、Discord 心跳、插話全部停住）。批次跑 10 人
     就是 60 次阻塞，而 `select_targets` 那句實測就要 1 秒。
 
-    **放在模組層而不是 `run_and_persist` 內的 closure**：M4 的 `run_batch` 是第二個
+    **放在模組層而不是 `run_and_persist` 內的 closure**：批次的 `run_batch` 是第二個
     async 進入點，closure 借不到就會各寫一份 `run_in_executor`。
     `test_persona_agent_loop.BlockingCallTests` 會掃這兩支的原始碼把關。
     """
@@ -645,7 +646,7 @@ async def run_and_persist(
 ) -> tuple[AgentRun, Any]:
     """跑一位使用者 → 驗證 → 寫入兩張表。回傳 `(AgentRun, ValidationResult|None)`。
 
-    `run_for_user` 保持純粹（只產出 diff、不碰 DB），寫入集中在這裡，M4 的批次直接
+    `run_for_user` 保持純粹（只產出 diff、不碰 DB），寫入集中在這裡，批次直接
     呼叫這支即可。`save=False` 時只驗證不寫，給除錯指令用。
 
     **執行前先看連續失敗次數**：失敗越多次預算調得越保守，超過門檻就跳過並記
@@ -762,7 +763,7 @@ async def run_and_persist(
             quote_misses=result.quote_misses if result else None,
             # 通過驗證卻沒寫成版本時（`skip_reason` 有值），內容只存在記憶體裡。
             # 只記 `accepted_changes=5` 這個數字，「那五項寫了什麼」就永遠查不到——
-            # 而低量使用者能不能寫出東西，正是 M6 要判斷的。寫成版本的那條路不必存，
+            # 而低量使用者能不能寫出東西，正是評比階段要判斷的。寫成版本的那條路不必存，
             # 內容在 `persona_agent_versions` 裡。
             skipped_changes=(
                 result.accepted if result and result.skip_reason is not None else None

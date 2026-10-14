@@ -9,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 from utils.logger_config import configure_logging  # import 即套用 settings/logging.json
-from utils.utils import safe_send_interaction_message
+from utils.utils import CONFIG_FILE, safe_send_interaction_message
 from services.relay.telegram_relay_service import (
     DiscordMessagePublisher,
     MessageRelayWorker,
@@ -497,7 +497,7 @@ async def auto_start_article_monitor(bot):
         await asyncio.sleep(2)
 
         # 讀取配置文件
-        config_file = "config.json"
+        config_file = CONFIG_FILE
         if not os.path.exists(config_file):
             logger.info("配置文件不存在，跳過自動啟動官方文章更新")
             return
@@ -619,8 +619,8 @@ async def auto_start_telegram_relay(bot):
 
         dsn = build_telegram_pg_dsn_from_env()
         repository = TelegramMessageRepository(dsn=dsn)
-        resolver = MessageRouteResolver(config_path="config.json")
-        adapter = TelegramRenderAdapter(app_root="/app")
+        resolver = MessageRouteResolver()
+        adapter = TelegramRenderAdapter()
         publisher = DiscordMessagePublisher()
 
         from services.relay.telegram_filter import RelayFilter

@@ -6,8 +6,7 @@
 全程 best-effort：任何失敗只 log、不拋（絕不拖垮轉發主流程）。
 掛點：article_monitor.send_article_to_channel / fb_monitor.send_fb_post_to_channel 尾巴。
 
-設計依據：對 articles.db 全 490 篇對抗審查（2026-07-01）。詳見
-AI_HANDOFF_AND_TODO.md「活動公告 → 自動建立 Discord 伺服器活動」區塊。
+設計依據：對 articles.db 全部 490 篇公告做過對抗審查，解析規則與去重方式由此而來。
 """
 from __future__ import annotations
 
@@ -18,6 +17,8 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from sys_settings.paths import SCRAPER_DIR
 from typing import List, Optional
 
 # 注意：discord / ChannelConfig / StateDB 等相依只在 maybe_schedule_events 內 lazy import，
@@ -66,7 +67,7 @@ def is_umbrella_title(name: str) -> bool:
     return bool(_UMBRELLA_TITLE.search(name or ""))
 
 # articles.db 路徑（discord-bot 容器掛 ./src → /app；版本日回填用，RO）
-_ARTICLES_DB = Path(__file__).resolve().parents[2] / "scraper" / "articles.db"  # services/events/ 往上兩層是 src/
+_ARTICLES_DB = SCRAPER_DIR / "articles.db"
 
 
 # ── 版本更新日回填（相對起點「X版本更新後」→ 版本真實上線時間） ──

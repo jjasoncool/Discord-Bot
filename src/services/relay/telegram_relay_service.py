@@ -22,6 +22,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from sys_settings.paths import APP_ROOT, TELEGRAM_SCRAPER_DIR
+from utils.utils import CONFIG_FILE
 from typing import Optional
 from urllib.parse import quote_plus
 
@@ -205,7 +207,7 @@ class TelegramMessageRepository:
                 );
                 """
             )
-            # 要補判：開著過濾、模型沒判到就送進主頻道的（使用者 10-08 UC-Q1；欄名使用者要求看得懂）。預設 FALSE，加欄不改既有資料
+            # 要補判：開著過濾、模型沒判到就送進主頻道的（欄名要讓人看得懂）。預設 FALSE，加欄不改既有資料
             await conn.execute(
                 "ALTER TABLE telegram_relay_delivery_state "
                 "ADD COLUMN IF NOT EXISTS needs_recheck BOOLEAN NOT NULL DEFAULT FALSE;"
@@ -710,8 +712,8 @@ class MessageRouteResolver:
 
     def __init__(
         self,
-        config_path: str = "config.json",
-        telegram_runtime_config_path: str = "telegram_scraper/runtime_config.json",
+        config_path: str | Path = CONFIG_FILE,
+        telegram_runtime_config_path: str | Path = TELEGRAM_SCRAPER_DIR / "runtime_config.json",
     ) -> None:
         self.config_path = Path(config_path)
         self.telegram_runtime_config_path = Path(telegram_runtime_config_path)
@@ -853,7 +855,7 @@ class TelegramRenderAdapter:
     # 保守取 3000 當「每段」上限：超過就切成多則連續發送（不截斷、不丟內容）。
     _DESCRIPTION_MAX_CHARS = 3000
 
-    def __init__(self, app_root: str = "/app") -> None:
+    def __init__(self, app_root: str | Path = APP_ROOT) -> None:
         self.app_root = Path(app_root)
         self._runtime_config_path = self.app_root / "telegram_scraper" / "runtime_config.json"
 
@@ -1969,7 +1971,7 @@ class MessageRelayWorker:
 
         - 判定：判成垃圾、而且要真的隔離時才有；其他情況（沒開、只記錄、放行）是 None。
         - 待補判：正式模式下模型沒判到（沒回應、出錯、回答看不懂）就照常送主頻道的，之後補判、是垃圾再搬走
-          （使用者 10-08：「每個訊息應該都要被檢查過」）。
+          （每則訊息都要被檢查過）。
         - `complete=False`（相簿等待逾時只到齊一部分、單則的圖等太久還沒到）不判、照常送：只看到一部分就判，
           會把「文字只有水、圖是設計稿」那種情報錯關（13649）。
         """
@@ -2001,7 +2003,7 @@ class MessageRelayWorker:
 
     @staticmethod
     def _verdict_header(verdict: Optional[Verdict]) -> str:
-        """隔離那則最上面一行（使用者 10-06 TF-Q4）。"""
+        """隔離那則最上面一行。"""
         if verdict is None:
             return ""
         return f"判定：{verdict.label}｜{verdict.reason}" if verdict.reason else f"判定：{verdict.label}"
@@ -2059,7 +2061,7 @@ class MessageRelayWorker:
         return count
 
     # ------------------------------------------------------------------
-    # 隔離區：清單與放回主頻道（使用者 10-06 TF-Q1～Q4）
+    # 隔離區：清單與放回主頻道
     # ------------------------------------------------------------------
 
     async def quarantine_items(self, parent_id: int, *, current_thread_id: Optional[int] = None) -> list[QuarantineItem]:
@@ -2201,7 +2203,7 @@ class MessageRelayWorker:
     _QUARANTINE_SCAN_LIMIT = 500
 
     # ------------------------------------------------------------------
-    # 隔離區：把已經貼在主頻道的移進來（使用者 10-07：「判垃圾搬到 thread、原本頻道的貼文刪除」）
+    # 隔離區：把已經貼在主頻道的移進來（判成垃圾的搬到 thread、原本頻道的貼文刪除）
     # ------------------------------------------------------------------
 
     async def unit_pks(self, record: TelegramMessageRecord) -> list[int]:
@@ -2369,7 +2371,7 @@ class MessageRelayWorker:
         return rows
 
     # ------------------------------------------------------------------
-    # 待補判：模型沒判到就送進主頻道的，之後補判（使用者 10-08：「每個訊息應該都要被檢查過」，UC-Q1～Q3）
+    # 待補判：模型沒判到就送進主頻道的，之後補判（每則訊息都要被檢查過）
     # ------------------------------------------------------------------
 
     _RECHECK_INTERVAL = timedelta(minutes=10)
@@ -2597,8 +2599,8 @@ class MessageRelayWorker:
             return
 
         # 有圖標示、但圖還沒下載到（爬蟲先寫訊息列、下載完才寫媒體列，每小時輪詢與重啟補償會撿到中間狀態）：
-        # 先不處理、也不記成處理過，等爬蟲補到圖的通知，文字和圖一起送。有文字的最多等 30 分鐘就先送文字
-        # （使用者 10-05），沒文字的等到補圖時限；時間基準跟爬蟲一樣用 Telegram 發文時間。
+        # 先不處理、也不記成處理過，等爬蟲補到圖的通知，文字和圖一起送。有文字的最多等 30 分鐘就先送文字、
+        # 沒文字的等到補圖時限；時間基準跟爬蟲一樣用 Telegram 發文時間。
         media_pending = message.has_media and not message.media_items
         if media_pending:
             age = self._message_age(message)
@@ -2703,7 +2705,7 @@ class MessageRelayWorker:
                 self._processing.add(pk)
                 try:
                     if self._filter_active():
-                        # 開了過濾就一次只處理一則（使用者 10-06 TF-Q6）：模型一次只能判一則，並行快不了多少，
+                        # 開了過濾就一次只處理一則：模型一次只能判一則，並行快不了多少，
                         # 反而讓判得快的插隊、打亂 Discord 上的順序
                         async with self._filtered_lock:
                             await self._process_one(pk)

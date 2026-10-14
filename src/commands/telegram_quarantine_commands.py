@@ -1,10 +1,10 @@
-"""Telegram 過濾的隔離區面板：「垃圾訊息」thread 最底下一個面板，把判錯的放回主頻道（使用者 10-06 TF-Q1～Q4）。
+"""Telegram 過濾的隔離區面板：「垃圾訊息」thread 最底下一個面板，把判錯的放回主頻道。
 
 - 置底面板只有日期選單（固定 custom_id，重啟後照樣能用）。選日期 → 只有自己看得到的訊息選單 → 選訊息 →
   只有自己看得到的確認（附連到隔離那則的連結）→ 按「放回主頻道」才送，避免選錯就公開送出。
 - 第二層以後都是只有按的人看得到的訊息，兩位管理員同時操作不互相干擾；放回本身在轉發端一次只做一則，
   同一則只會送一次。
-- 只有在這裡有「管理訊息」權限的人能操作（TF-Q2）。
+- 只有在這裡有「管理訊息」權限的人能操作。
 - 有新的隔離訊息、或有人放回時，面板置底並更新日期（`QuarantineThreads.on_change`）。
 - 選單只列被隔離、還沒放回的；依發文時間排，有文字顯示文字開頭，沒文字顯示「圖片」「影片」。
   Discord 一個選單最多 25 項：日期只列最近 25 天，一天也最多列 25 則（一天約一則，夠用）。
@@ -22,6 +22,7 @@ from services.relay.telegram_relay_service import QuarantineItem
 from sys_settings.time_settings import APP_TZ
 from utils.discord_threads import reopen_thread
 from utils.panel_bump import PanelBumper
+from sys_settings.paths import settings_file
 from utils.utils import check_guild, safe_send_interaction_message
 
 logger = logging.getLogger(__name__)
@@ -30,12 +31,12 @@ DATE_SELECT_ID = "tgq:date"
 PICK_TEMPLATE = r"tgq:pick:(?P<parent>\d+):(?P<day>\d{8})"
 RESTORE_TEMPLATE = r"tgq:restore:(?P<pk>\d+)"
 #: 面板位置（bot 自己寫的狀態，不進版控）。跟隔離 thread 的紀錄分開放，兩邊寫入不會互相蓋掉
-PANEL_RUNTIME_PATH = str(Path(__file__).parents[1] / "settings" / "telegram_quarantine_panel_runtime.json")
+PANEL_RUNTIME_PATH = settings_file("telegram_quarantine_panel_runtime.json")
 _MAX_OPTIONS = 25
 _PERMISSION = "manage_messages"
 
 PANEL_TEXT = (
-    # 給群友看的：不寫訊息從哪裡、怎麼來（使用者 10-07：「這邊可以不要寫出 telegram 轉發」）
+    # 給群友看的：不寫訊息從哪裡、怎麼來（群友不需要知道這是 Telegram 轉發）
     "🗑️ **垃圾訊息**：被判成沒有遊戲資訊的訊息放在這裡，每則最上面寫著判定理由。\n"
     "判錯的可以放回主頻道：選日期 → 選訊息 → 確認。需要「管理訊息」權限。"
 )

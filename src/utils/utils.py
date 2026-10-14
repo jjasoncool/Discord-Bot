@@ -8,6 +8,7 @@ import asyncio
 import threading
 import discord
 
+from sys_settings.paths import APP_ROOT
 from utils.safe_write import replace_text
 from utils import hot_files
 
@@ -108,6 +109,10 @@ class ConfigWriteError(RuntimeError):
     """設定檔讀不到或格式壞掉，這次沒有寫入（避免把整份檔寫成只剩這次改的那一項）。"""
 
 
+#: 主設定檔的位置；呼叫端沒指定就用它（在容器裡＝/app/config.json）
+CONFIG_FILE = str(APP_ROOT / "config.json")
+
+
 class ChannelConfig:
     """讀寫 config.json（綁頻道、綁身分組、Telegram 路由等）。
 
@@ -116,7 +121,7 @@ class ChannelConfig:
 
     **寫**：一律 `update_config`。寫入前重讀磁碟上最新的內容、只套用這次的變動、安全寫入（暫存檔換名，每天第一次
     改寫前備份到 `/logs/config_backup`）。以前是拿 5 分鐘快取裡的整份設定寫回：使用者手改後 5 分鐘內有人從
-    Discord 存任何設定，手改的內容就被舊快取蓋掉；檔案壞掉時更會寫成只剩一個 key（使用者 10-06 SW-Q4）。
+    Discord 存任何設定，手改的內容就被舊快取蓋掉；檔案壞掉時更會寫成只剩一個 key。
     """
     DEFAULT_ID = 1234567890  # 預設佔位符 ID
     #: {config_file: (修改時間 ns, 設定)}
@@ -126,7 +131,7 @@ class ChannelConfig:
     BACKUP_KEEP = 14
 
     @staticmethod
-    def load_config(config_file="config.json", caller="unknown") -> dict:
+    def load_config(config_file=CONFIG_FILE, caller="unknown") -> dict:
         """讀取完整設定檔（檔案沒改就用快取）；回傳複本。讀不到時回上次的正確內容，從來沒讀到過就回空 dict。
 
         快取與「壞檔沿用上次」在 `utils.hot_files`（和 prompt、字典、開關同一份機制）；這裡只負責驗證最外層是物件、
@@ -172,7 +177,7 @@ class ChannelConfig:
             return copy.deepcopy(config)
 
     @staticmethod
-    async def update_config(apply, config_file="config.json", caller="unknown") -> dict:
+    async def update_config(apply, config_file=CONFIG_FILE, caller="unknown") -> dict:
         """改設定檔：`apply(config)` 直接改傳進來的 dict（磁碟上最新的內容），回傳寫入後的複本。
 
         `apply` 會在執行緒裡跑，只能改 dict，不要在裡面呼叫 Discord。檔案讀不到或格式錯誤時拋 `ConfigWriteError`，
@@ -181,7 +186,7 @@ class ChannelConfig:
         return await asyncio.to_thread(ChannelConfig._update_sync, apply, config_file, caller)
 
     @staticmethod
-    async def get_channel_id(config_key, config_file="config.json", caller="unknown"):
+    async def get_channel_id(config_key, config_file=CONFIG_FILE, caller="unknown"):
         """從配置文件中讀取指定鍵的頻道 ID（使用快取）"""
         config = ChannelConfig.load_config(config_file, caller)
         channel_id = config.get(config_key, ChannelConfig.DEFAULT_ID)
@@ -192,7 +197,7 @@ class ChannelConfig:
         return channel_id
 
     @staticmethod
-    async def get_configured_id(config_key, config_file="config.json", caller="unknown") -> Optional[int]:
+    async def get_configured_id(config_key, config_file=CONFIG_FILE, caller="unknown") -> Optional[int]:
         """有設定才回頻道 id；沒設定（佔位符或缺 key）回 None，不記警告。
 
         給「頻道可以不綁」的功能用：呼叫端拿到 None 就自己決定要不要記 log，
@@ -202,23 +207,23 @@ class ChannelConfig:
             return None
         return int(channel_id)
 
-async def get_trade_forum_channel_id(config_file="config.json", caller="unknown"):
+async def get_trade_forum_channel_id(config_file=CONFIG_FILE, caller="unknown"):
     """從配置文件中讀取交易論壇頻道 ID"""
     return await ChannelConfig.get_channel_id('trade_forum_channel_id', config_file, caller)
 
-async def get_cart_delivery_channel_id(config_file="config.json", caller="unknown"):
+async def get_cart_delivery_channel_id(config_file=CONFIG_FILE, caller="unknown"):
     """從配置文件中讀取購物車交付頻道 ID"""
     return await ChannelConfig.get_channel_id('cart_delivery_channel_id', config_file, caller)
 
-async def get_archive_channel_id(config_file="config.json", caller="unknown"):
+async def get_archive_channel_id(config_file=CONFIG_FILE, caller="unknown"):
     """從配置文件中讀取封存頻道 ID"""
     return await ChannelConfig.get_channel_id('archive_channel_id', config_file, caller)
 
-async def get_intro_channel_id(config_file="config.json", caller="unknown"):
+async def get_intro_channel_id(config_file=CONFIG_FILE, caller="unknown"):
     """從配置文件中讀取自我介紹頻道 ID"""
     return await ChannelConfig.get_channel_id('intro_channel_id', config_file, caller)
 
-async def get_forum_article_channel_id(config_file="config.json", caller="unknown"):
+async def get_forum_article_channel_id(config_file=CONFIG_FILE, caller="unknown"):
     """從配置文件中讀取論壇文章頻道 ID"""
     return await ChannelConfig.get_channel_id('forum_article_channel_id', config_file, caller)
 
@@ -243,7 +248,7 @@ async def check_role(user, required_role: str = None) -> bool:
         if user.id == owner_id:
             logger.info(f'使用者 {user.name} 是 owner，自動通過角色權限檢查')
             return True
-        config_file = "config.json"
+        config_file = CONFIG_FILE
         if os.path.exists(config_file):
             try:
                 with open(config_file, 'r') as f:

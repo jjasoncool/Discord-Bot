@@ -39,6 +39,7 @@ from services.community.community_lookup_service import (
 from services.source_urls import bahamut_floor_url
 from services.state_db import StateDB
 from utils.panel_bump import PanelBumper
+from sys_settings.paths import settings_file
 from utils.user_dates import parse_user_date
 from utils.utils import ChannelConfig, safe_send_interaction_message
 
@@ -49,7 +50,7 @@ logger = logging.getLogger(__name__)
 # 常數
 # ═══════════════════════════════════════════════════
 
-COMMUNITY_PANEL_RUNTIME_FILE = "settings/community_panel_runtime.json"
+COMMUNITY_PANEL_RUNTIME_FILE = settings_file("community_panel_runtime.json")
 
 EMBED_DESC_MAX = 4000          # 留 96 字 buffer
 SEND_DELAY = 0.3                # slot 連發間隔
@@ -1416,7 +1417,7 @@ class CommunityLookupCommands(commands.Cog):
     # ── Panel 部署 ──
 
     async def get_panel_channel(self, guild: discord.Guild) -> Optional[discord.TextChannel]:
-        config = ChannelConfig.load_config("config.json", caller="CommunityLookup")
+        config = ChannelConfig.load_config(caller="CommunityLookup")
         ch_id = config.get("community_lookup_channel_id", ChannelConfig.DEFAULT_ID)
         if ch_id == ChannelConfig.DEFAULT_ID:
             return None

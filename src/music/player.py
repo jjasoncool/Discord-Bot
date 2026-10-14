@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 from .queue import MusicQueue
 from .ytdl import YTDLSource
 from .config import MusicConfig, MUSIC_RUNTIME_PATH, playlist_key
+from utils import runtime_file
 from .models import Song
 from .exceptions import QueueEmptyError
 
@@ -488,14 +489,9 @@ class MusicPlayer:
     def _save_to_runtime(key: str, value):
         """寫入 music_runtime.json 的指定欄位"""
         try:
-            if os.path.exists(MUSIC_RUNTIME_PATH):
-                with open(MUSIC_RUNTIME_PATH, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-            else:
-                data = {"music": {}}
-            data["music"][key] = value
-            with open(MUSIC_RUNTIME_PATH, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            data = runtime_file.load(MUSIC_RUNTIME_PATH)
+            data.setdefault("music", {})[key] = value
+            runtime_file.save(MUSIC_RUNTIME_PATH, data)
         except Exception as e:
             logger.warning(f"[MusicPlayer] 儲存 {key} 失敗: {e}")
 
@@ -510,14 +506,7 @@ class MusicPlayer:
     @staticmethod
     def get_last_position() -> str | None:
         """讀取上次播放的 video ID"""
-        try:
-            if os.path.exists(MUSIC_RUNTIME_PATH):
-                with open(MUSIC_RUNTIME_PATH, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                return data.get("music", {}).get("last_video_id")
-        except Exception:
-            pass
-        return None
+        return runtime_file.load(MUSIC_RUNTIME_PATH).get("music", {}).get("last_video_id")
 
     def skip_to_video_id(self, target_video_id: str) -> bool:
         """跳轉主歌單到指定 video ID 的位置"""

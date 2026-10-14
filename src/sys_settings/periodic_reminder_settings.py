@@ -14,6 +14,8 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from sys_settings.paths import settings_file
+
 
 class ReminderCycle(BaseModel):
     """一個固定週期重置的項目。"""
@@ -53,7 +55,7 @@ class PeriodicReminderSettings(BaseSettings):
     #: 找不到記錄的 id 時，也會先用這個名稱找既有身份組
     role_name: str = "週期活動提醒"
     #: 身份組 id 與面板訊息 id（不進版控，與自介面板的 runtime 檔同一套做法）
-    runtime_path: str = "settings/periodic_reminder_runtime.json"
+    runtime_path: str = settings_file("periodic_reminder_runtime.json")
 
     #: 結束前提醒：重置前一天的幾點發（伺服器時間），正常 @
     ending_reminder_hour: int = 20

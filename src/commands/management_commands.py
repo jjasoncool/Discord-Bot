@@ -12,6 +12,8 @@ from typing import Optional
 # 注意：需確保 utils 資料夾下的 utils.py 包含 create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, ChannelConfig 等定義
 from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, ChannelConfig, ConfigWriteError, check_guild
 from utils.panel_bump import PanelBumper
+from utils import runtime_file
+from sys_settings.paths import settings_file
 # 注意：需確保 services 資料夾下的 intro_profile_service.py 包含 IntroProfilePayload, ImpressionPayload, IntroProfileServiceProtocol, IntroProfileService 等定義
 from services.community.intro_profile_service import (
     IntroProfilePayload,
@@ -25,44 +27,28 @@ from settings.channel_registry import all_settings, get_setting, ChannelSetConte
 
 # 獲取 logger
 logger = logging.getLogger(__name__)
-INTRO_PANEL_RUNTIME_FILE = "settings/intro_panel_runtime.json"
+INTRO_PANEL_RUNTIME_FILE = settings_file("intro_panel_runtime.json")
 # 面板按鈕 custom_id：persistent view 與置底翻找殘留面板共用
 INTRO_CUSTOM_ID_OPEN = "intro_open_modal"
 INTRO_CUSTOM_ID_IMPRESSION = "intro_open_impression_modal"
-INTRO_SUBMISSION_RUNTIME_FILE = "settings/intro_submission_runtime.json"
+INTRO_SUBMISSION_RUNTIME_FILE = settings_file("intro_submission_runtime.json")
 
 
 def _load_intro_submission_runtime_config() -> dict:
     """讀取自我介紹提交訊息 runtime 資料。"""
-    if not os.path.exists(INTRO_SUBMISSION_RUNTIME_FILE):
-        return {"intro_submissions": {}, "impression_submissions": {}}
-
-    try:
-        with open(INTRO_SUBMISSION_RUNTIME_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            return {"intro_submissions": {}, "impression_submissions": {}}
-        intro_submissions = data.get("intro_submissions")
-        if not isinstance(intro_submissions, dict):
-            intro_submissions = {}
-        impression_submissions = data.get("impression_submissions")
-        if not isinstance(impression_submissions, dict):
-            impression_submissions = {}
-        return {
-            "intro_submissions": intro_submissions,
-            "impression_submissions": impression_submissions,
-        }
-    except Exception as e:
-        logger.error(f"讀取 {INTRO_SUBMISSION_RUNTIME_FILE} 失敗: {e}", exc_info=True)
-        return {"intro_submissions": {}, "impression_submissions": {}}
+    data = runtime_file.load(INTRO_SUBMISSION_RUNTIME_FILE)
+    intro_submissions = data.get("intro_submissions")
+    impression_submissions = data.get("impression_submissions")
+    return {
+        "intro_submissions": intro_submissions if isinstance(intro_submissions, dict) else {},
+        "impression_submissions": impression_submissions if isinstance(impression_submissions, dict) else {},
+    }
 
 
 def _save_intro_submission_runtime_config(data: dict) -> None:
     """寫入自我介紹提交訊息 runtime 資料。"""
     try:
-        os.makedirs(os.path.dirname(INTRO_SUBMISSION_RUNTIME_FILE), exist_ok=True)
-        with open(INTRO_SUBMISSION_RUNTIME_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        runtime_file.save(INTRO_SUBMISSION_RUNTIME_FILE, data)
     except Exception as e:
         logger.error(f"寫入 {INTRO_SUBMISSION_RUNTIME_FILE} 失敗: {e}", exc_info=True)
         raise
@@ -611,7 +597,7 @@ class ManagementCommands(commands.Cog):
         if not interaction.guild:
             return
 
-        config = ChannelConfig.load_config("config.json", caller="ManagementCommands")
+        config = ChannelConfig.load_config(caller="ManagementCommands")
         intro_channel_id = config.get("intro_channel_id", ChannelConfig.DEFAULT_ID)
         if intro_channel_id == ChannelConfig.DEFAULT_ID:
             logger.info("自動 bump 跳過：intro_channel_id 未設定。")
@@ -953,7 +939,7 @@ class ManagementCommands(commands.Cog):
         if not await check_guild(interaction, owner_only=True):
             return
 
-        config = ChannelConfig.load_config("config.json", caller="ManagementCommands")
+        config = ChannelConfig.load_config(caller="ManagementCommands")
 
         role_mapping = config.get("role_mapping", {})
         if not role_mapping:
@@ -996,8 +982,7 @@ class ManagementCommands(commands.Cog):
         if not await check_guild(interaction, owner_only=True):
             return
 
-        config_file = "config.json"
-        config = ChannelConfig.load_config(config_file, caller="ManagementCommands")
+        config = ChannelConfig.load_config(caller="ManagementCommands")
 
         role_mapping = config.get("role_mapping", {})
         if not role_mapping:
@@ -1141,7 +1126,7 @@ class ManagementCommands(commands.Cog):
             return
 
         from utils.utils import get_intro_channel_id
-        intro_channel_id = await get_intro_channel_id(config_file="config.json", caller="ManagementCommands")
+        intro_channel_id = await get_intro_channel_id(caller="ManagementCommands")
 
         if intro_channel_id == ChannelConfig.DEFAULT_ID:
             await safe_send_interaction_message(
