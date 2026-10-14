@@ -12,7 +12,7 @@ from urllib.parse import quote_plus
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from sys_settings.paths import SYS_SETTINGS_DIR, prompt_file
+from sys_settings.paths import LOGS_DIR, SYS_SETTINGS_DIR, prompt_file
 
 logger = logging.getLogger(__name__)
 
@@ -216,18 +216,18 @@ class AskAICommandSettings(BaseSettings):
     identity_file_path: str = prompt_file("persona_identity.txt")
     guardrails_file_path: str = prompt_file("persona_guardrails.txt")
     examples_file_path: str = prompt_file("persona_examples.txt")
-    prompt_log_path: str = "/logs/askai_prompt.txt"
+    prompt_log_path: str = str(LOGS_DIR / "askai_prompt.txt")
     # askai_prompt：以時間輪替，並只保留固定份數
     prompt_log_when: str = "midnight"
     prompt_log_interval: int = 1
     prompt_log_backup_count: int = 3
     # debug 另存一份，避免混入真正送給 Ollama 的文字
-    prompt_debug_log_path: str = "/logs/askai_prompt_debug.txt"
+    prompt_debug_log_path: str = str(LOGS_DIR / "askai_prompt_debug.txt")
     prompt_debug_log_max_bytes: int = 5 * 1024 * 1024
     prompt_debug_log_backup_count: int = 5
 
     # json line (多行格式)
-    response_log_path: str = "/logs/askai_response_history.jsonl"
+    response_log_path: str = str(LOGS_DIR / "askai_response_history.jsonl")
     # response history：容量輪替
     response_log_max_bytes: int = 20 * 1024 * 1024
     response_log_backup_count: int = 10
@@ -512,7 +512,7 @@ class AmbientChatSettings(BaseSettings):
 
     # ── debug 觀測（debug 完可關 debug_log）──
     debug_log: bool = True               # 把每次插話的完整 prompt 寫進檔案
-    debug_prompt_log_path: str = "/logs/ambient_prompt.txt"
+    debug_prompt_log_path: str = str(LOGS_DIR / "ambient_prompt.txt")
     debug_log_max_bytes: int = 5 * 1024 * 1024
     debug_log_backup_count: int = 3
 
@@ -647,7 +647,7 @@ class DiaryReflectionSettings(BaseSettings):
 
     # debug 觀測
     debug_log: bool = True
-    debug_prompt_log_path: str = "/logs/diary_prompt.txt"
+    debug_prompt_log_path: str = str(LOGS_DIR / "diary_prompt.txt")
     debug_log_max_bytes: int = 5 * 1024 * 1024
     debug_log_backup_count: int = 3
 
@@ -693,7 +693,7 @@ class EmojiAutofillSettings(BaseSettings):
 
     prompt_path: str = prompt_file("emoji_autofill_prompt.txt")
     #: 每天第一次改寫字典前備份到這裡，各保留 `backup_keep` 份
-    backup_dir: str = "/logs/dictionary_backup"
+    backup_dir: str = str(LOGS_DIR / "dictionary_backup")
     backup_keep: int = 14
 
     #: 逾時就當這次失敗（下次被看到、過了 `retry_hours` 再試）。不另設 context 長度：

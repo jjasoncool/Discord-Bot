@@ -16,11 +16,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from sys_settings.paths import SETTINGS_DIR
+from sys_settings.paths import LOGS_DIR, SETTINGS_DIR
 
 load_dotenv()
 
-LOG_DIR = "/logs"
+LOG_DIR = str(LOGS_DIR)
 CONFIG_PATH = SETTINGS_DIR / "logging.json"
 
 #: 測試執行時（由 `test/__init__.py` 設定）所有 log 檔改寫到這一個檔，不把假紀錄混進正式 log

@@ -75,7 +75,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 幾組工具一起交給同一個工具輪（例：遊戲情報＋網路搜尋） | `llm.client.tool_calls.combine_runners`（宣告照順序接、使用規則依序接、呼叫依名稱交給宣告它的那組；沒工具的連規則一起略過） |
 | 按鈕、指令的操作權限 | `utils.utils.check_guild`（`owner_only`／`admin_only`／`required_role`／`permission="manage_messages"` 這類 Discord 權限；不通過時自己回只有本人看得到的訊息） |
 | 功能開關（開／關、off／dry_run／on） | 值寫在 `settings/switches.json`（手改、下一次用到就生效）；名稱、預設、允許的值定義在 `sys_settings.switches.Switches`，讀用 `switches.current()`；新開關只能放這裡（守衛擋，舊的改到再搬） |
-| 專案裡檔案的位置（settings、prompts、scraper 資料庫、static、config.json） | `sys_settings.paths`（`APP_ROOT`、`SETTINGS_DIR`、`PROMPTS_DIR`、`SCRAPER_DIR`、`STATIC_DIR`、`settings_file()`、`prompt_file()`；config.json 用 `utils.utils.CONFIG_FILE`）；不寫死 `"/app/..."`、不用 `Path(__file__).parents[n]` 往上數、不用相對路徑（守衛擋；爬蟲容器例外） |
+| 專案裡檔案的位置（settings、prompts、scraper 資料庫、static、config.json、log 與備份） | `sys_settings.paths`（`APP_ROOT`、`LOGS_DIR`、`SETTINGS_DIR`、`PROMPTS_DIR`、`SCRAPER_DIR`、`STATIC_DIR`、`settings_file()`、`prompt_file()`；config.json 用 `utils.utils.CONFIG_FILE`）；不寫死 `"/app/..."`、`"/logs/..."`、不用 `Path(__file__).parents[n]` 往上數、不用相對路徑（守衛擋；爬蟲容器例外） |
 | 程式自己寫的狀態 JSON（`settings/*_runtime.json`：面板訊息 id、點名、音樂、自介投稿、隔離 thread） | `utils.runtime_file.load`／`save`／`update`（讀走熱讀檔、寫走安全寫入加備份；面板位置用 `panel_bump` 的 `load_runtime`／`update_runtime`）；不自己 `open`／`json.load`（守衛擋） |
 | 賣家物品價格（`settings/item_prices.json`） | `services.community.item_prices`（`all_prices`／`user_prices`／`set_user_prices`） |
 | 寫 `config.json` | `ChannelConfig.update_config(apply)`（重讀最新內容、只改這次的 key、安全寫入加備份）；讀 `load_config` 回複本、改檔即生效 |

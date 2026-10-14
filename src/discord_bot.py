@@ -9,6 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 from utils.logger_config import configure_logging  # import 即套用 settings/logging.json
+from sys_settings.paths import LOGS_DIR
 from utils.utils import CONFIG_FILE, safe_send_interaction_message
 from services.relay.telegram_relay_service import (
     DiscordMessagePublisher,
@@ -32,11 +33,11 @@ logger = logging.getLogger("discord_bot")
 # 記錄環境變數和系統信息（安全方式）
 logger.info(f"Discord 機器人啟動於 {time.strftime('%Y-%m-%d %H:%M:%S')}")
 logger.info(f"Python 版本: {sys.version}")
-logger.info(f"日誌文件位置: /logs/discord_bot.log")
+logger.info(f"日誌文件位置: {LOGS_DIR / 'discord_bot.log'}")
 logger.info(f"環境變數中的 DISCORD_TOKEN: {'已設置' if TOKEN else '未設置'}")
 logger.info(f"當前工作目錄: {os.getcwd()}")
 logger.info(f"當前目錄內容: {os.listdir('.')}")
-logger.info(f"日誌目錄內容: {os.listdir('/logs') if os.path.exists('/logs') else '日誌目錄不存在'}")
+logger.info(f"日誌目錄內容: {os.listdir(LOGS_DIR) if LOGS_DIR.exists() else '日誌目錄不存在'}")
 
 # 設定意圖
 intents = discord.Intents.default()

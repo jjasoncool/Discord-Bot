@@ -182,16 +182,17 @@ def _find_hardcoded_utc_offsets(path: Path) -> list[int]:
 
 
 def _find_hardcoded_app_root(path: Path) -> list[int]:
-    """找寫死的專案根目錄 `"/app"`、`"/app/..."`（字串裡的東西 regex 看不到，走 AST）。
+    """找寫死的容器掛載點 `"/app"`、`"/app/..."`、`"/logs"`、`"/logs/..."`（字串裡的東西 regex 看不到，走 AST）。
 
-    容器裡 `/app` 永遠對，但主機上的腳本、未來的 CI 找不到；掛載一改就要翻 38 處。
-    根目錄只有 `sys_settings.paths` 一處知道，其他地方問它。
+    容器裡這兩個路徑永遠對，但主機上的腳本、未來的 CI 找不到；掛載一改就要翻幾十處。
+    根目錄與 log 目錄只有 `sys_settings.paths` 一處知道，其他地方問它。
     """
     hits = []
     for node in ast.walk(_parse(path)):
-        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
-                and (node.value == "/app" or node.value.startswith("/app/"))):
-            hits.append(node.lineno)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            v = node.value
+            if v in ("/app", "/logs") or v.startswith("/app/") or v.startswith("/logs/"):
+                hits.append(node.lineno)
     return hits
 
 
@@ -624,16 +625,14 @@ RULES = [
         allowed=set(),
     ),
     Rule(
-        name="專案根目錄的路徑（寫死 /app 在容器外就找不到檔）",
+        name="容器掛載點的路徑（寫死 /app、/logs 在容器外就找不到）",
         finder=_find_hardcoded_app_root,
-        canonical="sys_settings.paths（APP_ROOT、SETTINGS_DIR、prompt_file()…）",
+        canonical="sys_settings.paths（APP_ROOT、LOGS_DIR、SETTINGS_DIR、prompt_file()…）",
         allowed={
             "sys_settings/paths.py",
             # 爬蟲是獨立容器（各自掛子目錄到 /app），看不到 sys_settings
             "scraper/",
             "telegram_scraper/",
-            # 在容器裡手動跑的一次性腳本
-            "scripts/",
             "test/",
         },
     ),

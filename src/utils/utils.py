@@ -8,7 +8,7 @@ import asyncio
 import threading
 import discord
 
-from sys_settings.paths import APP_ROOT
+from sys_settings.paths import APP_ROOT, LOGS_DIR
 from utils.safe_write import replace_text
 from utils import hot_files
 
@@ -127,7 +127,7 @@ class ChannelConfig:
     #: {config_file: (修改時間 ns, 設定)}
     #: 同一個行程裡的寫入排隊（讀檔、改、寫回這三步不能交錯）
     _write_lock = threading.Lock()
-    BACKUP_DIR = "/logs/config_backup"
+    BACKUP_DIR = str(LOGS_DIR / "config_backup")
     BACKUP_KEEP = 14
 
     @staticmethod

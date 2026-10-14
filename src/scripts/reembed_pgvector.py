@@ -41,8 +41,7 @@ import sys
 import time
 from pathlib import Path
 
-# container 裡 /app 沒在 sys.path，手動加入以便 import sys_settings / llm 等模組
-sys.path.insert(0, "/app")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # scripts/ 往上一層是 src，才 import 得到 sys_settings、llm
 
 import requests
 

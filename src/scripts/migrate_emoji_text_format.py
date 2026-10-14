@@ -31,8 +31,9 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from pathlib import Path
 
-sys.path.insert(0, "/app")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # scripts/ 往上一層是 src，才 import 得到 sys_settings、llm
 
 import psycopg2
 import psycopg2.extras
