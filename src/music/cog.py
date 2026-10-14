@@ -194,7 +194,7 @@ class MusicCog(commands.Cog):
             self._starting = False
 
     async def refresh_playlist_config(self):
-        """「編輯歌單」按鈕按下時：立即重讀 music_runtime.json（不等 5 秒 watcher）
+        """「編輯歌單」按鈕按下時：立即重讀歌單檔 music_playlists.json（不等 5 秒 watcher）
         並補抓未自訂名稱的歌單標題，讓彈出的多選清單顯示最新歌單與正確名稱。
 
         只更新設定與名稱，不動佇列；實際切換/重載由使用者在多選清單挑選後觸發。

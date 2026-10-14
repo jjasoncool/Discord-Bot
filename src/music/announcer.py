@@ -1,17 +1,12 @@
 import os
-import json
-
-from sys_settings.paths import settings_file
-from utils import runtime_file
 import logging
 import discord
 from .models import Song
 from .ytdl import YTDLSource
+from .config import read_state, save_state
 from utils.dm_notifier import notify_song_liked
 
 logger = logging.getLogger(__name__)
-
-MUSIC_RUNTIME_PATH = settings_file("music_runtime.json")
 
 
 def _is_in_music_channel(cog, user) -> bool:
@@ -159,7 +154,7 @@ class MusicControlView(discord.ui.View):
             await interaction.followup.send("目前沒有在播放", ephemeral=True)
 
     # custom_id 沿用舊的 music_stop 以相容既有面板；
-    # 行為：重讀 music_runtime.json 歌單設定（套用新增/刪改的歌單，免重啟），
+    # 行為：重讀歌單檔 music_playlists.json（套用新增/刪改的歌單，免重啟），
     #       2 個以上歌單→彈出多選清單讓使用者挑；只有 0~1 個→直接重載最新線上歌單。
     @discord.ui.button(label="編輯歌單", style=discord.ButtonStyle.secondary, custom_id="music_stop", emoji="🎚️", row=1)
     async def edit_playlist(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -380,19 +375,13 @@ class Announcer:
 
     @staticmethod
     def _save_panel_id(message_id: int | None):
-        """將面板訊息 ID 存入 music_runtime.json"""
+        """把面板訊息 ID 記進狀態檔；None＝面板已刪（明確寫 null，才不會退回讀到舊檔裡過期的 id）"""
         try:
-            data = runtime_file.load(MUSIC_RUNTIME_PATH)
-            music = data.setdefault("music", {})
-            if message_id:
-                music["panel_message_id"] = message_id
-            else:
-                music.pop("panel_message_id", None)
-            runtime_file.save(MUSIC_RUNTIME_PATH, data)
+            save_state("panel_message_id", message_id or None)
         except Exception as e:
             logger.warning(f"[Announcer] 儲存面板 ID 失敗: {e}")
 
     @staticmethod
     def _load_panel_id() -> int | None:
-        """從 music_runtime.json 讀取面板訊息 ID"""
-        return runtime_file.load(MUSIC_RUNTIME_PATH).get("music", {}).get("panel_message_id")
+        """從狀態檔讀面板訊息 ID"""
+        return read_state().get("panel_message_id")

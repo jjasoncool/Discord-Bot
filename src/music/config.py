@@ -1,10 +1,9 @@
 import os
 import re
-import json
 
-from sys_settings.paths import settings_file
-from utils.utils import CONFIG_FILE
-from utils import runtime_file
+from sys_settings.paths import settings_file, runtime_path
+from utils.utils import ChannelConfig
+from utils import hot_files, runtime_file
 import asyncio
 import logging
 from dataclasses import dataclass, field
@@ -13,10 +12,29 @@ from utils.background_tasks import supervise
 
 logger = logging.getLogger(__name__)
 
-# 頻道設定來源（與其他頻道設定一致）
-CONFIG_JSON_PATH = CONFIG_FILE
-# 歌單等音樂專屬設定
-MUSIC_RUNTIME_PATH = settings_file("music_runtime.json")
+#: 人手改的音樂設定：歌單網址、音訊模式（`{"music": {"playlist_url": [...], "audio_mode": "opus"}}`；進版控由使用者決定）
+MUSIC_PLAYLISTS_PATH = settings_file("music_playlists.json")
+#: 程式寫的狀態：放到哪首、面板訊息 id、隨機與啟用的歌單（不進版控，由 `runtime_file` 讀寫）
+MUSIC_STATE_PATH = runtime_path("music.json")
+#: 狀態檔只收這幾個欄位；歌單、音訊模式永遠不從狀態檔來
+STATE_KEYS = ("last_video_id", "panel_message_id", "shuffle", "active_playlists")
+
+
+def read_playlists_file() -> dict:
+    """人手改的歌單設定（`music` 底下那層）；改了下一次讀就生效，壞檔沿用上次。回傳的是快取，不要改它。"""
+    data = hot_files.read_json(MUSIC_PLAYLISTS_PATH, label="音樂歌單") or {}
+    music = data.get("music")
+    return music if isinstance(music, dict) else {}
+
+
+def read_state() -> dict:
+    """程式寫的狀態（面板刪掉時 `panel_message_id` 是明確的 null，不是沒有）。"""
+    return {k: v for k, v in runtime_file.load(MUSIC_STATE_PATH).items() if k in STATE_KEYS}
+
+
+def save_state(key: str, value) -> None:
+    """只寫狀態檔；歌單檔是人手改的，程式不碰。寫失敗往外丟，呼叫端決定要不要吞。"""
+    runtime_file.update(MUSIC_STATE_PATH, **{key: value})
 
 
 def playlist_key(url: str) -> str:
@@ -53,7 +71,7 @@ class MusicConfig:
     playlists: list = field(default_factory=list)        # list[Playlist]
     # 目前選取的歌單 key（可複選），預設為全部
     active_keys: list = field(default_factory=list)      # list[str]
-    audio_mode: str = 'opus'  # 'pcm' 或 'opus'，可在 music_runtime.json 切換
+    audio_mode: str = 'opus'  # 'pcm' 或 'opus'，在歌單檔 music_playlists.json 切換
     shuffle: bool = False
 
     @property
@@ -74,7 +92,6 @@ class MusicConfig:
 class RuntimeMusicConfig:
     _instance: Optional['RuntimeMusicConfig'] = None
     _config: MusicConfig | None = None
-    _last_mtime_config: float = 0
     _last_mtime_runtime: float = 0
     _watch_task: asyncio.Task | None = None
     _on_change_callback: Callable[['MusicConfig'], Awaitable[None]] | None = None
@@ -108,29 +125,25 @@ class RuntimeMusicConfig:
 
     @classmethod
     def _load_config(cls) -> bool:
-        """從 config.json 讀頻道、music_runtime.json 讀歌單，回傳是否成功"""
-        # 讀取頻道 ID（from config.json）
-        voice_channel_id = 0
-        if os.path.exists(CONFIG_JSON_PATH):
-            try:
-                with open(CONFIG_JSON_PATH, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                voice_channel_id = int(data.get("music_voice_channel_id", 0))
-            except Exception as e:
-                logger.warning(f"[MusicConfig] 讀取 config.json 失敗: {e}")
+        """從 config.json 讀頻道、歌單檔讀歌單與音訊模式、狀態檔讀隨機與啟用的歌單，回傳是否成功"""
+        try:
+            voice_channel_id = int(ChannelConfig.load_config(caller="music").get("music_voice_channel_id", 0))
+        except (TypeError, ValueError) as e:
+            logger.warning(f"[MusicConfig] music_voice_channel_id 不是數字: {e}")
+            voice_channel_id = 0
 
         if not voice_channel_id:
             logger.warning("[MusicConfig] config.json 中未設定 music_voice_channel_id，音樂功能不啟用")
             cls._config = None
             return False
 
-        # 讀取歌單、音訊模式、shuffle（from music_runtime.json）
-        runtime_data = runtime_file.load(MUSIC_RUNTIME_PATH).get("music", {})
+        runtime_data = read_playlists_file()
         audio_mode = runtime_data.get("audio_mode", "pcm")
-        shuffle = runtime_data.get("shuffle", False)
+        state = read_state()
+        shuffle = state.get("shuffle", False)
 
         playlists = cls._parse_playlists(runtime_data)
-        active_keys = cls._resolve_active(runtime_data, playlists)
+        active_keys = cls._resolve_active(state, playlists)
 
         cls._config = MusicConfig(
             voice_channel_id=voice_channel_id,
@@ -140,11 +153,9 @@ class RuntimeMusicConfig:
             shuffle=bool(shuffle),
         )
 
-        # 記錄兩個檔案的 mtime
-        if os.path.exists(CONFIG_JSON_PATH):
-            cls._last_mtime_config = os.path.getmtime(CONFIG_JSON_PATH)
-        if os.path.exists(MUSIC_RUNTIME_PATH):
-            cls._last_mtime_runtime = os.path.getmtime(MUSIC_RUNTIME_PATH)
+        # 記錄歌單檔的 mtime
+        if os.path.exists(MUSIC_PLAYLISTS_PATH):
+            cls._last_mtime_runtime = os.path.getmtime(MUSIC_PLAYLISTS_PATH)
 
         logger.info(
             f"🎵 [MusicConfig] 已載入配置 (voice: {voice_channel_id}, "
@@ -197,7 +208,7 @@ class RuntimeMusicConfig:
 
     @staticmethod
     def _resolve_active(runtime_data: dict, playlists: list) -> list:
-        """決定目前選取的歌單 key 清單；無效/空值一律退回「全部」。
+        """決定目前選取的歌單 key 清單（`runtime_data` 是狀態，見 `read_state`）；無效/空值一律退回「全部」。
 
         `active_playlists` 可為 "all"、key 陣列，或（為了好讀）名稱陣列，三者都接受。
         """
@@ -237,16 +248,13 @@ class RuntimeMusicConfig:
 
     @classmethod
     def _get_watched_snapshot(cls) -> dict:
-        """取得需要監控的欄位快照"""
+        """取得需要監控的欄位快照：頻道來自 config.json，歌單與音訊模式來自歌單檔，隨機與啟用的歌單來自狀態檔"""
         snapshot = {}
         try:
-            if os.path.exists(CONFIG_JSON_PATH):
-                with open(CONFIG_JSON_PATH, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                snapshot['voice_channel_id'] = data.get('music_voice_channel_id', 0)
-            runtime_data = runtime_file.load(MUSIC_RUNTIME_PATH).get('music', {})
+            snapshot['voice_channel_id'] = ChannelConfig.load_config(caller="music").get('music_voice_channel_id', 0)
+            merged = {**read_playlists_file(), **read_state()}
             for key in cls._watched_keys:
-                snapshot[key] = runtime_data.get(key)
+                snapshot[key] = merged.get(key)
         except Exception:
             pass
         return snapshot

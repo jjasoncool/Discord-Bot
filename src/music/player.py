@@ -1,6 +1,5 @@
 import os
 import re
-import json
 import asyncio
 import logging
 import discord
@@ -9,8 +8,7 @@ from discord.ext import commands
 logger = logging.getLogger(__name__)
 from .queue import MusicQueue
 from .ytdl import YTDLSource
-from .config import MusicConfig, MUSIC_RUNTIME_PATH, playlist_key
-from utils import runtime_file
+from .config import MusicConfig, playlist_key, read_state, save_state
 from .models import Song
 from .exceptions import QueueEmptyError
 
@@ -206,7 +204,7 @@ class MusicPlayer:
             cache_path = YTDLSource.get_cache_path(video_id) if video_id else None
             need_download = False
 
-            # 音訊模式：pcm 或 opus（可在 music_runtime.json 的 audio_mode 切換）
+            # 音訊模式：pcm 或 opus（在歌單檔 music_playlists.json 的 audio_mode 切換）
             use_opus = self.config.audio_mode == 'opus'
             BUFFER_OPTS = '-thread_queue_size 4096 -fflags +genpts'
             # Discord voice 固定 48kHz stereo；opus frame_duration 20ms 最穩定
@@ -487,11 +485,9 @@ class MusicPlayer:
 
     @staticmethod
     def _save_to_runtime(key: str, value):
-        """寫入 music_runtime.json 的指定欄位"""
+        """寫入狀態檔的指定欄位（歌單檔是人手改的，程式不碰）"""
         try:
-            data = runtime_file.load(MUSIC_RUNTIME_PATH)
-            data.setdefault("music", {})[key] = value
-            runtime_file.save(MUSIC_RUNTIME_PATH, data)
+            save_state(key, value)
         except Exception as e:
             logger.warning(f"[MusicPlayer] 儲存 {key} 失敗: {e}")
 
@@ -506,7 +502,7 @@ class MusicPlayer:
     @staticmethod
     def get_last_position() -> str | None:
         """讀取上次播放的 video ID"""
-        return runtime_file.load(MUSIC_RUNTIME_PATH).get("music", {}).get("last_video_id")
+        return read_state().get("last_video_id")
 
     def skip_to_video_id(self, target_video_id: str) -> bool:
         """跳轉主歌單到指定 video ID 的位置"""
