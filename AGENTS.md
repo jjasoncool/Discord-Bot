@@ -75,6 +75,9 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 幾組工具一起交給同一個工具輪（例：遊戲情報＋網路搜尋） | `llm.client.tool_calls.combine_runners`（宣告照順序接、使用規則依序接、呼叫依名稱交給宣告它的那組；沒工具的連規則一起略過） |
 | 按鈕、指令的操作權限 | `utils.utils.check_guild`（`owner_only`／`admin_only`／`required_role`／`permission="manage_messages"` 這類 Discord 權限；不通過時自己回只有本人看得到的訊息） |
 | 功能開關（開／關、off／dry_run／on） | 值寫在 `settings/switches.json`（手改、下一次用到就生效）；名稱、預設、允許的值定義在 `sys_settings.switches.Switches`，讀用 `switches.current()`；新開關只能放這裡（守衛擋，舊的改到再搬） |
+| 專案裡檔案的位置（settings、prompts、scraper 資料庫、static、config.json） | `sys_settings.paths`（`APP_ROOT`、`SETTINGS_DIR`、`PROMPTS_DIR`、`SCRAPER_DIR`、`STATIC_DIR`、`settings_file()`、`prompt_file()`；config.json 用 `utils.utils.CONFIG_FILE`）；不寫死 `"/app/..."`、不用 `Path(__file__).parents[n]` 往上數、不用相對路徑（守衛擋；爬蟲容器例外） |
+| 程式自己寫的狀態 JSON（`settings/*_runtime.json`：面板訊息 id、點名、音樂、自介投稿、隔離 thread） | `utils.runtime_file.load`／`save`／`update`（讀走熱讀檔、寫走安全寫入加備份；面板位置用 `panel_bump` 的 `load_runtime`／`update_runtime`）；不自己 `open`／`json.load`（守衛擋） |
+| 賣家物品價格（`settings/item_prices.json`） | `services.community.item_prices`（`all_prices`／`user_prices`／`set_user_prices`） |
 | 寫 `config.json` | `ChannelConfig.update_config(apply)`（重讀最新內容、只改這次的 key、安全寫入加備份）；讀 `load_config` 回複本、改檔即生效 |
 | 綁頻道 | `settings/channel_registry.py` 的 `register_channel` |
 | 取得 thread（封存的也拿得到）、解除封存 | `utils.discord_threads.fetch_thread`／`reopen_thread`（封存的 thread 改不了、刪不了訊息） |
@@ -106,13 +109,13 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 
 ## 程式碼
 
-- 註解用繁體中文，寫「為什麼」；不寫具體模型名稱或規格（模型會一直換）。
+- 註解用繁體中文，只寫「為什麼」；不寫具體模型名稱或規格（模型會一直換）。**不寫誰決定、哪天決定**（「使用者 10-03」只有當時在場的人懂）、**不寫里程碑或題號代碼**（M5、TR-Q40）、**不拿「見交接檔」代替理由**（讀程式的人看不到交接檔）：理由寫得下就寫在原地，寫不下就不寫；只在文件裡維護的數字、樣本，可以寫「記在哪個區塊」。commit 訊息同樣不寫代碼與出處，只寫改了什麼。
 - 模組開頭的說明照這個格式（2026-10-13 起；新寫、搬動的模組一定照做，舊的碰到再改）：
   1. 一句話：這個模組做什麼。
   2. 架構定位：在哪一層、能依賴什麼；上層（誰呼叫，寫種類與例子）；下層（呼叫誰）。
   3. 介面：對外的函式各一行。
   4. 規則：呼叫端要遵守的約定、不做的事。
-  5. 例外與決策：不收斂的例外寫在這；決策的理由與日期寫交接檔、這裡只留區塊 id。
+  5. 例外與決策：不收斂的例外、決策與一兩句理由寫在這裡；不要只寫「見交接檔」。經過與長篇討論寫交接檔，程式這邊要有結論。
   範例：`src/utils/hot_files.py`。歷史敘述（「原本是…後來…」）不寫在程式裡。
 - async 裡的同步 DB 或檔案 I/O 丟到執行緒（`asyncio.to_thread`；persona agent 用 `run_db`）。音樂、Discord 心跳、插話都在同一個 event loop 上。
 - 新增欄位或改介面時，列出所有牽動點並逐一確認。
