@@ -2,12 +2,12 @@
 
 守的底線：
   - 層級由下往上：基礎（utils、sys_settings、settings、constants）→ 技術 → 服務 → 功能 → 介面（commands、discord_bot、music）
-  - `llm/` 與 `services/` 兩個資料夾各自橫跨三層（使用者 2026-09-29 定義：services＝服務、llm＝LLM 相關技術且 AI 功能也在裡面），
+  - `llm/` 與 `services/` 兩個資料夾各自橫跨三層（定義：services＝服務、llm＝LLM 相關技術且 AI 功能也在裡面），
     所以分類寫到子資料夾／模組，不以頂層資料夾為準
   - 往上 import 一律紅，不分檔案開頭或函式內（函式內的延遲 import 多半是為了繞循環，正是這裡要抓的）
   - `if TYPE_CHECKING:` 裡的 import 不算（執行時不存在）
   - 每個模組都要分得到層；新資料夾沒登記就紅，逼人想清楚它是哪一層
-  - 跨容器 import（`scraper`、`telegram_scraper` 各自是獨立容器）也算違規；現有的列在例外並寫理由，M6 清掉
+  - 跨容器 import（`scraper`、`telegram_scraper` 各自是獨立容器）也算違規；現有的列在例外並寫理由，整理套件撞名時清掉
   - 技術層與服務層不可 import discord（`TYPE_CHECKING` 裡的不算）：它們要能離開 Discord 測試、重用；
     功能層與介面層就是 Discord 應用本身，可以；基礎層只有列在 `DISCORD_HELPERS_IN_BASE` 的 Discord 工具可以
 
@@ -72,7 +72,7 @@ LAYERS = [
 
 #: 跨容器的 import：bot 直接用另一個容器的程式。每條都要寫理由與去向。
 CROSS_CONTAINER_ALLOWED = {
-    # 轉發端要和爬蟲用同一組媒體時限常數、同一個頻道名稱正規化；M6 把共用的抽進 utils/ 後清掉
+    # 轉發端要和爬蟲用同一組媒體時限常數、同一個頻道名稱正規化；把共用的抽進 utils/ 後清掉
     ("services.relay.telegram_relay_service", "telegram_scraper.media_download"),
     ("services.relay.telegram_relay_service", "telegram_scraper.tg_config"),
     ("settings.channel_registry", "telegram_scraper.tg_config"),

@@ -1,4 +1,4 @@
-"""M7：把 agent 的描述挑成「精簡版」，寫進 `auto_personality` 給插話／askai 讀。
+"""把 agent 的描述挑成「精簡版」，寫進 `auto_personality` 給插話／askai 讀。
 
 **為什麼不直接給全文**：agent 的描述幾乎只增不減（drop 很少），常常比插話那一行的上限
 （`AmbientChatSettings.persona_line_max_chars`）還長。直接給全文會被切在句子中間，而且是
@@ -36,7 +36,7 @@ AI觀察排最後、最先被切。bot 讀取時撈到哪幾則印象、什麼�
 自介／印象時可能超過，要等下一晚重算——那時插話的截斷會切在最後一個「；」或「。」，
 不切半句（`ambient_reply._rag_to_persona_lines`）。
 
-**精簡版是空的人**：不寫、維持最後一版描述（2026-10-13 起 production 萃取已拆掉，新成員要等 agent 寫出條目才有描述，PR-Q3 接受這段空窗）。
+**精簡版是空的人**：不寫、維持最後一版描述（2026-10-13 起 production 萃取已拆掉，新成員要等 agent 寫出條目才有描述；這段空窗可以接受，因為備援寫出來的描述品質不如 agent）。
 名單每次重算、不看「誰被發布過」——精簡版後來變空的人（例如自介變長、預算放不下任何一條）就停在上一版。
 
 **寫入時記的萃取時間是當下**：啟動補跑看 `last_extracted_at` 的最大值（`personality_extractor.get_last_extraction_time`），

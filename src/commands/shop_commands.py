@@ -91,7 +91,7 @@ class DiscordShopViews:
     def order(self, listing_id: int, picks: dict[int, int], total: str) -> discord.ui.View:
         # 停用的按鈕只是用來記錄訂單（custom_id 帶「商品編號x數量」），取消時靠它還回預留
         view = discord.ui.View(timeout=None)
-        # 字寫這筆的總計，像收據最底下的戳章（使用者 2026-10-04，TR-Q40）
+        # 字寫這筆的總計，像收據最底下的戳章
         view.add_item(discord.ui.Button(label=f"{ORDER_TOTAL_PREFIX}{total}"[:80], emoji="🧾",
                                         style=discord.ButtonStyle.secondary,
                                         disabled=True, custom_id=order_custom_id(listing_id, picks)))
@@ -134,7 +134,7 @@ class ShopBuySelect(discord.ui.DynamicItem[discord.ui.Select], template=BUY_TEMP
         await interaction.response.send_modal(QuantityModal(self.listing_id, variants))
         # 回應只能有一個（跳出視窗），選單會停在剛選的項目；按取消後再選同一項，Discord 不會通知 bot。
         # 所以視窗跳出後，bot 用自己的身分重畫商品貼文清空選單；視窗要問的商品已經決定好了，不受影響
-        # （使用者 2026-10-03：按了取消就沒辦法重新選擇）
+        # （按了取消就沒辦法重新選擇）
         await shop.refresh_listing(self.listing_id)
 
 
@@ -168,7 +168,7 @@ class ShopManageButton(discord.ui.DynamicItem[discord.ui.Button], template=MANAG
 # ── 管理面板（只有上架者看得到的暫時訊息） ──
 
 _PANEL_ACTIONS = {
-    # 主要動作藍、一般灰、會刪東西的紅（使用者 2026-10-03）；編輯／刪除品項是面板裡的兩個選單
+    # 主要動作藍、一般灰、會刪東西的紅；編輯／刪除品項是面板裡的兩個選單
     "add": ("新增品項", discord.ButtonStyle.primary),
     "batch": ("批次新增", discord.ButtonStyle.primary),
     "info": ("編輯商品資訊", discord.ButtonStyle.secondary),
@@ -191,7 +191,7 @@ async def _show_panel(interaction: discord.Interaction, listing: Listing, text: 
     """重畫管理面板（這則只有上架者看得到的訊息）。
 
     每次操作完都重畫：Discord 的選單選過同一項就不會再通知 bot，重畫才會回到未選取
-    （使用者 2026-10-03：編輯一次之後選單卡在那一項，第二次就編輯不了）。呼叫前要先回應過互動。"""
+    （實測：編輯一次之後選單卡在那一項，第二次就編輯不了）。呼叫前要先回應過互動。"""
     await interaction.edit_original_response(content=text, embed=_panel_embed(listing), view=_panel_view(listing))
 
 
@@ -272,7 +272,7 @@ class ShopPanelButton(discord.ui.DynamicItem[discord.ui.Button],
         elif self.action == "close":
             # 確認畫面直接換在面板上（不另開訊息），按「返回」回到面板
             await interaction.response.edit_message(
-                # 下架不能恢復，提醒上架者只想暫停的話改數量就好（使用者 2026-10-04，TR-Q39）
+                # 下架不能恢復，提醒上架者只想暫停的話改數量就好
                 content="確定要下架這篇商品嗎？下架後不能恢復，已成立的交易照常進行。"
                         "只想暫停販售的話，把品項的剩餘數量改成 0 就好。",
                 embed=None, view=_confirm_view("close", self.listing_id))
@@ -319,7 +319,7 @@ class ShopPickSelect(discord.ui.DynamicItem[discord.ui.Select],
         if variant is None:
             return await _reply(interaction, "找不到這個品項，可能已經被刪除。")
         if self.action == "edit":
-            # 選了直接跳出編輯視窗（使用者 2026-10-04：不用再多按一次），跳出後再重畫面板清空選單
+            # 選了直接跳出編輯視窗（不用再多按一次），跳出後再重畫面板清空選單
             await interaction.response.send_modal(VariantModal(self.listing_id, variant))
             await _clear_panel_after_modal(interaction, shop, self.listing_id)
         else:
@@ -471,7 +471,7 @@ class VariantModal(discord.ui.Modal):
         ])
         self.cutoff = discord.ui.TextInput(required=False, max_length=16, placeholder="2026/10/20 23:59",
                                            default=format_cutoff(variant.cutoff) if preorder else None)
-        # 編輯時填「剩餘數量」：預填目前還剩幾個（賣光＝0），補貨幾個就填幾個（使用者 2026-10-03，TR-Q27）
+        # 編輯時填「剩餘數量」：預填目前還剩幾個（賣光＝0），補貨幾個就填幾個
         self.limit = discord.ui.TextInput(
             required=False, max_length=6,
             default=str(variant.remaining) if variant and variant.remaining is not None else None)

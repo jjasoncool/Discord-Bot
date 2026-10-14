@@ -4,8 +4,7 @@
 一種工作佔 GPU」的閘——排程產圖（ComfyUI）會卸載 LLM 並獨佔顯卡數十分鐘，
 它跟 chat / embedding 是同一個資源的競爭者，不該各自開一把鎖。
 
-**檔名還叫 `lemonade_gate` 是暫時的**：等 ComfyUI 那條線接完會一起正名
-（見 AI_HANDOFF「ComfyUI 產圖 + GPU 資源仲裁」區塊的檔名正名表）。
+**檔名還叫 `lemonade_gate` 是暫時的**：等 ComfyUI 那條線接完會一起正名成 GPU 閘。
 
 ── 原始問題（仍然成立）───────────────────────────────────────────
   Lemonade 收到 chat / embedding 請求時，透過內部 CURL 轉發到對應的

@@ -3,7 +3,7 @@
 把一批插話頻道訊息餵模型 → 抽出「本人自我揭露的中性偏好」原子事實（守門：自他分流、
 敏感丟、紅線丟）→ 經 corroboration（多次提到才升等）寫入共享 pgvector 記憶層。
 
-政策（見 AI_HANDOFF 功能二區塊）：
+政策：
   只記本人中性偏好；他人/敏感/紅線一律丟；confidence < 門檻不寫；
   首見 tentative（不公開引用），不同批次提到 ≥ trusted_promote_at 升 trusted（才會被召回）。
 

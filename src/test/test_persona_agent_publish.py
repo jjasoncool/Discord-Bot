@@ -1,4 +1,4 @@
-"""M7 精簡版：挑哪幾條、預算多少、怎麼寫進 auto_personality（hermetic，不碰 DB／LLM）。
+"""精簡版：挑哪幾條、預算多少、怎麼寫進 auto_personality（hermetic，不碰 DB／LLM）。
 
 守的幾件事：
   - 只挑證據跨 ≥2 次對話的條目（擋「一次當成習慣」），整條挑、不切半句
@@ -96,7 +96,7 @@ class SelectLiteTests(unittest.TestCase):
 
     def test_core_is_capped_at_half_when_recent_competes(self):
         """第一輪基本個性最多一半預算。第二輪沒排進去的基本個性會跟近況一起依對話次數排——
-        次數比近況多就可能超過一半（使用者 09-28 接受）；這裡次數相同，近況靠時間排進來。"""
+        次數比近況多就可能超過一半（可接受）；這裡次數相同，近況靠時間排進來。"""
         cores =[item(f"基本{i}" + "字" * 18, ago(40), ago(20 - i)) for i in range(4)]
         recent = item("最近" + "字" * 18, ago(0.5), ago(2))
         r = publish.select_lite([*cores, recent], 60, now=NOW)

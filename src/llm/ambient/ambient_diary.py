@@ -13,8 +13,7 @@
 規則：只反映它對今天的感受，不影響它對任何人的插話態度；社交來源預設是插話頻道（ambient_chat_channel_id）；
   沒設日記頻道就略過。
 
-例外與決策：排程還是手寫的 sleep 迴圈（守衛 `test_shared_conventions` 列為例外），TR-Q9 待搬到 `utils.due_loop.run_due_loop`；
-  日記的設計與調整紀錄見交接檔 `ambient-chat`。
+例外與決策：排程還是手寫的 sleep 迴圈（守衛 `test_shared_conventions` 列為例外），待搬到 `utils.due_loop.run_due_loop`。
 """
 
 from __future__ import annotations

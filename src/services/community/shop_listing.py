@@ -1,6 +1,6 @@
 """商品貼文的資料，以及它在 Discord 訊息上的寫法（純資料，不連網路）。
 
-商品貼文本身就是紀錄（使用者 2026-10-03 決定不加資料表，延續交易的做法）：
+商品貼文本身就是紀錄（不加資料表，延續交易的做法）：
   - 標題、說明、商品圖：貼文第一則訊息的 embed。
   - 上架者 id、下一個品項編號、幣別、是否已下架：「⚙️ 管理商品（上架者）」按鈕的 custom_id 與停用狀態。
   - 每個商品（品項）：購買下拉選單的一個選項，名稱寫在 label，其餘寫在 value（`Variant.encode`）。
@@ -32,11 +32,11 @@ CUSTOM_ID_LIMIT = 100
 _MANAGE_RE = re.compile(MANAGE_TEMPLATE)
 _ITEM_RE = re.compile(r"(\d+)x(\d+)")
 
-#: 預購截止時間一律寫年份（使用者 2026-10-03），伺服器時間
+#: 預購截止時間一律寫年份，伺服器時間
 CUTOFF_FORMAT = "%Y/%m/%d %H:%M"
-#: 只寫日期＝當天結束（使用者 2026-10-04，TR-Q42）
+#: 只寫日期＝當天結束
 CUTOFF_DEFAULT_TIME = time(23, 59)
-#: 截止時間最遠幾年後：擋年份打錯（例：2062），預購頂多幾年（使用者 2026-10-04 定五年）
+#: 截止時間最遠幾年後：擋年份打錯（例：2062），預購頂多幾年（定五年）
 CUTOFF_MAX_YEARS = 5
 NAME_LIMIT = 80    # 下拉選項 label 上限 100
 PRICE_MAX = 999_999_999   # 跟單一新增的 modal 一致（9 位），選項 value 才不會超過 100 字
@@ -95,7 +95,7 @@ class Variant:
         return None
 
     def status(self, unit: str, now: datetime, *, rich: bool = False) -> str:
-        """品項狀態。不能買的要一眼看得出來、但不突兀（使用者 2026-10-04，TR-Q38）：
+        """品項狀態。不能買的要一眼看得出來、但不突兀：
         rich＝給 embed 用，價格與類型加刪除線、後面接灰底標籤；選單的說明文字不能用 Markdown，
         就把狀態放最前面，手機上後面被截斷也看得到。"""
         price = money(unit, self.price)
@@ -153,7 +153,7 @@ def parse_draft(name: str, price: str, limit: str, cutoff: str, *,
 
     min_limit：新增時數量至少 1；編輯時填的是「剩餘數量」，可以填 0（停賣、標成已售完）。
     allow_unused_cutoff：選立即購買卻填了截止時間時忽略它。編輯時要開：預購改成立即購買，
-    截止欄還留著預填的時間；新增時不開，免得以為是預購卻變成立即購買（使用者 2026-10-04，TR-Q42）。"""
+    截止欄還留著預填的時間；新增時不開，免得以為是預購卻變成立即購買。"""
     name = (name or "").strip()
     if not name:
         raise ShopError("名稱不能空白")
@@ -333,7 +333,7 @@ def select_options(listing: Listing, now: datetime) -> list[discord.SelectOption
 
 
 def unavailable_text(listing: Listing, now: datetime) -> Optional[str]:
-    """品項全部都不能買時，購買選單要停用並寫上的原因；還有能買的回 None（使用者 2026-10-04）。"""
+    """品項全部都不能買時，購買選單要停用並寫上的原因；還有能買的回 None。"""
     reasons = {v.unavailable_reason(now) for v in listing.variants}
     if not reasons or None in reasons:
         return None
@@ -364,8 +364,8 @@ ORDER_TOTAL_PREFIX = "總計 "
 
 
 def order_total(message) -> Optional[str]:
-    """訂單訊息按鈕上的「總計 …」（下單當時的金額）。總計只寫在按鈕上，訊息文字裡沒有
-    （使用者 2026-10-04，TR-Q40）；改版前的訂單按鈕寫「訂單紀錄」，總計在文字裡，這裡回 None。"""
+    """訂單訊息按鈕上的「總計 …」（下單當時的金額）。總計只寫在按鈕上，訊息文字裡沒有；
+    改版前的訂單按鈕寫「訂單紀錄」，總計在文字裡，這裡回 None。"""
     for child in _children(message):
         label = getattr(child, "label", None) or ""
         if (getattr(child, "custom_id", None) or "").startswith(ORDER_PREFIX) and label.startswith(ORDER_TOTAL_PREFIX):

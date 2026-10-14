@@ -20,9 +20,9 @@
 
 例外與決策：
   - 2026-10-13 拆掉原本的第 ③ 步「production 人格萃取」（整批送 LLM 直接寫 auto_personality）：精簡版連續 12 晚 failed=0，
-    備援每晚只剩 1 人、寫入 0；精簡版是空的人從此維持最後一版描述（PR-Q2～Q4，見交接檔 `persona-extraction-agent`）。
-  - 排程還是手寫的 sleep 迴圈（守衛 `test_shared_conventions` 列為例外），TR-Q9 待搬到 `utils.due_loop.run_due_loop`。
-  - 從 `discord_bot.on_ready` 搬出來是 `architecture-review-2026-10` 的 M4。
+    備援每晚只剩 1 人、寫入 0；精簡版是空的人從此維持最後一版描述（備援寫出來的品質不如 agent，寧可空著）。
+  - 排程還是手寫的 sleep 迴圈（守衛 `test_shared_conventions` 列為例外），待搬到 `utils.due_loop.run_due_loop`。
+  - 從 `discord_bot.on_ready` 搬出來：維護的順序、補跑、不重疊是功能邏輯，不該和啟動登記混在一起。
 """
 from __future__ import annotations
 

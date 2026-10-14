@@ -4,7 +4,7 @@
 本後端（Lemonade 11.5.0 + llama.cpp b9747）已實測支援 strict 模式且輸出可直接
 `json.loads()`，故不再另外寫 GBNF。
 
-**LLM 輸出一律視為不可信輸入**：schema 只保證「形狀對」，內容真偽由 M3 的驗證層
+**LLM 輸出一律視為不可信輸入**：schema 只保證「形狀對」，內容真偽由寫入前的驗證層
 （evidence 反查、confidence 門檻）負責。
 """
 from __future__ import annotations

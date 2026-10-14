@@ -1,8 +1,7 @@
 """Persona Extraction Agent：把每日人格萃取從固定 pipeline 升級成 tool-calling agent。
 
-與現有 `personality_extractor` 並行、完整描述寫獨立資料表；bot 讀到的只有 `publish` 挑過、
-寫進 `auto_personality` 的精簡版（`PersonaAgentSettings.publish_mode` 開啟時才寫）。
-規劃與工程節點詳見 `AI_HANDOFF_AND_TODO.md` 的 Persona Extraction Agent 區塊。
+完整描述寫獨立資料表；bot 讀到的只有 `publish` 挑過、寫進 `auto_personality` 的精簡版
+（`PersonaAgentSettings.publish_mode` 開啟時才寫）。
 
 模組分工：
   - `tools`      ：四支唯讀工具 + function-calling 宣告與派發
@@ -11,7 +10,7 @@
   - `validation` ：把模型輸出當不可信輸入逐項驗證
   - `store`      ：兩張獨立資料表的讀寫
   - `batch`      ：每晚的挑人與批次執行
-  - `publish`    ：M7 精簡版——挑條目、算預算、寫進 `auto_personality`
+  - `publish`    ：精簡版——挑條目、算預算、寫進 `auto_personality`
 
 **刻意不在這裡 re-export**：所有呼叫端都走子模組（`from llm.persona.agent import agent,
 tools`），re-export 一份只會是死程式碼，而且會讓「碰到套件」就 eager import `agent`

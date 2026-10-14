@@ -23,7 +23,6 @@
   4. 這裡只有機制。解析、驗證、寫入、壞了怎麼辦的政策都在呼叫端；不加認得特定檔案的函式。
 
 不收斂的例外：llm.ambient.ambient_reply._load_ambient_prompt（多檔疊層、自己組裝）。
-決策與歷史：AI_HANDOFF_AND_TODO.md 的 `architecture-review-2026-10`（M2a）。
 """
 from __future__ import annotations
 

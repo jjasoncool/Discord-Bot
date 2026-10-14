@@ -20,7 +20,7 @@
 例外與決策：
   - 2026-10-03：重啟後連上 Discord 到快取載完的 3 秒內，本伺服器的貼圖被當成別的伺服器的寫進字典
     → `is_known` 多收 `guild`，快取沒有就看它自己的清單（連上就有，不用等預載）。
-  - 2026-10-13（架構修正 M3）：原本的 `load_guild_stickers(bot)` 自己向每個伺服器 `fetch_stickers`，
+  - 2026-10-13（技術層與服務層退出 discord）：原本的 `load_guild_stickers(bot)` 自己向每個伺服器 `fetch_stickers`，
     拆成介面層抓、這裡 `remember`；技術層不 import discord（守衛 `test_layering`）。
 """
 from __future__ import annotations

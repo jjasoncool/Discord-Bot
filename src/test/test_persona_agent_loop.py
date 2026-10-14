@@ -1,7 +1,7 @@
 """Persona agent 執行迴圈的單元測試（hermetic：假 LLM、假 DB）。
 
 驗證迴圈在各種模型行為下都收斂到明確狀態——agent 是黑箱，這些狀態就是之後
-（M3 寫進 runs 表後）唯一能拿來除錯與統計失敗率的東西：
+（寫進 runs 表後）唯一能拿來除錯與統計失敗率的東西：
 
   ok / max_steps / rejected_schema / context_exceeded / error
 
@@ -506,7 +506,7 @@ class BlockingCallTests(unittest.TestCase):
     而 `select_targets` 那句實測就要 1 秒。
     掃 AST 而不是靠人記得——這種錯誤不會報錯，只會讓 bot 間歇性卡頓。
 
-    **掃描對象是清單而不是單一函式**：原本只掃 `run_and_persist`，於是 M4 新增的
+    **掃描對象是清單而不是單一函式**：原本只掃 `run_and_persist`，於是後來批次新增的
     `run_batch`（第二個 async 進入點）裸呼叫 `select_targets` 完全沒被擋下來。
     日後再多一個 async 進入點，加進 `ASYNC_ENTRYPOINTS` 即可。
     """

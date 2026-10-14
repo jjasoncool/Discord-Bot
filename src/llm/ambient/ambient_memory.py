@@ -10,7 +10,7 @@
   `recall_signature_tags(...)`。
 
 規則：抽取只在緩衝夠量、而且前景（/askai、串流）閒置時才真的跑模型，避免換模型；排程每 `memory_flush_interval_seconds` 秒檢查一次。
-  政策（2026-06-21 定案）：只記本人講自己的中性偏好，敏感類一律不存——見交接檔 `ambient-chat`「偏好事實（C）的政策與接口」。
+  政策：只記本人講自己的中性偏好，敏感類一律不存——記下來的會被召回進 prompt、說出口，記別人講的或敏感事等於替人公開。
 """
 
 from __future__ import annotations

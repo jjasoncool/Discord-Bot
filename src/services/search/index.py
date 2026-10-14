@@ -11,7 +11,7 @@
   4. 有 reranker（P4）時，合併後的前幾十篇再讓 reranker 逐篇讀過、重新排序，見 `rerank.py`；
      呼叫端給了使用者的原句（`question`）就用原句判斷，不用拆成關鍵字的查詢字
 兩份索引分工：三字組（trigram）擅長整段比對長詞；兩字組讓沒有空格的中文句子也能靠 BM25
-自動壓低常見詞、拉高少見詞（2026-10-08 加，原句模式的評估從這裡開始改善，見 AI_HANDOFF_AND_TODO.md 的 mcp-search-tools 區塊）。
+自動壓低常見詞、拉高少見詞（兩字組加進來之後，原句模式的命中率才開始上升）。
 """
 from __future__ import annotations
 

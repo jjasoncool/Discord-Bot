@@ -3,7 +3,7 @@
 **加來源＝寫一個 `Source` 子類別並放進 `SOURCES`**；搜尋工具的名稱與參數都不用動
 （MCP 的 `sources` 參數、結果的來源標籤都由這張表產生）。
 
-文件的定義（見 `AI_HANDOFF_AND_TODO.md` 的 `mcp-search-tools` 區塊「用語」）：可以直接給人一個連結的那一篇。巴哈以「樓層」為單位，
+文件的定義：可以直接給人一個連結的那一篇。巴哈以「樓層」為單位，
 編號用 `sn`（樓層唯一編號）；`post_id#position` 在資料庫裡有重複，不能當 id。
 """
 from __future__ import annotations

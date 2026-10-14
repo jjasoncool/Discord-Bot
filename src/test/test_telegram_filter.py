@@ -1,8 +1,8 @@
 """Telegram 過濾的判斷（services/relay/telegram_filter.py）。
 
 守的底線：
-- 只有模型明確回「隔離」才隔離；回「放行」、看不懂、只寫了理由都放行（拿不準放行，使用者 10-05）
-- 模型忙就排隊、不放行（使用者 10-08：「不能 90 秒沒回應就處理，應該排隊」）：產圖佔著 GPU 時等它做完才叫模型
+- 只有模型明確回「隔離」才隔離；回「放行」、看不懂、只寫了理由都放行（拿不準放行）
+- 模型忙就排隊、不放行（不能 90 秒沒回應就放行）：產圖佔著 GPU 時等它做完才叫模型
   （不然會把 LLM 載回去搶 VRAM）；模型逾時、連不上就隔一陣子再排
 - 排滿 30 分鐘還判不到才放行，並認定模型掛了：之後每則只問一次、失敗就放行（不再每則等滿）；問到一次就恢復排隊
 - 判不了的放行、不擋轉發：模型回錯誤、讀不到 prompt
@@ -214,7 +214,7 @@ class ModelUnavailableTests(FilterTestBase):
         self.assertEqual(len(self.llm.calls), 3)
 
     async def test_which_passes_are_rechecked_later(self):
-        # 使用者 10-08 UC-Q2：模型沒判到（沒回應、出錯、看不懂）之後補判；看不了的檔案、有圖沒看到再判也一樣
+        # 模型沒判到（沒回應、出錯、看不懂）之後補判；看不了的檔案、有圖沒看到再判也一樣
         self.llm.answer = "看起來是梗圖"
         self.assertTrue((await self.judge("水")).recheck, "回答看不懂")
         self.llm.error = RuntimeError("連不上")

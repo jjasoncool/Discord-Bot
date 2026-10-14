@@ -1,11 +1,11 @@
 """交易模組：自由市場的需求被供應方接單後，在購物車開私人 thread，處理領收、取消、封存。
 
-角色（使用者 2026-10-03 定名；交易不一定是買賣，所以不叫買家賣家）：
+角色（交易不一定是買賣，所以不叫買家賣家）：
   - 需求方（requester）：在自由市場發需求的人。使用者自己發的貼文就是貼文作者；
     `/select_item` 由 bot 代發的貼文，是內文裡被 @ 的人。
   - 供應方（supplier）：對需求貼文按表情接單的人，必須有 Trader 身份組（伺服器上叫觀星者）。
 
-交易紀錄就是 Discord 本身，沒有資料表（使用者 2026-10-03 決定）：
+交易紀錄就是 Discord 本身，沒有資料表：
   - 身分（需求貼文、需求方、供應方）寫在按鈕的 custom_id。只有 bot 寫得進去，重啟後照樣讀得到；
     以前寫在一段中文句子裡，四個地方各自用字串切割讀回來。
   - 狀態看交易 thread：沒鎖定＝進行中；結束時一次改名加上結果前綴並鎖定。
@@ -17,8 +17,8 @@
     到期前的提醒做過沒有，看 bot 有沒有在那則通知上按 ⏰。都是在 Discord 上做的註記。
 
 同一篇需求可以有多位供應方，每位各開一個 thread、只加入雙方（不同供應方很正常）。
-一位完成後需求貼文會封存並刪除，其他供應方的 thread 一併結束（TR-Q8）。
-只有供應方能取消（TR-Q4：避免需求方受領服務後擅自取消；需求方想取消就跟供應方說）。
+一位完成後需求貼文會封存並刪除，其他供應方的 thread 一併結束。
+只有供應方能取消（避免需求方受領服務後擅自取消；需求方想取消就跟供應方說）。
 
 交易的來源有兩種：自由市場的需求貼文（預設，寫在這裡）與商品貼文（`SourceKind`，由商品上架
 `services.community.shop_service` 交進來）。兩者差在完成與取消後怎麼處理來源：需求貼文成交一次就
@@ -90,7 +90,7 @@ _MISSING = "missing"    # 需求貼文已經不在（被刪、或別的供應方
 _LOCKED = "locked"      # 封存頻道沒設定，只鎖定需求貼文
 _FAILED = "failed"      # 複製失敗，保留原貼文
 _FOREIGN = "foreign"    # 來源不在自由市場（例：商品貼文被誤判），不封存、不刪、不結束其他交易
-# 給群友看的只說結果、要不要通知管理員；原因寫在 log（使用者 2026-10-04）
+# 給群友看的只說結果、要不要通知管理員；原因寫在 log
 _ARCHIVE_NOTE = {
     _ARCHIVED: "需求貼文已封存。",
     _ARCHIVED_KEPT: "需求貼文沒能自動移除，請通知管理員。",
@@ -538,7 +538,7 @@ class TradeService:
             else:
                 who = f"<@{ref.requester_id}> 已領收"
                 done = "需求方{requester}已領收，交易完成。"
-            # 開頭先 @ 供應方：需求方按「已領收」或自動領收時，供應方也要收到通知（使用者 2026-10-03）
+            # 開頭先 @ 供應方：需求方按「已領收」或自動領收時，供應方也要收到通知
             await thread.send(f"<@{ref.supplier_id}>，{who}，交易完成。{note}此對話將鎖定。")
             await self._close(thread, COMPLETED_PREFIX)
         logger.info("交易：完成 thread=%s ref=%s auto=%s 來源=%s", thread.id, ref, auto, result)
@@ -591,7 +591,7 @@ class TradeService:
     async def _close(self, thread: discord.Thread, prefix: str) -> None:
         self._closed.add(thread.id)
         try:
-            # 交易結束就拿掉交易按鈕（使用者 2026-10-03：做完了按鈕還在，看起來像還能按）。
+            # 交易結束就拿掉交易按鈕（做完了按鈕還在，看起來像還能按）。
             # 要在封存前做：封存中的 thread 改不了訊息
             await self._strip_buttons(thread)
             # 改名、鎖定、封存一次做完：改名有很嚴的限速，一筆交易只改這一次
@@ -603,7 +603,7 @@ class TradeService:
     async def _notify_parties(self, thread: discord.Thread, ref: TradeRef, title: str, text: str) -> None:
         """交易結束時私訊雙方，附上交易 thread 的連結。
 
-        thread 一結束就封存、從頻道列表消失，裡面的 @ 很容易錯過（使用者 2026-10-03）；封存後點連結仍進得去。
+        thread 一結束就封存、從頻道列表消失，裡面的 @ 很容易錯過；封存後點連結仍進得去。
         私訊關閉或已離開伺服器的人就略過（send_dm 只記 log，不會丟例外）。"""
         try:
             names = await self.display_names(thread.guild, (ref.requester_id, ref.supplier_id))
@@ -754,7 +754,7 @@ class TradeService:
         """在封存頻道發一篇封存。自由市場的封存與商品交易的留底都用它。
 
         放得下 2000 字就把摘要＋對話整段寫在貼文裡（打開就看得到，Discord 搜尋也找得到）；
-        放不下時貼文只放摘要，完整內容放 .txt 附檔，封存才不會因為太長而失敗（使用者 2026-10-03，TR-Q28）。
+        放不下時貼文只放摘要，完整內容放 .txt 附檔，封存才不會因為太長而失敗。
         封存頻道沒設定回 False；發不出去丟例外。"""
         archive = await self._channel(self.settings.archive_channel_key)
         if archive is None:
@@ -781,7 +781,7 @@ class TradeService:
 
     async def transcript(self, thread: discord.Thread) -> str:
         """自由市場需求貼文的對話紀錄（給封存用）：每則「[時間] 名字: 內容」，@ 換成名字，最多讀設定的則數。
-        需求貼文本來就公開；商品交易的私人對話不複製進封存頻道（TR-Q44），所以只有這裡用。"""
+        需求貼文本來就公開；商品交易的私人對話不複製進封存頻道，所以只有這裡用。"""
         messages = [m async for m in thread.history(limit=self.settings.archive_history_limit, oldest_first=True)]
         # 向 API 抓回來的歷史訊息，作者不在快取時只有全域名稱；名字一律從伺服器取（被 @ 的人也一樣）
         mentioned = {int(i) for m in messages for i in _MENTION_RE.findall(m.content or "")}

@@ -14,7 +14,7 @@ PERSONA_MAX_CARDS = 3
 
 #: 單張卡每個欄位的字數上限（400 → 600，2026-09-07）。
 #:
-#: persona agent 的完整描述會一路長大，但 auto_personality 不放全文：M7 起寫進去的是
+#: persona agent 的完整描述會一路長大，但 auto_personality 不放全文：改成精簡版之後寫進去的是
 #: `llm.persona.agent.publish` 挑的精簡版，它的預算同時受這個上限與插話那一行的上限
 #: （`AmbientChatSettings.persona_line_max_chars`）限制，所以不會被這裡截斷。要調這個數字時，
 #: 精簡版的預算會跟著變——它在發布時讀的就是這個常數。

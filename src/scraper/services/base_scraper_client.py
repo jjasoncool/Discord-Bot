@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 # Firefox（133／144／147）與本機抓的 Firefox ESR 指紋全部通過；巴哈、PTT、官網 JSON 則每一種都通過。
 # 所有網站都過的只有 Firefox 系；一個 IP 固定用同一種瀏覽器，也比每次換一種更像真人。
 # 以前 HKEPC 的 403 時有時無，就是隨機抽到 Chrome／Safari 的那幾頁被擋。
-# 要加回其他瀏覽器或換版本，先用同樣方式逐站實測（見 AI_HANDOFF「scraper 抓網頁機制檢查」）。
+# 要加回其他瀏覽器或換版本，先用同樣方式逐站實測。
 FIREFOX_TARGETS = ["firefox144", "firefox147"]
 
 try:

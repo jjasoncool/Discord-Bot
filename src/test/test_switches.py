@@ -1,6 +1,6 @@
 """功能開關（sys_settings/switches.py 與 settings/switches.json）。
 
-守的底線（使用者 10-06 SW-Q1～Q2）：
+守的底線：
 - 值從 switches.json 讀，改了下一次用到就生效、不用重啟
 - 沒有檔案、讀不到時全部用預設（預設是關掉也安全的那邊）
 - 某一項的值寫錯：那一項用預設並記 warning，其他項照用；不認得的名稱記 warning；`_` 開頭的說明不算開關

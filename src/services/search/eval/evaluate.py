@@ -3,7 +3,7 @@
 用法（search-mcp 容器裡）：`python -m services.search.eval.evaluate --label 基準線`
 報告寫到這個資料夾的 `reports/<時間>-<名稱>.json`（設定、各模式的分數、每題正確答案排第幾、
 搜尋回了哪些文件）；表格只印到畫面。結論與數字記在 `AI_HANDOFF_AND_TODO.md` 的 `mcp-search-tools` 區塊，
-不另存 Markdown 報告（使用者 2026-10-08：markdown 收成一份就好）。
+不另存 Markdown 報告（結論只留一份，散在多處會分岔）。
 
 兩種模式（預設兩種都考）：
   - 原句：群友怎麼問就怎麼搜，整句丟進去——沒有人幫忙改寫時，搜尋本身找不找得到

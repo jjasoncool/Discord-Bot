@@ -17,7 +17,7 @@
      另一位買家各開一個；交易 thread 開不起來就把預留還回去；加購會作廢原本的領收通知；
      正在取消的 thread 不再收訂單。
   4. 接上交易模組：商品交易完成時在封存頻道另發一篇留底（下單紀錄＋交易對話的連結，寫名字不寫 @；
-     對話內容不複製過去：封存頻道所有觀星者都看得到，對話裡可能有帳號、付款、地址（TR-Q44／Q45）；
+     對話內容不複製過去：封存頻道所有觀星者都看得到，對話裡可能有帳號、付款、地址；
      封存頻道沒設定就說沒留底），不搬、不刪商品貼文、不結束其他買家的 thread——商品論壇改綁或解除也一樣
      （交易種類看交易 thread 裡的訂單紀錄，不看來源貼文在哪）；取消時把這個 thread 所有訂單（首次＋加購，
      多長的 thread 都讀完）的預留還回去。
@@ -29,11 +29,11 @@
      說明附橫幅圖（論壇列表的縮圖也用它）：舊的置頂文重綁時補上、換了圖才重傳；圖檔不在就只發文字、不拿掉原本的圖。
   7. 名字一律是伺服器暱稱（快取拿不到就向 API 查）。
   8. 分層：商品模組不 import 指令層；介面層按鈕與選單的 custom_id 解析得回同一筆資料。
-  9. 選單不會卡住：Discord 的選單選過同一項就不會再通知 bot（使用者 2026-10-03 實測：編輯一次後
+  9. 選單不會卡住：Discord 的選單選過同一項就不會再通知 bot（實測：編輯一次後
      第二次編輯不了；按了取消就沒辦法重新選擇）。買家在購買選單選完、填數量的視窗一跳出，
      商品貼文就重畫清空選單，視窗裡仍是剛選的商品；管理面板每次操作完都重畫，編輯品項選了就跳出視窗、
      跳出後重畫面板（改不了原始回應就改指定訊息，都不行只留 log、不出錯），刪除與下架的確認換在面板上。
-  10. 給群友看的訊息不寫程式用語：交易 thread 一律說「對話」（使用者 2026-10-04）。
+  10. 給群友看的訊息不寫程式用語：交易 thread 一律說「對話」。
 """
 
 import ast
@@ -309,7 +309,7 @@ class ManageTests(ShopTestCase):
         self.assertTrue(self.shop.cutoffs_changed.is_set())
 
     def test_editing_quantity_means_remaining(self):
-        # 編輯時填的是「還要賣幾個」：系統自動加上已下單的（TR-Q27）
+        # 編輯時填的是「還要賣幾個」：系統自動加上已下單的
         self.add(self.thread, "60 月相｜30｜4｜")
         self.order(self.thread, BUYER, {1: 2})
 
@@ -478,7 +478,7 @@ class TradeIntegrationTests(ShopTestCase):
         self.press(mine, BUYER, RECEIVE, self.ref_of(mine))
 
         self.assertTrue(mine.locked)
-        # 成功留底就不提封存的事，只說交易完成（使用者 2026-10-04）
+        # 成功留底就不提封存的事，只說交易完成
         self.assertIn("交易完成。此對話將鎖定。", mine.sent()[-1])
         # 交易按鈕拿掉了，但 🧾 訂單紀錄要留著（取消還回、認出商品交易都靠它）
         remaining = [c.custom_id for m in mine.messages for row in m.components for c in row.children]
