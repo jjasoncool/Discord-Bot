@@ -22,7 +22,7 @@ from services.relay.telegram_relay_service import QuarantineItem
 from sys_settings.time_settings import APP_TZ
 from utils.discord_threads import reopen_thread
 from utils.panel_bump import PanelBumper
-from sys_settings.paths import settings_file
+from sys_settings.paths import runtime_path
 from utils.utils import check_guild, safe_send_interaction_message
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,7 @@ DATE_SELECT_ID = "tgq:date"
 PICK_TEMPLATE = r"tgq:pick:(?P<parent>\d+):(?P<day>\d{8})"
 RESTORE_TEMPLATE = r"tgq:restore:(?P<pk>\d+)"
 #: 面板位置（bot 自己寫的狀態，不進版控）。跟隔離 thread 的紀錄分開放，兩邊寫入不會互相蓋掉
-PANEL_RUNTIME_PATH = settings_file("telegram_quarantine_panel_runtime.json")
+PANEL_RUNTIME_PATH = runtime_path("telegram_quarantine_panel.json")
 _MAX_OPTIONS = 25
 _PERMISSION = "manage_messages"
 

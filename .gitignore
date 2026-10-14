@@ -12,9 +12,6 @@ src/scraper/articles.db-wal
 src/scraper/articles_bk*.db
 src/services/sent_articles.json
 src/services/sent_articles_bk.json
-src/settings/item_prices.json
-src/settings/intro_panel_runtime.json
-src/settings/intro_submission_runtime.json
 staged_diff.txt
 doc/interview/
 
@@ -24,12 +21,8 @@ src/telegram_scraper/media/
 src/services/sent_articles.db
 src/services/sent_articles.db-shm
 src/services/sent_articles.db-wal
-src/settings/music_runtime.json
-src/settings/rollcall_runtime.json
-src/settings/community_panel_runtime.json
-src/settings/periodic_reminder_runtime.json
-src/settings/telegram_quarantine_runtime.json
-src/settings/telegram_quarantine_panel_runtime.json
+# bot 執行時寫的資料（透過 Discord 設的值＋它自己的紀錄：面板、點名、音樂、價格表、關鍵字監控）：整個資料夾不進版控
+src/settings/runtime/
 
 # search-mcp 情報搜尋的索引：從 articles.db 建出來的衍生資料，刪掉會自動重建（容器掛 /search_data）
 search_data/

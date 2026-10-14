@@ -197,27 +197,25 @@ def _find_hardcoded_app_root(path: Path) -> list[int]:
 
 
 def _find_raw_runtime_json_io(path: Path) -> list[int]:
-    """自己 `open()`／`read_text()`／`write_text()` 一個 `*_runtime.json`（或價格表）的那幾行。
+    """自己 `open()`／`read_text()`／`write_text()` 一個 bot 寫的檔（`settings/runtime/` 底下、舊名 `*_runtime.json`、價格表）的那幾行。
 
     看的是開檔那一行的參數文字：直接寫檔名、或變數名帶 RUNTIME／runtime／PRICES。這些是程式自己寫的
     狀態檔；各寫一套讀寫，就會有的直接覆寫、有的自己快取、有的相對路徑。機制只有 `utils.runtime_file`
     一份（面板置底的 `load_runtime`／`update_runtime` 轉呼叫它；價格表的 `item_prices` 也建在它上面）。
-    人手改的 `article_runtime.json` 走熱讀檔，另有 `base_monitor` 自己的快取，列在 allowed。
+    人手改的 `settings/article_relay.json` 走熱讀檔（`hot_files`），不在這條規則的對象裡。
     """
     hits = []
     for node in ast.walk(_parse(path)):
-        if not isinstance(node, ast.Call) or not node.args:
+        if not isinstance(node, ast.Call):
             continue
         f = node.func
-        opens_file = (isinstance(f, ast.Name) and f.id == "open") or (
-            isinstance(f, ast.Attribute) and f.attr in ("read_text", "write_text"))
         if isinstance(f, ast.Attribute) and f.attr in ("read_text", "write_text"):
-            target = ast.unparse(f.value)
-        elif opens_file:
+            target = ast.unparse(f.value)          # `X.read_text(encoding=...)` 沒有位置參數，看的是 X
+        elif isinstance(f, ast.Name) and f.id == "open" and node.args:
             target = ast.unparse(node.args[0])
         else:
             continue
-        if "_runtime.json" in target or "RUNTIME" in target or "runtime" in target or "PRICES" in target or "prices_file" in target:
+        if any(k in target for k in ("_runtime.json", "RUNTIME", "runtime", "PRICES", "prices_file", "STATE", "monitored_channels")):
             hits.append(node.lineno)
     return hits
 
@@ -637,14 +635,13 @@ RULES = [
         },
     ),
     Rule(
-        name="狀態 JSON（*_runtime.json、價格表）的讀寫",
+        name="settings/runtime/ 底下 bot 寫的 JSON（面板、點名、音樂、價格表、關鍵字監控）的讀寫",
         finder=_find_raw_runtime_json_io,
         canonical="utils.runtime_file.load / save / update（面板走 panel_bump 的 load_runtime / update_runtime）",
         allowed={
             "utils/runtime_file.py",
-            # 人手改的設定，走自己的 5 分鐘快取（不是程式寫的狀態）
-            "services/relay/base_monitor.py",
-            "services/relay/ptt_monitor.py",
+            # 人手改的 LLM 設定（llm_runtime_config.json），嚴格讀取、缺檔要炸；不是程式寫的狀態
+            "sys_settings/llm_settings.py",
             # 爬蟲是獨立容器，看不到 utils
             "scraper/",
             "telegram_scraper/",

@@ -1,4 +1,4 @@
-"""專案根目錄、log 掛載點與其下固定目錄的唯一來源：程式要找 settings、prompts、scraper 資料、log 與備份時都問這裡。
+"""專案根目錄、log 掛載點與其下固定目錄的唯一來源：程式要找 settings、settings/runtime、prompts、scraper 資料、log 與備份時都問這裡。
 
 架構定位：基礎層（`sys_settings`），不依賴專案內其他模組。上層：所有要讀專案內檔案的模組
 （pydantic 設定的預設路徑、字典、prompt、交易價格檔、scraper 資料庫位置）。下層：只有 `os`、`pathlib`。
@@ -6,10 +6,11 @@
 介面：
 - `APP_ROOT`：根目錄。環境變數 `APP_ROOT` 有設就用它，沒設就是容器裡的掛載點 `/app`。
 - `LOGS_DIR`：log、prompt 除錯檔與備份放的地方。環境變數 `LOGS_DIR` 有設就用它，沒設就是容器裡的掛載點 `/logs`。
-- `SETTINGS_DIR`、`PROMPTS_DIR`、`SYS_SETTINGS_DIR`、`SCRAPER_DIR`、`TELEGRAM_SCRAPER_DIR`、`STATIC_DIR`：
-  根目錄下的固定子目錄（`Path`）。
-- `settings_file(name)`、`prompt_file(name)`：`settings/` 與 `settings/prompts/` 下某個檔的路徑字串，
-  給型別是 `str` 的設定欄位當預設值。
+- `SETTINGS_DIR`（你手改的設定，進版控）、`RUNTIME_DIR`（bot 執行時寫的資料：透過 Discord 設的值＋它自己的紀錄，整個資料夾
+  不進版控）、`PROMPTS_DIR`、
+  `SYS_SETTINGS_DIR`、`SCRAPER_DIR`、`TELEGRAM_SCRAPER_DIR`、`STATIC_DIR`：根目錄下的固定子目錄（`Path`）。
+- `settings_file(name)`、`runtime_path(name)`、`prompt_file(name)`：`settings/`、`settings/runtime/`、`settings/prompts/` 下某個檔的
+  路徑字串，給型別是 `str` 的設定欄位當預設值。
 
 規則：
 - 程式裡不再寫死 `"/app/..."`、`"/logs/..."`（守衛 `test_shared_conventions` 擋）；要路徑就從這裡拿。
@@ -28,6 +29,9 @@ from pathlib import Path
 
 APP_ROOT = Path(os.environ.get("APP_ROOT") or "/app")
 SETTINGS_DIR = APP_ROOT / "settings"
+#: bot 執行時寫的資料：透過 Discord 設的值（提醒的身分組與面板文字、點名開關、監控關鍵字、價格）加上它自己的紀錄
+#: （面板訊息 id、thread id、放到哪首）。人手不改、整個資料夾不進版控
+RUNTIME_DIR = SETTINGS_DIR / "runtime"
 PROMPTS_DIR = SETTINGS_DIR / "prompts"
 SYS_SETTINGS_DIR = APP_ROOT / "sys_settings"
 SCRAPER_DIR = APP_ROOT / "scraper"
@@ -41,6 +45,11 @@ LOGS_DIR = Path(os.environ.get("LOGS_DIR") or "/logs")
 def settings_file(name: str) -> str:
     """`settings/<name>` 的路徑字串。"""
     return str(SETTINGS_DIR / name)
+
+
+def runtime_path(name: str) -> str:
+    """`settings/runtime/<name>` 的路徑字串。"""
+    return str(RUNTIME_DIR / name)
 
 
 def prompt_file(name: str) -> str:

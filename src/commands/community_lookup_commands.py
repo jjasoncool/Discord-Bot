@@ -39,7 +39,7 @@ from services.community.community_lookup_service import (
 from services.source_urls import bahamut_floor_url
 from services.state_db import StateDB
 from utils.panel_bump import PanelBumper
-from sys_settings.paths import settings_file
+from sys_settings.paths import runtime_path
 from utils.user_dates import parse_user_date
 from utils.utils import ChannelConfig, safe_send_interaction_message
 
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 # 常數
 # ═══════════════════════════════════════════════════
 
-COMMUNITY_PANEL_RUNTIME_FILE = settings_file("community_panel_runtime.json")
+COMMUNITY_PANEL_RUNTIME_FILE = runtime_path("community_panel.json")
 
 EMBED_DESC_MAX = 4000          # 留 96 字 buffer
 SEND_DELAY = 0.3                # slot 連發間隔

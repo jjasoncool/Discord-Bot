@@ -6,7 +6,6 @@
 import asyncio
 import aiohttp
 import io
-import json
 import logging
 import os
 import random
@@ -19,29 +18,16 @@ from urllib.parse import urlparse
 from utils.logger_config import get_article_monitor_logger
 from services.state_db import StateDB, get_shared_state_db
 from sys_settings.paths import SETTINGS_DIR
+from utils import hot_files
 
 logger = get_article_monitor_logger()
 
-# article_runtime.json 共用快取（TTL 5 分鐘）
-_article_runtime_cache: Dict = {}
-_article_runtime_cache_time: float = 0
-_ARTICLE_RUNTIME_PATH = SETTINGS_DIR / "article_runtime.json"
-_ARTICLE_RUNTIME_TTL = 300
+_ARTICLE_RUNTIME_PATH = SETTINGS_DIR / "article_relay.json"
 
 
 def get_article_runtime_config() -> Dict:
-    """讀取 article_runtime.json（TTL 快取，所有 monitor 共用）。"""
-    import time
-    global _article_runtime_cache, _article_runtime_cache_time
-    now = time.time()
-    if _article_runtime_cache and (now - _article_runtime_cache_time) < _ARTICLE_RUNTIME_TTL:
-        return _article_runtime_cache
-    try:
-        _article_runtime_cache = json.loads(_ARTICLE_RUNTIME_PATH.read_text(encoding="utf-8"))
-        _article_runtime_cache_time = now
-    except Exception:
-        pass
-    return _article_runtime_cache
+    """人手改的轉發設定（暴雷關鍵字、排除分類），所有 monitor 共用；改了下一次讀就生效，壞檔沿用上次。"""
+    return hot_files.read_json(_ARTICLE_RUNTIME_PATH, label="article_relay 設定") or {}
 
 
 class BaseContentMonitor:

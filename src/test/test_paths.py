@@ -35,12 +35,14 @@ class PathsTests(unittest.TestCase):
         self.assertEqual("/app/settings/x.json", paths.settings_file("x.json"))
         self.assertEqual(Path("/app/scraper"), paths.SCRAPER_DIR)
         self.assertEqual(Path("/logs"), paths.LOGS_DIR)
+        self.assertEqual("/app/settings/runtime/x.json", paths.runtime_path("x.json"))
 
     def test_environment_variable_moves_everything(self):
         paths = _load("/srv/bot")
         self.assertEqual(Path("/srv/bot"), paths.APP_ROOT)
         self.assertEqual("/srv/bot/settings/prompts/x.txt", paths.prompt_file("x.txt"))
         self.assertEqual(Path("/srv/bot/static"), paths.STATIC_DIR)
+        self.assertEqual(Path("/srv/bot/settings/runtime"), paths.RUNTIME_DIR)
         self.assertEqual(Path("/logs"), paths.LOGS_DIR, "log 目錄是另一個掛載點，不跟著根目錄走")
         self.assertEqual(Path("/srv/logs"), _load("/srv/bot", logs="/srv/logs").LOGS_DIR)
 

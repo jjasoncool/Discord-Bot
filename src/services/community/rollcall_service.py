@@ -11,7 +11,7 @@ import random
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from sys_settings.paths import settings_file
+from sys_settings.paths import runtime_path
 from utils import runtime_file
 from utils.utils import ChannelConfig
 from typing import Callable, Dict, List, Optional, Set
@@ -23,7 +23,7 @@ from utils.background_tasks import supervise
 
 logger = logging.getLogger(__name__)
 
-RUNTIME_FILE = Path(settings_file("rollcall_runtime.json"))  # services/community/ 往上兩層是 src/
+RUNTIME_FILE = Path(runtime_path("rollcall.json"))  # services/community/ 往上兩層是 src/
 # 點名回覆期限（天）
 RESPONSE_DEADLINE_DAYS = 7
 # 通過點名後的豁免期（天）
@@ -79,7 +79,7 @@ class RollCallRuntime:
             self.last_rollcall_date = data.get("last_rollcall_date")
             self.last_manual_rollcall_date = data.get("last_manual_rollcall_date")
         except Exception as e:
-            logger.error(f"讀取 rollcall_runtime.json 失敗: {e}", exc_info=True)
+            logger.error(f"讀取點名狀態檔失敗: {e}", exc_info=True)
 
     def save(self):
         try:
@@ -95,7 +95,7 @@ class RollCallRuntime:
             }
             runtime_file.save(RUNTIME_FILE, data)
         except Exception as e:
-            logger.error(f"寫入 rollcall_runtime.json 失敗: {e}", exc_info=True)
+            logger.error(f"寫入點名狀態檔失敗: {e}", exc_info=True)
 
     # ── 查詢 ──
 

@@ -18,14 +18,14 @@ import discord
 
 from utils.discord_threads import fetch_thread, reopen_thread
 from utils.panel_bump import load_runtime, update_runtime
-from sys_settings.paths import settings_file
+from sys_settings.paths import runtime_path
 from utils.background_tasks import spawn
 
 logger = logging.getLogger(__name__)
 
 THREAD_NAME = "垃圾訊息"
 #: 隔離 thread 與面板位置（bot 自己寫的狀態，不進版控）
-RUNTIME_PATH = settings_file("telegram_quarantine_runtime.json")  # services/relay/ 往上兩層是 src/
+RUNTIME_PATH = runtime_path("telegram_quarantine.json")  # services/relay/ 往上兩層是 src/
 #: 一週沒人講話才封存（Discord 允許的最長值）
 _AUTO_ARCHIVE_MINUTES = 10080
 

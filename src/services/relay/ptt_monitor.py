@@ -5,11 +5,11 @@ PTT 貼文 → Discord 論壇頻道 relay 服務
 """
 import asyncio
 import aiohttp
-import json
 import logging
 import discord
 from pathlib import Path
 from sys_settings.paths import SETTINGS_DIR
+from utils import hot_files
 from typing import List, Dict, Optional
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
@@ -30,7 +30,7 @@ class PTTMonitor(BaseContentMonitor):
     """PTT 貼文 → Discord Forum Channel 監控器"""
 
     PTT_FORUM_TAG_NAME = "PTT"
-    ARTICLE_RUNTIME_CONFIG_PATH = SETTINGS_DIR / "article_runtime.json"
+    ARTICLE_RUNTIME_CONFIG_PATH = SETTINGS_DIR / "article_relay.json"
 
     def __init__(self, bot, scraper_api_url: str = "http://scraper:8000"):
         super().__init__(bot, scraper_api_url)
@@ -38,17 +38,15 @@ class PTTMonitor(BaseContentMonitor):
 
     def _load_article_runtime_config(self) -> Dict:
         """載入文章相關 runtime 設定。"""
-        with open(self.ARTICLE_RUNTIME_CONFIG_PATH, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-
-        if not isinstance(raw, dict):
-            raise ValueError("article_runtime.json 格式錯誤，根節點必須是 JSON object")
+        raw = hot_files.read_json(self.ARTICLE_RUNTIME_CONFIG_PATH, label="article_relay 設定")
+        if raw is None:
+            raise ValueError("article_relay.json 讀不到，或根節點不是 JSON object")
 
         if "ptt_spoiler_keywords" not in raw:
-            raise ValueError("article_runtime.json 缺少必要欄位: ptt_spoiler_keywords")
+            raise ValueError("article_relay.json 缺少必要欄位: ptt_spoiler_keywords")
 
         if "ptt_comment_chunk_limit" not in raw:
-            raise ValueError("article_runtime.json 缺少必要欄位: ptt_comment_chunk_limit")
+            raise ValueError("article_relay.json 缺少必要欄位: ptt_comment_chunk_limit")
 
         return raw
 

@@ -1,4 +1,4 @@
-"""賣家物品價格表（`settings/item_prices.json`）的唯一讀寫點。
+"""賣家物品價格表（`settings/runtime/item_prices.json`）的唯一讀寫點。
 
 架構定位：功能層（`services/community`）。上層：指令層（`commands.user_commands` 查價、`commands.trade_commands`
 設價、`commands.forum_monitor` 開交易時附上供應方價格）。下層：`utils.hot_files`（讀，改檔即生效）、
@@ -21,11 +21,11 @@ import copy
 import json
 from pathlib import Path
 
-from sys_settings.paths import settings_file
+from sys_settings.paths import runtime_path
 from utils import runtime_file
 from utils.hot_files import read_parsed
 
-PRICES_PATH = settings_file("item_prices.json")
+PRICES_PATH = runtime_path("item_prices.json")
 
 
 def _parse(raw: str):

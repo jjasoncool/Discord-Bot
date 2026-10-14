@@ -13,7 +13,7 @@ from typing import Optional
 from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, ChannelConfig, ConfigWriteError, check_guild
 from utils.panel_bump import PanelBumper
 from utils import runtime_file
-from sys_settings.paths import settings_file
+from sys_settings.paths import runtime_path
 # 注意：需確保 services 資料夾下的 intro_profile_service.py 包含 IntroProfilePayload, ImpressionPayload, IntroProfileServiceProtocol, IntroProfileService 等定義
 from services.community.intro_profile_service import (
     IntroProfilePayload,
@@ -27,11 +27,11 @@ from settings.channel_registry import all_settings, get_setting, ChannelSetConte
 
 # 獲取 logger
 logger = logging.getLogger(__name__)
-INTRO_PANEL_RUNTIME_FILE = settings_file("intro_panel_runtime.json")
+INTRO_PANEL_RUNTIME_FILE = runtime_path("intro_panel.json")
 # 面板按鈕 custom_id：persistent view 與置底翻找殘留面板共用
 INTRO_CUSTOM_ID_OPEN = "intro_open_modal"
 INTRO_CUSTOM_ID_IMPRESSION = "intro_open_impression_modal"
-INTRO_SUBMISSION_RUNTIME_FILE = settings_file("intro_submission_runtime.json")
+INTRO_SUBMISSION_RUNTIME_FILE = runtime_path("intro_submissions.json")
 
 
 def _load_intro_submission_runtime_config() -> dict:

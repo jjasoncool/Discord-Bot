@@ -29,13 +29,13 @@ class DataFileLocationTests(unittest.TestCase):
         from services import state_db
         self.assertLocation(state_db.DEFAULT_DB_PATH, "services", "sent_articles.db")
 
-    def test_article_runtime_config(self):
+    def test_article_relay_config(self):
         from services.relay import base_monitor
-        self.assertLocation(base_monitor._ARTICLE_RUNTIME_PATH, "settings", "article_runtime.json")
+        self.assertLocation(base_monitor._ARTICLE_RUNTIME_PATH, "settings", "article_relay.json")
 
-    def test_rollcall_runtime(self):
+    def test_rollcall_state(self):
         from services.community import rollcall_service
-        self.assertLocation(rollcall_service.RUNTIME_FILE, "settings", "rollcall_runtime.json")
+        self.assertLocation(rollcall_service.RUNTIME_FILE, "settings", "runtime", "rollcall.json")
 
     def test_scraper_articles_db(self):
         from services.events import event_scheduler
@@ -48,6 +48,34 @@ class DataFileLocationTests(unittest.TestCase):
     def test_music_cache_dir(self):
         from music import ytdl
         self.assertLocation(ytdl.CACHE_DIR, "music", "cache")
+
+    def test_music_playlists_and_state(self):
+        from music import config
+        self.assertLocation(config.MUSIC_PLAYLISTS_PATH, "settings", "music_playlists.json")
+        self.assertLocation(config.MUSIC_STATE_PATH, "settings", "runtime", "music.json")
+
+    def test_switches_and_item_prices(self):
+        from services.community import item_prices
+        from sys_settings import switches
+        self.assertLocation(switches.SWITCHES_PATH, "settings", "switches.json")
+        self.assertLocation(item_prices.PRICES_PATH, "settings", "runtime", "item_prices.json")
+
+    def test_every_runtime_file_lives_in_the_runtime_folder(self):
+        """bot 執行時寫的檔全部在 settings/runtime/（整個資料夾不進版控）；誰放到別處就會又出現在 git 清單裡。"""
+        from commands import community_lookup_commands, management_commands, telegram_quarantine_commands, user_commands
+        from services.relay import telegram_quarantine
+        from sys_settings.periodic_reminder_settings import PeriodicReminderSettings
+        for actual, name in (
+            (management_commands.INTRO_PANEL_RUNTIME_FILE, "intro_panel.json"),
+            (management_commands.INTRO_SUBMISSION_RUNTIME_FILE, "intro_submissions.json"),
+            (community_lookup_commands.COMMUNITY_PANEL_RUNTIME_FILE, "community_panel.json"),
+            (telegram_quarantine_commands.PANEL_RUNTIME_PATH, "telegram_quarantine_panel.json"),
+            (telegram_quarantine.RUNTIME_PATH, "telegram_quarantine.json"),
+            (user_commands.monitored_channels_file, "monitored_channels.json"),
+            (PeriodicReminderSettings().runtime_path, "periodic_reminder.json"),
+        ):
+            with self.subTest(name=name):
+                self.assertLocation(actual, "settings", "runtime", name)
 
 
 if __name__ == "__main__":

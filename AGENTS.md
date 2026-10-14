@@ -35,7 +35,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 
 1. **禁止**在未取得使用者明確同意前，執行任何可能刪除、清空、覆寫資料檔的操作。
 2. 以下一律視為「高風險資料」：
-   - runtime 狀態檔（例：`src/settings/*_runtime.json`、`src/services/sent_articles.db`；原本的 `sent_articles.json` 已遷移成 SQLite）
+   - bot 執行時寫的檔（`src/settings/runtime/*.json`：透過 Discord 設的值與它自己的紀錄——面板、點名、音樂、價格表、關鍵字監控；`src/services/sent_articles.db`）
    - 使用者設定檔（例：`src/config.json`）
    - 快取、歷史紀錄、session、資料庫檔（例：`src/scraper/articles.db`、pgvector 資料、`/logs` 下的歷史紀錄、Telegram session）
 3. 如需修改高風險資料檔，必須先說明風險與影響、提供備份／回復方案、取得使用者同意。
@@ -75,9 +75,9 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 幾組工具一起交給同一個工具輪（例：遊戲情報＋網路搜尋） | `llm.client.tool_calls.combine_runners`（宣告照順序接、使用規則依序接、呼叫依名稱交給宣告它的那組；沒工具的連規則一起略過） |
 | 按鈕、指令的操作權限 | `utils.utils.check_guild`（`owner_only`／`admin_only`／`required_role`／`permission="manage_messages"` 這類 Discord 權限；不通過時自己回只有本人看得到的訊息） |
 | 功能開關（開／關、off／dry_run／on） | 值寫在 `settings/switches.json`（手改、下一次用到就生效）；名稱、預設、允許的值定義在 `sys_settings.switches.Switches`，讀用 `switches.current()`；新開關只能放這裡（守衛擋，舊的改到再搬） |
-| 專案裡檔案的位置（settings、prompts、scraper 資料庫、static、config.json、log 與備份） | `sys_settings.paths`（`APP_ROOT`、`LOGS_DIR`、`SETTINGS_DIR`、`PROMPTS_DIR`、`SCRAPER_DIR`、`STATIC_DIR`、`settings_file()`、`prompt_file()`；config.json 用 `utils.utils.CONFIG_FILE`）；不寫死 `"/app/..."`、`"/logs/..."`、不用 `Path(__file__).parents[n]` 往上數、不用相對路徑（守衛擋；爬蟲容器例外） |
-| 程式自己寫的狀態 JSON（`settings/*_runtime.json`：面板訊息 id、點名、音樂、自介投稿、隔離 thread） | `utils.runtime_file.load`／`save`／`update`（讀走熱讀檔、寫走安全寫入加備份；面板位置用 `panel_bump` 的 `load_runtime`／`update_runtime`）；不自己 `open`／`json.load`（守衛擋） |
-| 賣家物品價格（`settings/item_prices.json`） | `services.community.item_prices`（`all_prices`／`user_prices`／`set_user_prices`） |
+| 專案裡檔案的位置（settings、settings/runtime、prompts、scraper 資料庫、static、config.json、log 與備份） | `sys_settings.paths`（`APP_ROOT`、`LOGS_DIR`、`SETTINGS_DIR`＝你手改、`RUNTIME_DIR`＝bot 寫、`PROMPTS_DIR`、`SCRAPER_DIR`、`STATIC_DIR`、`settings_file()`、`runtime_path()`、`prompt_file()`；config.json 用 `utils.utils.CONFIG_FILE`）；不寫死 `"/app/..."`、`"/logs/..."`、不用 `Path(__file__).parents[n]` 往上數、不用相對路徑（守衛擋；爬蟲容器例外） |
+| bot 執行時寫的 JSON（`settings/runtime/*.json`：透過 Discord 設的值與它自己的紀錄——面板、點名、音樂、自介投稿、隔離 thread、關鍵字監控；整個資料夾不進版控） | `utils.runtime_file.load`／`save`／`update`（讀走熱讀檔、寫走安全寫入加備份；面板位置用 `panel_bump` 的 `load_runtime`／`update_runtime`）；不自己 `open`／`json.load`（守衛擋） |
+| 賣家物品價格（`settings/runtime/item_prices.json`） | `services.community.item_prices`（`all_prices`／`user_prices`／`set_user_prices`） |
 | 寫 `config.json` | `ChannelConfig.update_config(apply)`（重讀最新內容、只改這次的 key、安全寫入加備份）；讀 `load_config` 回複本、改檔即生效 |
 | 綁頻道 | `settings/channel_registry.py` 的 `register_channel` |
 | 取得 thread（封存的也拿得到）、解除封存 | `utils.discord_threads.fetch_thread`／`reopen_thread`（封存的 thread 改不了、刪不了訊息） |
@@ -127,4 +127,5 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 - 單元測試放 `src/test/test_<功能>.py`，檔案開頭寫「守的底線」。斷言使用者看得到的約定（誰被 @、何時發、刪了哪則）；文案只比對關鍵資訊。
 - 需要真實服務的放 `src/test/integration/it_*.py`，不進啟動 gate，手動執行。
 - 測試會自動把 log 寫到 `/logs/test_run.log`，正式 log 不受影響。
+- 靠真實時間判斷的測試（租約到期、排隊上限、相簿安靜期這類）掛 `@timing_sensitive`（`test/__init__.py`）：啟動 gate 設了 `APP_STARTUP_GATE=1` 會跳過，手動跑與 CI 照跑。容器啟動時負載高，這類測試誤判會讓 bot 多等一輪 gate。
 - 突變測試複製到容器的 `/tmp` 做，只複製需要的目錄（`/app/telegram_scraper` 有 30 GB）；設 `PYTHONDONTWRITEBYTECODE=1` 並先清 `__pycache__`——同一秒內改壞又還原、檔案大小不變時，Python 會沿用改壞的 `.pyc`，結果不可信。

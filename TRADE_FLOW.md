@@ -45,7 +45,7 @@
 | `src/sys_settings/trade_settings.py` | `TradeSettings` |
 | `src/commands/trade_commands.py` | `/select_item`（下單、在自由市場發指令貼文）、`/set_item_prices`、`/trade_info`；與交易 thread 無關 |
 | `src/commands/user_commands.py` | `get_user_item_prices`、`/list_item_price`（價格表）；關鍵字監看對自由市場的 bot 貼文例外放行 |
-| `src/constants.py` `ITEMS`、`src/static/items.png`、`settings/item_prices.json` | 固定物品清單、物品圖、每位供應方的價格 |
+| `src/constants.py` `ITEMS`、`src/static/items.png`、`settings/runtime/item_prices.json` | 固定物品清單、物品圖、每位供應方的價格 |
 | `src/test/test_trade_flow.py`、`src/test/test_due_loop.py` | 交易流程與到期迴圈的測試 |
 
 ## 流程圖

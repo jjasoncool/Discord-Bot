@@ -1,4 +1,4 @@
-"""程式自己寫的狀態 JSON（`settings/*_runtime.json`：面板訊息 id、點名狀態、音樂狀態…）的唯一讀寫機制。
+"""bot 執行時寫的 JSON（`settings/runtime/*.json`：透過 Discord 設的值與它自己的紀錄——面板、點名、音樂、價格表、關鍵字監控…）的唯一讀寫機制。
 
 架構定位：基礎層（`utils`）。上層：所有要記「我上次做到哪」的功能與介面層模組（面板置底 `panel_bump`、
 點名、音樂、自介投稿、隔離 thread、週期提醒）。下層：`utils.hot_files`（讀，mtime 快取、壞檔沿用上次）、
@@ -11,9 +11,9 @@
 - 寫入失敗拋例外，要不要吞由呼叫端決定（面板置底吞掉記 log，點名記 log）。
 
 規則：
-- `*_runtime.json` 只能經過這裡讀寫（守衛 `test_shared_conventions`）；格式與位置不變，所以沒有資料遷移。
-- 人手改的設定檔（`article_runtime.json`、`llm_runtime_config.json`、字典、prompt）不是這裡的對象，
-  它們走各自的熱讀檔。`music_runtime.json` 兩者都是（歌單人手改、面板 id 程式寫），讀寫一樣走這裡。
+- `settings/runtime/` 底下的檔只能經過這裡讀寫（守衛 `test_shared_conventions`）；路徑用 `sys_settings.paths.runtime_path()`。
+- 人手改的設定檔（`settings/` 底下：`article_relay.json`、`switches.json`、字典、prompt）不是這裡的對象，
+  它們走各自的熱讀檔。音樂把兩種分開：歌單檔 `settings/music_playlists.json` 人手改、走熱讀檔；狀態檔 `settings/runtime/music.json` 程式寫、走這裡。
 
 例外與決策：
 - 留 JSON 檔、不搬進 SQLite（StateDB）：九個檔加起來不到 10 KB，問題是七套讀寫各自為政，不是容量；搬進資料庫要遷移資料、
