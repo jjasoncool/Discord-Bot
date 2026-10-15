@@ -3,8 +3,8 @@
 架構定位：功能層（`llm/storage`），吃 Discord 訊息物件、寫資料庫。和 `store_chat`（篩選後的語意索引）並列、互不依賴；
 raw 表是備份層，也是互動（反應）的真相來源。
   - 上層（誰呼叫）：`discord_bot` 的 on_message／on_message_edit／on_raw_message_delete／on_raw_reaction_add／remove
-    （各自的 `enqueue_*`，滿門檻就 `flush_raw_buffer`）與 on_ready（用 `utils.background_tasks.periodic` 定期呼叫 `flush_raw_buffer`）；
-    要看一則訊息被按了多少反應的功能查 `get_reaction_salience`。
+    （各自的 `enqueue_*`，滿門檻就 `flush_raw_buffer`）、on_ready（用 `utils.background_tasks.periodic` 定期呼叫 `flush_raw_buffer`）
+    與停機收尾（`MyBot.close` 呼叫 `flush_raw_buffer`）；要看一則訊息被按了多少反應的功能查 `get_reaction_salience`。
   - 下層（呼叫誰）：psycopg2 連線池（獨立 pool，不和 pgvector 的 LlamaIndex 共用）、`llm.preprocess.sticker_cache`。
 
 介面：`enqueue_raw_message`、`enqueue_raw_edit`、`enqueue_raw_delete`、`enqueue_reaction_change`、`should_trigger_flush`、

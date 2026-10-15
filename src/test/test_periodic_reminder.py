@@ -6,11 +6,13 @@
 - 錯過的提醒只在補發時限內補，已發過的不重發
 - 身份組建立時不可被一般成員 @、沒有任何權限，名稱以設定為準
 - 終焉矩陣跟著版本走：開放日要對得上巴哈各階段隊伍分享串的時程；不知道下一次更新時不發結束提醒
+- 排程迴圈被取消（停機、cog 卸載）時以「被取消」結束：吞掉的話 supervise 會當成迴圈自己結束、每次停機都記 WARNING
 
 執行：
     cd src && python -m unittest test.test_periodic_reminder -v
 """
 
+import asyncio
 import os
 import sys
 import tempfile
@@ -488,6 +490,22 @@ class PanelRefreshTests(CogTestBase):
         self.cog._update_starts = [datetime(2099, 1, 1, 4, 0, tzinfo=SERVER_TZ)]
         self.assertTrue(await self.cog.refresh_panel_if_changed(channel))
         self.cog.panel.bump_safe.assert_awaited_once_with(channel)
+
+
+class ScheduleLoopCancelTests(CogTestBase):
+    async def test_cancel_ends_the_loop_as_cancelled(self):
+        self.bot.wait_until_ready = AsyncMock()
+        self.cog._refresh_update_starts = AsyncMock()
+        self.cog.reminder_channel = MagicMock(return_value=None)
+        self.cog.run_due = AsyncMock()
+        loop_task = asyncio.create_task(self.cog._schedule_loop())
+        for _ in range(3):
+            await asyncio.sleep(0)   # 讓它跑到等下一個提醒的 sleep
+
+        loop_task.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await loop_task
 
 
 if __name__ == "__main__":

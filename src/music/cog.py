@@ -1,3 +1,17 @@
+"""音樂功能的 Cog：on_ready 後連上固定語音頻道、背景載入歌單、播放；設定檔改了就跟著換頻道或歌單。
+
+架構定位：介面層（`music/`）。
+  - 上層（誰呼叫）：`commands.music_commands` 的 setup（載入這個 Cog）；discord.py（on_ready、語音狀態事件、卸載）。
+  - 下層（呼叫誰）：`music.player.MusicPlayer`、`music.announcer`（面板）、`music.config.RuntimeMusicConfig`（設定與監看）。
+
+介面：`cog_load`／`cog_unload`（discord.py 呼叫）、on_ready 等事件。
+
+規則：停機時 `cog_unload` 先讓播放器進入停機狀態（`mark_closing`），再取消歌單載入：
+  那個 task 被取消時的 finally 會想開新的播放迴圈。
+
+例外與決策：這個 Cog 定義在 `music.cog`，不在它的 extension（`commands.music_commands`）底下，所以停機時
+  discord.py 不會在卸載那個 extension 時移除它，而是等其他 extension 都卸完才移除（音樂是最後一個收尾的）。
+"""
 import logging
 import asyncio
 import discord
@@ -39,6 +53,8 @@ class MusicCog(commands.Cog):
     async def cog_unload(self):
         """Cog 卸載時清理所有資源"""
         logger.info("[MusicCog] cog_unload: 開始清理資源")
+        if self.player:
+            self.player.mark_closing()  # 歌單載入 task 被取消時的 finally 會想開播放迴圈，要在取消它之前擋下
 
         # 取消歌單載入 task
         if self._playlist_task and not self._playlist_task.done():

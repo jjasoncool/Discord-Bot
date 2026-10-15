@@ -1,3 +1,20 @@
+"""音樂播放器：長期掛在固定語音頻道，依佇列下載、播放歌曲，並記住播放位置。
+
+架構定位：介面層（`music/`，直接操作 Discord 語音連線）。
+  - 上層（誰呼叫）：`music.cog.MusicCog`（建立播放器、啟動播放迴圈、cog_unload 時呼叫 `mark_closing`／`cleanup`）、
+    `music.announcer` 的面板按鈕（跳過、重播、插播）。
+  - 下層（呼叫誰）：discord.py 的語音連線、`music.ytdl`（下載與快取）、`music.queue`、`music.config`（狀態檔）。
+
+介面（停機相關）：`mark_closing()`、`cleanup()`；其餘是播放控制（`start_background_loop`、`ensure_voice`、跳過、重播、插播）。
+
+規則：
+  - 停機時 `cleanup` 的每一步都有時限（CLOSE_LOOP_TIMEOUT、CLOSE_DISCONNECT_TIMEOUT），整個 bot 的停機收尾只有幾秒。
+  - `mark_closing` 之後不再開新的播放迴圈。
+
+例外與決策：停機時離開語音不用 discord.py 的 disconnect 等到底：讀 Discord 事件的連線已經停了，「已離開」的回報永遠
+  不會來（它會等 30 秒）；而且取消若落在關語音 websocket 那段，它的 finally 還會再等一次，包 wait_for 也擋不住。
+  所以斷線放進自己的 task，時間到就直接從 discord.py 取消登記。
+"""
 import os
 import re
 import asyncio
@@ -11,6 +28,11 @@ from .ytdl import YTDLSource
 from .config import MusicConfig, playlist_key, read_state, save_state
 from .models import Song
 from .exceptions import QueueEmptyError
+
+# 停機時離開語音最多等幾秒（離開的要求在等回報之前就送出了）
+CLOSE_DISCONNECT_TIMEOUT = 2.0
+# 停機時等播放迴圈停下最多幾秒：迴圈若正在斷線／重連，discord.py 會吞掉取消、繼續往下走
+CLOSE_LOOP_TIMEOUT = 1.0
 
 
 class MusicPlayer:
@@ -26,6 +48,7 @@ class MusicPlayer:
         self._bg_tasks: set[asyncio.Task] = set()  # 追蹤背景下載 tasks
         self._replay = False  # 重播當前歌曲（不跳下一首）
         self._reloading = False  # 重載歌單中，避免重複觸發
+        self._closing = False  # 停機中：不再開新的播放迴圈
         self._playlist_titles: dict[str, str] = {}  # 歌單 key → YouTube 標題（自動命名快取）
 
     def _has_active_voice(self) -> bool:
@@ -135,34 +158,75 @@ class MusicPlayer:
         task.add_done_callback(self._bg_tasks.discard)
         return task
 
+    def mark_closing(self) -> None:
+        """停機開始：之後不再開新的播放迴圈（歌單載入被取消時的 finally 也會想開一個）。"""
+        self._closing = True
+
     async def cleanup(self):
-        """停止播放、取消所有背景 tasks、斷開語音"""
-        # 取消播放主迴圈
-        if self._task and not self._task.done():
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
+        """停止播放、取消所有背景 tasks、斷開語音；停機時由 cog_unload 呼叫，每一步都有時限。"""
+        self.mark_closing()
+        await self._stop_play_loop()
 
         # 取消所有背景下載/prefetch tasks
         for task in list(self._bg_tasks):
             task.cancel()
         self._bg_tasks.clear()
 
-        # 停止目前播放並斷開語音
-        if self.voice_client:
-            if self.voice_client.is_playing():
-                self.voice_client.stop()
-            if self.voice_client.is_connected():
-                await self.voice_client.disconnect(force=True)
-            self._reset_voice_client()
+        # 停止目前播放並離開語音。不看 is_connected：語音正在重連時它是 False，但連線物件還登記在 discord.py，
+        # 留著的話關 Discord 連線時會再斷一次、再等一次回報
+        if self.voice_client and self.voice_client.is_playing():
+            self.voice_client.stop()
+        guild = self._voice_guild()
+        if guild is not None:
+            await self._leave_voice_on_close(guild)
+        self._reset_voice_client()
 
         self.queue.current = None
 
+    async def _leave_voice_on_close(self, guild) -> None:
+        """停機時離開語音：最多等 CLOSE_DISCONNECT_TIMEOUT 秒，時間到就直接從 discord.py 取消登記（原因見模組說明）。"""
+        voice = guild.voice_client
+        if voice is None:
+            return
+        leaving = asyncio.ensure_future(voice.disconnect(force=True))
+        done, _ = await asyncio.wait({leaving}, timeout=CLOSE_DISCONNECT_TIMEOUT)
+        if done:
+            if not leaving.cancelled() and leaving.exception() is not None:
+                logger.warning("[MusicPlayer] 停機時離開語音失敗：%s", leaving.exception())
+            return
+        leaving.cancel()   # 讓它在背景收尾；停機的下一步會再取消一次
+        leaving.add_done_callback(lambda t: t.cancelled() or t.exception())   # 之後才結束的結果沒人取，先接住
+        try:
+            voice.cleanup()
+        except Exception as exc:
+            logger.warning("[MusicPlayer] 停機時取消語音登記失敗：%s", exc)
+
+    def _voice_guild(self):
+        """音樂用的語音頻道所在的伺服器；還沒連過語音時從設定的頻道找。"""
+        if self.voice_client is not None:
+            return self.voice_client.guild
+        channel = self.bot.get_channel(self.config.voice_channel_id) if self.config else None
+        return getattr(channel, "guild", None)
+
+    async def _stop_play_loop(self) -> None:
+        """取消播放主迴圈，最多等 CLOSE_LOOP_TIMEOUT 秒；沒停下就再取消一次（取消可能被 discord.py 吞掉）。"""
+        task, self._task = self._task, None
+        if task is None or task.done():
+            return
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + CLOSE_LOOP_TIMEOUT
+        while not task.done():
+            task.cancel()   # 放棄前也先送出這一次：迴圈下次醒來就會停
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                logger.warning("[MusicPlayer] 播放迴圈 %g 秒內沒停下，不再等", CLOSE_LOOP_TIMEOUT)
+                return
+            await asyncio.wait({task}, timeout=min(remaining, CLOSE_LOOP_TIMEOUT / 4))
+
     async def start_background_loop(self):
         """背景播放主迴圈"""
+        if self._closing:
+            return
         if self._task and not self._task.done():
             return
         self._task = asyncio.create_task(self._play_loop())

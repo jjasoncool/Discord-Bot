@@ -193,7 +193,7 @@ class RollCallService:
                     self.runtime.last_rollcall_date = today_str
                     self.runtime.save()
             except asyncio.CancelledError:
-                return
+                raise  # 要以「被取消」結束：吞掉的話 supervise 會當成迴圈自己結束、記 WARNING
             except Exception as e:
                 logger.error(f"幽靈點名每日排程錯誤: {e}", exc_info=True)
                 await asyncio.sleep(300)
@@ -205,7 +205,7 @@ class RollCallService:
             if self.runtime.enabled:
                 await self.check_expired()
         except asyncio.CancelledError:
-            return
+            raise  # 要以「被取消」結束：吞掉的話 supervise 會當成迴圈自己結束、記 WARNING
         except Exception as e:
             logger.error(f"幽靈點名啟動掃描錯誤: {e}", exc_info=True)
 
@@ -215,7 +215,7 @@ class RollCallService:
                 if self.runtime.enabled:
                     await self.check_expired()
             except asyncio.CancelledError:
-                return
+                raise
             except Exception as e:
                 logger.error(f"幽靈點名過期掃描錯誤: {e}", exc_info=True)
                 await asyncio.sleep(300)

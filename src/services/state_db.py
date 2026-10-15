@@ -1,11 +1,20 @@
-"""
-統一狀態追蹤資料庫（SQLite）
+"""統一狀態追蹤資料庫（SQLite，services/sent_articles.db）：轉發、活動、社群查詢記「發過什麼、發在哪」。
 
-取代原本的 sent_articles.json，涵蓋所有來源：
+架構定位：服務層（`services/`）。
+  - 上層（誰呼叫）：轉發（官網、FB、PTT、巴哈監控）、活動排程、社群 ID 查詢、週期提醒，都透過 `get_shared_state_db`；
+    `discord_bot` 的停機收尾呼叫 `close_shared_state_db`。
+  - 下層（呼叫誰）：aiosqlite。
+
+介面：`StateDB`（各表的讀寫方法）、`get_shared_state_db()`（全程式共用的一條連線）、`close_shared_state_db()`（停機時關掉）。
+
+表：
 - sent_content：所有來源的已發送去重
 - forum_thread_state：PTT / Bahamut 等 forum 來源的 thread 追蹤
 - bahamut_post_state / bahamut_comment_slot / bahamut_synced_comment：巴哈明細
+- created_events：活動公告建成的 Discord 伺服器活動
 - community_lookup_threads：社群 ID 查詢（PTT / 巴哈）的 thread 追蹤（日期 hybrid section）
+
+規則：每個寫入方法自己 commit；WAL 模式。停機時關掉共用連線後不再開新的（見 `close_shared_state_db`）。
 """
 import asyncio
 import aiosqlite
@@ -685,13 +694,31 @@ class StateDB:
 # 放在這裡而不是某個功能底下：其他功能才不必為了拿資料庫去依賴那個功能。
 _shared_state_db: Optional[StateDB] = None
 _shared_state_db_lock = asyncio.Lock()
+#: 停機時關掉之後就不再開新連線
+_shared_state_db_closed = False
 
 
 async def get_shared_state_db() -> StateDB:
-    """取得全域共用的 StateDB 實例（併發安全）。"""
+    """取得全域共用的 StateDB 實例（併發安全）；停機關掉之後丟 RuntimeError。"""
     global _shared_state_db
     async with _shared_state_db_lock:
         if _shared_state_db is None:
+            if _shared_state_db_closed:
+                raise RuntimeError("停機中：共用 StateDB 已關閉，不再開新連線")
             _shared_state_db = StateDB()
             await _shared_state_db.connect()
     return _shared_state_db
+
+
+async def close_shared_state_db() -> None:
+    """停機時關掉全域共用的 StateDB 連線；之後 get_shared_state_db 不再開新連線。
+
+    aiosqlite 每條連線背後有一條非 daemon 的執行緒，不關的話 Python 結束時會一直等它，行程退不出去。
+    停機時漏網的工作（撐過取消、或收尾途中才跑的）若又拿連線，新開的那條同樣沒人關，所以關掉就不再開。
+    """
+    global _shared_state_db, _shared_state_db_closed
+    async with _shared_state_db_lock:
+        db, _shared_state_db = _shared_state_db, None
+        _shared_state_db_closed = True
+    if db is not None:
+        await db.close()

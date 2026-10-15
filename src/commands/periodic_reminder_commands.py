@@ -117,7 +117,7 @@ class PeriodicReminderCommands(commands.Cog):
                     delay = min(delay, (upcoming[0].send_at - datetime.now(SERVER_TZ)).total_seconds() + 1)
                 await asyncio.sleep(max(delay, 1))
             except asyncio.CancelledError:
-                return
+                raise  # 要以「被取消」結束：吞掉的話 supervise 會當成迴圈自己結束、記 WARNING
             except Exception as e:
                 logger.error("週期提醒排程錯誤: %s", e, exc_info=True)
                 await asyncio.sleep(300)

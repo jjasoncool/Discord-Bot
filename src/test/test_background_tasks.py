@@ -9,6 +9,8 @@
   - `supervise` 第一次呼叫 factory 是當場呼叫：factory 本身寫錯會在呼叫端立刻炸，不會躲進背景一直重試
   - `periodic` 每隔固定秒數做一次、做失敗記 WARNING（含名稱）繼續、被取消就停
   - `cancel_all` 取消所有還在跑的
+  - `cancel_other_tasks`（關機用）取消目前這個以外的所有 task（不只 spawn 建的）、等它們收尾才回來、不取消自己；
+    把取消吞掉停不下來的不會讓它一直等
   - 守衛：結果被丟掉的 `asyncio.create_task(...)` 要被 `test_shared_conventions` 抓到（那條規則在那個檔測）
 
 執行：
@@ -233,6 +235,53 @@ class PeriodicTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(logs.output), 1)
         self.assertIn("聊天記憶定期寫入", logs.output[0])
         self.assertIn("後端連不上", logs.output[0])
+
+
+class CancelOtherTasksTests(unittest.IsolatedAsyncioTestCase):
+    """關機用：取消目前這個以外還在跑的所有 task，等它們收尾；時間到就不再等。"""
+
+    async def test_cancels_everything_but_the_caller_and_waits_for_their_cleanup(self):
+        cleaned: list[str] = []
+
+        async def worker(name):
+            try:
+                await asyncio.sleep(3600)
+            finally:
+                cleaned.append(name)
+
+        plain = asyncio.create_task(worker("plain"))   # 不是 spawn 建的，例如 discord.py 派發事件的 task
+        spawned = bg.spawn(worker("spawned"), name="spawned")
+        await asyncio.sleep(0)
+
+        stopped = await bg.cancel_other_tasks(timeout=5)
+
+        self.assertEqual(stopped, 2)
+        self.assertTrue(plain.cancelled())
+        self.assertTrue(spawned.cancelled())
+        self.assertEqual(sorted(cleaned), ["plain", "spawned"], "要等它們的 finally 跑完才回來")
+
+    async def test_a_task_that_swallows_the_cancel_does_not_hold_it_up(self):
+        release = asyncio.Event()
+        # 斷言失敗時也要放它走：不然測試收尾會一直等這個 task，整個 unittest 卡住（啟動 gate 會永遠起不來）
+        self.addCleanup(release.set)
+
+        async def stubborn():
+            while not release.is_set():
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    pass   # 像 discord.py 斷語音時把取消吞掉
+
+        task = asyncio.create_task(stubborn())
+        await asyncio.sleep(0)
+
+        stopped = await asyncio.wait_for(bg.cancel_other_tasks(timeout=0.05), timeout=5)
+
+        self.assertEqual(stopped, 1)
+        self.assertFalse(task.done())
+        release.set()
+        task.cancel()
+        await task
 
 
 if __name__ == "__main__":

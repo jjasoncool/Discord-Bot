@@ -19,7 +19,7 @@ from services.relay.telegram_relay_service import (
     TelegramRenderAdapter,
     build_telegram_pg_dsn_from_env,
 )
-from utils.background_tasks import periodic, spawn, supervise
+from utils.background_tasks import cancel_other_tasks, periodic, spawn, supervise
 
 # 載入環境變數
 load_dotenv()
@@ -71,6 +71,7 @@ class MyBot(commands.Bot):
         self.echo_tracker = {}
         self.ambient_tracker = {}  # 功能二：per-channel 插話冷卻/計數狀態
         self.telegram_relay_worker = None
+        self._shutdown_started = False
 
     async def setup_hook(self):
         logger.info("正在載入指令模組...")
@@ -92,6 +93,77 @@ class MyBot(commands.Bot):
 
         except Exception as e:
             logger.error(f"斜線命令同步失敗: {str(e)}", exc_info=True)
+
+    async def close(self):
+        """停機收尾：docker stop 送 SIGINT 後由 discord.py 呼叫。
+
+        順序：先把 raw 備份寫進資料庫（資料最要緊）→ 停掉接新工作的入口（爬蟲通知、Telegram 轉發）→ discord.py 的關閉
+        （卸載 cog、斷語音、關 Discord 連線）→ 停掉還在跑的工作 → 關共用的 StateDB（aiosqlite 的執行緒不關，行程退不出去）
+        → 補寫這段期間進來的 raw。前面幾步共用一個總期限、每步各有上限，卡住或失敗的那步不擋後面；關 StateDB 另外保留時間。
+        聊天記憶的緩衝不在這裡寫：要算 embedding，停機的時間不夠。
+        """
+        if self._shutdown_started:
+            return await super().close()
+        self._shutdown_started = True
+        from llm.storage.raw_message_store import flush_raw_buffer
+        from services.state_db import close_shared_state_db
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _SHUTDOWN_BUDGET
+
+        def limit(step: str) -> float:
+            return max(0.0, min(_SHUTDOWN_TIMEOUTS[step], deadline - loop.time()))
+
+        logger.info("停機收尾開始")
+        raw_done = await _shutdown_step("raw 訊息備份寫入", flush_raw_buffer(), limit("raw"))
+        notify_server = getattr(self, "_notify_server", None)
+        if notify_server is not None:
+            await _shutdown_step("停止 Notify Server", notify_server.stop(), limit("intake"))
+        if self.telegram_relay_worker is not None:
+            await _shutdown_step("停止 Telegram Relay Worker", self.telegram_relay_worker.stop(), limit("intake"))
+        await _shutdown_step("discord.py 的關閉（卸載 cog、斷語音、關 Discord 連線）", super().close(), limit("discord"))
+        stopped = await cancel_other_tasks(limit("tasks"))
+        await _shutdown_step("關閉 StateDB", close_shared_state_db(), _SHUTDOWN_TIMEOUTS["statedb"])
+        # 第一次逾時的話那批還在執行緒裡寫，再排一次只會多卡一條執行緒
+        if raw_done and limit("raw") > 0:
+            await _shutdown_step("raw 訊息備份補寫", flush_raw_buffer(), limit("raw"))
+        logger.info("停機收尾完成（停掉 %d 個還在跑的工作）", stopped)
+
+
+# 停機收尾的時間：Docker 從送出停止訊號起只給 10 秒，超過就強制結束。前面幾步共用 _SHUTDOWN_BUDGET 秒、每步最多用到
+# 自己的上限；關 StateDB 另外保留（沒關的話行程退不出去）；剩下的留給 asyncio.run 收尾（等執行緒、關 event loop）
+_SHUTDOWN_BUDGET = 7.0
+_SHUTDOWN_TIMEOUTS = {"raw": 3.0, "intake": 1.0, "discord": 4.0, "tasks": 1.0, "statedb": 1.0}
+
+
+async def _shutdown_step(name: str, awaitable, timeout: float) -> bool:
+    """停機的一步：放進自己的 task、最多等 `timeout` 秒；回傳有沒有在時限內做完。
+
+    逾時或失敗只記 log，不擋後面的步驟。不用 wait_for：它時間到後還要等裡面的程式自己結束，而 discord.py 斷語音
+    這類程式會吞掉取消、再等一個不會來的回報。
+    """
+    task = asyncio.ensure_future(awaitable)
+    done, _ = await asyncio.wait({task}, timeout=timeout)
+    if not done:
+        task.cancel()   # 讓它自己收尾；停不下來的交給後面的 cancel_other_tasks 與 asyncio.run
+        task.add_done_callback(_ignore_result)
+        logger.warning("停機收尾：%s 超過 %g 秒，不再等", name, timeout)
+        return False
+    if task.cancelled():
+        logger.warning("停機收尾：%s 被取消", name)
+        return False
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("停機收尾：%s 失敗：%s: %s", name, type(exc).__name__, exc)
+        return False
+    return True
+
+
+def _ignore_result(task: asyncio.Task) -> None:
+    """不再等的那步之後才結束：取走結果，Python 才不會另外抱怨「例外沒人取」。"""
+    if not task.cancelled():
+        task.exception()
+
 
 bot = MyBot()
 
@@ -612,6 +684,8 @@ async def _auto_start_ptt_forum_monitor(bot, article_commands, forum_article_cha
 async def auto_start_telegram_relay(bot):
     """自動啟動 Telegram Relay Worker。"""
     try:
+        if bot._shutdown_started:
+            return  # 啟動沒幾秒就停機：收尾已經跳過這裡了，現在才開就沒人停
         # on_ready 可能因 reconnect 被重複觸發，避免重複建立 worker
         worker = getattr(bot, "telegram_relay_worker", None)
         if worker and worker.running:
@@ -659,6 +733,8 @@ async def auto_start_telegram_relay(bot):
 async def auto_start_notify_server(bot):
     """啟動 Notify Server（接收 Scraper webhook 通知）。"""
     try:
+        if bot._shutdown_started:
+            return  # 啟動沒幾秒就停機：收尾已經跳過這裡了，現在才開就沒人停
         # 避免 on_ready reconnect 重複啟動
         if getattr(bot, "_notify_server", None):
             logger.info("Notify Server 已在運行中，略過重複啟動")

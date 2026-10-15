@@ -15,6 +15,7 @@ event loop 只留弱參照），以及任務裡沒接住的例外只會在被回
     視為新的一次故障、間隔重算。迴圈自己正常結束記 WARNING、不重啟（正常的迴圈不該結束，多半是忘了 `while True`）。
   - `periodic`：固定間隔做同一件事（定期寫入、定期檢查），失敗記 WARNING 繼續；要算「下一個時刻」的排程用
     `utils.due_loop.run_due_loop`，不是它。
+  - `cancel_other_tasks`：關機時、關掉大家共用的資源（資料庫連線）之前，先停掉目前這個以外還在跑的所有 task。
   - 這裡只管「建、留、記、重啟」。工作本身的節流、去重、等 GPU 都留給呼叫端；`run_due_loop` 管的是
     「什麼時候醒來」，兩者是搭配不是取代。
 
@@ -111,7 +112,7 @@ def pending() -> list[str]:
 
 
 def cancel_all() -> int:
-    """取消所有還在跑的背景任務（關機、測試收尾用）；回傳取消了幾個。"""
+    """取消所有還在跑、由這裡建的背景任務（測試收尾用；正式停機用 `cancel_other_tasks`）；回傳取消了幾個。"""
     live = [task for task in _tasks if not task.done()]
     for task in live:
         task.cancel()
@@ -119,7 +120,23 @@ def cancel_all() -> int:
 
 
 async def wait_all(timeout: Optional[float] = None) -> None:
-    """等所有背景任務結束（測試用；正式程式關機時搭配 `cancel_all`）。"""
+    """等所有由這裡建的背景任務結束（測試用，搭配 `cancel_all`）。"""
     live = [task for task in _tasks if not task.done()]
     if live:
         await asyncio.wait(live, timeout=timeout)
+
+
+async def cancel_other_tasks(timeout: float) -> int:
+    """取消目前這個 task 以外還在跑的所有 task，最多等 `timeout` 秒讓它們收尾；回傳取消了幾個。
+
+    關機用：關掉共用的資料庫連線前，先讓可能還在用它的工作停下來。不只 `spawn` 建的，discord.py 派發事件的 task
+    也算在內。時間到還沒停的不再等：asyncio.run 結束時會再取消一次並等它們，吞掉取消的那種仍會拖住行程結束，
+    這裡的時限只是讓呼叫端不卡在這一步。
+    """
+    current = asyncio.current_task()
+    live = [task for task in asyncio.all_tasks() if task is not current and not task.done()]
+    for task in live:
+        task.cancel()
+    if live:
+        await asyncio.wait(live, timeout=timeout)
+    return len(live)

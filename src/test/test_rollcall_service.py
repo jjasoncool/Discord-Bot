@@ -8,6 +8,8 @@
   3. 指令層（Cog，唯一的建立點）建立服務時，確實把按鈕類別交進去；漏交的話點名訊息就沒有按鈕。
   4. 兩層接起來也要能用（真的 Cog＋真的按鈕）：點名訊息上有「我是活人」按鈕；被點名本人按下會交給
      服務層處理，別人按只會收到「不是你的點名」提示、不會替本人解除點名。
+  5. 兩個排程迴圈被取消（停機、cog 卸載）時以「被取消」結束：吞掉的話 supervise 會當成迴圈自己結束、
+     每次停機都記 WARNING。
 
 執行期狀態檔（settings/runtime/rollcall.json）一律以假物件取代，測試不讀也不寫它。
 """
@@ -120,6 +122,42 @@ class CogAndServiceTogetherTests(unittest.TestCase):
             service.handle_response.assert_awaited_once_with(123, owner)
 
         asyncio.run(scenario())
+
+
+class LoopCancelTests(unittest.IsolatedAsyncioTestCase):
+    async def test_both_loops_end_as_cancelled(self):
+        service = _make_service(mock.MagicMock())
+        service.bot.wait_until_ready = mock.AsyncMock()
+        service.runtime.enabled = False
+        for loop in (service._weekly_pick_loop, service._expire_check_loop):
+            with self.subTest(loop=loop.__name__):
+                loop_task = asyncio.create_task(loop())
+                for _ in range(3):
+                    await asyncio.sleep(0)   # 讓它跑到等下一次的 sleep
+
+                loop_task.cancel()
+
+                with self.assertRaises(asyncio.CancelledError):
+                    await loop_task
+
+    async def test_expire_loop_cancelled_during_the_startup_scan_ends_as_cancelled(self):
+        service = _make_service(mock.MagicMock())
+        service.runtime.enabled = True
+        scanning = asyncio.Event()
+
+        async def check_expired():
+            scanning.set()
+            await asyncio.sleep(3600)
+
+        service.bot.wait_until_ready = mock.AsyncMock()
+        service.check_expired = check_expired
+        loop_task = asyncio.create_task(service._expire_check_loop())
+        await scanning.wait()
+
+        loop_task.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await loop_task
 
 
 if __name__ == "__main__":
