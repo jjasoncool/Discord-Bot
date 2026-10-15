@@ -29,6 +29,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
+from test import timing_sensitive  # noqa: E402
 from llm.retrievers.web import WebResult, fetch_web_results, format_web_context_lines  # noqa: E402
 from llm.retrievers.web import searxng  # noqa: E402
 from sys_settings.llm_settings import AskAIWebSettings  # noqa: E402
@@ -146,6 +147,7 @@ class FetchWebResultsTests(_FakeSearxngTestCase):
         self.assertEqual(self.fake.requests[1]["engines"], "bing,duckduckgo")
         self.assertEqual(result.meta["skipped_engines"], [])
 
+    @timing_sensitive
     async def test_the_engine_comes_back_after_the_cooldown(self):
         short = AskAIWebSettings(searxng_url=self.settings.searxng_url, default_engines="bing,duckduckgo",
                                  blocked_engine_cooldown_seconds=0.2, timeout_seconds=5)

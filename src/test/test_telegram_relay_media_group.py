@@ -21,6 +21,7 @@ if SRC_DIR not in sys.path:
 from services.relay.telegram_relay_service import MessageRelayWorker
 from telegram_scraper.media_download import MEDIA_RETRY_WINDOW
 from test import timing_sensitive
+from test.fake_clock import FakeClock
 from test.telegram_relay_fakes import CHANNEL, make_worker, media_of
 
 
@@ -33,21 +34,20 @@ class ScraperAgreementTests(unittest.TestCase):
 
 class MediaGroupCollectTests(unittest.IsolatedAsyncioTestCase):
 
-    @timing_sensitive
     async def test_members_written_one_by_one_are_sent_together(self):
-        # 重現 GameData #3223：8 張逐則進來，每張「列先到、媒體後到」，間隔短於安靜期
+        # 重現 GameData #3223：8 張逐則進來，每張「列先到、媒體後到」，間隔短於安靜期。
+        # 用假時鐘：worker 的輪詢與餵料的間隔都是虛擬時間，機器忙不忙結果都一樣
         worker, repo, _, publisher = make_worker()
-        # 安靜期要比餵料間隔（0.06 秒）長很多：啟動 gate 的負載下餵料會拖慢，0.1 秒的安靜期曾被誤判成到齊
-        worker._GROUP_QUIET_SEC = 0.5
-        worker._GROUP_MAX_WAIT_SEC = 3.0
+        clock = FakeClock()
+        worker._clock, worker._sleep = clock.now, clock.sleep
         pks = list(range(901, 909))
         repo.add_ready(pks[0], 5001, text="相簿說明")
 
         async def scraper():
             for i, pk in enumerate(pks[1:], start=1):
-                await asyncio.sleep(0.03)
+                await clock.sleep(0.03)
                 repo.add_row(pk, 5001 + i)
-                await asyncio.sleep(0.03)
+                await clock.sleep(0.03)
                 repo.add_media(pk)
 
         feeder = asyncio.create_task(scraper())
@@ -59,6 +59,7 @@ class MediaGroupCollectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(publisher.plans[0]["title_suffix"], "")
         self.assertTrue(all((pk, CHANNEL) in repo.delivered for pk in pks))
 
+    @timing_sensitive
     async def test_waits_for_member_whose_media_is_not_written_yet(self):
         # 組員數早就不變，但最後一則的媒體還在下載：不能先發
         worker, repo, _, publisher = make_worker()
@@ -76,6 +77,7 @@ class MediaGroupCollectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(publisher.plans), 1)
         self.assertEqual(publisher.plans[0]["media"], media_of(1, 2))
 
+    @timing_sensitive
     async def test_member_arriving_during_collection_does_not_block_or_duplicate(self):
         worker, repo, _, publisher = make_worker()
         repo.add_ready(1, 100)

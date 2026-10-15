@@ -29,6 +29,7 @@ if SRC_DIR not in sys.path:
 
 from llm.client import lemonade_gate as gate  # noqa: E402
 from test import timing_sensitive  # noqa: E402
+from test.fake_clock import FakeClock  # noqa: E402
 from services.llm_service import LLMService  # noqa: E402
 from sys_settings.llm_settings import LLMRuntimeConfig  # noqa: E402
 
@@ -94,6 +95,7 @@ class CrossProcessQueueTests(_GateTestCase):
         await asyncio.wait_for(task, 2)
         self.assertTrue(entered.is_set())
 
+    @timing_sensitive
     async def test_lock_is_released_after_use_and_after_cancel(self):
         async with gate.stream_exclusive():
             pass
@@ -105,8 +107,12 @@ class CrossProcessQueueTests(_GateTestCase):
         other.communicate("\n")
         self.hold_in_other_process().communicate("\n")   # 取消的不會留著鎖
 
+    @timing_sensitive
     async def test_takes_turns_with_another_process(self):
         """本行程有一串工作時，別的行程也要插得進來（輪流用，不是等整串做完）。"""
+        # 放鎖後的讓位窗口拉長：外部行程每 0.02 秒輪詢一次，機器忙時它可能好幾百毫秒排不到 CPU，
+        # 0.2 秒的窗口會剛好錯過、被本行程的下一件搶回去（手動／CI 同時跑別的東西時出現過一次）
+        self.enterContext(mock.patch.object(gate, "_CROSS_PROCESS_YIELD_S", 1.0))
         order = []
         poller = subprocess.Popen(
             [sys.executable, "-c",
@@ -140,24 +146,23 @@ class CrossProcessQueueTests(_GateTestCase):
         poller.wait()
         self.assertEqual(order[0], "got", f"外部行程要在下一件之前插進來：{order}")
 
-    @timing_sensitive
     async def test_long_wait_is_logged_and_capped(self):
         other = self.hold_in_other_process()
+        clock = FakeClock()
         try:
-            with mock.patch.object(gate, "_CROSS_PROCESS_WARN_S", 0.2), \
+            with mock.patch.object(gate, "_clock", clock.now), mock.patch.object(gate, "_async_sleep", clock.sleep), \
+                 mock.patch.object(gate, "_CROSS_PROCESS_WARN_S", 0.2), \
                  mock.patch.object(gate, "_CROSS_PROCESS_MAX_WAIT_S", 0.5):
                 with self.assertLogs("llm.client.lemonade_gate", "WARNING") as logs:
                     async with gate.stream_exclusive():
                         pass
-            self.assertTrue(any("已等" in line for line in logs.output), logs.output)
-            self.assertTrue(any("不等了" in line for line in logs.output), "別的行程卡住時不能讓 bot 的 AI 整個停住")
-            # 等滿上限放行後，下一個呼叫不能又從頭等（排在後面的會等 N 倍）。上限拉到 2 秒：真的又從頭等
-            # 會花 2 秒以上，沒等只有讓位的 0.2 秒加排程誤差——門檻放 1 秒，啟動 gate 的負載下也分得開
-            started = asyncio.get_running_loop().time()
-            with mock.patch.object(gate, "_CROSS_PROCESS_MAX_WAIT_S", 2.0):
+                self.assertTrue(any("已等" in line for line in logs.output), logs.output)
+                self.assertTrue(any("不等了" in line for line in logs.output), "別的行程卡住時不能讓 bot 的 AI 整個停住")
+                # 等滿上限放行後，下一個呼叫不能又從頭等（排在後面的會等 N 倍）：虛擬時間只該過讓位的那一小段
+                started = clock.now()
                 async with gate.stream_exclusive():
                     pass
-            self.assertLess(asyncio.get_running_loop().time() - started, 1.0)
+                self.assertLess(clock.now() - started, gate._CROSS_PROCESS_MAX_WAIT_S)
         finally:
             other.communicate("\n")
 
@@ -189,6 +194,7 @@ class SyncGateTests(_GateTestCase):
         self.assertEqual(entered, [True])
         self.hold_in_other_process().communicate("\n")   # 用完有放
 
+    @timing_sensitive
     async def test_sync_gate_gives_up_after_max_wait(self):
         """互動式查詢等不起：別的行程佔著超過上限就丟 GpuBusy，而且不會留著鎖。"""
         # 預設「等滿 15 分鐘照常打模型」縮成 2 秒：等待上限壞掉時測試要很快失敗，不是卡 15 分鐘
@@ -207,6 +213,7 @@ class SyncGateTests(_GateTestCase):
         other.communicate("\n")
         self.hold_in_other_process().communicate("\n")   # 放棄等待的那次沒拿到鎖，也沒留下鎖
 
+    @timing_sensitive
     async def test_sync_gate_blocks_the_bot_while_held(self):
         held, release = asyncio.Event(), asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -277,6 +284,7 @@ class StreamExclusiveRegressionTests(_GateTestCase):
         self.assertFalse(gate.stream_busy())
         self.assertIsNone(gate.current_owner())
 
+    @timing_sensitive
     async def test_no_lease_never_expires(self):
         """`lease_seconds=None` ＝ 不開 watchdog，持有多久都不會被取消。"""
         async with gate.gpu_exclusive("llm") as lease:
@@ -319,35 +327,38 @@ class LeaseTests(_GateTestCase):
         self.assertFalse(gate.stream_busy(), "租約到期後閘門必須放掉")
         self.assertIsNone(gate.current_owner())
 
-    @timing_sensitive
     async def test_renew_keeps_long_job_alive(self):
         """持續心跳的長工作不可以被誤殺——租約長度與工作總長解耦。"""
         finished = False
+        clock = FakeClock()
 
         async def polling_holder():
             nonlocal finished
-            # 租約 2 秒、每 0.1 秒續一次：總長 2.5 秒 > 單次租約，證明續租有效；續租間隔只有租約的 1/20，
-            # 啟動 gate 把 event loop 卡住零點幾秒也不會被 watchdog 誤殺（之前 0.5 秒租約在負載下被收掉過）
-            async with gate.gpu_exclusive("imagegen", lease_seconds=2.0) as lease:
-                for _ in range(25):
-                    await asyncio.sleep(0.1)
+            # 租約 1 秒、每 0.4 秒續一次、共 2 秒：總長超過單次租約，續租有效才跑得完（虛擬時間，瞬間跑完）
+            async with gate.gpu_exclusive("imagegen", lease_seconds=1.0) as lease:
+                for _ in range(5):
+                    await clock.sleep(0.4)
                     lease.renew()           # 模擬 ComfyUI 輪詢成功
                 finished = True
 
-        await asyncio.wait_for(asyncio.create_task(polling_holder()), timeout=5)
+        with mock.patch.object(gate, "_clock", clock.now), mock.patch.object(gate, "_async_sleep", clock.sleep):
+            await asyncio.wait_for(asyncio.create_task(polling_holder()), timeout=5)
         self.assertTrue(finished)
         self.assertFalse(gate.stream_busy())
 
     async def test_gate_is_reusable_after_expiry(self):
         """被 watchdog 收掉之後，下一個工作要能正常進場（不留殘留狀態）。"""
+        clock = FakeClock()
+
         async def stuck_holder():
             async with gate.gpu_exclusive("imagegen", lease_seconds=0.2):
-                await asyncio.sleep(30)
+                await clock.sleep(30)
 
-        task = asyncio.create_task(stuck_holder())
-        await asyncio.sleep(0.05)
-        with self.assertRaises(asyncio.CancelledError):
-            await task
+        with mock.patch.object(gate, "_clock", clock.now), mock.patch.object(gate, "_async_sleep", clock.sleep):
+            task = asyncio.create_task(stuck_holder())
+            await clock.sleep(0.05)
+            with self.assertRaises(asyncio.CancelledError):
+                await task
 
         async with gate.stream_exclusive():
             self.assertEqual(gate.current_owner(), "llm")

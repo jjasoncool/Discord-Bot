@@ -74,6 +74,11 @@ _holder: str | None = None
 #: watchdog 的檢查間隔上限；租約剩餘時間比這短時會提早醒來。
 _WATCHDOG_TICK_S = 5.0
 
+#: 看時間、睡覺都經過這兩個名字：正式執行就是 time.monotonic 與 asyncio.sleep；測試換成假時鐘
+#: （`test.fake_clock.FakeClock`），租約到期、排隊上限這類判斷就不必真的等、也不會被機器忙碌影響。
+_clock = time.monotonic
+_async_sleep = asyncio.sleep
+
 #: 跨行程的鎖檔。同一個容器的行程共用 /tmp；跨容器（discord-bot 與 search-mcp）由 docker-compose 把同一個
 #: 主機資料夾掛進兩邊、用 LEMONADE_GPU_LOCK_PATH 指過去——各容器的 /tmp 是分開的，用預設值會各排各的隊。
 #: 單元測試由 test/__init__.py 換成暫存檔，不跟執行中的 bot 搶
@@ -101,7 +106,7 @@ class GpuLease:
         self.owner = owner
         self.lease_seconds = lease_seconds
         self._deadline = (
-            time.monotonic() + lease_seconds
+            _clock() + lease_seconds
             if lease_seconds is not None
             else float("inf")
         )
@@ -109,12 +114,12 @@ class GpuLease:
     def renew(self) -> None:
         """證明還活著，把到期時間往後推。"""
         if self.lease_seconds is not None:
-            self._deadline = time.monotonic() + self.lease_seconds
+            self._deadline = _clock() + self.lease_seconds
 
     @property
     def remaining(self) -> float:
         """距離到期還有幾秒（無租約模式回 inf）。"""
-        return max(0.0, self._deadline - time.monotonic())
+        return max(0.0, self._deadline - _clock())
 
     @property
     def expired(self) -> bool:
@@ -133,7 +138,7 @@ async def _watch_lease(lease: GpuLease, holder: asyncio.Task | None) -> None:
             if holder is not None and not holder.done():
                 holder.cancel()
             return
-        await asyncio.sleep(min(remaining, _WATCHDOG_TICK_S))
+        await _async_sleep(min(remaining, _WATCHDOG_TICK_S))
 
 
 def _open_lock_file() -> int | None:
@@ -159,10 +164,10 @@ def _acquire_steps(fd: int, max_wait: float | None = None):
     不走預設的「等滿上限照常打模型」。
     """
     global _skip_until
-    since_release = time.monotonic() - _last_release
+    since_release = _clock() - _last_release
     if since_release < _CROSS_PROCESS_YIELD_S:
         yield _CROSS_PROCESS_YIELD_S - since_release
-    started = time.monotonic()
+    started = _clock()
     next_warn = _CROSS_PROCESS_WARN_S
     while True:
         try:
@@ -170,15 +175,15 @@ def _acquire_steps(fd: int, max_wait: float | None = None):
             _skip_until = 0.0
             return
         except BlockingIOError:
-            if time.monotonic() < _skip_until:
+            if _clock() < _skip_until:
                 return      # 剛等滿上限放行過：別的行程還卡著，這段時間不再等
-            waited = time.monotonic() - started
+            waited = _clock() - started
             if max_wait is not None and waited >= max_wait:
                 raise GpuBusy(f"GPU 被別的工作佔著，等了 {waited:.0f} 秒還沒輪到")
             if waited >= _CROSS_PROCESS_MAX_WAIT_S:
                 logger.error("等別的行程放 GPU 鎖檔超過 %d 秒，不等了、照常打模型（接下來 %d 秒都不等）（%s）",
                              _CROSS_PROCESS_MAX_WAIT_S, _CROSS_PROCESS_MAX_WAIT_S, CROSS_PROCESS_LOCK_PATH)
-                _skip_until = time.monotonic() + _CROSS_PROCESS_MAX_WAIT_S
+                _skip_until = _clock() + _CROSS_PROCESS_MAX_WAIT_S
                 return
             if waited >= next_warn:
                 logger.warning("別的行程佔著 GPU（鎖檔 %s），已等 %d 秒", CROSS_PROCESS_LOCK_PATH, waited)
@@ -189,7 +194,7 @@ def _acquire_steps(fd: int, max_wait: float | None = None):
 def _release(fd: int) -> None:
     global _last_release
     os.close(fd)
-    _last_release = time.monotonic()
+    _last_release = _clock()
 
 
 @contextlib.asynccontextmanager
@@ -201,7 +206,7 @@ async def _cross_process_lock():
         return
     try:
         for delay in _acquire_steps(fd):
-            await asyncio.sleep(delay)
+            await _async_sleep(delay)
         yield
     finally:
         _release(fd)
@@ -311,11 +316,11 @@ _LAST_FOREGROUND_ACTIVITY_MONO: float = 0.0
 def note_foreground_activity() -> None:
     """前景（/askai、功能一）開始/進行時呼叫，記錄活躍時刻。"""
     global _LAST_FOREGROUND_ACTIVITY_MONO
-    _LAST_FOREGROUND_ACTIVITY_MONO = time.monotonic()
+    _LAST_FOREGROUND_ACTIVITY_MONO = _clock()
 
 
 def foreground_recently_active(grace_seconds: float) -> bool:
     """前景是否在 grace_seconds 內活躍過（背景插話據此讓位）。"""
     if _LAST_FOREGROUND_ACTIVITY_MONO <= 0.0:
         return False
-    return (time.monotonic() - _LAST_FOREGROUND_ACTIVITY_MONO) < grace_seconds
+    return (_clock() - _LAST_FOREGROUND_ACTIVITY_MONO) < grace_seconds

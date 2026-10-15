@@ -38,6 +38,8 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
+from test import timing_sensitive  # noqa: E402
+
 import services.relay.bahamut_monitor as bm  # noqa: E402
 from services.relay.bahamut_monitor import BahamutMonitor  # noqa: E402
 from services.state_db import StateDB  # noqa: E402
@@ -47,8 +49,8 @@ FORUM_ID = 900
 GUILD_ID = 1_276_158_258_503_094_400
 # 測試用的間隔：真實值是秒級，測試縮短，只驗「有排隊」
 INTERVAL = 0.2
-# 斷言「不超過多久」的測試用較長間隔：完整測試也是啟動 gate，機器忙時不能誤紅
-SLACK_INTERVAL = 0.5
+# 斷言「不超過多久」的測試用較長間隔：對的流程只等一個間隔、錯的要三個，間隔越長兩者差得越開
+SLACK_INTERVAL = 1.0
 # 計時誤差容許
 EPS = 0.02
 
@@ -225,6 +227,7 @@ class SameThreadPacingTests(_Base):
 class RejectedEditTests(_Base):
     interval = SLACK_INTERVAL
 
+    @timing_sensitive
     async def test_rejected_edits_do_not_hold_up_the_round(self):
         # 討論串封存時 Discord 會直接拒絕編輯；被拒的不佔排隊名額，否則每則都白等一個間隔
         before = _thread_data("1", _post("100"), [_post("101"), _post("102"), _post("103")])
@@ -261,6 +264,7 @@ class ArchivedThreadTests(_Base):
 class CrossThreadPacingTests(_Base):
     interval = SLACK_INTERVAL
 
+    @timing_sensitive
     async def test_threads_do_not_wait_for_each_other(self):
         before = {pid: _thread_data(pid, _post(f"{pid}00"), [_post(f"{pid}01"), _post(f"{pid}02")])
                   for pid in ("1", "2")}

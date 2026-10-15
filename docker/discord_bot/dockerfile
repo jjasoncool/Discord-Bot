@@ -25,4 +25,5 @@ COPY docker/discord_bot/requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt
 
 # 不需要複製源代碼，因為 docker-compose 會將 src 目錄掛載到 /app
+# 只有直接 docker run 這個映像檔才會用到：compose 的 command 會蓋掉它（discord-bot 先跑啟動測試再開 bot，search-mcp 改跑 MCP server）
 CMD ["python", "discord_bot.py"]

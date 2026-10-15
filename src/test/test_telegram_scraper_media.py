@@ -39,6 +39,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
+from test import timing_sensitive  # noqa: E402
 from telegram_scraper_fakes import (  # noqa: E402
     CHANNEL, CHAT, REAL_TELETHON, FakeClient, FakeDB, FakeTelegramDatabase, FakeWatcher, fake_config, hours_ago,
     load_scraper, media, msg, photo_media, video_media, webpage_media,
@@ -124,6 +125,7 @@ class DownloadFailureTests(MediaTestBase):
         await self.process(msg(10, text="爆料", media_obj=photo_media()))
         self.assertEqual(self.db.notified, [self.db.pk_of(10)])
 
+    @timing_sensitive
     async def test_shutdown_still_propagates(self):
         """關機（外層被取消）時，訊息處理照常往外拋 CancelledError，不能被當成下載失敗吞掉。"""
         async def hang(target, file, progress_callback):
@@ -138,6 +140,7 @@ class DownloadFailureTests(MediaTestBase):
 
 
 class StallGuardTests(MediaTestBase):
+    @timing_sensitive
     async def test_stalled_download_is_cancelled(self):
         cancelled = []
 
@@ -152,6 +155,7 @@ class StallGuardTests(MediaTestBase):
                 media_download.download_with_stall_guard(self.client, msg(1), file="/tmp/x.jpg"), 2)
         self.assertEqual(cancelled, [True], "卡住的下載要被取消，不能留在背景")
 
+    @timing_sensitive
     async def test_slow_but_progressing_download_completes(self):
         # 門檻 0.5 秒、每 0.02 秒有進度、總共約 0.6 秒：門檻留大一點，啟動 gate 裡偶爾慢一點也不會誤判
         async def trickle(target, file, progress_callback):
@@ -164,6 +168,7 @@ class StallGuardTests(MediaTestBase):
             media_download.download_with_stall_guard(self.client, msg(1), file="/tmp/x.jpg", stall_sec=0.5), 5)
         self.assertEqual(path, "/tmp/x.jpg", "總共花的時間比門檻長，但一直有進度，不能被誤殺")
 
+    @timing_sensitive
     async def test_shutdown_cancels_the_download_too(self):
         """關機時外層被取消：CancelledError 照常往外拋，下載也一併取消。"""
         cancelled = []
@@ -183,6 +188,7 @@ class StallGuardTests(MediaTestBase):
                 await task
         self.assertEqual(cancelled, [True])
 
+    @timing_sensitive
     async def test_shutdown_during_stall_cleanup_still_propagates(self):
         """判定卡住、正在等下載收尾時剛好關機：要拋 CancelledError，不能變成「卡住」被當下載失敗吞掉。"""
         async def slow_to_stop(target, file, progress_callback):

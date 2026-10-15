@@ -1468,6 +1468,9 @@ class MessageRelayWorker:
         self.dsn = dsn
         self.notify_channel = notify_channel
         self.poll_interval_sec = poll_interval_sec
+        #: 相簿到齊判斷看時間、睡覺都經過這兩個：正式就是 time.monotonic 與 asyncio.sleep，測試換成假時鐘
+        self._clock = time.monotonic
+        self._sleep = asyncio.sleep
         self._emoji_resolver = CustomEmojiResolver(bot, repository, render_adapter.app_root)
         #: 有 `mode`（off／dry_run／on）與 `judge(text, media, trace_id=)` 的物件；None＝不過濾（測試預設）
         self._filter = content_filter
@@ -1821,13 +1824,12 @@ class MessageRelayWorker:
 
     async def _wait_group_settled(self, grouped_id: int, chat_id: int) -> list[tuple[int, bool]]:
         """輪詢到整組到齊（或逾時），回傳組員 (pk, 是否就緒)。"""
-        loop = asyncio.get_running_loop()
-        started = loop.time()
+        started = self._clock()
         last_change = started
         previous: Optional[list[tuple[int, bool]]] = None
         while True:
             members = await self.repository.get_group_member_states(grouped_id, chat_id)
-            now = loop.time()
+            now = self._clock()
             if members != previous:
                 previous = members
                 last_change = now
@@ -1843,7 +1845,7 @@ class MessageRelayWorker:
                     grouped_id, members,
                 )
                 return members
-            await asyncio.sleep(self._GROUP_POLL_INTERVAL)
+            await self._sleep(self._GROUP_POLL_INTERVAL)
 
     async def _merge_group_messages(self, pks: list[int]) -> Optional[TelegramMessageRecord]:
         """把多則組員的文字與媒體合併到第一則上，成為單一虛擬訊息。"""

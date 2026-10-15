@@ -127,5 +127,5 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 - 單元測試放 `src/test/test_<功能>.py`，檔案開頭寫「守的底線」。斷言使用者看得到的約定（誰被 @、何時發、刪了哪則）；文案只比對關鍵資訊。
 - 需要真實服務的放 `src/test/integration/it_*.py`，不進啟動 gate，手動執行。
 - 測試會自動把 log 寫到 `/logs/test_run.log`，正式 log 不受影響。
-- 靠真實時間判斷的測試（租約到期、排隊上限、相簿安靜期這類）掛 `@timing_sensitive`（`test/__init__.py`）：啟動 gate 設了 `APP_STARTUP_GATE=1` 會跳過，手動跑與 CI 照跑。容器啟動時負載高，這類測試誤判會讓 bot 多等一輪 gate。
+- 靠時間的邏輯（租約到期、排隊上限、相簿安靜期）看時間、睡覺要經過可換的名字（`lemonade_gate._clock`／`_async_sleep`、轉發 worker 的 `_clock`／`_sleep`），測試換成 `test.fake_clock.FakeClock`，不要真的 sleep。流程裡夾著真的執行緒 IO（aiosqlite、to_thread）換不成假時鐘的，掛 `@timing_sensitive`（`test/__init__.py`）：啟動 gate 設了 `APP_STARTUP_GATE=1` 會跳過、手動與 CI 照跑。容器啟動時負載高，靠真實時間的測試會把幾十毫秒的誤差判成失敗，bot 就多等一輪 gate。
 - 突變測試複製到容器的 `/tmp` 做，只複製需要的目錄（`/app/telegram_scraper` 有 30 GB）；設 `PYTHONDONTWRITEBYTECODE=1` 並先清 `__pycache__`——同一秒內改壞又還原、檔案大小不變時，Python 會沿用改壞的 `.pyc`，結果不可信。

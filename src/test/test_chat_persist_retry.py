@@ -33,6 +33,7 @@ if SRC_DIR not in sys.path:
 
 from sqlalchemy.exc import OperationalError
 
+from test import timing_sensitive
 from llm.client.http_client import LlmAPIError, LlmConnectionError, LlmTimeoutError
 from llm.storage import store_chat
 
@@ -288,6 +289,7 @@ class ChatPersistRetryTests(unittest.IsolatedAsyncioTestCase):
 
     # ---- 6. 佔用 GPU 閘門的時間有上限 ----
 
+    @timing_sensitive
     async def test_flush_stops_when_its_gpu_time_is_up(self):
         for mid in range(1, 6):
             store_chat.enqueue_message(_msg(mid))

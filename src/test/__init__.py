@@ -33,8 +33,9 @@ from utils.logger_config import configure_logging  # noqa: E402
 
 configure_logging()
 
-#: 靠真實時間判斷的測試（租約到期、排隊上限、相簿安靜期）掛這個：啟動 gate（compose 設 APP_STARTUP_GATE=1）跳過，
-#: 手動跑與 CI 照跑。容器啟動時其他服務也在搶 CPU，這類測試會把幾十毫秒的誤差判成失敗，bot 就得多等一輪 gate。
+#: 靠真實時間、又換不成假時鐘的測試（流程裡夾著真的執行緒 IO，假時鐘沒辦法知道該什麼時候撥時間）掛這個：
+#: 啟動 gate（compose 設 APP_STARTUP_GATE=1）跳過，手動跑與 CI 照跑。容器啟動時其他服務在搶 CPU，
+#: 這類測試會把幾十毫秒的誤差判成失敗，bot 就多等一輪 gate。能用 `test.fake_clock.FakeClock` 的就不要掛這個。
 import unittest  # noqa: E402
 
 timing_sensitive = unittest.skipIf(os.environ.get("APP_STARTUP_GATE") == "1", "靠真實時間，啟動 gate 不跑；手動與 CI 照跑")
