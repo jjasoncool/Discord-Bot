@@ -736,23 +736,26 @@ def load_context_safety_rules(path: str | Path) -> LLMContextSafetyRules:
         raise RuntimeError(f"無法載入 context safety rules: {safety_path}") from exc
 
 
+def _parse_llm_runtime_config(raw: str) -> LLMRuntimeConfig:
+    content = raw.strip()
+    if not content:
+        raise ValueError("LLM runtime config 檔案為空")
+    raw_data = json.loads(content)
+    if not isinstance(raw_data, dict):
+        raise ValueError("LLM runtime config 內容必須為 JSON object")
+    return LLMRuntimeConfig.model_validate(raw_data)
+
+
 def load_llm_runtime_config(path: str | Path) -> LLMRuntimeConfig:
-    """讀取 LLM 執行時設定（嚴格模式：缺檔或缺值直接拋錯）。"""
-    runtime_path = Path(path)
+    """讀取 LLM 執行時設定（哪個後端、哪個模型、embedding 模型）。
 
-    if not runtime_path.exists():
-        raise FileNotFoundError(f"找不到 ollama runtime config: {runtime_path}")
+    走 `utils.hot_files` 的機制：檔案修改時間沒變就回上次解析的結果，改檔即生效；改壞了沿用上次的好內容（hot_files
+    會記錯誤）。十幾個地方每次用到都呼叫這裡，所以不能每次都重讀重驗。缺檔、或從來沒有成功讀過一次（例如一開始就是壞的）
+    就拋錯：這些設定沒有合理的預設值。回傳的物件是共用的，呼叫端不要改它。
+    """
+    from utils.hot_files import read_parsed
 
-    try:
-        content = runtime_path.read_text(encoding="utf-8").strip()
-        if not content:
-            raise ValueError(f"ollama runtime config 檔案為空: {runtime_path}")
-
-        raw_data = json.loads(content)
-        if not isinstance(raw_data, dict):
-            raise ValueError(f"ollama runtime config 內容必須為 JSON object: {runtime_path}")
-
-        return LLMRuntimeConfig.model_validate(raw_data)
-    except Exception as exc:
-        logger.error("載入 ollama runtime config 失敗（嚴格模式）: %s", exc)
-        raise RuntimeError(f"無法載入 ollama runtime config: {runtime_path}") from exc
+    runtime_config = read_parsed(path, parse=_parse_llm_runtime_config, label="LLM runtime config")
+    if runtime_config is None:
+        raise RuntimeError(f"無法載入 LLM runtime config: {path}")   # 缺檔，或從沒成功讀過一次
+    return runtime_config

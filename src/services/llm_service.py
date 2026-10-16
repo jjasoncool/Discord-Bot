@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import logging
 from typing import Any, List, Optional
 
@@ -30,8 +29,8 @@ from sys_settings.llm_settings import (
     LLMRuntimeConfig,
     LLMServiceSettings,
     load_context_safety_rules,
+    load_llm_runtime_config,
 )
-from utils import hot_files
 
 logger = logging.getLogger(__name__)
 anomaly_logger = logging.getLogger("llm_anomaly")
@@ -227,17 +226,13 @@ class LLMService:
         )
 
     def _load_runtime_config_cached(self) -> Optional[LLMRuntimeConfig]:
-        """讀取 runtime config（檔案沒變不重讀，壞檔沿用上次；機制在 `utils.hot_files`）。缺檔或沒有模型名稱回 None。"""
-
-        def parse(raw: str) -> LLMRuntimeConfig:
-            data = json.loads(raw)
-            if not isinstance(data, dict):
-                raise ValueError("runtime config 內容必須為 JSON object")
-            return LLMRuntimeConfig.model_validate(data)
-
-        runtime_config = hot_files.read_parsed(self.settings.llm_runtime_model_path, parse=parse,
-                                               label="LLM runtime config", missing_ok=True)
-        if runtime_config is None or not runtime_config.model.strip():
+        """讀取 runtime config（檔案沒變不重讀，壞檔沿用上次；機制在 `load_llm_runtime_config` 走的 `utils.hot_files`）。
+        缺檔、從沒讀成功過、或沒有模型名稱回 None：這裡的呼叫端都有退路（環境變數的模型名稱、預設後端）。"""
+        try:
+            runtime_config = load_llm_runtime_config(self.settings.llm_runtime_model_path)
+        except RuntimeError:
+            return None
+        if not runtime_config.model.strip():
             return None
         return runtime_config
 

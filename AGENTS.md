@@ -59,7 +59,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 遊戲公告的時間 | `services.events.event_time_parser.SERVER_TZ`（值同為 UTC+8，但語意不同，兩者不可合併） |
 | 連 pgvector | `LLMServiceSettings().pgvector_connect()` |
 | 實體表名 | `HYBRID_RETRIEVAL_SETTINGS.chat_table()`／`.source_table(key)`／`.physical_table(name)`（含 identifier 消毒） |
-| 讀會被手改、改了就要生效的檔案（prompt、字典、開關、config.json、LLM runtime 設定） | 機制只有一份：`utils.hot_files.read_text()`／`read_json()`／`read_parsed(path, parse=…)`（mtime 快取、壞檔沿用上次）。各檔的解析、驗證、寫入在呼叫端：config.json 走 `ChannelConfig.load_config`／`update_config`、開關走 `switches.current()`、runtime 設定走 `LLMService`、字典走 `emoji_dictionary`／`sticker_dictionary`；不要在 `hot_files` 加認得特定檔案的函式 |
+| 讀會被手改、改了就要生效的檔案（prompt、字典、開關、config.json、LLM runtime 設定） | 機制只有一份：`utils.hot_files.read_text()`／`read_json()`／`read_parsed(path, parse=…)`（mtime 快取、壞檔沿用上次）。各檔的解析、驗證、寫入在呼叫端：config.json 走 `ChannelConfig.load_config`／`update_config`、開關走 `switches.current()`、LLM runtime 設定走 `sys_settings.llm_settings.load_llm_runtime_config`（已接熱讀檔，LLMService 也用它）、字典走 `emoji_dictionary`／`sticker_dictionary`；不要在 `hot_files` 加認得特定檔案的函式 |
 | 清理聊天文字 | `llm.persona.personality_extractor._clean_text_for_extraction()` |
 | 描述品質規則 | `persona_description_rules.txt`（各處讀同一個檔） |
 | 人格素描的角色設定 | 疊在 `personality_extraction_prompt.json` 的 `system_prompt` 之上 |
