@@ -330,3 +330,6 @@ UN_FX01 = 花痴、愛慕 | agree
 Frog_WorrySleep03 = 憂慮、睡不著 | negative
 phoebe_playphone = 無聊、放空 | neutral
 frog_police = 警察、查案 | neutral
+cat23 = 震驚、嚇到 | think
+awawawawa = 哀嚎、慘叫 | negative
+914857593732726784 = 震驚、驚訝 | think
