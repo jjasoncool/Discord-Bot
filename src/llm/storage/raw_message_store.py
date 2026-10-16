@@ -378,8 +378,27 @@ def _sync_flush(
     delete_batch: list[str],
     reaction_batch: list[dict],
 ) -> dict[str, int]:
+    """寫一批到資料庫。連線層的錯誤（池子給到已斷的連線、伺服器端把閒置連線關了）換一條連線再寫一次：
+    這批寫不進去就整批丟了，停機收尾和聊天向量庫的補寫都靠這張表完整。資料本身的錯誤不重試。"""
     pool = _get_pool()
-    conn = pool.getconn()
+    for attempt in (1, 2):
+        conn = pool.getconn()
+        broken = False
+        try:
+            return _write_all(conn, insert_batch, edit_batch, delete_batch, reaction_batch)
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
+            broken = True
+            if attempt == 1:
+                logger.warning("raw_message_store: 連線壞了（%s），換一條連線重試一次", exc)
+                continue
+            raise
+        finally:
+            pool.putconn(conn, close=broken)   # 壞掉的連線不放回池子，下一個拿到的人才不會再踩到
+    return {"inserted": 0, "updated": 0, "deleted": 0, "reactions_applied": 0}   # 迴圈一定 return 或 raise；給型別檢查看
+
+
+def _write_all(conn, insert_batch: list[dict], edit_batch: list[dict], delete_batch: list[str],
+               reaction_batch: list[dict]) -> dict[str, int]:
     stats = {"inserted": 0, "updated": 0, "deleted": 0, "reactions_applied": 0}
     try:
         conn.autocommit = False
@@ -394,10 +413,11 @@ def _sync_flush(
                 stats["reactions_applied"] = _apply_reactions(cur, reaction_batch)
         conn.commit()
     except Exception:
-        conn.rollback()
+        try:
+            conn.rollback()
+        except Exception:
+            pass   # 連線已經斷了就 rollback 不了，交給呼叫端換連線
         raise
-    finally:
-        pool.putconn(conn)
     return stats
 
 
