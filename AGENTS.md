@@ -18,6 +18,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 
 - 容器內完整測試全綠（主機沒有 discord 套件）：
   `docker exec -w /app discord-bot python -m unittest discover -s test -t . -p 'test_*.py'`
+  （同 `make test`；啟動 gate 只跑 `src/test/gate.py` 列的守衛、import 解析與設定載入，新的守衛要加進那張清單；lint 與型別檢查 `make lint`、`make typecheck`，工具在 `requirements-dev.txt`）
   新增的測試要故意改壞一次程式，確認它會紅。
 - 回寫 `AI_HANDOFF_AND_TODO.md`：已定案的決定與理由、**還沒定案的問題（選項＋建議）**、狀態、盤點紀錄。討論或 grill 的**每一輪**都回寫，不只定案時。寫法規則在該檔開頭。
 - 等使用者明說才 commit。訊息用英文 conventional commits，body 3～5 點 `- ` 條列，不加 Co-Authored-By。

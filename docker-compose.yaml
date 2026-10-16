@@ -9,15 +9,14 @@ services:
     build: *main-build
     container_name: discord-bot
     restart: always
-    # 啟動前自動探索並跑 src/test/ 下所有 hermetic 單元測試（test_*.py）；測試紅就 exit 1，
-    # compose 會無限重啟 → log 立刻可見。`exec` 讓 python 取代 bash 當 PID 1，停止訊號才會送到 bot 而不是 bash。
-    # 加新測試＝建 test_<feature>.py 即可，無須改此行（不再手動維護列表、不會漏測）。
-    # 需 live 服務的整合測試放 test/integration/（it_*.py），不符 test_*.py → 自動排除出 gate。
+    # 啟動前只跑守衛（分層、共用元件、錯誤邊界）、import 解析與設定載入（src/test/gate.py，約 20 秒）；紅就 exit 1，
+    # compose 會無限重啟 → log 立刻可見。完整測試（一千五百多項、約兩分鐘）改由收工前的 `make test` 與 CI 跑。
+    # `exec` 讓 python 取代 bash 當 PID 1，停止訊號才會送到 bot 而不是 bash。
     command: >
       bash -c "
-      echo '--- running startup tests (auto-discover) ---' &&
-      APP_STARTUP_GATE=1 python -m unittest discover -s test -t . -p 'test_*.py' &&
-      echo '--- tests OK, starting bot ---' &&
+      echo '--- running startup gate ---' &&
+      APP_STARTUP_GATE=1 python -m test.gate &&
+      echo '--- gate OK, starting bot ---' &&
       exec python discord_bot.py
       "
     # 停止時送 SIGINT（同 Ctrl+C）而不是預設的 SIGTERM：容器的 PID 1 只收得到自己有接的訊號，

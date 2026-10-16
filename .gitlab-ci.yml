@@ -1,0 +1,27 @@
+# CI 草稿：還沒推到 GitLab 跑過。lint 用主機規則，單元測試用 bot 的 requirements 裝在乾淨的 python 映像檔裡跑。
+# 用不到外部服務：測試是 hermetic 的（整合測試在 test/integration/，不在 test_*.py 的範圍）。
+# 跑不過的第一個可能是系統套件（ffmpeg、libopus）——測試有用到就在 before_script 補 apt-get。
+
+stages: [lint, test]
+
+image: python:3.12-slim
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+cache:
+  paths: [.cache/pip]
+
+lint:
+  stage: lint
+  script:
+    - pip install -r requirements-dev.txt
+    - python -m ruff check src
+
+unit-tests:
+  stage: test
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends ffmpeg libopus0 && rm -rf /var/lib/apt/lists/*
+    - pip install -r docker/discord_bot/requirements.txt
+  script:
+    - cd src && APP_ROOT=$CI_PROJECT_DIR/src LOGS_DIR=$CI_PROJECT_DIR/logs python -m unittest discover -s test -t . -p 'test_*.py'

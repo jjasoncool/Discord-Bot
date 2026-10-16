@@ -1,0 +1,27 @@
+# 工具設定（ruff、pyright）。程式本身不是用 pyproject 安裝的，套件版本在 docker/*/requirements.txt 與 constraints.txt。
+# 跑法：`make lint`、`make typecheck`（工具裝在 requirements-dev.txt，不進正式映像檔）。
+
+[tool.ruff]
+target-version = "py312"
+line-length = 130
+src = ["src"]
+extend-exclude = ["doc", "logs", "search_data", "searxng", "src/scraper/db/migrations"]
+
+[tool.ruff.lint]
+# 先只開「一定是錯」的那幾類：語法與未定義名稱（F）、少數會咬人的寫法（B）、沒用到的 import。
+# 風格類（排序、引號、行長）先不開：一開就是幾千行的機械修改，和功能修正混在一起沒人看得懂。
+select = ["F", "E9", "B006", "B008", "B904"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# 測試檔為了把 src 加進 sys.path，import 不在檔頭
+"src/test/*" = ["E402"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
+include = ["src"]
+exclude = ["src/scraper", "src/telegram_scraper", "**/__pycache__", "src/test"]
+# 套件只裝在容器裡：主機跑 pyright 時找不到 discord、pydantic 這些，先不當錯誤報
+reportMissingImports = false
+reportMissingModuleSource = false

@@ -1,0 +1,4 @@
+# 開發用工具：lint 與型別檢查（`make lint`、`make typecheck`），不進正式映像檔。
+# 版本先不釘：這兩個工具沒有和程式的相容問題，升級只會多報幾條。
+ruff
+pyright
