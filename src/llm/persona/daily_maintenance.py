@@ -21,18 +21,19 @@
 例外與決策：
   - 2026-10-13 拆掉原本的第 ③ 步「production 人格萃取」（整批送 LLM 直接寫 auto_personality）：精簡版連續 12 晚 failed=0，
     備援每晚只剩 1 人、寫入 0；精簡版是空的人從此維持最後一版描述（備援寫出來的品質不如 agent，寧可空著）。
-  - 排程還是手寫的 sleep 迴圈（守衛 `test_shared_conventions` 列為例外），待搬到 `utils.due_loop.run_due_loop`。
+  - 排程走 `utils.due_loop.run_due_loop`：這裡的 tick 只決定「今天 04:00 那一輪做過了沒」，睡到時刻、出錯重試在那邊。
   - 從 `discord_bot.on_ready` 搬出來：維護的順序、補跑、不重疊是功能邏輯，不該和啟動登記混在一起。
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from sys_settings.llm_settings import LLMServiceSettings, load_llm_runtime_config
 from sys_settings.time_settings import APP_TZ
+from utils.due_loop import run_due_loop
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ RETRY_AFTER_SECONDS = 3600      # 排程那一輪失敗後隔多久再試
 
 _SETTINGS = LLMServiceSettings()
 _running = False                # 同一時間只跑一輪（補跑檢查、排程、手動測試不會疊在一起）
+_ran_on: Optional[date] = None  # 這個行程今天的那一輪跑過了沒（啟動補跑或排程）
 
 
 def _scheduled_model() -> Optional[str]:
@@ -137,20 +139,29 @@ async def catch_up_if_missed(bot, *, now: Optional[datetime] = None) -> bool:
 
 
 async def schedule_loop(bot) -> None:
-    """先等 60 秒讓其他服務就緒 → 啟動補跑檢查 → 每天 04:00 跑一次；失敗記 ERROR、1 小時後再試。給 `supervise`。"""
+    """先等 60 秒讓其他服務就緒 → 啟動補跑檢查 → 之後每天 04:00 跑一次；失敗記 ERROR、1 小時後再試。給 `supervise`。
+
+    睡到 04:00、出錯重試的機制在 run_due_loop；這裡只決定「今天的那一輪做過了沒」。
+    """
+    global _ran_on
     await asyncio.sleep(STARTUP_DELAY_SECONDS)
     try:
         await catch_up_if_missed(bot)
     except Exception as exc:
         logger.error("啟動補跑檢查失敗: %s", exc, exc_info=True)
-    while True:
-        try:
-            now = datetime.now(APP_TZ)
-            target = next_run(now)
-            wait_seconds = (target - now).total_seconds()
-            logger.info("每日維護排程：下次執行 %s（等待 %.0f 秒）", target.isoformat(), wait_seconds)
-            await asyncio.sleep(wait_seconds)
-            await run_once(bot.guilds[0] if bot.guilds else None)
-        except Exception as exc:
-            logger.error("每日維護排程失敗: %s", exc, exc_info=True)
-            await asyncio.sleep(RETRY_AFTER_SECONDS)
+    now = datetime.now(APP_TZ)
+    if now >= now.replace(hour=MAINTENANCE_HOUR, minute=0, second=0, microsecond=0):
+        _ran_on = now.date()   # 今天的時段已過：要不要補由上面的補跑檢查決定過了，排程不再跑一次
+    await run_due_loop("每日維護", lambda at: _tick(bot, at), max_sleep=24 * 3600,
+                       retry_after=RETRY_AFTER_SECONDS, now=lambda: datetime.now(APP_TZ))
+
+
+async def _tick(bot, now: datetime) -> datetime:
+    """今天 04:00 到了而且還沒跑過就跑一輪；回傳下一個 04:00。"""
+    global _ran_on
+    if now >= now.replace(hour=MAINTENANCE_HOUR, minute=0, second=0, microsecond=0) and _ran_on != now.date():
+        _ran_on = now.date()
+        await run_once(bot.guilds[0] if bot.guilds else None)
+    target = next_run(now)
+    logger.info("每日維護排程：下次執行 %s", target.isoformat())
+    return target

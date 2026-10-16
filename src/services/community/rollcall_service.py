@@ -19,7 +19,8 @@ from typing import Callable, Dict, List, Optional, Set
 import discord
 
 from utils.dm_notifier import send_dm
-from utils.background_tasks import supervise
+from utils.background_tasks import periodic, supervise
+from utils.due_loop import run_due_loop
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,8 @@ PICK_HOUR_UTC8 = 14
 PICK_INTERVAL_DAYS = 7
 # 過期掃描間隔（秒）
 EXPIRE_CHECK_INTERVAL = 6 * 3600  # 6 小時
+# 14:00 之後多久內醒來都算這一天的抽選；超過就當錯過、等明天（重啟錯過不補跑，和原本一樣）
+PICK_WINDOW = timedelta(hours=1)
 # 踢除後重新加入的邀請連結
 REJOIN_INVITE_URL = "https://discord.gg/wuwachatroom"
 
@@ -158,67 +161,41 @@ class RollCallService:
     # ── 背景排程 ──
 
     async def _weekly_pick_loop(self):
-        """每週 UTC+8 14:00 自動抽選"""
-        while True:
-            try:
-                now = _now_utc8()
-                # 計算到下一次 14:00 的秒數
-                target = now.replace(
-                    hour=PICK_HOUR_UTC8, minute=0, second=0, microsecond=0
-                )
-                if now >= target:
-                    target += timedelta(days=1)
-                wait_seconds = (target - now).total_seconds()
-                logger.info(
-                    f"幽靈點名：下次檢查在 {target.isoformat()}（{wait_seconds:.0f} 秒後）"
-                )
-                await asyncio.sleep(wait_seconds)
+        """每天 UTC+8 14:00 檢查要不要自動抽選；睡到那時、出錯隔 5 分鐘再試的機制在 run_due_loop。"""
+        await run_due_loop("幽靈點名每日抽選", self._pick_tick, max_sleep=24 * 3600, now=_now_utc8)
 
-                if self.runtime.enabled:
-                    from datetime import date
-                    today_str = _now_utc8().strftime("%Y-%m-%d")
-                    today = date.fromisoformat(today_str)
+    async def _pick_tick(self, now: datetime) -> datetime:
+        """今天 14:00 到了（而且還在 PICK_WINDOW 內）就做抽選的判斷；回傳下一次 14:00。"""
+        target = now.replace(hour=PICK_HOUR_UTC8, minute=0, second=0, microsecond=0)
+        if now >= target:
+            if now < target + PICK_WINDOW and self.runtime.enabled:
+                await self._auto_pick_if_due(now)
+            target += timedelta(days=1)
+        logger.info(f"幽靈點名：下次檢查在 {target.isoformat()}")
+        return target
 
-                    # 今天已有手動點名，跳過自動排程
-                    if self.runtime.last_manual_rollcall_date == today_str:
-                        continue
-
-                    # 檢查距離上次自動點名是否已過指定天數
-                    last_date = self.runtime.last_rollcall_date
-                    if last_date:
-                        last = date.fromisoformat(last_date)
-                        if (today - last).days < PICK_INTERVAL_DAYS:
-                            continue
-                    await self.do_roll_call()
-                    self.runtime.last_rollcall_date = today_str
-                    self.runtime.save()
-            except asyncio.CancelledError:
-                raise  # 要以「被取消」結束：吞掉的話 supervise 會當成迴圈自己結束、記 WARNING
-            except Exception as e:
-                logger.error(f"幽靈點名每日排程錯誤: {e}", exc_info=True)
-                await asyncio.sleep(300)
+    async def _auto_pick_if_due(self, now: datetime) -> None:
+        """今天沒有手動點名、距上次自動點名也滿了間隔天數，才真的點名。"""
+        from datetime import date
+        today_str = now.strftime("%Y-%m-%d")
+        today = date.fromisoformat(today_str)
+        if self.runtime.last_manual_rollcall_date == today_str:
+            return
+        last_date = self.runtime.last_rollcall_date
+        if last_date and (today - date.fromisoformat(last_date)).days < PICK_INTERVAL_DAYS:
+            return
+        await self.do_roll_call()
+        self.runtime.last_rollcall_date = today_str
+        self.runtime.save()
 
     async def _expire_check_loop(self):
-        """定期掃描逾期未回覆的成員（啟動時等 bot ready 後立即掃一次）"""
-        try:
-            await self.bot.wait_until_ready()
-            if self.runtime.enabled:
-                await self.check_expired()
-        except asyncio.CancelledError:
-            raise  # 要以「被取消」結束：吞掉的話 supervise 會當成迴圈自己結束、記 WARNING
-        except Exception as e:
-            logger.error(f"幽靈點名啟動掃描錯誤: {e}", exc_info=True)
+        """等 bot ready 後立即掃一次逾期未回覆的成員，之後每 EXPIRE_CHECK_INTERVAL 秒掃一次。"""
+        await self.bot.wait_until_ready()
+        await periodic(EXPIRE_CHECK_INTERVAL, self._expire_tick, name="幽靈點名過期掃描", first_after=0)
 
-        while True:
-            try:
-                await asyncio.sleep(EXPIRE_CHECK_INTERVAL)
-                if self.runtime.enabled:
-                    await self.check_expired()
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.error(f"幽靈點名過期掃描錯誤: {e}", exc_info=True)
-                await asyncio.sleep(300)
+    async def _expire_tick(self) -> None:
+        if self.runtime.enabled:
+            await self.check_expired()
 
     # ── 核心邏輯 ──
 

@@ -204,5 +204,36 @@ class CatchUpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.ran, [])
 
 
+
+class TickTests(unittest.IsolatedAsyncioTestCase):
+    """每天 04:00 的那一輪（_tick）：時刻沒到不跑、到了跑一次、同一天再醒來不重跑、回傳下一個 04:00。"""
+
+    def setUp(self):
+        self.ran = []
+
+        async def fake_run_once(guild):
+            self.ran.append(guild)
+
+        patcher = mock.patch.object(dm, "run_once", fake_run_once)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        dm._ran_on = None
+        self.addCleanup(setattr, dm, "_ran_on", None)
+        self.guild = SimpleNamespace(id=1)
+        self.bot = SimpleNamespace(guilds=[self.guild])
+
+    async def test_runs_once_per_day_when_the_hour_arrives(self):
+        self.assertEqual(datetime(2026, 10, 14, 4, 0, tzinfo=APP_TZ),
+                         await dm._tick(self.bot, datetime(2026, 10, 14, 3, 59, tzinfo=APP_TZ)))
+        self.assertEqual([], self.ran)
+        self.assertEqual(datetime(2026, 10, 15, 4, 0, tzinfo=APP_TZ),
+                         await dm._tick(self.bot, datetime(2026, 10, 14, 4, 0, 1, tzinfo=APP_TZ)))
+        self.assertEqual([self.guild], self.ran)
+        await dm._tick(self.bot, datetime(2026, 10, 14, 9, 0, tzinfo=APP_TZ))
+        self.assertEqual([self.guild], self.ran, "同一天再醒來不重跑")
+        await dm._tick(self.bot, datetime(2026, 10, 15, 4, 0, 1, tzinfo=APP_TZ))
+        self.assertEqual([self.guild, self.guild], self.ran)
+
+
 if __name__ == "__main__":
     unittest.main()

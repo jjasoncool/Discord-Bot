@@ -12,7 +12,7 @@ tick 收到「現在」，處理所有已到期的事，回傳下一個該醒的
 啟動後會先 tick 一次：bot 停機期間錯過的到期項目就在這一次補做，所以 tick 要冪等
 （已做過的不要再做，例如靠 StateDB `sent_content` 去重，或狀態本身就記在 Discord 上）。
 
-既有的四份迴圈還沒搬過來（2026-10-03 決定逐步搬）；`test_shared_conventions` 擋第六份。
+週期提醒、點名、每日維護、日記都已經走這裡；`test_shared_conventions` 擋新的手寫版。
 """
 from __future__ import annotations
 

@@ -13,7 +13,8 @@
 規則：只反映它對今天的感受，不影響它對任何人的插話態度；社交來源預設是插話頻道（ambient_chat_channel_id）；
   沒設日記頻道就略過。
 
-例外與決策：排程還是手寫的 sleep 迴圈（守衛 `test_shared_conventions` 列為例外），待搬到 `utils.due_loop.run_due_loop`。
+例外與決策：排程走 `utils.due_loop.run_due_loop`，tick 只決定「今天寫過了沒」；醒來超過排定時刻 10 分鐘就當錯過、等明天，
+  不補寫（重啟錯過不會多一篇，也不會一天兩篇）。
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +34,7 @@ from llm.preprocess.chat_line import fetch_recent_lines
 from llm.logger_factory import get_or_create_file_logger
 from sys_settings.llm_settings import DiaryReflectionSettings
 from sys_settings.time_settings import APP_TZ
+from utils.due_loop import run_due_loop
 from utils.utils import ChannelConfig
 
 logger = logging.getLogger(__name__)
@@ -236,19 +238,29 @@ async def run_daily_reflection(bot) -> Optional[str]:
     )
     return diary
 
+# 排定時刻之後多久內醒來都算當天那一篇；超過就當錯過、等明天（重啟錯過不補寫，和原本一樣，也不會一天寫兩篇）
+DIARY_WINDOW = timedelta(minutes=10)
+_ran_on: Optional[date] = None   # 這個行程今天寫過了沒
+
+
 async def schedule_loop(bot) -> None:
-    """等 90 秒讓其他服務就緒，之後每天到設定的時刻寫一篇；失敗記 ERROR、1 小時後再試。給 `supervise`，由 `discord_bot` 掛上。"""
+    """等 90 秒讓其他服務就緒，之後每天到設定的時刻寫一篇；失敗記 ERROR、1 小時後再試。給 `supervise`，由 `discord_bot` 掛上。
+
+    睡到那個時刻、出錯重試的機制在 run_due_loop；這裡只決定「今天寫過了沒」。
+    """
     await asyncio.sleep(90)
-    while True:
-        try:
-            now = datetime.now(APP_TZ)
-            target = now.replace(hour=_SETTINGS.schedule_hour, minute=_SETTINGS.schedule_minute, second=0, microsecond=0)
-            if now >= target:
-                target += timedelta(days=1)
-            wait_seconds = (target - now).total_seconds()
-            logger.info("AI 日記排程：下次 %s（等待 %.0f 秒）", target.isoformat(), wait_seconds)
-            await asyncio.sleep(wait_seconds)
+    await run_due_loop("AI 日記", lambda now: _tick(bot, now), max_sleep=24 * 3600, retry_after=3600,
+                       now=lambda: datetime.now(APP_TZ))
+
+
+async def _tick(bot, now: datetime) -> datetime:
+    """排定時刻到了（且在 DIARY_WINDOW 內、今天還沒寫）就寫一篇；回傳下一次的時刻。"""
+    global _ran_on
+    target = now.replace(hour=_SETTINGS.schedule_hour, minute=_SETTINGS.schedule_minute, second=0, microsecond=0)
+    if now >= target:
+        if now < target + DIARY_WINDOW and _ran_on != now.date():
+            _ran_on = now.date()
             await run_daily_reflection(bot)
-        except Exception as exc:
-            logger.error("AI 日記排程失敗: %s", exc, exc_info=True)
-            await asyncio.sleep(3600)
+        target += timedelta(days=1)
+    logger.info("AI 日記排程：下次 %s", target.isoformat())
+    return target

@@ -847,14 +847,7 @@ RULES = [
         name="定時排程（算出離下一次還有幾秒、睡到那時）",
         finder=_find_sleep_until,
         canonical="utils.due_loop.run_due_loop（tick 回傳下一次的時刻）",
-        # 2026-10-03 抽出 run_due_loop 時已有這四份，各自處理補跑、空轉與出錯（決定逐步搬，
-        # 搬完就從這裡移除）。人格萃取與日記在 04:00 維護時段跑，搬的時候要避開重啟時段。
-        allowed={
-            "commands/periodic_reminder_commands.py",
-            "services/community/rollcall_service.py",
-            "llm/persona/daily_maintenance.py",   # 2026-10-13 從 discord_bot.on_ready 搬出來，迴圈本身沒改
-            "llm/ambient/ambient_diary.py",       # 同上
-        },
+        allowed=set(),
     ),
     Rule(
         name="背景任務：結果被丟掉的 create_task（沒人留參照、失敗沒人知道）",

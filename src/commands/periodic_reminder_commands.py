@@ -37,6 +37,7 @@ from sys_settings.periodic_reminder_settings import PeriodicReminderSettings, Ve
 from utils.panel_bump import PanelBumper, load_runtime, update_runtime
 from utils.utils import ChannelConfig
 from utils.background_tasks import supervise
+from utils.due_loop import run_due_loop
 
 logger = logging.getLogger(__name__)
 
@@ -102,25 +103,19 @@ class PeriodicReminderCommands(commands.Cog):
         channel = self.reminder_channel()
         if channel is not None:
             await self.ensure_role(channel.guild)  # 啟動時把身份組名稱同步成設定值
-        while True:
-            try:
-                await self._refresh_update_starts()
-                now = datetime.now(SERVER_TZ)
-                await self.run_due(now)
-                channel = self.reminder_channel()
-                if channel is not None:
-                    await self.refresh_panel_if_changed(channel)
-                upcoming = upcoming_reminders(datetime.now(SERVER_TZ), self.settings, self._update_starts)
-                delay = _MAX_SLEEP_SECONDS
-                if upcoming:
-                    # +1 秒：避免醒得稍早、還沒到 send_at 又空轉一輪
-                    delay = min(delay, (upcoming[0].send_at - datetime.now(SERVER_TZ)).total_seconds() + 1)
-                await asyncio.sleep(max(delay, 1))
-            except asyncio.CancelledError:
-                raise  # 要以「被取消」結束：吞掉的話 supervise 會當成迴圈自己結束、記 WARNING
-            except Exception as e:
-                logger.error("週期提醒排程錯誤: %s", e, exc_info=True)
-                await asyncio.sleep(300)
+        # 睡到下一則提醒、出錯隔 5 分鐘再試、途中沒有下一則就最多睡 _MAX_SLEEP_SECONDS 再重算：機制在 run_due_loop
+        await run_due_loop("週期提醒", self._tick, max_sleep=_MAX_SLEEP_SECONDS,
+                           now=lambda: datetime.now(SERVER_TZ))
+
+    async def _tick(self, now: datetime) -> Optional[datetime]:
+        """到期的提醒發出去、面板內容變了就重發；回傳下一則提醒的時刻（沒有就 None）。"""
+        await self._refresh_update_starts()
+        await self.run_due(now)
+        channel = self.reminder_channel()
+        if channel is not None:
+            await self.refresh_panel_if_changed(channel)
+        upcoming = upcoming_reminders(datetime.now(SERVER_TZ), self.settings, self._update_starts)
+        return upcoming[0].send_at if upcoming else None
 
     def _log_upcoming(self, now: datetime) -> None:
         def label(r: Reminder) -> str:

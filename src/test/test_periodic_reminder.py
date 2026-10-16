@@ -508,5 +508,21 @@ class ScheduleLoopCancelTests(CogTestBase):
             await loop_task
 
 
+
+class ScheduleTickTests(CogTestBase):
+    async def test_tick_sends_due_and_returns_the_next_reminder_time(self):
+        from types import SimpleNamespace
+        from commands import periodic_reminder_commands as prc
+        self.cog._refresh_update_starts = AsyncMock()
+        self.cog.reminder_channel = MagicMock(return_value=None)
+        self.cog.run_due = AsyncMock()
+        now = T(10, 12, 4)
+        with patch.object(prc, "upcoming_reminders", return_value=[SimpleNamespace(send_at=T(10, 12, 20))]):
+            self.assertEqual(T(10, 12, 20), await self.cog._tick(now))
+        self.cog.run_due.assert_awaited_once_with(now)
+        with patch.object(prc, "upcoming_reminders", return_value=[]):
+            self.assertIsNone(await self.cog._tick(now), "沒有下一則就讓迴圈睡到上限再重算")
+
+
 if __name__ == "__main__":
     unittest.main()

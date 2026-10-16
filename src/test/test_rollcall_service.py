@@ -160,5 +160,50 @@ class LoopCancelTests(unittest.IsolatedAsyncioTestCase):
             await loop_task
 
 
+
+class PickTickTests(unittest.IsolatedAsyncioTestCase):
+    """每日 14:00 的自動抽選判斷（_pick_tick）：時刻沒到不動、到了才看間隔與手動點名、錯過時段等明天。"""
+
+    def setUp(self):
+        self.service = _make_service(mock.MagicMock())
+        self.service.do_roll_call = mock.AsyncMock()
+        runtime = self.service.runtime
+        runtime.enabled = True
+        runtime.last_manual_rollcall_date = None
+        runtime.last_rollcall_date = None
+        runtime.save = mock.MagicMock()
+
+    @staticmethod
+    def at(hour, minute=0, second=0, day=14):
+        return datetime(2026, 10, day, hour, minute, second, tzinfo=APP_TZ)
+
+    async def test_before_two_pm_only_schedules_today(self):
+        self.assertEqual(self.at(14), await self.service._pick_tick(self.at(13)))
+        self.service.do_roll_call.assert_not_awaited()
+
+    async def test_at_two_pm_picks_once_and_schedules_tomorrow(self):
+        self.assertEqual(self.at(14, day=15), await self.service._pick_tick(self.at(14, 0, 1)))
+        self.service.do_roll_call.assert_awaited_once()
+        self.assertEqual("2026-10-14", self.service.runtime.last_rollcall_date)
+        self.service.runtime.save.assert_called_once()
+
+    async def test_missed_window_waits_for_tomorrow(self):
+        self.assertEqual(self.at(14, day=15), await self.service._pick_tick(self.at(15, 30)))
+        self.service.do_roll_call.assert_not_awaited()
+
+    async def test_manual_today_or_recent_auto_skips(self):
+        self.service.runtime.last_manual_rollcall_date = "2026-10-14"
+        await self.service._pick_tick(self.at(14, 0, 1))
+        self.service.runtime.last_manual_rollcall_date = None
+        self.service.runtime.last_rollcall_date = "2026-10-10"   # 4 天前，還不到間隔天數
+        await self.service._pick_tick(self.at(14, 0, 1))
+        self.service.do_roll_call.assert_not_awaited()
+
+    async def test_disabled_never_picks(self):
+        self.service.runtime.enabled = False
+        await self.service._pick_tick(self.at(14, 0, 1))
+        self.service.do_roll_call.assert_not_awaited()
+
+
 if __name__ == "__main__":
     unittest.main()
