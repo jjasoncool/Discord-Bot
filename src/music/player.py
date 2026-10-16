@@ -317,17 +317,23 @@ class MusicPlayer:
     async def _play_loop(self):
         while True:
             try:
-                await self._play_next()
+                played = await self._play_next()
             except QueueEmptyError:
-                await asyncio.sleep(5)
+                await _sleep(5)
+                continue
             except Exception as e:
                 logger.error(f"[MusicPlayer] 播放迴圈錯誤: {e}", exc_info=True)
-                await asyncio.sleep(5)
+                await _sleep(5)
+                continue
+            if played is False:
+                # 連不上語音（頻道不在、兩次連線都失敗）：睡一下再試，不然這個迴圈會把整個 event loop 吃滿
+                await _sleep(5)
 
     async def _play_next(self):
+        """播一首並等它結束。連不上語音回 False（讓迴圈退避），其他情況回 None。"""
         async with self._play_lock:
             if not await self.ensure_voice():
-                return
+                return False
 
             resume, self._resume = self._resume, None
             resume_offset = 0.0

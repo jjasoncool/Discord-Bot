@@ -201,6 +201,24 @@ class EnsureVoiceTests(VoiceReconnectTestCase):
         self.assertEqual(0, self.clock.now())
         self.assertEqual([], self.channel.connects)
 
+    async def test_play_loop_backs_off_when_voice_is_unavailable(self):
+        calls: list[float] = []
+
+        async def no_voice():
+            calls.append(self.clock.now())
+            if len(calls) == 3:
+                raise asyncio.CancelledError
+            return False
+
+        self.player._play_next = no_voice
+        with self.assertRaises(asyncio.CancelledError):
+            await self.player._play_loop()
+        self.assertEqual([0, 5, 10], calls, "連不上語音時每次重試之間要睡一下，不能空轉")
+
+    async def test_play_next_reports_missing_voice(self):
+        self.player.bot.get_channel = lambda channel_id: None   # 頻道被刪了
+        self.assertIs(False, await self.player._play_next())
+
 
 class ResumeAfterDisconnectTests(VoiceReconnectTestCase):
     async def asyncSetUp(self):
