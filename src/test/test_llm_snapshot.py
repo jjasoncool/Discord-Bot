@@ -225,6 +225,29 @@ class TruncatedAnswerTests(unittest.TestCase):
             asyncio.run(svc.chat_raw(model="m", messages=[], max_tokens=100, trace_id="t"))
         self.assertEqual("length", caught.exception.kind)
 
+    def test_tool_round_with_nothing_at_the_cap_is_a_length_error_not_a_backend_fault(self):
+        # 呼叫端靠 kind 分辨「想太久」（換方式重答）和「後端給了空回應」（照原本方式再問）
+        svc = _make_service()
+        svc._client.chat_completion.return_value = self._completion("")
+        with self.assertRaises(llm_service_module.LLMAPIError) as caught:
+            asyncio.run(svc.chat_with_tools(model="m", messages=[], tools=[{"type": "function"}],
+                                            max_tokens=100, trace_id="t"))
+        self.assertEqual("length", caught.exception.kind)
+        svc._client.admin_get.assert_not_awaited()                     # 不是後端異常，不抓狀態快照
+
+    def test_the_end_of_the_thinking_is_kept_when_the_cap_is_hit(self):
+        svc = _make_service()
+        reasoning = "開頭不用留" + "想" * 3000 + "最後卡在這裡"
+        svc._client.chat_completion.return_value = {
+            "choices": [{"message": {"content": "", "reasoning_content": reasoning}, "finish_reason": "length"}],
+            "usage": {"completion_tokens": 100}}
+        with self.assertLogs(llm_service_module.anomaly_logger, "WARNING") as logs, \
+                self.assertRaises(llm_service_module.LLMAPIError):
+            asyncio.run(svc.chat_raw(model="m", messages=[], max_tokens=100, trace_id="t"))
+        written = "\n".join(logs.output)
+        self.assertIn("最後卡在這裡", written)
+        self.assertNotIn("開頭不用留", written)
+
 
 if __name__ == "__main__":
     unittest.main()

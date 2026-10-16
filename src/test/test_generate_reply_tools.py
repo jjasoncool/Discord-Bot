@@ -8,6 +8,8 @@
     呼叫，保證有文字——那句開場白不能被當成回答送出
   - 第一次呼叫就被後端拒絕（例如不支援工具）或什麼都沒產出：改用不帶工具的呼叫，照原本的方式回答
   - 查過之後才失敗：照實回報錯誤（不改用沒查的回答），錯誤紀錄裡看得到已經查了什麼
+  - 給了長度上限、思考卻把上限用完還沒寫出答案：不用同樣的思考設定重跑（只會再想完一次），改成關掉思考、
+    不帶工具、用已經查到的資料再答一次；仍沒答案才回「想太久」，不叫人把問題拆小。沒給上限的呼叫端不重答
   - 工具的使用規則只在有工具時接在系統提示詞後面；網路搜尋的指示知道這次有工具
   - 沒給工具、或工具清單是空的：跟原本一樣一問一答
   - 模型呼叫失敗：一樣回友善錯誤訊息（和沒有工具的路徑共用）
@@ -261,12 +263,98 @@ class AnswerLengthCapTests(GenerateReplyToolTests):
             self.assertIsNone(self.svc.chat_raw.await_args.kwargs["max_tokens"])
 
 
-class LengthErrorMessageTests(GenerateReplyToolTests):
-    async def test_length_error_becomes_a_message_about_splitting_the_question(self):
-        self.svc.chat_raw = mock.AsyncMock(side_effect=LLMAPIError("回答超過長度上限，沒有產出內容", kind="length"))
-        result = await self.svc.generate_reply(prompt="深塔多久重置？", max_tokens=100)
+def thought_too_long():
+    return LLMAPIError("回答超過長度上限，沒有產出內容", kind="length")
+
+
+class ThoughtTooLongTests(GenerateReplyToolTests):
+    """思考把長度上限用完、沒寫出答案（實測：一題翻譯兩次各寫滿 4,096 token 的思考，最後回「請拆小」）。"""
+
+    async def test_first_tool_round_running_out_is_answered_once_without_thinking(self):
+        async def chat_with_tools(**kwargs):
+            self.model_calls.append(kwargs)
+            raise thought_too_long()
+
+        self.svc.chat_with_tools = chat_with_tools
+        with self.assertLogs("services.llm_service", level="WARNING"):
+            result = await self.ask(FakeRunner(), max_tokens=4096)
+
+        self.assertEqual(result.reply, "一般回答")
+        self.assertIsNone(result.error_kind)
+        self.assertEqual(len(self.model_calls), 1)
+        self.svc.chat_raw.assert_awaited_once()                       # 不再用同樣的思考、不帶工具重跑一次
+        retry = self.svc.chat_raw.await_args.kwargs
+        self.assertIs(retry["think"], False)
+        self.assertEqual(retry["max_tokens"], 4096)
+        self.assertNotIn("tools", retry)
+
+    async def test_running_out_after_searching_answers_from_what_was_found(self):
+        calls = {"n": 0}
+
+        async def chat_with_tools(**kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return wants(call("c1"))
+            raise thought_too_long()
+
+        self.svc.chat_with_tools = chat_with_tools
+        with self.assertLogs("services.llm_service", level="WARNING"):
+            result = await self.ask(FakeRunner(), max_tokens=4096)
+
+        self.assertEqual(result.reply, "一般回答")
+        retry_messages = self.svc.chat_raw.await_args.kwargs["messages"]
+        self.assertEqual(retry_messages[-1]["role"], "tool")          # 查到的資料跟著重答，不白查
+        self.assertIs(self.svc.chat_raw.await_args.kwargs["think"], False)
+
+    async def test_plain_answer_running_out_is_answered_once_without_thinking(self):
+        self.svc.chat_raw = mock.AsyncMock(side_effect=[thought_too_long(), "不思考的回答"])
+        with self.assertLogs("services.llm_service", level="WARNING"):
+            result = await self.svc.generate_reply(prompt="翻譯一下", max_tokens=4096)
+
+        self.assertEqual(result.reply, "不思考的回答")
+        self.assertIsNone(result.error_kind)
+        first, second = [c.kwargs for c in self.svc.chat_raw.await_args_list]
+        self.assertIs(first["think"], True)
+        self.assertIs(second["think"], False)
+
+    async def test_still_nothing_without_thinking_says_it_thought_too_long(self):
+        self.svc.chat_raw = mock.AsyncMock(side_effect=[thought_too_long(), thought_too_long()])
+        with self.assertLogs("services.llm_service", level="WARNING"):
+            result = await self.svc.generate_reply(prompt="翻譯一下", max_tokens=4096)
+
         self.assertEqual("length", result.error_kind)
-        self.assertIn("拆小", result.reply)
+        self.assertIn("想太久", result.reply)
+        self.assertNotIn("拆小", result.reply)
+        self.assertEqual(self.svc.chat_raw.await_count, 2)
+
+    async def test_running_out_with_a_gif_does_not_retry_as_png_first(self):
+        # 退成 PNG 是給「後端解不了這個圖檔格式」用的；想太久跟圖無關，退了只會用同樣的思考再想完一次
+        import base64
+        import io
+
+        from PIL import Image
+        buffer = io.BytesIO()
+        Image.new("RGB", (8, 8), (200, 30, 30)).save(buffer, format="GIF")
+        gif = base64.b64encode(buffer.getvalue()).decode("ascii")
+        with_gif = PromptBundle(messages=[{"role": "system", "content": "你是 bot"},
+                                          {"role": "user", "content": "這張圖在說什麼", "images": [gif]}],
+                                prompt_record_log="PROMPT")
+        self.build.return_value = with_gif
+        self.svc.chat_raw = mock.AsyncMock(side_effect=[thought_too_long(), "不思考的回答"])
+        with self.assertLogs("services.llm_service", level="WARNING"):
+            result = await self.svc.generate_reply(prompt="這張圖在說什麼", max_tokens=4096)
+
+        self.assertEqual(result.reply, "不思考的回答")
+        self.assertEqual(self.svc.chat_raw.await_count, 2)
+        self.assertIs(self.svc.chat_raw.await_args.kwargs["think"], False)
+
+    async def test_callers_without_a_cap_are_not_retried(self):
+        self.svc.chat_raw = mock.AsyncMock(side_effect=thought_too_long())
+        with self.assertLogs("services.llm_service", level="WARNING"):
+            result = await self.svc.generate_reply(prompt="插話")
+
+        self.assertEqual("length", result.error_kind)
+        self.svc.chat_raw.assert_awaited_once()
 
 
 if __name__ == "__main__":

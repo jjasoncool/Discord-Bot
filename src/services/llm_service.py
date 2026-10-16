@@ -186,6 +186,10 @@ class ChatMessageResult:
 
 #: 有給長度上限的回答撞到上限時，接在結尾的說明（給看回答的人）
 TRUNCATED_NOTE = "（回答到長度上限被截斷）"
+#: 關掉思考重答仍沒有答案時回給使用者的話：題目本身多半不長，是模型想不完，叫人「拆小」會誤導
+THOUGHT_TOO_LONG_REPLY = "⚠️ 這題想太久，沒整理出答案。換個問法再問一次看看。"
+#: 撞到長度上限時記進 anomaly log 的思考結尾長度：看得出卡在哪就夠，整段會撐爆 log
+REASONING_TAIL_CHARS = 1500
 
 
 @dataclass(frozen=True)
@@ -635,6 +639,11 @@ class LLMService:
         if choices[0].get("finish_reason") == "length":
             logger.warning("LLM 回答撞到長度上限被截斷 trace=%s model=%s max_tokens=%s usage=%s",
                            trace_label, model, extra_body.get("max_tokens"), completion.get("usage"))
+            reasoning = (choices[0].get("message") or {}).get("reasoning_content") or ""
+            if reasoning:
+                # 撞到上限多半是思考停不下來；思考內容其他地方都不記，留最後一段才看得出卡在哪
+                anomaly_logger.warning("length trace=%s model=%s reasoning_chars=%d reasoning_tail=%s",
+                                       trace_label, model, len(reasoning), reasoning[-REASONING_TAIL_CHARS:])
         return choices[0], completion
 
     async def chat_with_tools(
@@ -709,6 +718,11 @@ class LLMService:
         content = message.get("content") or ""
 
         if not content and not tool_calls:
+            if choice.get("finish_reason") == "length":
+                # 思考把長度上限用完、還沒寫到回答或工具呼叫：和 chat_raw 一樣回 length，呼叫端才分得出
+                # 「想太久」和「後端給了空回應」——前者用同樣的設定重跑只會一樣用完
+                raise LLMAPIError("回答超過長度上限，沒有產出內容", kind="length",
+                                  detail=str({"trace": trace_label, "usage": completion.get("usage")}))
             # 兩者皆空才算異常（單獨空 content 在 tool-calling 是正常的）
             anomaly_logger.error(
                 "empty_content trace=%s model=%s finish_reason=%s usage=%s raw=%s",
@@ -803,6 +817,8 @@ class LLMService:
           就改用不帶工具的一般呼叫，保證有文字
         - 第一次呼叫就被後端拒絕（例如不支援工具）或什麼都沒產出：改用不帶工具的一般呼叫——原本的 /askai
           在這種情況下答得出來，不能因為多了查情報反而答不出來。模型回過話之後才失敗，就照實往外丟
+        - 例外：思考把長度上限用完（`length`）照實往外丟，不改用不帶工具的呼叫——思考設定和上限都一樣，
+          重跑只會再用完一次（實測兩次各寫滿 4,096 token、白佔顯示卡 4 分鐘）；怎麼補救交給 `generate_reply`
         """
         progress[:] = list(messages)
         messages = progress
@@ -815,7 +831,7 @@ class LLMService:
             try:
                 result = await self.chat_with_tools(messages=messages, tools=runner.tools, think=think, **common)
             except LLMAPIError as exc:
-                if answered_once:
+                if answered_once or exc.kind == "length":
                     raise
                 logger.warning("工具輪 trace=%s 帶工具的第一次呼叫失敗（%s），這次不查、照原本的方式回答",
                                trace_id or "-", exc)
@@ -883,6 +899,10 @@ class LLMService:
         `tool_runner` 給了（而且有工具）就讓模型自己決定要不要先查（/askai 的情報搜尋），見 `_answer_with_tools`；
         沒給就跟原本一樣一問一答。錯誤訊息、圖片退成 PNG 重試兩種路徑共用。
         有工具時才把這組工具的使用規則（`tool_runner.instructions`）接在系統提示詞後面：沒工具時提示詞跟原本完全一樣。
+
+        呼叫端給了 `max_tokens`、而模型開著思考卻想到上限還沒寫出答案：關掉思考、不帶工具，用已經查到的資料
+        （工具輪的 messages）再答一次——同樣的設定重跑只會再想完一次。仍沒有答案才回「想太久」。
+        沒給上限的呼叫端（插話、日記）不會走到這裡。
         """
         use_tools = tool_runner is not None and bool(tool_runner.tools)
         instructions = getattr(tool_runner, "instructions", "") if use_tools else ""
@@ -961,7 +981,8 @@ class LLMService:
         except LLMAPIError as exc:
             # 帶了非 jpeg/png 的圖而請求失敗 → 可能是後端解不了那個格式（gif/webp 支援度看模型）。
             # 退成 PNG 第一幀重試一次。刻意不預先轉檔：那會把「讀得懂 gif 的模型」一起打死。
-            downgraded = _downgrade_images(sent_messages)
+            # 想太久（length）跟圖的格式無關，退成 PNG 只會再想完一次
+            downgraded = _downgrade_images(sent_messages) if exc.kind != "length" else None
             if downgraded is not None:
                 logger.warning(
                     "LLM 帶圖請求失敗 trace=%s status=%s → 把圖退成 PNG 重試一次",
@@ -987,10 +1008,27 @@ class LLMService:
                 )
             if exc.kind == "length":
                 logger.warning("LLM 回答超過長度上限且沒有內容 trace=%s detail=%s", trace_label, exc.detail)
+                retry_messages = list(progress) or list(sent_messages)
+                if target_think and max_tokens is not None:
+                    try:
+                        reply = await self.chat_raw(
+                            model=target_model, messages=retry_messages, think=False, temperature=temperature,
+                            top_p=top_p, repeat_penalty=repeat_penalty, num_ctx=num_ctx, timeout=timeout,
+                            keep_alive=keep_alive, max_tokens=max_tokens, trace_id=trace_id,
+                        )
+                        logger.info("LLM 關掉思考重答 trace=%s：有回答", trace_label)
+                        return GenerateReplyResult(
+                            reply=reply,
+                            prompt_record_log=record_log(transcript_so_far),
+                            messages_sent=retry_messages,
+                            error_kind=None,
+                        )
+                    except (LLMAPIError, LlmTimeoutError, LlmConnectionError) as retry_exc:
+                        logger.warning("LLM 關掉思考重答仍失敗 trace=%s：%s", trace_label, retry_exc)
                 return GenerateReplyResult(
-                    reply="⚠️ 這題回答太長寫不完，請把問題拆小一點再問。",
+                    reply=THOUGHT_TOO_LONG_REPLY,
                     prompt_record_log=record_log(transcript_so_far),
-                    messages_sent=list(progress) or list(bundle.messages),
+                    messages_sent=retry_messages,
                     error_kind="length",
                 )
             # raise 端帶 kind，未帶時退回 unknown_format（理論上不會走到，留個安全網）
