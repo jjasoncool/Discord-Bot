@@ -31,5 +31,11 @@
     "keyword：舊做法，問題裡有「今天、新聞、天氣、股價…」這類字就先查好、塞給模型",
     "tool：做成工具，由模型自己決定要不要查網路（和遊戲情報一起決定，兩邊不會同時塞資料打架）"
   ],
-  "askai_web_search_mode": "tool"
+  "askai_web_search_mode": "tool",
+  "_chat_index_backfill_mode 可以填": [
+    "off：不查",
+    "dry_run：查、記 log 說會補幾則，不寫（試跑用）",
+    "on：把 raw 備份有、聊天向量庫沒有的訊息補進向量庫，每 15 分鐘 20 則，只補近 14 天"
+  ],
+  "chat_index_backfill_mode": "on"
 }

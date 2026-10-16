@@ -241,7 +241,7 @@ wfrog_stock_rise = 股票大漲、興奮 | negative
 # === 自動偵測 2026-08-10（待填寫） ===
 Dorothy_love = agree
 Dorothy_question = 疑惑、問問 | neutral
-Dorothy_wink = laugh
+Dorothy_wink = 得意眨眼 | laugh
 
 # === 自動偵測 2026-08-15（待填寫） ===
 Dorothy_chaos = negative
@@ -326,3 +326,7 @@ a_pic_ox = 嘿嘿偷笑 | laugh
 cz = 害羞、心動 | agree
 cmon = 懷疑、不信 | think
 PGR_LivGun = 開槍、威脅 | negative
+UN_FX01 = 花痴、愛慕 | agree
+Frog_WorrySleep03 = 憂慮、睡不著 | negative
+phoebe_playphone = 無聊、放空 | neutral
+frog_police = 警察、查案 | neutral
