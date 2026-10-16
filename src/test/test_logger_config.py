@@ -4,7 +4,7 @@
 - 設定檔載得起來，而且 root 有畫面與主 log 檔兩個輸出（模組 logger 才有地方去）
 - 類別 logger（article_monitor、llm_anomaly）不往 root 傳，不會重複寫進主 log
 - 會大量寫 log 的第三方套件（httpx 每次請求一筆）被壓到 WARNING
-- 測試模式下所有檔案輸出都改寫到測試 log，不碰正式 log
+- 測試模式下所有檔案輸出都改寫到測試 log，不碰正式 log，也不印到畫面（畫面就是 docker logs）
 - 設定檔裡寫的 logger 名稱都對得到東西：模組改名或打錯字時，設定不會悄悄失效
 
 執行：
@@ -50,6 +50,17 @@ class BuildConfigTests(unittest.TestCase):
         config = build_config(RAW, log_dir="/logs", test_log_name="test_run.log")
         files = {h["filename"] for h in self.file_handlers(config).values()}
         self.assertEqual(files, {"/logs/test_run.log"})
+
+    def test_test_mode_writes_only_to_the_test_log(self):
+        """啟動 gate 的畫面輸出就是 docker logs：測試故意製造的 ERROR 不能印到畫面，否則會被當成 bot 出錯。"""
+        config = build_config(RAW, log_dir="/logs", test_log_name="test_run.log")
+        screen = {name for name, h in config["handlers"].items() if "filename" not in h}
+        self.assertTrue(screen, "設定檔應該有畫面輸出，才有東西可以關")
+        sections = [config["root"], *config.get("loggers", {}).values()]
+        for section in sections:
+            self.assertFalse(screen & set(section.get("handlers", [])), section)
+        self.assertTrue(set(config["root"]["handlers"]), "root 還是要有檔案輸出")
+        self.assertTrue(screen & set(build_config(RAW)["root"]["handlers"]), "正式執行照舊印到畫面")
 
     def test_level_override(self):
         self.assertEqual(build_config(RAW, level="DEBUG")["root"]["level"], "DEBUG")

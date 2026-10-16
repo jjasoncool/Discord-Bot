@@ -49,6 +49,13 @@ def build_config(raw: dict, *, log_dir: str = LOG_DIR, test_log_name=None, level
     for handler in config.get("handlers", {}).values():
         if "filename" in handler:
             handler["filename"] = os.path.join(log_dir, test_log_name or handler["filename"])
+    if test_log_name:
+        # 測試模式只寫測試 log 檔，不印到畫面：啟動 gate 的畫面輸出就是 docker logs，測試故意製造的 ERROR
+        # 會被當成 bot 出錯；unittest 自己的失敗報告走 stderr，不受影響
+        screen = {name for name, handler in config.get("handlers", {}).items() if "filename" not in handler}
+        for section in [config.get("root", {}), *config.get("loggers", {}).values()]:
+            if "handlers" in section:
+                section["handlers"] = [h for h in section["handlers"] if h not in screen]
     if level:
         config.setdefault("root", {})["level"] = level
     if root_handlers is not None:
