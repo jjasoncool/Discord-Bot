@@ -2,11 +2,14 @@
 
 架構定位：功能層（`llm/storage`），吃 Discord 訊息物件、寫資料庫。
   - 上層（誰呼叫）：`discord_bot` 的 on_message／on_message_edit（`enqueue_message`、`enqueue_message_edit`，滿門檻就
-    `flush_buffer`）與 on_ready（用 `utils.background_tasks.periodic` 定期呼叫 `flush_buffer`）。
+    `flush_buffer`）與 on_ready（用 `utils.background_tasks.periodic` 定期呼叫 `flush_buffer`）；
+    `llm.storage.chat_index_backfill`（從 raw 備份補寫漏掉的，排進同一個 buffer）。
   - 下層（呼叫誰）：`llm.client.lemonade_gate`（GPU 閘門）、`llm.client.http_client.is_unreachable`、
     `llm.preprocess`（表情描述、貼圖描述）、`llm.retrievers.context_retriever`（共用的已寫入 id 集合）、LlamaIndex 的 pgvector 索引。
 
-介面：`enqueue_message(msg)`、`enqueue_message_edit(after)`、`should_flush_now()`、`flush_buffer()`。
+介面：`enqueue_message(msg)`、`enqueue_message_edit(after)`、`should_flush_now()`、`flush_buffer()`；
+  從 raw 備份補寫用的 `compose_persist_text`、`preview_text`（組文字的規則）、`backfill_candidates`／`enqueue_backfill`
+  （哪些會排、排進 buffer）。
 
 規則：
   - 寫入時拿著 GPU 閘門（算 embedding 要用顯示卡），插話與 /askai 都在後面排隊，所以一次 flush 最多寫
@@ -94,38 +97,38 @@ def _check_flush_deps() -> bool:
     return _flush_deps_ready
 
 
-def _build_persist_text(msg: discord.Message) -> str:
-    """組裝要寫入 pgvector 的文字（含貼圖描述、連結預覽）。
+def compose_persist_text(content: str, sticker_texts: list[str], previews: list[str]) -> str:
+    """組裝要寫入 pgvector 的文字：內文＋貼圖描述＋連結預覽。
 
+    即時寫入（Discord 訊息物件）和從 raw 備份補寫（`chat_index_backfill`）都走這一份，兩邊寫進去的文字才一樣。
     custom emoji `<:name:id>` 會被語意化替換為 `[描述]`，避免 embed model
     把 emoji token 當亂碼。raw_message_store 不做這個替換（保留原文）。
     """
-    text = (msg.content or "").strip()
-    text = replace_custom_emoji_with_description(text)
-    if msg.stickers:
-        sticker_texts = []
-        for sticker in msg.stickers:
-            st = get_sticker_text(sticker)
-            if st:
-                sticker_texts.append(st)
-        if sticker_texts:
-            sticker_part = " ".join(sticker_texts)
-            text = f"{text} {sticker_part}" if text else sticker_part
-    # 附加 Discord 抓取的連結預覽（標題/描述）
-    if msg.embeds:
-        embed_parts = []
-        for embed in msg.embeds:
-            parts = []
-            if embed.title:
-                parts.append(embed.title)
-            if embed.description:
-                parts.append(embed.description[:100])
-            if parts:
-                embed_parts.append(" - ".join(parts))
-        if embed_parts:
-            embed_text = " ".join(f"[預覽：{p}]" for p in embed_parts)
-            text = f"{text} {embed_text}" if text else embed_text
+    text = replace_custom_emoji_with_description((content or "").strip())
+    if sticker_texts:
+        sticker_part = " ".join(sticker_texts)
+        text = f"{text} {sticker_part}" if text else sticker_part
+    if previews:
+        embed_text = " ".join(f"[預覽：{p}]" for p in previews)
+        text = f"{text} {embed_text}" if text else embed_text
     return text
+
+
+def preview_text(title: Optional[str], description: Optional[str]) -> Optional[str]:
+    """一個連結預覽要寫進去的文字（標題 - 描述前 100 字）；兩個都沒有回 None。"""
+    parts = []
+    if title:
+        parts.append(title)
+    if description:
+        parts.append(description[:100])
+    return " - ".join(parts) if parts else None
+
+
+def _build_persist_text(msg: discord.Message) -> str:
+    """組裝要寫入 pgvector 的文字（含貼圖描述、Discord 抓取的連結預覽）。"""
+    sticker_texts = [t for t in (get_sticker_text(s) for s in (msg.stickers or [])) if t]
+    previews = [p for p in (preview_text(e.title, e.description) for e in (msg.embeds or [])) if p]
+    return compose_persist_text(msg.content, sticker_texts, previews)
 
 
 def enqueue_message(msg: discord.Message) -> None:
@@ -183,6 +186,31 @@ def enqueue_message_edit(after: discord.Message) -> None:
         "timestamp": after.created_at.isoformat(),
     })
     _trim_oldest(_edit_buffer)
+
+
+def backfill_candidates(items: list[dict]) -> tuple[list[dict], list[str]]:
+    """補寫的訊息哪些會排進 buffer（不改 buffer）：回傳 (會排的項目, 已寫過或已在 buffer 而跳過的 message_id)。
+
+    「已寫過」看的是這個行程記的已寫入集合，資料庫查到缺、這裡卻記成已寫的也算在跳過裡（例如被切成兩段、撞到唯一
+    索引而沒寫成的長訊息），呼叫端別每輪再排它。會排的只取 buffer 剩下的空間：補寫的是舊訊息，不擠掉即時的。
+    """
+    persisted = _get_persisted_ids()
+    queued = {item["message_id"] for item in _buffer} | {item["message_id"] for item in _edit_buffer}
+    fresh = [item for item in items if item["message_id"] not in persisted and item["message_id"] not in queued]
+    skipped = [item["message_id"] for item in items if item["message_id"] in persisted or item["message_id"] in queued]
+    room = max(MAX_BUFFER_SIZE - len(_buffer), 0)
+    return fresh[:room], skipped
+
+
+def enqueue_backfill(items: list[dict]) -> tuple[list[str], list[str]]:
+    """把補寫的訊息（`chat_index_backfill` 從 raw 備份組好，欄位同 buffer）排進 buffer 前端。
+
+    回傳 (排進去的 message_id, 跳過的 message_id)，規則見 `backfill_candidates`。
+    寫入走同一條 flush（GPU 閘門、時間預算、連不上放回），這裡不自己寫資料庫。
+    """
+    fresh, skipped = backfill_candidates(items)
+    _buffer[:0] = fresh   # 放前面：時間順序跟即時寫入的一致（較舊的先寫）
+    return [item["message_id"] for item in fresh], skipped
 
 
 def _trim_oldest(buf: list[dict]) -> None:

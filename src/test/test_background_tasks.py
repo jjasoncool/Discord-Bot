@@ -7,7 +7,7 @@
   - `supervise` 的迴圈自己結束：記 WARNING、不重啟
   - `supervise` 被取消：停下來、不重啟、不記 ERROR
   - `supervise` 第一次呼叫 factory 是當場呼叫：factory 本身寫錯會在呼叫端立刻炸，不會躲進背景一直重試
-  - `periodic` 每隔固定秒數做一次、做失敗記 WARNING（含名稱）繼續、被取消就停
+  - `periodic` 每隔固定秒數做一次、做失敗記 WARNING（含名稱）繼續、被取消就停；`first_after` 讓第一次提早、之後照間隔
   - `cancel_all` 取消所有還在跑的
   - `cancel_other_tasks`（關機用）取消目前這個以外的所有 task（不只 spawn 建的）、等它們收尾才回來、不取消自己；
     把取消吞掉停不下來的不會讓它一直等
@@ -235,6 +235,12 @@ class PeriodicTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(logs.output), 1)
         self.assertIn("聊天記憶定期寫入", logs.output[0])
         self.assertIn("後端連不上", logs.output[0])
+
+    async def test_first_run_can_come_sooner_then_every_interval(self):
+        with self.assertLogs(LOGGER, level="WARNING"):
+            with self.assertRaises(asyncio.CancelledError):
+                await bg.periodic(3600, self.job, name="聊天向量庫補寫", first_after=300, sleep=self.sleep)
+        self.assertEqual(self.slept, [300, 3600, 3600])
 
 
 class CancelOtherTasksTests(unittest.IsolatedAsyncioTestCase):

@@ -5,6 +5,7 @@ raw 表是備份層，也是互動（反應）的真相來源。
   - 上層（誰呼叫）：`discord_bot` 的 on_message／on_message_edit／on_raw_message_delete／on_raw_reaction_add／remove
     （各自的 `enqueue_*`，滿門檻就 `flush_raw_buffer`）、on_ready（用 `utils.background_tasks.periodic` 定期呼叫 `flush_raw_buffer`）
     與停機收尾（`MyBot.close` 呼叫 `flush_raw_buffer`）；要看一則訊息被按了多少反應的功能查 `get_reaction_salience`。
+    `llm.storage.chat_index_backfill` 直接讀 discord_messages_raw 表，從這裡補寫聊天向量庫漏掉的訊息。
   - 下層（呼叫誰）：psycopg2 連線池（獨立 pool，不和 pgvector 的 LlamaIndex 共用）、`llm.preprocess.sticker_cache`。
 
 介面：`enqueue_raw_message`、`enqueue_raw_edit`、`enqueue_raw_delete`、`enqueue_reaction_change`、`should_trigger_flush`、
@@ -12,6 +13,8 @@ raw 表是備份層，也是互動（反應）的真相來源。
 
 規則：四種事件各自一個緩衝，任一滿 50 則或每 60 秒寫一批（反應要夠即時），單次 flush 合併處理；
   純 SQL、不算 embedding；刪除是軟刪（is_deleted=TRUE）。
+  聊天向量庫的補寫照 channel_id／thread_id 的拆法與 stickers、tenor_gifs 的內容組文字：改這些欄位的語意時，
+  要一起改 `chat_index_backfill.build_items`，不然補寫的文字會和即時寫入的不一樣。
 """
 
 from __future__ import annotations

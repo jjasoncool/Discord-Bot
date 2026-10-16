@@ -41,6 +41,7 @@ LAYERS = [
     ("llm.preprocess.emoji_autofill", FEATURE),     # 看圖補字典（on_message 觸發）
     ("llm.storage.store_chat", FEATURE),            # Discord 訊息寫進聊天向量庫
     ("llm.storage.raw_message_store", FEATURE),     # Discord 訊息寫進原始備份表
+    ("llm.storage.chat_index_backfill", FEATURE),   # 從原始備份補寫聊天向量庫漏掉的（交給 store_chat 寫）
     # ── llm/ 裡的服務：共用的能力、資料存取、橋接 ──
     ("llm.storage.member_profile_store", SERVICE),  # 成員檔案（自介、印象、AI 觀察、偏好）的存取
     ("llm.storage.ai_interactions_store", SERVICE), # 插話互動紀錄的存取

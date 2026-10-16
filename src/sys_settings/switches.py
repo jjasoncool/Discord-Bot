@@ -54,6 +54,10 @@ class Switches(BaseModel):
     #: /askai 的網路搜尋（SearXNG，llm.retrievers.web）：keyword＝問題裡有時事類關鍵字就先查好、塞進 prompt（舊做法）；
     #: tool＝做成工具，由模型和遊戲情報一起決定查哪邊（兩邊不會同時塞資料）；off＝不查。預設照舊做法
     askai_web_search_mode: Literal["off", "keyword", "tool"] = "keyword"
+    #: 聊天向量庫補寫（llm.storage.chat_index_backfill）：raw 備份有、聊天向量庫沒有的訊息（多半是停機前還在記憶體裡、
+    #: 沒來得及寫的）定期補寫。off＝不查；dry_run＝查、記 log（幾則、會排幾則），不寫；on＝排進聊天記憶的寫入佇列。
+    #: 預設 dry_run：只讀不寫，跟 off 一樣安全，又能先從 log 看到要補多少再決定切到 on
+    chat_index_backfill_mode: Literal["off", "dry_run", "on"] = "dry_run"
 
 
 def _parse(raw: str) -> Switches:

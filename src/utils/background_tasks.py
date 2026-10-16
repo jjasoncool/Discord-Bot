@@ -14,7 +14,7 @@ event loop 只留弱參照），以及任務裡沒接住的例外只會在被回
     重啟間隔從 `restart_after` 起每次加倍、到 `max_restart_after` 為止；跑滿 `healthy_after` 秒才掛掉的，
     視為新的一次故障、間隔重算。迴圈自己正常結束記 WARNING、不重啟（正常的迴圈不該結束，多半是忘了 `while True`）。
   - `periodic`：固定間隔做同一件事（定期寫入、定期檢查），失敗記 WARNING 繼續；要算「下一個時刻」的排程用
-    `utils.due_loop.run_due_loop`，不是它。
+    `utils.due_loop.run_due_loop`，不是它。啟動後要先做一次的工作用 `first_after` 把第一次提早。
   - `cancel_other_tasks`：關機時、關掉大家共用的資源（資料庫連線）之前，先停掉目前這個以外還在跑的所有 task。
   - 這裡只管「建、留、記、重啟」。工作本身的節流、去重、等 GPU 都留給呼叫端；`run_due_loop` 管的是
     「什麼時候醒來」，兩者是搭配不是取代。
@@ -92,14 +92,18 @@ def supervise(
 
 
 async def periodic(seconds: float, job: Callable[[], Awaitable[object]], *, name: str,
+                   first_after: Optional[float] = None,
                    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
     """每隔 `seconds` 秒做一次 `job`；做失敗只記 WARNING（含名稱）、下一輪照常再做。
 
     給 `supervise` 當 factory：`supervise(lambda: periodic(300, flush_buffer, name="聊天記憶定期寫入"), name=…)`。
+    `first_after`：第一次在幾秒後做，沒給就等一個 `seconds`。
     `job` 自己的例外在這裡接住（一次沒寫成不該讓整個迴圈重啟）；取消照常往外丟。
     """
+    wait = seconds if first_after is None else first_after
     while True:
-        await sleep(seconds)
+        await sleep(wait)
+        wait = seconds
         try:
             await job()
         except Exception as exc:

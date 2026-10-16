@@ -100,7 +100,7 @@ class MyBot(commands.Bot):
         順序：先把 raw 備份寫進資料庫（資料最要緊）→ 停掉接新工作的入口（爬蟲通知、Telegram 轉發）→ discord.py 的關閉
         （卸載 cog、斷語音、關 Discord 連線）→ 停掉還在跑的工作 → 關共用的 StateDB（aiosqlite 的執行緒不關，行程退不出去）
         → 補寫這段期間進來的 raw。前面幾步共用一個總期限、每步各有上限，卡住或失敗的那步不擋後面；關 StateDB 另外保留時間。
-        聊天記憶的緩衝不在這裡寫：要算 embedding，停機的時間不夠。
+        聊天記憶的緩衝不在這裡寫（要算 embedding，停機的時間不夠），由 `chat_index_backfill` 從 raw 補寫（開關切到 on 才補）。
         """
         if self._shutdown_started:
             return await super().close()
@@ -232,10 +232,11 @@ def _start_once(task_attr: str, name: str, factory, started_log: str) -> None:
 
 
 def _start_background_loops() -> None:
-    """五個該一直跑的迴圈，照原本的順序掛上；三個定期寫入用 `periodic`，兩個要算時刻的排程在各自的模組。"""
+    """六個該一直跑的迴圈：四個定期工作（三個定期寫入、從 raw 補寫聊天向量庫）用 `periodic`，
+    兩個要算時刻的排程（每日維護、日記）在各自的模組。"""
     from llm.ambient import ambient_diary, ambient_memory
     from llm.persona import daily_maintenance
-    from llm.storage import raw_message_store, store_chat
+    from llm.storage import chat_index_backfill, raw_message_store, store_chat
     from sys_settings.llm_settings import AmbientChatSettings
 
     chat_every = store_chat.FLUSH_INTERVAL_SECONDS
@@ -250,6 +251,11 @@ def _start_background_loops() -> None:
     _start_once("_ambient_memory_task", "插話記憶定期抽取",
                 lambda: periodic(memory_every, ambient_memory.maybe_flush, name="插話記憶定期抽取"),
                 "插話記憶定期抽取已啟動（每 %.0f 秒檢查）" % memory_every)
+    backfill_every = chat_index_backfill.INTERVAL_SECONDS
+    _start_once("_chat_backfill_task", "聊天向量庫補寫",
+                lambda: periodic(backfill_every, chat_index_backfill.run_once, name="聊天向量庫補寫",
+                                 first_after=chat_index_backfill.FIRST_RUN_AFTER_SECONDS),
+                "聊天向量庫補寫已啟動（每 %d 秒，開關 chat_index_backfill_mode）" % backfill_every)
     _start_once("_personality_task", "每日維護排程", lambda: daily_maintenance.schedule_loop(bot),
                 "每日維護排程已啟動（每日 04:00 UTC+8，含啟動補跑檢查）")
     _start_once("_diary_task", "日記排程", lambda: ambient_diary.schedule_loop(bot),

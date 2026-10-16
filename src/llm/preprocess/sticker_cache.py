@@ -3,7 +3,8 @@
 架構定位：技術層（`llm/preprocess`），只是一份記憶體快取，不認 Discord——向 Discord 要貼圖清單、
 接 `on_guild_stickers_update` 事件都是介面層（`discord_bot`）的事，它拿到清單後交進來。
   - 上層（誰呼叫）：`discord_bot`（啟動時 `remember`、貼圖變動時 `update_guild`）、
-    `llm.preprocess.chat_line`／`llm.storage.store_chat`／`llm.storage.raw_message_store`（`get_sticker_text`）、
+    `llm.preprocess.chat_line`／`llm.storage.store_chat`／`llm.storage.raw_message_store`／
+    `llm.storage.chat_index_backfill`（`get_sticker_text`）、
     `llm.preprocess.emoji_autofill`／`external_emoji`（`is_known`）。
   - 下層（呼叫誰）：`llm.preprocess.sticker_dictionary`（別的伺服器的貼圖，AI 看圖補的描述）。
 
