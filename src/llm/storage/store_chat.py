@@ -371,6 +371,30 @@ def _out_of_time(deadline: Optional[float]) -> bool:
     return deadline is not None and time.monotonic() >= deadline
 
 
+def _chat_node(item: dict):
+    """一則訊息一個節點，不經 LlamaIndex 的切段器。
+
+    經切段器的話，內文加預覽超過切段長度的訊息會被切成兩段，第二段撞到 message_id 的唯一索引、整則回滾，
+    卻被當成已存在而從此漏掉；編輯後變長的更慘，舊的先刪、新的寫不進去。embedding 的上下文（8192）放得下
+    任何一則 Discord 訊息，所以不需要切。節點以訊息 id 當來源，`delete_ref_doc(message_id)` 才刪得到它。
+    """
+    from llama_index.core.schema import NodeRelationship, RelatedNodeInfo, TextNode
+
+    mid = item["message_id"]
+    return TextNode(
+        id_=mid,
+        text=item["text"],
+        metadata={
+            "message_id": mid,
+            "author_id": item["author_id"],
+            "channel_id": item["channel_id"],
+            "timestamp": item["timestamp"],
+            "doc_type": "discord_chat",
+        },
+        relationships={NodeRelationship.SOURCE: RelatedNodeInfo(node_id=mid)},
+    )
+
+
 def _sync_write_batch(batch: list[dict], deadline: Optional[float] = None) -> tuple[int, list[dict]]:
     """同步寫入一批訊息到 pgvector（在 executor 中執行）。
 
@@ -378,8 +402,6 @@ def _sync_write_batch(batch: list[dict], deadline: Optional[float] = None) -> tu
     逐則硬試的話每則都要等到連線逾時，這段時間一直佔著 GPU 閘門，/askai 與插話都得等。
     過了 `deadline`（`time.monotonic()` 的時刻）也停：後端只是很慢時，不讓一批訊息拖住閘門。
     """
-    from llama_index.core import Document
-
     try:
         index = _get_chat_index()
     except Exception as exc:
@@ -401,18 +423,7 @@ def _sync_write_batch(batch: list[dict], deadline: Optional[float] = None) -> tu
             )
             return written, batch[pos:]
         try:
-            doc = Document(
-                text=item["text"],
-                doc_id=mid,
-                metadata={
-                    "message_id": mid,
-                    "author_id": item["author_id"],
-                    "channel_id": item["channel_id"],
-                    "timestamp": item["timestamp"],
-                    "doc_type": "discord_chat",
-                },
-            )
-            index.insert(doc)
+            index.insert_nodes([_chat_node(item)])
             persisted_ids.add(mid)
             written += 1
         except Exception as exc:
@@ -442,8 +453,6 @@ def _sync_update_batch(batch: list[dict], deadline: Optional[float] = None) -> t
     回傳 (更新則數, 要放回編輯 buffer 的訊息)，規則（連不上、時間用完）同 `_sync_write_batch`。
     刪掉舊的之後才連不上的那則也會放回去，下一輪補寫，不會從 pgvector 消失。
     """
-    from llama_index.core import Document
-
     try:
         index = _get_chat_index()
     except Exception as exc:
@@ -461,18 +470,7 @@ def _sync_update_batch(batch: list[dict], deadline: Optional[float] = None) -> t
             return updated, batch[pos:]
         try:
             index.delete_ref_doc(mid)
-            doc = Document(
-                text=item["text"],
-                doc_id=mid,
-                metadata={
-                    "message_id": mid,
-                    "author_id": item["author_id"],
-                    "channel_id": item["channel_id"],
-                    "timestamp": item["timestamp"],
-                    "doc_type": "discord_chat",
-                },
-            )
-            index.insert(doc)
+            index.insert_nodes([_chat_node(item)])
             updated += 1
         except Exception as exc:
             if _is_backend_unreachable(exc):

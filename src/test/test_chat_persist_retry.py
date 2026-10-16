@@ -65,14 +65,20 @@ class FakeIndex:
         self.on_delete = None
 
     def insert(self, doc) -> None:
+        raise AssertionError("寫聊天向量庫要用 insert_nodes（一則一段），insert(Document) 會經過切段器")
+
+    def insert_nodes(self, nodes) -> None:
         self.insert_calls += 1
+        if len(nodes) != 1:
+            raise AssertionError(f"一則訊息只能有一個節點，收到 {len(nodes)} 個")
+        node = nodes[0]
         if self.on_insert:
-            self.on_insert(doc)
+            self.on_insert(node)
         if self.down:
             raise self.down
-        if doc.doc_id in self.fail:
-            raise self.fail[doc.doc_id]
-        self.inserted.append((doc.doc_id, doc.text))
+        if node.node_id in self.fail:
+            raise self.fail[node.node_id]
+        self.inserted.append((node.node_id, node.text))
 
     def delete_ref_doc(self, mid: str) -> None:
         if self.on_delete:
@@ -327,6 +333,41 @@ class ChatPersistRetryTests(unittest.IsolatedAsyncioTestCase):
             updated, left = store_chat._sync_update_batch(batch, deadline=time.monotonic() - 1)
 
         self.assertEqual((updated, left, self.index.deleted), (0, batch, []))
+
+
+class SingleNodeTests(unittest.TestCase):
+    """一則訊息一個節點：經切段器的長訊息會被切成兩段、第二段撞 message_id 唯一索引整則回滾，卻被當成已存在而漏掉。"""
+
+    def setUp(self) -> None:
+        self.index = FakeIndex()
+        for target, value in (("_get_chat_index", lambda: self.index), ("_get_persisted_ids", set)):
+            p = patch.object(store_chat, target, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    @staticmethod
+    def item(mid: str, text: str) -> dict:
+        return {"message_id": mid, "text": text, "author_id": "7", "channel_id": "10",
+                "timestamp": "2026-10-01T00:00:00+00:00"}
+
+    def test_long_message_is_written_whole_as_one_node(self):
+        text = "深塔" * 3000   # 6,000 字，遠超過切段長度
+        written, left = store_chat._sync_write_batch([self.item("1", text)])
+        self.assertEqual((1, []), (written, left))
+        self.assertEqual([("1", text)], self.index.inserted)
+
+    def test_edit_rewrites_the_message_as_one_node(self):
+        text = "海墟" * 3000
+        updated, left = store_chat._sync_update_batch([self.item("2", text)])
+        self.assertEqual((1, []), (updated, left))
+        self.assertEqual(["2"], self.index.deleted)
+        self.assertEqual([("2", text)], self.index.inserted)
+
+    def test_node_can_be_deleted_by_message_id(self):
+        node = store_chat._chat_node(self.item("9", "hi"))
+        self.assertEqual("9", node.ref_doc_id, "delete_ref_doc(message_id) 靠來源 id 找到它")
+        self.assertEqual("9", node.node_id)
+        self.assertEqual("discord_chat", node.metadata["doc_type"])
 
 
 class ChatIndexTimeoutTests(unittest.TestCase):
