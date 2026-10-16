@@ -117,6 +117,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
   4. 規則：呼叫端要遵守的約定、不做的事。
   5. 例外與決策：不收斂的例外、決策與一兩句理由寫在這裡；不要只寫「見交接檔」。經過與長篇討論寫交接檔，程式這邊要有結論。
   範例：`src/utils/hot_files.py`。歷史敘述（「原本是…後來…」）不寫在程式裡。
+- **錯誤邊界**（`src/test/test_error_boundaries.py` 守衛）：技術層與服務層（`llm/`、`services/` 裡不是功能的模組）不接所有例外（`except Exception`、裸 `except`、含它們的 tuple），讓例外往外走到邊界處理；真的是邊界（排程的一次 tick、每則訊息、每個工具呼叫、對外的一次請求）才接，而且在那一行註明 `# 邊界：原因`（有註明的不計）。既有的 80 處記在該檔 `BASELINE`，只准減不准增；清掉一處就把基準往下調。
 - async 裡的同步 DB 或檔案 I/O 丟到執行緒（`asyncio.to_thread`；persona agent 用 `run_db`）。音樂、Discord 心跳、插話都在同一個 event loop 上。
 - 新增欄位或改介面時，列出所有牽動點並逐一確認。
 - 細項設定放 `sys_settings/` 的 pydantic settings（frozen）；功能開關放 `settings/switches.json`（見共用元件表）。
