@@ -10,15 +10,23 @@
 規則：
   - 停機時 `cleanup` 的每一步都有時限（CLOSE_LOOP_TIMEOUT、CLOSE_DISCONNECT_TIMEOUT），整個 bot 的停機收尾只有幾秒。
   - `mark_closing` 之後不再開新的播放迴圈。
+  - 語音斷線後先等 discord.py 自己重連（RECONNECT_GRACE_SECONDS），等不到才在同一條連線上重連，連線從它的登記表消失
+    才建新的；被斷線打斷的歌從斷掉的地方接著播（續播不重複記入已播、不重發面板）。
 
-例外與決策：停機時離開語音不用 discord.py 的 disconnect 等到底：讀 Discord 事件的連線已經停了，「已離開」的回報永遠
-  不會來（它會等 30 秒）；而且取消若落在關語音 websocket 那段，它的 finally 還會再等一次，包 wait_for 也擋不住。
-  所以斷線放進自己的 task，時間到就直接從 discord.py 取消登記。
+例外與決策：
+  - 停機時離開語音不用 discord.py 的 disconnect 等到底：讀 Discord 事件的連線已經停了，「已離開」的回報永遠
+    不會來（它會等 30 秒）；而且取消若落在關語音 websocket 那段，它的 finally 還會再等一次，包 wait_for 也擋不住。
+    所以斷線放進自己的 task，時間到就直接從 discord.py 取消登記。
+  - 斷線後不立刻換連線：discord.py 自己幾秒內就會接回；對它強制 disconnect 不會取消它進行中的重連，那份工作 30 秒後
+    會送出「離開頻道」把新連線踢掉、再等 30 秒才放棄，一次網路抖動變成兩次掉線、丟兩首歌。
+  - 斷線時 discord.py 可能把正在播的歌直接中止、也可能讓它接著播，取決於幾毫秒的時序；所以播完與被打斷用
+    「結束那一刻連線還在不在」分辨，被打斷的記下已播秒數、重連後用 ffmpeg 跳回去續播。
 """
 import os
 import re
 import asyncio
 import logging
+import time
 import discord
 from discord.ext import commands
 
@@ -33,6 +41,19 @@ from .exceptions import QueueEmptyError
 CLOSE_DISCONNECT_TIMEOUT = 2.0
 # 停機時等播放迴圈停下最多幾秒：迴圈若正在斷線／重連，discord.py 會吞掉取消、繼續往下走
 CLOSE_LOOP_TIMEOUT = 1.0
+# 語音斷線後先讓 discord.py 自己重連：它一次重連最多 30 秒，過了這段還沒接回才由播放器接手。
+# 太早接手會砍掉它進行中的重連，又留下它的背景工作，30 秒後那份工作會把新連線踢出頻道
+RECONNECT_GRACE_SECONDS = 35.0
+# 等重連時多久看一次
+RECONNECT_POLL_SECONDS = 0.5
+# 同一首歌連續被斷線打斷幾次後放棄續播、換下一首
+MAX_RESUMES_PER_SONG = 3
+# 續播時倒退幾秒，接得自然一點
+RESUME_REWIND_SECONDS = 1.0
+
+# 看時間、睡覺都走這兩個名字，測試換成假時鐘
+_clock = time.monotonic
+_sleep = asyncio.sleep
 
 
 class MusicPlayer:
@@ -47,6 +68,9 @@ class MusicPlayer:
         self._task: asyncio.Task | None = None
         self._bg_tasks: set[asyncio.Task] = set()  # 追蹤背景下載 tasks
         self._replay = False  # 重播當前歌曲（不跳下一首）
+        self._resume: tuple[Song, float, bool] | None = None  # 被斷線打斷的歌：(歌, 從第幾秒接著播, 是不是插播)
+        self._resume_song_key: str | None = None  # 連續被打斷的是哪一首
+        self._resume_count = 0
         self._reloading = False  # 重載歌單中，避免重複觸發
         self._closing = False  # 停機中：不再開新的播放迴圈
         self._playlist_titles: dict[str, str] = {}  # 歌單 key → YouTube 標題（自動命名快取）
@@ -63,7 +87,12 @@ class MusicPlayer:
             return await self._ensure_voice_inner()
 
     async def _force_cleanup_guild_voice(self, guild):
-        """強制斷開並清理 guild 上的殘留 voice_client，含 disconnect 的硬 timeout"""
+        """強制斷開並清理 guild 上的殘留 voice_client，含 disconnect 的硬 timeout。
+
+        只在那條連線已經沒有 discord.py 自己的重連在跑時用（等過寬限期、或同一條連線重連失敗之後）：
+        重連進行中就強制 disconnect 的話，它的重連工作不會被取消，30 秒後會把後來建的新連線踢出頻道。
+        取消登記由 disconnect 裡的 cleanup 做，guild.voice_client 是從登記表讀的，不能直接改。
+        """
         self._reset_voice_client()
         existing = guild.voice_client
         if existing is not None:
@@ -72,10 +101,6 @@ class MusicPlayer:
                 await asyncio.wait_for(existing.disconnect(force=True), timeout=5)
             except (asyncio.TimeoutError, Exception):
                 pass
-        try:
-            guild._voice_client = None
-        except Exception:
-            pass
 
     async def _try_connect(self, channel) -> bool:
         """單次嘗試連線。用外層 wait_for 強制中斷 discord.py 不可靠的 timeout。
@@ -121,21 +146,28 @@ class MusicPlayer:
         # bot 固定在同一頻道，已連線就直接複用
         if self._has_active_voice():
             return True
-        if self.voice_client is not None:
-            logger.warning("[MusicPlayer] 偵測到失效的 voice_client，將重新建立連線")
-            self._reset_voice_client()
 
-        # guild 層級已有連線（gateway reconnect / voice server migration 後常見）
-        # 直接認領，不要嘗試重新 connect
-        existing_vc = guild.voice_client
-        if existing_vc is not None:
-            if existing_vc.is_connected() and getattr(existing_vc.channel, 'id', None) == channel.id:
-                logger.info("[MusicPlayer] 認領 guild 殘留語音連線（同頻道）")
-                self.voice_client = existing_vc
+        # discord.py 登記表上的連線（通常就是我們手上這條）。連著就認領；斷了多半是它正在自己重連，先等它、
+        # 等不到再在同一條連線上重連。只有登記表上沒有連線了，才建新的
+        existing = guild.voice_client
+        if existing is not None:
+            if existing.is_connected():
+                if getattr(existing.channel, 'id', None) == channel.id:
+                    logger.info("[MusicPlayer] 認領 guild 殘留語音連線（同頻道）")
+                    self.voice_client = existing
+                    return True
+            elif await self._wait_for_reconnect(existing, guild):
+                self.voice_client = existing
                 return True
+            elif guild.voice_client is existing and await self._reconnect_same_client(existing):
+                self.voice_client = existing
+                return True
+
+        self._reset_voice_client()
+        if guild.voice_client is not None:
             logger.info("[MusicPlayer] 清理 guild 殘留語音連線")
             await self._force_cleanup_guild_voice(guild)
-            await asyncio.sleep(3)
+            await _sleep(3)
 
         # 第一次嘗試
         if await self._try_connect(channel):
@@ -144,12 +176,63 @@ class MusicPlayer:
         # 失敗則強制清理 guild 狀態後再試一次（不等 _play_loop 5 秒）
         logger.info("[MusicPlayer] 第一次連線失敗，強制清理後立即重試")
         await self._force_cleanup_guild_voice(guild)
-        await asyncio.sleep(2)
+        await _sleep(2)
         if await self._try_connect(channel):
             return True
 
         logger.error("[MusicPlayer] 加入語音頻道失敗（兩次嘗試皆失敗）")
         return False
+
+    async def _wait_for_reconnect(self, voice, guild) -> bool:
+        """語音斷了但連線還在登記表上：discord.py 會自己重連，給它 RECONNECT_GRACE_SECONDS。
+
+        接回來回 True。它放棄的話會把連線從登記表拿掉，這時提早回 False，不白等。
+        """
+        started = _clock()
+        logger.info("[MusicPlayer] 語音連線斷了，等 discord.py 自己重連（最多 %d 秒）", RECONNECT_GRACE_SECONDS)
+        while True:
+            if voice.is_connected():
+                logger.info("[MusicPlayer] 語音已重連（等了 %.1f 秒）", _clock() - started)
+                return True
+            if guild.voice_client is not voice:
+                logger.warning("[MusicPlayer] discord.py 放棄重連（等了 %.1f 秒），改建新連線", _clock() - started)
+                return False
+            if _clock() - started >= RECONNECT_GRACE_SECONDS:
+                logger.warning("[MusicPlayer] 等了 %d 秒還沒接回，由播放器接手重連", RECONNECT_GRACE_SECONDS)
+                return False
+            await _sleep(RECONNECT_POLL_SECONDS)
+
+    async def _reconnect_same_client(self, voice) -> bool:
+        """在同一條連線上重連。
+
+        discord.py 的 connect 會先取消這條連線自己的重連工作再重新握手，不會留下殭屍；失敗時它會自己 disconnect
+        並取消登記，呼叫端接著建新連線就好。已取消登記的連線收不到語音事件，對它重連沒有用，所以呼叫端要先確認它還在登記表上。
+        """
+        try:
+            await asyncio.wait_for(voice.connect(reconnect=True, timeout=30, self_deaf=True),
+                                   timeout=RECONNECT_GRACE_SECONDS)
+        except asyncio.TimeoutError:
+            logger.warning("[MusicPlayer] 同一條連線重連逾時")
+            return False
+        except Exception as e:
+            logger.warning(f"[MusicPlayer] 同一條連線重連失敗: {e}")
+            return False
+        if voice.is_connected():
+            logger.info("[MusicPlayer] 同一條連線重連成功")
+            return True
+        logger.warning("[MusicPlayer] 同一條連線重連回來了但沒接上")
+        return False
+
+    def _may_resume(self, song: Song) -> bool:
+        """同一首連續被斷線打斷太多次就放棄續播，換下一首（避免某一首永遠播不完、一直重來）。"""
+        key = song.webpage_url or song.title
+        if self._resume_song_key != key:
+            self._resume_song_key, self._resume_count = key, 0
+        self._resume_count += 1
+        if self._resume_count > MAX_RESUMES_PER_SONG:
+            logger.warning(f"[MusicPlayer] 同一首連續被打斷超過 {MAX_RESUMES_PER_SONG} 次，放棄續播換下一首: {song.title}")
+            return False
+        return True
 
     def _track_task(self, coro) -> asyncio.Task:
         """建立背景 task 並自動追蹤，完成後從 set 移除"""
@@ -246,8 +329,15 @@ class MusicPlayer:
             if not await self.ensure_voice():
                 return
 
-            # 重播模式：沿用 current，不從佇列取下一首
-            if self._replay and self.queue.current:
+            resume, self._resume = self._resume, None
+            resume_offset = 0.0
+            if resume is not None:
+                # 上一輪被斷線打斷：同一首從斷掉的地方接著播，不從佇列取、不算播完
+                song, resume_offset, is_interrupt_song = resume
+                self.queue.current = song
+                logger.info(f"[MusicPlayer] 從第 {resume_offset:.0f} 秒接著播: {song.title}")
+            elif self._replay and self.queue.current:
+                # 重播模式：沿用 current，不從佇列取下一首
                 song = self.queue.current
                 is_interrupt_song = False
                 self._replay = False
@@ -257,8 +347,8 @@ class MusicPlayer:
                 song = self.queue.get_next()
                 self.queue.current = song
 
-            # 記錄當前播放位置（主歌單的歌才記錄，插播不記錄）
-            if not is_interrupt_song:
+            # 記錄當前播放位置（主歌單的歌才記錄，插播不記錄；續播的上一輪已記過）
+            if resume is None and not is_interrupt_song:
                 video_id_for_save = YTDLSource._extract_video_id(song.webpage_url)
                 if video_id_for_save:
                     self._save_last_position(video_id_for_save)
@@ -271,6 +361,8 @@ class MusicPlayer:
             # 音訊模式：pcm 或 opus（在歌單檔 music_playlists.json 的 audio_mode 切換）
             use_opus = self.config.audio_mode == 'opus'
             BUFFER_OPTS = '-thread_queue_size 4096 -fflags +genpts'
+            # 續播：ffmpeg 讀來源前先跳到斷掉的地方（-ss 放在 -i 之前，快取檔和串流都適用）
+            seek_opts = f'-ss {resume_offset:.1f} ' if resume_offset > 0 else ''
             # Discord voice 固定 48kHz stereo；opus frame_duration 20ms 最穩定
             OPUS_ENCODE = '-c:a libopus -b:a 192k -ar 48000 -ac 2 -frame_duration 20 -application audio'
 
@@ -288,7 +380,7 @@ class MusicPlayer:
                     opus_opts = f'-vn {volume_filter} {OPUS_ENCODE} -flush_packets 0 -f opus'.strip()
                     audio_source = discord.FFmpegOpusAudio(
                         cache_path,
-                        before_options=BUFFER_OPTS,
+                        before_options=seek_opts + BUFFER_OPTS,
                         options=opus_opts,
                         codec='copy',  # 告訴 discord.py 資料已是 opus，直接送出不再轉碼
                     )
@@ -296,7 +388,7 @@ class MusicPlayer:
                     pcm_opts = f'-vn -ar 48000 -ac 2 -f s16le {volume_filter}'.strip()
                     audio_source = discord.FFmpegPCMAudio(
                         cache_path,
-                        before_options=BUFFER_OPTS,
+                        before_options=seek_opts + BUFFER_OPTS,
                         options=pcm_opts,
                     )
             else:
@@ -327,70 +419,85 @@ class MusicPlayer:
                 if use_opus:
                     audio_source = discord.FFmpegOpusAudio(
                         stream_url,
-                        before_options=stream_before,
+                        before_options=seek_opts + stream_before,
                         options=f'-vn {OPUS_ENCODE} -f opus',
                         codec='copy',
                     )
                 else:
                     audio_source = discord.FFmpegPCMAudio(
                         stream_url,
-                        before_options=stream_before,
+                        before_options=seek_opts + stream_before,
                         options='-vn -ar 48000 -ac 2 -f s16le',
                     )
                 need_download = True
 
             # 播放並等待結束
             play_done = asyncio.Event()
+            voice = self.voice_client
+            outcome = {"connected": True}
 
             def after_callback(error):
                 if error:
                     logger.error(f"[MusicPlayer] 播放錯誤: {error}")
+                # 斷線把播放執行緒中止時 discord.py 不給錯誤，只能從「結束那一刻連線還在不在」分辨是播完還是被打斷
+                outcome["connected"] = voice.is_connected()
                 self.bot.loop.call_soon_threadsafe(play_done.set)
+
+            def put_back():
+                """沒播出去：續播的留到下一輪接著播，其他的排回佇列"""
+                if resume is not None:
+                    self._resume = resume
+                else:
+                    self.queue.requeue_song(song, is_interrupt_song)
+                    self.queue.current = None
 
             if not self._has_active_voice():
                 logger.warning("[MusicPlayer] 播放前偵測到 voice 已失效，重新排回歌曲並重連")
                 self._reset_voice_client()
-                self.queue.requeue_song(song, is_interrupt_song)
-                self.queue.current = None
+                put_back()
                 return
 
             # 防呆：voice 仍在播時直接呼叫 play() 會丟 ClientException: Already playing audio
             # （通常是上一輪 _play_next 因 announcer 503 等例外提早跳出，play_done 未等待）
             if self.voice_client.is_playing():
                 logger.warning("[MusicPlayer] voice_client 仍在播放，將歌曲排回稍後重試")
-                self.queue.requeue_song(song, is_interrupt_song)
-                self.queue.current = None
-                await asyncio.sleep(2)
+                put_back()
+                await _sleep(2)
                 return
 
+            started_at = _clock()
             try:
                 self.voice_client.play(audio_source, after=after_callback, bitrate=192)
             except discord.ClientException as e:
                 logger.warning(f"[MusicPlayer] play() 時 voice 已失效，歌曲將回佇列重試: {e}")
                 self._reset_voice_client()
-                self.queue.requeue_song(song, is_interrupt_song)
-                self.queue.current = None
+                put_back()
                 return
 
-            # play() 已成功送出，loop 模式將歌曲循環回主歌單尾端
-            self.queue.mark_played(song, is_interrupt_song)
+            if resume is None:
+                # play() 已成功送出，loop 模式將歌曲循環回主歌單尾端（續播的上一輪已經記過）
+                self.queue.mark_played(song, is_interrupt_song)
 
-            # 通知「現在播放」面板（Discord HTTP 暫時性錯誤不應炸到播放迴圈）
-            if self.announcer:
-                try:
-                    await self.announcer.send_now_playing(song)
-                except Exception as e:
-                    logger.warning(f"[MusicPlayer] 發送現在播放面板失敗（不影響播放）: {e}")
+                # 通知「現在播放」面板（Discord HTTP 暫時性錯誤不應炸到播放迴圈）；續播不重發，面板上還是這一首
+                if self.announcer:
+                    try:
+                        await self.announcer.send_now_playing(song)
+                    except Exception as e:
+                        logger.warning(f"[MusicPlayer] 發送現在播放面板失敗（不影響播放）: {e}")
 
-            # 背景下載當前歌曲 + 預先快取下一首
-            if need_download and song.webpage_url:
-                self._track_task(YTDLSource.download_to_cache(song.webpage_url))
-            self._track_task(self._prefetch_next())
+                # 背景下載當前歌曲 + 預先快取下一首
+                if need_download and song.webpage_url:
+                    self._track_task(YTDLSource.download_to_cache(song.webpage_url))
+                self._track_task(self._prefetch_next())
 
             await play_done.wait()
-            if not self._replay:
+            if not outcome["connected"] and self._may_resume(song):
+                position = max(0.0, resume_offset + (_clock() - started_at) - RESUME_REWIND_SECONDS)
+                self._resume = (song, position, is_interrupt_song)
+                logger.warning(f"[MusicPlayer] 播放被語音斷線打斷，重連後從第 {position:.0f} 秒接著播: {song.title}")
+            elif not self._replay:
                 self.queue.current = None
-            await asyncio.sleep(0.5)
+            await _sleep(0.5)
 
     async def _fetch_playlist_songs(self, url: str) -> list[Song]:
         """解析歌單 URL，回傳 Song 清單（純抓取，不動佇列）。順便快取歌單標題供自動命名。"""
