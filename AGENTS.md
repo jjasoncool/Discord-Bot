@@ -94,6 +94,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 沒描述的表情／貼圖讓 AI 看圖補字典 | `llm.preprocess.emoji_autofill.observe`（`on_message` 呼叫；設定 `EmojiAutofillSettings`） |
 | 別的伺服器的表情／貼圖給 AI 看圖 | `llm.preprocess.external_emoji.external_emoji_context` |
 | 被點名罵時的應對（模型判斷、按嘲諷表情）；最近罵過它的人 | `llm.ambient.ambient_insult`（模型在插話 prompt 裡輸出 `[INSULT]`；`is_marker`、`respond`、`grudges`；開關 `ambient_insult_mode`） |
+| bot 與 telegram-scraper 都要用的定義（頻道識別正規化、媒體補圖時限） | `shared.telegram`（`src/shared/` 由 compose 唯讀掛進爬蟲容器；只能依賴標準庫） |
 | Telegram 爬蟲下載媒體 | `telegram_scraper.media_download.download_with_stall_guard`（太久沒進度就取消；時限常數：補掃重試與補發通知 `MEDIA_RETRY_WINDOW`、新訊息圖沒到先不通知 `MEDIA_HOLD_NOTIFY`） |
 | 下載網址上的圖給 vision 模型 | `llm.preprocess.vision_image.download_images`（失敗跳過、限張數與大小） |
 | 本機的圖與影片給 vision 模型（縮圖、動圖與影片挑幀） | `llm.preprocess.vision_image.fit_for_vision`（縮到長邊上限、轉 JPEG）、`extract_key_frames`（動圖）、`video_key_frames`（影片）；挑幀規則只有 `select_key_frames` 一份 |

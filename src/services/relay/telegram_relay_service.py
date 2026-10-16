@@ -31,8 +31,7 @@ from urllib.parse import quote_plus
 import asyncpg
 import discord
 from services.relay.telegram_filter import MediaFile, Verdict, media_kind
-from telegram_scraper.media_download import MEDIA_HOLD_NOTIFY, MEDIA_RETRY_WINDOW
-from telegram_scraper.tg_config import normalize_channel_identifier
+from shared.telegram import MEDIA_HOLD_NOTIFY, MEDIA_RETRY_WINDOW, normalize_channel_identifier
 from utils.discord_content import split_message
 from utils.discord_threads import fetch_thread, reopen_thread
 from utils.media_probe import probe_duration

@@ -10,15 +10,8 @@ from urllib.parse import quote_plus
 logger = logging.getLogger(__name__)
 
 
-def normalize_channel_identifier(value: str) -> str:
-    """把頻道識別值正規化為 Telethon 可用格式。"""
-    value = value.strip()
-    value = value.replace("https://t.me/s/", "")
-    value = value.replace("https://t.me/", "")
-    value = value.strip("/")
-    if value.startswith("@"):
-        value = value[1:]
-    return value
+# 和 bot 共用的定義，由 compose 把 src/shared 唯讀掛進 /opt/pylib（PYTHONPATH）；這裡 import 進來給其他模組沿用
+from shared.telegram import normalize_channel_identifier  # noqa: F401
 
 
 def _load_required_env(name: str) -> str:

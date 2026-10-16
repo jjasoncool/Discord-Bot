@@ -128,11 +128,17 @@ services:
       - type: bind
         source: ./src/telegram_scraper
         target: /app
+      # 和 bot 共用的定義（頻道正規化、補圖時限）；只掛這一小包，不讓爬蟲看到 bot 其他程式
+      - type: bind
+        source: ./src/shared
+        target: /opt/pylib/shared
+        read_only: true
       - type: bind
         source: ./logs
         target: /logs
     environment:
       - TZ=Asia/Taipei
+      - PYTHONPATH=/opt/pylib
       - TELEGRAM_API_ID=${TELEGRAM_API_ID:?TELEGRAM_API_ID_required}
       - TELEGRAM_API_HASH=${TELEGRAM_API_HASH:?TELEGRAM_API_HASH_required}
       - TELEGRAM_PG_NOTIFY_CHANNEL=${TELEGRAM_PG_NOTIFY_CHANNEL:-telegram_new_message}

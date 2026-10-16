@@ -69,15 +69,12 @@ LAYERS = [
     # ── 介面與基礎 ──
     ("commands", INTERFACE), ("discord_bot", INTERFACE), ("music", INTERFACE),
     ("constants", BASE), ("sys_settings", BASE), ("utils", BASE), ("settings", BASE),
+    ("shared", BASE),                               # 和爬蟲容器共用的定義；只能依賴標準庫
 ]
 
-#: 跨容器的 import：bot 直接用另一個容器的程式。每條都要寫理由與去向。
-CROSS_CONTAINER_ALLOWED = {
-    # 轉發端要和爬蟲用同一組媒體時限常數、同一個頻道名稱正規化；把共用的抽進 utils/ 後清掉
-    ("services.relay.telegram_relay_service", "telegram_scraper.media_download"),
-    ("services.relay.telegram_relay_service", "telegram_scraper.tg_config"),
-    ("settings.channel_registry", "telegram_scraper.tg_config"),
-}
+#: 跨容器的 import：bot 直接用另一個容器的程式。每條都要寫理由與去向；目前沒有：
+#: 轉發端與爬蟲共用的頻道正規化與媒體時限在 `shared/telegram.py`，compose 把它唯讀掛進爬蟲容器，兩邊 import 同一份。
+CROSS_CONTAINER_ALLOWED: set[tuple[str, str]] = set()
 OTHER_CONTAINERS = ("scraper", "telegram_scraper")
 #: 不在 bot 行程裡執行、或不是 bot 程式的資料夾
 SKIP_DIRS = {"test", "scripts", "scraper", "telegram_scraper", "__pycache__"}

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -20,15 +19,9 @@ logger = logging.getLogger(__name__)
 #: 只是延到下一輪補掃再試。
 MEDIA_STALL_TIMEOUT_SEC = 180
 
-#: 下載失敗後，補掃重試到「發文時間＋這段時間」為止；圖在這段時間內補到才通知轉發端。
-#: 跟轉發端的相簿補圖時限（discord-bot `telegram_relay_service._GROUP_FOLLOWUP_MAX_AGE`）一致：
-#: 超過之後轉發端本來就不補送，再試也不會出現在 Discord。兩個容器不能互相 import，改一邊要記得改另一邊。
-MEDIA_RETRY_WINDOW = timedelta(hours=12)
+# 補圖時限和 bot 共用一份（src/shared 由 compose 唯讀掛進 /opt/pylib）；這裡 import 進來給 handlers、runner 沿用
+from shared.telegram import MEDIA_HOLD_NOTIFY, MEDIA_RETRY_WINDOW  # noqa: F401
 
-#: 新訊息的圖第一次下載失敗時，先不通知轉發端，等補掃補到圖再通知（文字和圖一起送成一則）；
-#: 發文超過這段時間還沒補到，才通知一次讓文字先送。定「等 30 分鐘」：
-#: 轉發端的單則不等圖，下載失敗就通知會變成文字先送、之後補到的圖再也送不出去。
-MEDIA_HOLD_NOTIFY = timedelta(minutes=30)
 
 
 class MediaDownloadStalled(TimeoutError):

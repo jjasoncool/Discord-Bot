@@ -23,7 +23,7 @@ from typing import Any, Awaitable, Callable, Optional
 import discord
 
 from utils.utils import ChannelConfig, ConfigWriteError, safe_send_interaction_message
-from telegram_scraper.tg_config import normalize_channel_identifier
+from shared.telegram import normalize_channel_identifier
 
 logger = logging.getLogger(__name__)
 
