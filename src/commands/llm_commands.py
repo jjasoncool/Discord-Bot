@@ -903,6 +903,7 @@ class LLMCommands(commands.Cog):
                 trace_id=inputs.trace_id,
                 tool_runner=tool_runner,
                 max_tool_rounds=INTEL_SETTINGS.max_tool_rounds,
+                max_tokens=ASKAI_SETTINGS.answer_max_tokens,
             )
 
         # 網路搜尋的工具模式：和情報工具合成一組交給模型（輪數兩邊共用 INTEL_SETTINGS 的值）

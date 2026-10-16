@@ -201,6 +201,9 @@ class AskAICommandSettings(BaseSettings):
     max_context_to_send: int = 50
     min_recent_context: int = 25
     max_relevant_context: int = 25
+    #: 一題回答最多產出幾個 token（含思考）。沒上限時一題寫不停會拿著顯示卡寫到逾時（實測 6,000～8,600 個 token 沒寫完）；
+    #: 以常見的生成速度，這個值能在逾時前寫完
+    answer_max_tokens: int = 4096
 
     discord_context_begin: str = "<context:discord_chat_begin>"
     discord_context_end: str = "</context:discord_chat_end>"

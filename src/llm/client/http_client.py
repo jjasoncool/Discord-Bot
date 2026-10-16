@@ -219,6 +219,9 @@ class LlmHttpClient:
 
         `extra_body` 與 OpenAI SDK 同義：top-level 合併到 request body，
         後端不解析的欄位由後端決定忽略 / 報錯（建議搭配 backend profile 用）。
+
+        等回應的逾時不重試：對話請求等到逾時，代表模型還在寫（或後端卡住），不是連線抖動；
+        再送兩次只會讓同一題拿著顯示卡寫三遍（實測一題卡了 12 分半）。連不上（連線階段逾時）、連線錯誤與 5xx 照樣重試。
         """
         body: dict[str, Any] = {
             "model": model,
@@ -231,7 +234,7 @@ class LlmHttpClient:
             body["top_p"] = top_p
         if extra_body:
             body.update(extra_body)
-        return await self._apost_json("/chat/completions", body, timeout=timeout)
+        return await self._apost_json("/chat/completions", body, timeout=timeout, retry_on_read_timeout=False)
 
     # ---------- embedding ----------
 
@@ -535,6 +538,7 @@ class LlmHttpClient:
         body: dict[str, Any],
         *,
         timeout: float | None = None,
+        retry_on_read_timeout: bool = True,
     ) -> dict[str, Any]:
         eff_timeout = timeout if timeout is not None else self._timeout
         for attempt in range(self._max_retries + 1):
@@ -563,7 +567,9 @@ class LlmHttpClient:
                     ) from exc
                 await asyncio.sleep(_backoff_delay(attempt))
             except httpx.TimeoutException as exc:
-                if attempt >= self._max_retries:
+                # 連線階段的逾時（ConnectTimeout）是網路問題，照舊重試；等回應的逾時由呼叫端決定要不要
+                waited_for_reply = isinstance(exc, httpx.ReadTimeout)
+                if (waited_for_reply and not retry_on_read_timeout) or attempt >= self._max_retries:
                     raise LlmTimeoutError(f"POST {path} timed out") from exc
                 await asyncio.sleep(_backoff_delay(attempt))
             except httpx.RequestError as exc:

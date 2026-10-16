@@ -94,7 +94,7 @@ class GenerateReplyToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.reply, "正式回答")
         (only,) = self.model_calls                                     # 不查就只問一次
         self.assertEqual(only["think"], True)
-        self.assertNotIn("max_tokens", only)
+        self.assertIsNone(only.get("max_tokens"), "沒給上限就不限長度")
         self.assertEqual(only["messages"], BUNDLE.messages)
         self.assertEqual(runner.executed, [])
         self.assertEqual(result.prompt_record_log, "PROMPT")
@@ -241,6 +241,32 @@ class GenerateReplyToolTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.error_kind, "timeout")
         self.assertTrue(result.reply.startswith("⚠️"))
+
+
+class AnswerLengthCapTests(GenerateReplyToolTests):
+    """回答長度上限（max_tokens）要一路帶到每一次模型呼叫：帶工具的每一輪、改用一般呼叫時都一樣；沒給就不送。"""
+
+    async def test_max_tokens_reaches_every_model_call(self):
+        runner = FakeRunner()
+        self.replies = [wants(call("c1")), says("查完了：兩週重置")]
+        with mock.patch("services.llm_service.build_prompt_bundle", return_value=BUNDLE):
+            await self.svc.generate_reply(prompt="深塔多久重置？", tool_runner=runner, max_tokens=4096)
+        self.assertEqual([4096, 4096], [c["max_tokens"] for c in self.model_calls])
+
+    async def test_plain_answer_carries_the_cap_and_no_cap_means_unlimited(self):
+        with mock.patch("services.llm_service.build_prompt_bundle", return_value=BUNDLE):
+            await self.svc.generate_reply(prompt="深塔多久重置？", max_tokens=4096)
+            self.assertEqual(4096, self.svc.chat_raw.await_args.kwargs["max_tokens"])
+            await self.svc.generate_reply(prompt="深塔多久重置？")
+            self.assertIsNone(self.svc.chat_raw.await_args.kwargs["max_tokens"])
+
+
+class LengthErrorMessageTests(GenerateReplyToolTests):
+    async def test_length_error_becomes_a_message_about_splitting_the_question(self):
+        self.svc.chat_raw = mock.AsyncMock(side_effect=LLMAPIError("回答超過長度上限，沒有產出內容", kind="length"))
+        result = await self.svc.generate_reply(prompt="深塔多久重置？", max_tokens=100)
+        self.assertEqual("length", result.error_kind)
+        self.assertIn("拆小", result.reply)
 
 
 if __name__ == "__main__":

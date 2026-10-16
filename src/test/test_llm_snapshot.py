@@ -199,5 +199,32 @@ class SnapshotOnFailureTests(unittest.TestCase):
         self.assertTrue(any("snapshot failed trace=t6" in m for m in msgs), msgs)
 
 
+class TruncatedAnswerTests(unittest.TestCase):
+    """回答撞到長度上限（finish_reason=length）：有給上限的呼叫在結尾加說明、沒給上限的內容不動、沒內容就回看得懂的錯誤。"""
+
+    @staticmethod
+    def _completion(content):
+        return {"choices": [{"message": {"content": content}, "finish_reason": "length"}], "usage": {"completion_tokens": 100}}
+
+    def test_capped_call_gets_a_note_and_a_warning(self):
+        svc = _make_service()
+        svc._client.chat_completion.return_value = self._completion("寫到一半")
+        with self.assertLogs(llm_service_module.logger, "WARNING"):
+            reply = asyncio.run(svc.chat_raw(model="m", messages=[], max_tokens=100, trace_id="t"))
+        self.assertEqual("寫到一半\n" + llm_service_module.TRUNCATED_NOTE, reply)
+
+    def test_uncapped_call_content_is_untouched(self):
+        svc = _make_service()
+        svc._client.chat_completion.return_value = self._completion('{"json": "照原樣"}')
+        self.assertEqual('{"json": "照原樣"}', asyncio.run(svc.chat_raw(model="m", messages=[], trace_id="t")))
+
+    def test_empty_content_at_the_cap_is_a_length_error(self):
+        svc = _make_service()
+        svc._client.chat_completion.return_value = self._completion("")
+        with self.assertRaises(llm_service_module.LLMAPIError) as caught:
+            asyncio.run(svc.chat_raw(model="m", messages=[], max_tokens=100, trace_id="t"))
+        self.assertEqual("length", caught.exception.kind)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -211,6 +211,12 @@ class AskaiFlowTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(stack.close)
         return h
 
+    async def test_answer_length_cap_is_sent_with_the_request(self):
+        """一題寫不停會拿著顯示卡寫到逾時：/askai 每次請求都帶回答長度上限（設定值）。"""
+        h = await self._harness().run(question="深塔多久重置", cancel_event=asyncio.Event())
+        self.assertGreater(lc.ASKAI_SETTINGS.answer_max_tokens, 0)
+        self.assertEqual(lc.ASKAI_SETTINGS.answer_max_tokens, h.prompt["max_tokens"])
+
     async def test_prompt_is_assembled_from_the_three_contexts(self):
         h = await self._harness().run(question="<@2222> 是誰", cancel_event=asyncio.Event())
         p = h.prompt

@@ -184,6 +184,10 @@ class ChatMessageResult:
         return bool(self.tool_calls)
 
 
+#: 有給長度上限的回答撞到上限時，接在結尾的說明（給看回答的人）
+TRUNCATED_NOTE = "（回答到長度上限被截斷）"
+
+
 @dataclass(frozen=True)
 class GenerateReplyResult:
     """generate_reply 結果。失敗時 reply 是友善字串、error_kind 標記類型。
@@ -472,8 +476,12 @@ class LLMService:
         timeout: Optional[int] = None,
         keep_alive: Optional[str] = None,
         trace_id: Optional[str] = None,
+        max_tokens: Optional[int] = None,
     ) -> str:
         """底層 /v1/chat/completions：caller 自組 messages，回傳 assistant content。
+
+        `max_tokens`：這次回答最多產出幾個 token（含思考），沒給就不限。/askai 給一個上限，
+        一題寫不停時不會拿著顯示卡寫到逾時。
 
         與 `generate_reply` 的分工：
         - `chat_raw` 只負責 HTTP、payload 組裝與錯誤分類（raise 例外）
@@ -510,6 +518,8 @@ class LLMService:
             num_ctx=num_ctx,
             keep_alive=keep_alive,
         )
+        if max_tokens is not None:
+            extra_body["max_tokens"] = max_tokens
 
         trace_label = trace_id or "-"
         choice, completion = await self._chat_completion_checked(
@@ -524,8 +534,15 @@ class LLMService:
 
         message = choice.get("message") or {}
         content = message.get("content")
+        truncated = choice.get("finish_reason") == "length"
         if content:
+            if truncated and max_tokens is not None:
+                # 呼叫端自己給了上限（/askai），撞到就讓看的人知道結尾不是寫完的；沒給上限的呼叫端拿到的內容不動
+                return content.rstrip() + "\n" + TRUNCATED_NOTE
             return content
+        if truncated:
+            raise LLMAPIError("回答超過長度上限，沒有產出內容", kind="length",
+                              detail=str({"trace": trace_label, "usage": completion.get("usage")}))
 
         # 空 content：完整 raw response 寫進 anomaly log（不污染主 log）
         anomaly_logger.error(
@@ -615,6 +632,9 @@ class LLMService:
             )
 
         log_llm_usage(trace_label, model, completion)
+        if choices[0].get("finish_reason") == "length":
+            logger.warning("LLM 回答撞到長度上限被截斷 trace=%s model=%s max_tokens=%s usage=%s",
+                           trace_label, model, extra_body.get("max_tokens"), completion.get("usage"))
         return choices[0], completion
 
     async def chat_with_tools(
@@ -631,6 +651,7 @@ class LLMService:
         timeout: Optional[int] = None,
         keep_alive: Optional[str] = None,
         trace_id: Optional[str] = None,
+        max_tokens: Optional[int] = None,
     ) -> ChatMessageResult:
         """tool-calling 版的底層呼叫：回傳完整 assistant message 而非 content 字串。
 
@@ -669,6 +690,8 @@ class LLMService:
             extra_body["tools"] = tools
         if response_format:
             extra_body["response_format"] = response_format
+        if max_tokens is not None:
+            extra_body["max_tokens"] = max_tokens
 
         trace_label = trace_id or "-"
         choice, completion = await self._chat_completion_checked(
@@ -764,6 +787,7 @@ class LLMService:
         keep_alive: Optional[str],
         trace_id: Optional[str],
         max_tool_rounds: int,
+        max_tokens: Optional[int] = None,
     ) -> str:
         """讓模型自己決定要不要先用工具查，再回答。回傳回答；送出的 messages 與工具呼叫紀錄**邊做邊寫進**
         `progress`／`transcript`（呼叫端給的空 list）——中途失敗時，錯誤紀錄才看得到已經查了什麼。
@@ -786,7 +810,7 @@ class LLMService:
         answered_once = False
         nudged = False
         common = dict(model=model, temperature=temperature, top_p=top_p, num_ctx=num_ctx, timeout=timeout,
-                      keep_alive=keep_alive, trace_id=trace_id)
+                      keep_alive=keep_alive, trace_id=trace_id, max_tokens=max_tokens)
         while True:
             try:
                 result = await self.chat_with_tools(messages=messages, tools=runner.tools, think=think, **common)
@@ -846,6 +870,7 @@ class LLMService:
         trace_id: Optional[str] = None,
         tool_runner: Optional[ToolRunner] = None,
         max_tool_rounds: int = 2,
+        max_tokens: Optional[int] = None,
     ) -> "GenerateReplyResult":
         """/askai 專用：組 prompt bundle → 呼叫 `chat_raw` → 回 GenerateReplyResult。
 
@@ -901,6 +926,7 @@ class LLMService:
                     messages, tool_runner, progress=progress, transcript=transcript_so_far, model=target_model,
                     think=target_think, temperature=temperature, top_p=top_p, num_ctx=num_ctx, timeout=timeout,
                     keep_alive=keep_alive, trace_id=trace_id, max_tool_rounds=max_tool_rounds,
+                    max_tokens=max_tokens,
                 )
                 return text, list(progress), list(transcript_so_far)
             text = await self.chat_raw(
@@ -913,6 +939,7 @@ class LLMService:
                 num_ctx=num_ctx,
                 timeout=timeout,
                 keep_alive=keep_alive,
+                max_tokens=max_tokens,
                 trace_id=trace_id,
             )
             return text, list(messages), []
@@ -957,6 +984,14 @@ class LLMService:
                     prompt_record_log=record_log(transcript_so_far),
                     messages_sent=list(progress) or list(bundle.messages),
                     error_kind="http_error",
+                )
+            if exc.kind == "length":
+                logger.warning("LLM 回答超過長度上限且沒有內容 trace=%s detail=%s", trace_label, exc.detail)
+                return GenerateReplyResult(
+                    reply="⚠️ 這題回答太長寫不完，請把問題拆小一點再問。",
+                    prompt_record_log=record_log(transcript_so_far),
+                    messages_sent=list(progress) or list(bundle.messages),
+                    error_kind="length",
                 )
             # raise 端帶 kind，未帶時退回 unknown_format（理論上不會走到，留個安全網）
             kind = exc.kind or "unknown_format"
