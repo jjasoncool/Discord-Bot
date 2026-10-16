@@ -113,6 +113,8 @@ services:
       - TZ=Asia/Taipei
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - DATABASE_URL=${DATABASE_URL:-sqlite:///./articles.db}
+      # 打 bot 通知伺服器時帶的共用密鑰，和 bot 同一個值（bot 從 env_file 拿）；沒設兩邊都不驗
+      - NOTIFY_SHARED_SECRET=${NOTIFY_SHARED_SECRET:-}
     networks:
       - discord-net
 

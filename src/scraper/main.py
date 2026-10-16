@@ -158,8 +158,9 @@ DISCORD_BOT_NOTIFY_URL = "http://discord-bot:5000"
 def _notify_discord_bot(source: str, payload: dict = None):
     """通知 Discord Bot 有新資料可處理。失敗只 log，不阻斷排程。"""
     try:
+        from config import notify_headers
         url = f"{DISCORD_BOT_NOTIFY_URL}/notify/{source}"
-        resp = requests.post(url, json=payload or {}, timeout=10)
+        resp = requests.post(url, json=payload or {}, headers=notify_headers(), timeout=10)
         logger.info("已通知 Discord Bot: %s status=%s", url, resp.status_code)
     except Exception as e:
         logger.warning("通知 Discord Bot 失敗（不影響排程）: %s", e)

@@ -7,8 +7,10 @@
 endpoint：
 - GET  /health             — 健康檢查
 - POST /notify/{source}    — 通用通知入口（bahamut / ptt / fb / ...）
+  有設共用密鑰（環境變數 NOTIFY_SHARED_SECRET）時，要帶 header X-Notify-Secret，不符回 401；沒設就不驗、啟動時警告一次。
 """
 import asyncio
+import hmac
 import logging
 from functools import partial
 from aiohttp import web
@@ -17,6 +19,7 @@ from typing import Callable, Coroutine, Dict, Optional
 from utils.logger_config import get_article_monitor_logger
 from utils.utils import ChannelConfig
 from utils.background_tasks import spawn
+from sys_settings.notify_settings import NotifyServerSettings
 
 logger = get_article_monitor_logger()
 
@@ -43,11 +46,16 @@ _RELAY_SOURCES: Dict[str, dict] = {
 }
 
 
+#: 爬蟲打通知時帶密鑰的 header
+SECRET_HEADER = "X-Notify-Secret"
+
+
 class NotifyServer:
     """輕量 HTTP 通知伺服器。"""
 
-    def __init__(self, bot):
+    def __init__(self, bot, settings: Optional[NotifyServerSettings] = None):
         self.bot = bot
+        self.settings = settings or NotifyServerSettings()
         self._runner: Optional[web.AppRunner] = None
         self._app = web.Application()
         # 來源 → 處理函式 的分派表
@@ -71,6 +79,18 @@ class NotifyServer:
         site = web.TCPSite(self._runner, "0.0.0.0", port)
         await site.start()
         logger.info("Notify server 已啟動: port=%s, 支援來源=%s", port, list(self._handlers.keys()))
+        self._warn_if_unprotected()
+
+    def _warn_if_unprotected(self) -> None:
+        if not self.settings.shared_secret:
+            logger.warning("Notify server 沒設共用密鑰（NOTIFY_SHARED_SECRET）：內網裡任何程式都能觸發通知")
+
+    def _authorized(self, request: web.Request) -> bool:
+        """有設密鑰才驗；比對用常數時間，不讓比對時間洩漏前幾個字元對不對。"""
+        secret = self.settings.shared_secret
+        if not secret:
+            return True
+        return hmac.compare_digest(request.headers.get(SECRET_HEADER, ""), secret)
 
     async def stop(self) -> None:
         if self._runner:
@@ -85,6 +105,10 @@ class NotifyServer:
     async def _handle_notify(self, request: web.Request) -> web.Response:
         """通用通知入口：依 path parameter {source} 分派到對應處理函式。"""
         source = request.match_info.get("source", "")
+
+        if not self._authorized(request):
+            logger.warning("拒絕通知：密鑰不符 source=%s remote=%s", source, request.remote)
+            return web.json_response({"status": "error", "message": "密鑰不符"}, status=401)
 
         if source not in self._handlers:
             return web.json_response(

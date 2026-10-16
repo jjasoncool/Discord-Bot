@@ -25,7 +25,7 @@ SCRAPER_ROOT = os.path.dirname(os.path.dirname(__file__))
 if SCRAPER_ROOT not in sys.path:
     sys.path.insert(0, SCRAPER_ROOT)
 
-from config import BAHAMUT_CONFIG
+from config import BAHAMUT_CONFIG, notify_headers
 from utils.logger import get_logger
 from utils.request_utils import human_sleep
 from services.base_scraper_client import BaseScraperClient
@@ -1524,7 +1524,7 @@ def main():
             payload = {"board_id": BAHAMUT_CONFIG.get("target_board_url", "").split("bsn=")[-1].split("&")[0] or "74934"}
             if target_sn_a:
                 payload["post_id"] = target_sn_a
-            curl_req.post("http://discord-bot:5000/notify/bahamut", json=payload, timeout=10)
+            curl_req.post("http://discord-bot:5000/notify/bahamut", json=payload, headers=notify_headers(), timeout=10)
             logger.info("已通知 Discord Bot: %s", payload)
         except Exception as e:
             logger.warning("通知 Discord Bot 失敗（不影響結果）: %s", e)

@@ -89,3 +89,9 @@ LOGGER_LEVELS = {
     "ptt_scraper": "INFO",
     "hkepc_scraper": "INFO",
 }
+
+
+def notify_headers() -> dict:
+    """打 bot 通知伺服器要帶的 header：共用密鑰來自環境變數 NOTIFY_SHARED_SECRET（和 bot 同一個值）；沒設就不帶。"""
+    secret = os.getenv("NOTIFY_SHARED_SECRET", "").strip()
+    return {"X-Notify-Secret": secret} if secret else {}
