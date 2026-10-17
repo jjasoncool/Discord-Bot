@@ -15,6 +15,8 @@
      （改文變長時新續文在串尾）。連結算進 hash，同一份資料再來一輪不會被判定有變；
      建立當下補連結失敗就記沒連結的版本、下一輪補；套用前建的長文只補一次；改回短的就拿掉。
   6. 封存的討論串不去編（一定被拒），等有新回覆時先解除封存再一起補上；更新時新增的回覆編號接續正確。
+  7. 討論串一開好就記下：之後補圖、留言格出錯，同一篇下一輪走增量更新，不再開第二串
+     （曾有一篇文因 Discord 回 500 每小時開一串、連開五天）；補圖失敗不擋留言格與回覆。
 
 Discord 以假物件取代；StateDB 用暫存目錄裡的新檔案，不碰正式資料。
 """
@@ -578,6 +580,61 @@ class ContinuationTests(_Base):
         await self.relay(data)
 
         self.assert_nav_chain(self.continuations(2))
+
+
+class ThreadOpenedButNotFinishedTests(_Base):
+    """開串之後補圖、留言格出錯：這串已經記下，不會再開一串。"""
+
+    async def test_failure_after_the_thread_opened_does_not_open_another(self):
+        data = _thread_data("1", _post("1", content=_long_content(), comments=[_comment("1")]), [])
+        with mock.patch.object(self.monitor, "_send_post_comments", side_effect=RuntimeError("500 Internal Server Error")):
+            self.assertIsNone(await self.relay(data))
+        self.assertEqual(1, len(self.forum.created))
+        thread = self.forum.created[0]
+        self.assertTrue(await self.db.is_content_sent("bahamut", "bahamut:74934:1"), "開了串就要記下")
+        sent_before = len(thread.messages)        # 主文＋續文
+
+        state = await self.relay(data)  # 下一輪：同一篇走增量更新，把缺的補上
+        self.assertEqual(1, len(self.forum.created), "同一篇不再開第二串")
+        self.assertIsNotNone(state)
+        slots = state["posts"]["1"]["comment_slots"]
+        self.assertTrue(slots, "留言格補建了")
+        self.assertEqual(len(thread.messages), sent_before + len(slots), "續文沒有重發一遍")
+
+    async def test_continuation_failing_midway_is_completed_next_round(self):
+        data = _thread_data("1", _post("1", content=_long_content()), [])
+        failed = []
+        real_send = _Thread.send
+
+        async def flaky_send(thread, *args, **kwargs):
+            if len(thread.messages) == 2 and not failed:   # 主文、第一則續文送出後，第二則送失敗（只失敗這一次）
+                failed.append(True)
+                raise RuntimeError("500 Internal Server Error")
+            return await real_send(thread, *args, **kwargs)
+
+        with mock.patch.object(_Thread, "send", flaky_send):
+            first = await self.relay(data)
+        self.assertIsNotNone(first)
+        thread = self.forum.created[0]
+        conts_after_first = len(first["posts"]["1"]["continuation_msg_ids"])
+        self.assertEqual(1, conts_after_first, "送到一半失敗，先記已送出的")
+
+        second = await self.relay(data)
+        self.assertEqual(1, len(self.forum.created))
+        conts = second["posts"]["1"]["continuation_msg_ids"]
+        self.assertGreater(len(conts), conts_after_first, "缺的續文下一輪補上")
+        self.assertEqual(len(thread.messages), 1 + len(conts) + len(second["posts"]["1"]["comment_slots"]),
+                         "沒有重發已經送出的續文")
+
+    async def test_main_images_failing_does_not_stop_the_rest(self):
+        data = _thread_data("1", _post("1", comments=[_comment("1")]), [_post("2")])
+        # 主文那次補圖失敗，回覆那次正常（回覆的補圖本來就各自接住）
+        with mock.patch.object(self.monitor, "_send_post_images", side_effect=[RuntimeError("413 Payload Too Large"), None]):
+            state = await self.relay(data)
+        self.assertIsNotNone(state)
+        self.assertEqual(1, len(self.forum.created))
+        self.assertTrue(state["posts"]["1"].get("comment_slots"), "補圖失敗，留言格照建")
+        self.assertIn("2", state["posts"], "補圖失敗，回覆照發")
 
 
 if __name__ == "__main__":

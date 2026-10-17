@@ -489,23 +489,39 @@ class BahamutMonitor(BaseContentMonitor):
                 board_id, post_id, thread_title, thread.id,
             )
 
-            # 追蹤狀態
+            starter_message = created.message if hasattr(created, "message") else None
+            main_sn = main_post.get("sn", "")
+            # 串一開好就先記下（含主文訊息）：接下來的續文、補圖、留言格任一步出錯，下一輪才會走
+            # 增量更新把缺的補上，而不是再開一串（曾有一篇文每小時開一串、連開五天）
             state = {
                 "thread_id": thread.id,
-                "posts": {},
+                "posts": {
+                    main_sn: {
+                        "msg_id": starter_message.id if starter_message else thread.id,
+                        "content_hash": content_hash(main_embed.description or ""),
+                        "continuation_msg_ids": [],
+                    },
+                },
             }
             db = await self._get_state_db()
+            await db.save_bahamut_thread(board_id, post_id, state)
 
             # 2. 發送主文續文
-            starter_message = created.message if hasattr(created, "message") else None
             main_cont_ids = await self._send_continuations(thread, main_cont_chunks, main_embed.color.value if main_embed.color else COLOR_MAIN_POST, starter_message or thread)
             main_desc = await self._link_post_to_continuations(thread, starter_message, main_embed, main_cont_chunks, main_cont_ids)
+            if main_cont_ids:
+                # 續文發完就記下 id 與連結後的 hash：之後出錯，下一輪才不會把續文整串重發一遍
+                state["posts"][main_sn].update(content_hash=content_hash(main_desc), continuation_msg_ids=main_cont_ids)
+                await db.save_bahamut_thread(board_id, post_id, state)
 
-            # 3. 發送主文額外圖片（第 2 張起）
-            await self._send_post_images(thread, main_post)
+            # 3. 發送主文額外圖片（第 2 張起）。圖太大、Discord 暫時出錯都不該讓留言格建不成，
+            # 增量更新也不會補圖，所以這步失敗只記 log
+            try:
+                await self._send_post_images(thread, main_post)
+            except Exception as e:  # 邊界：補圖失敗只記 log，留言格與回覆照建
+                logger.warning("巴哈主文補圖失敗，略過: board=%s post_id=%s err=%s", board_id, post_id, e)
 
             # 4. 處理主文留言 + 預建留言格
-            main_sn = main_post.get("sn", "")
             main_state = await self._send_post_comments(
                 thread=thread,
                 post_data=main_post,
@@ -694,6 +710,14 @@ class BahamutMonitor(BaseContentMonitor):
                 post_state = old_state["posts"].get(sn)
                 if not post_state:
                     # 全新回覆，走新增路徑（下面第 4 步處理）
+                    continue
+                if post_type == "main" and not post_state.get("comment_slots") and not post_state.get("overflow_slots"):
+                    # 開串後留言格那步出錯：主文記下了、格沒建，這裡補建。只補主文——回覆沒格的是舊資料
+                    # （一篇 1,400 多則回覆的串有 567 則沒格），替它們補格會往舊串灌幾百則訊息
+                    fresh = await self._send_post_comments(thread=thread, post_data=post_data)
+                    post_state.update({key: fresh[key] for key in
+                                       ("comment_slots", "overflow_anchor", "overflow_slots", "synced_comment_ids")})
+                    logger.info("增量更新：補建主文留言格 board=%s post_id=%s", board_id, post_id)
                     continue
 
                 new_comments = post_data.get("comments") or []
@@ -927,7 +951,11 @@ class BahamutMonitor(BaseContentMonitor):
         for i, chunk_text in enumerate(chunks):
             cont_embed = discord.Embed(description=chunk_text, color=color)
             # 初次建立時續文緊跟在主文後面，不需要 reply
-            cont_msg = await thread.send(embed=cont_embed)
+            try:
+                cont_msg = await thread.send(embed=cont_embed)
+            except Exception as e:  # 邊界：送到一半出錯就先回已送出的，缺的下一輪增量更新補在串尾；整個丟出去會讓已送的變孤兒
+                logger.warning("續文送出失敗（第 %d 則起下一輪再補）: %s", i + 1, e)
+                break
             await asyncio.sleep(SEND_DELAY)
             continuation_msg_ids.append(cont_msg.id)
 
