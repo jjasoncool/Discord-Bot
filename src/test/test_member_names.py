@@ -11,6 +11,8 @@
 - 問句裡的「一野」對得到糯糯（名字的一段或一段的開頭；不分大小寫），常見詞不會對到名字裡
   剛好含它的人
 - /askai 與插話的找人查詢會帶上 Discord 名字對到的人
+- 要送出網的查詢字：有識別碼（#尾碼、<@…>、長數字、email）或含群友的名字就擋下來（中文名字在任何位置都算、
+  英文名字要整個字；純英數短於 3 字的片段不算）；正常的查詢不擋
 
 執行：
     cd src && python -m unittest test.test_member_names -v
@@ -98,6 +100,34 @@ class MatchMembersTests(unittest.TestCase):
         self.assertEqual(mn.match_members({"9": ["我最近很忙"]}, ["最近"]), [])
         self.assertEqual(mn.match_members({"9": ["大佬"]}, ["這個大佬好強"]), [],
                          "問句候選詞比名字長（整句也是候選）時不算——不然名字是常見詞的人每句都被點到")
+
+
+class QueryGuardTests(unittest.TestCase):
+    """送出網前的查詢字檢查（`query_names_member`）。"""
+
+    PARTS = mn.name_parts(["糯糯 弗糯糯", "一野shout死你", "Rie", "or", "❤️柔柔喵❤️-時渺"])
+
+    def guard(self, query):
+        return mn.query_names_member(query, self.PARTS)
+
+    def test_identifiers_are_blocked(self):
+        for query in ("糯糯#6490 生日", "<@430244604688990212> 是誰", "430244604688990212 lookup",
+                      "someone@example.com 是誰"):
+            with self.subTest(query=query):
+                self.assertEqual(self.guard(query), "識別碼")
+
+    def test_member_names_are_blocked_wherever_they_appear(self):
+        for query in ("糯糯 生日", "肥糯糯生日", "一野 最近 在幹嘛", "Rie 新歌", "柔柔喵 意思"):
+            with self.subTest(query=query):
+                self.assertEqual(self.guard(query), "群友名字")
+
+    def test_ordinary_queries_pass(self):
+        for query in ("颱風 停班停課", "鳴潮 3.7 版本 新角色", "何意味 梗 意思", "sorry 意思", "iPhone 17 新聞"):
+            with self.subTest(query=query):
+                self.assertIsNone(self.guard(query))
+
+    def test_short_english_fragments_do_not_count(self):
+        self.assertIsNone(self.guard("either or 用法"), "「or」這種兩個字母的名字片段不算")
 
 
 class NameMapTests(unittest.TestCase):

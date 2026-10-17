@@ -111,6 +111,28 @@ def names_member(word: str, parts: Iterable[str], *, allow_longer: bool = False)
     return False
 
 
+#: 查詢字裡不該出網的識別碼：`#尾碼`、`<@…>`／`<#…>`、8 位以上的數字（Discord ID、電話、遊戲 UID）、email
+_IDENTIFIER = re.compile(r"<[@#]!?\d+>|#\d{4,}|(?<!\d)\d{8,}(?!\d)|[\w.+-]+@[\w-]+\.[\w.-]+")
+
+
+def query_names_member(query: str, parts: Iterable[str]) -> Optional[str]:
+    """要送出網的查詢字是不是在指某個群友：含識別碼回「識別碼」、含群友的名字回「群友名字」，都沒有回 None。
+
+    名字用 `names_member(allow_longer=True)`：中文名字在查詢字任何位置都算（「糯糯生日」含「糯糯」），英文名字
+    要整個字。純英數、短於 3 字的片段不算（「or」會擋掉所有含 or 的英文查詢）。名字剛好是常見詞的人（「少年」
+    「敗北」）會被誤擋，代價只是那次少查一次；查詢字一送出就收不回來，寧可多擋。
+    """
+    if _IDENTIFIER.search(query):
+        return "識別碼"
+    usable = [p for p in parts if not (p.isascii() and p.isalnum() and len(p) < 3)]
+    if not usable:
+        return None
+    for word in [query, *query.split()]:
+        if names_member(word, usable, allow_longer=True):
+            return "群友名字"
+    return None
+
+
 def match_members(member_names: Mapping[str, list[str]], candidates: Iterable[str]) -> list[str]:
     """問句裡的詞對得到哪些成員的 Discord 名字（「一野最近在幹嘛」→ 糯糯）。規則見 `names_member`。"""
     # 問句的候選詞已轉小寫（`persona_card_builder.normalize_alias_text`），`names_member` 比小寫
