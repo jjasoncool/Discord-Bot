@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup
 from utils.logger_config import get_article_monitor_logger
 from utils.discord_content import post_to_channel
 
-from .base_monitor import BaseContentMonitor
+from .base_monitor import BaseContentMonitor, content_send_lock
 # 官方原文網址的唯一來源在 services.source_urls；這裡轉出去，舊的 import 路徑照樣能用
 from services.source_urls import OFFICIAL_ARTICLE_URL, official_article_url  # noqa: F401
 
@@ -441,14 +441,18 @@ class ArticleMonitor(BaseContentMonitor):
                 time_str = article.get('start_time') or article.get('create_time') or '無時間'
                 logger.debug(f"[排程]  第 {i+1} 篇: {article.get('article_id')} - {time_str}")
 
-            # 發送新文章到所有指定頻道
+            # 發送新文章到所有指定頻道。推送和輪詢可能同時找到同一篇：拿到鎖後再查一次，
+            # 另一條路已經送完的就不再送
             for article in new_articles:
-                for channel_id in channel_ids:
-                    success = await self.send_article_to_channel(channel_id, article)
-                    if success:
-                        logger.info(f"[排程]成功發送文章 {article['article_id']} 到頻道 {channel_id}")
-                        # 每篇文章之間稍微延遲，避免頻率限制
-                        await asyncio.sleep(1)
+                async with content_send_lock('article', article['article_id']):
+                    if await self.is_content_sent('article', article['article_id']):
+                        continue
+                    for channel_id in channel_ids:
+                        success = await self.send_article_to_channel(channel_id, article)
+                        if success:
+                            logger.info(f"[排程]成功發送文章 {article['article_id']} 到頻道 {channel_id}")
+                            # 每篇文章之間稍微延遲，避免頻率限制
+                            await asyncio.sleep(1)
 
         except Exception as e:
             logger.error(f"[排程]檢查新文章時發生錯誤: {e}")

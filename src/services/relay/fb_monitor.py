@@ -13,7 +13,7 @@ from typing import List, Dict, Optional
 from urllib.parse import urlparse, urlunparse
 
 from utils.discord_content import post_to_channel
-from .base_monitor import BaseContentMonitor
+from .base_monitor import BaseContentMonitor, content_send_lock
 
 logger = logging.getLogger(__name__)
 
@@ -275,12 +275,16 @@ class FBMonitor(BaseContentMonitor):
 
             logger.info(f"[FB] 找到 {len(new_posts)} 篇新 FB 貼文")
 
+            # 同一篇可能同時被兩條路找到：拿到鎖後再查一次，另一條路已經送完的就不再送
             for post in new_posts:
-                for channel_id in channel_ids:
-                    success = await self.send_fb_post_to_channel(channel_id, post)
-                    if success:
-                        logger.info(f"[FB] 成功發送 FB 貼文 {post['id']} 到頻道 {channel_id}")
-                        await asyncio.sleep(2)
+                async with content_send_lock('fbpost', post['id']):
+                    if await self.is_content_sent('fbpost', post['id']):
+                        continue
+                    for channel_id in channel_ids:
+                        success = await self.send_fb_post_to_channel(channel_id, post)
+                        if success:
+                            logger.info(f"[FB] 成功發送 FB 貼文 {post['id']} 到頻道 {channel_id}")
+                            await asyncio.sleep(2)
 
         except Exception as e:
             logger.error(f"[FB] 檢查 FB 貼文時發生錯誤: {e}")

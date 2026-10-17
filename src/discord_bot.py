@@ -636,7 +636,8 @@ async def _auto_start_official_article_monitor(bot, article_commands, article_mo
     """自動啟動官方文章監控。
 
     註：article 已改「推送」為主（scraper 爬完打 /notify/article → notify_server._process_relay）。
-    此輪詢降為 30 分 fallback safety net（webhook 漏掉時補發；去重靠 StateDB，不會重送）。
+    此輪詢降為 30 分 fallback safety net（webhook 漏掉時補發；去重靠已送紀錄加上同一篇的送出鎖
+    `base_monitor.content_send_lock`，和推送剛好同時找到同一篇時也只送一份）。
     """
     def _get_channel(channel_id):
         return bot.get_channel(channel_id)

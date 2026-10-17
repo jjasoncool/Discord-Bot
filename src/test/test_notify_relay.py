@@ -2,21 +2,30 @@
 
 守的是「fb / article / it_article 收斂成單一 _process_relay」這次重構，避免改壞現役
 FB / IT 推送，並確認巴哈維持自有 handler（不被併進泛用表）。
+另守：推送和 30 分鐘一次的保險輪詢同時找到同一篇公告時只送一份（兩條路各建各的監看物件、
+已送紀錄要送完才寫，靠的是跨物件的送出鎖；曾經同一篇連圖貼了兩次）。
 
 執行：
     cd src && python -m unittest test.test_notify_relay -v
 """
 
+import asyncio
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from services.notify_server import NotifyServer, _RELAY_SOURCES
+import services.relay.base_monitor as base_monitor  # noqa: E402
+from services.notify_server import NotifyServer, _RELAY_SOURCES  # noqa: E402
+from services.relay.article_monitor import ArticleMonitor  # noqa: E402
+from services.state_db import StateDB  # noqa: E402
 
 
 class _DummyBot:
@@ -63,6 +72,42 @@ class HandlerWiringTests(unittest.TestCase):
     def test_relay_sources_are_callable(self):
         for src in ("fb", "article", "it_article"):
             self.assertTrue(callable(self.server._handlers[src]))
+
+
+class PushAndPollTests(unittest.IsolatedAsyncioTestCase):
+    """推送和輪詢同時找到同一篇，只送一份。"""
+
+    async def asyncSetUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db = StateDB(Path(self._tmp.name) / "state.db")
+        await self.db.connect()
+        base_monitor._send_locks.clear()
+
+    async def asyncTearDown(self):
+        await self.db.close()
+        self._tmp.cleanup()
+
+    def _monitor(self, sent):
+        monitor = ArticleMonitor(_DummyBot())
+        monitor._state_db = self.db
+
+        async def send(channel_id, article):
+            # 送一篇要 20～30 秒（下載圖、貼主文、補圖），最後才寫已送紀錄
+            for _ in range(3):
+                await asyncio.sleep(0)
+            sent.append(article["article_id"])
+            await monitor.mark_content_as_sent("article", article["article_id"])
+            return True
+
+        monitor.fetch_recent_articles = mock.AsyncMock(return_value=[{"article_id": 5631}])
+        monitor.send_article_to_channel = send
+        return monitor
+
+    async def test_push_and_poll_at_the_same_time_send_once(self):
+        sent = []
+        push, poll = self._monitor(sent), self._monitor(sent)
+        await asyncio.gather(push.check_and_send_new_articles([1]), poll.check_and_send_new_articles([1]))
+        self.assertEqual([5631], sent)
 
 
 if __name__ == "__main__":

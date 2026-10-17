@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Tuple
 import aiohttp
 import discord
 
-from services.relay.base_monitor import BaseContentMonitor
+from services.relay.base_monitor import BaseContentMonitor, content_send_lock
 from utils.discord_content import post_to_channel
 
 logger = logging.getLogger(__name__)
@@ -321,8 +321,12 @@ class ItArticleMonitor(BaseContentMonitor):
             if new_items:
                 logger.info("[IT 文章排程] 找到 %s 篇待發文章", len(new_items))
                 for it in new_items:
-                    for channel_id in channel_ids:
-                        await self.send_to_channel(channel_id, it)
+                    # 同一篇可能同時被兩條路找到：拿到鎖後再查一次，另一條路已經送完的就不再送
+                    async with content_send_lock(_CONTENT_TYPE, it["hkepc_id"]):
+                        if await self.is_content_sent(_CONTENT_TYPE, it["hkepc_id"]):
+                            continue
+                        for channel_id in channel_ids:
+                            await self.send_to_channel(channel_id, it)
                     # 每篇之間固定間隔（不論成敗），避免 rate limit
                     await asyncio.sleep(self.SEND_INTERVAL)
             # 新文先發：補內文要讀頻道、下載圖片、逐則編輯，放前面會拖慢新文

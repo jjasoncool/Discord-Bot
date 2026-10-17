@@ -30,6 +30,21 @@ def get_article_runtime_config() -> Dict:
     return hot_files.read_json(_ARTICLE_RUNTIME_PATH, label="article_relay 設定") or {}
 
 
+# 同一筆內容同時只能有一條路在送。推送（notify_server 每次新建監看物件）和輪詢（bot 常駐的那個）
+# 各拿各的物件，所以鎖放模組層、跨物件共用；已送紀錄要送完才寫，沒有鎖的話兩條路會各送一份。
+_send_locks: Dict[str, asyncio.Lock] = {}
+
+
+def content_send_lock(content_type: str, content_id) -> asyncio.Lock:
+    """某筆內容的送出鎖：`async with` 包住「再查一次已送紀錄 → 送出 → 寫紀錄」；
+    不想排隊的（手動指令撞上排程）看 `locked()` 直接跳過。"""
+    key = f"{content_type}:{content_id}"
+    lock = _send_locks.get(key)
+    if lock is None:
+        lock = _send_locks[key] = asyncio.Lock()
+    return lock
+
+
 class BaseContentMonitor:
     """基礎內容監控類別"""
 

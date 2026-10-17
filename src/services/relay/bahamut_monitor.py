@@ -25,7 +25,7 @@ from utils.discord_content import (
     content_hash,
     get_forum_tags,
 )
-from services.relay.base_monitor import BaseContentMonitor, get_article_runtime_config
+from services.relay.base_monitor import BaseContentMonitor, content_send_lock, get_article_runtime_config
 
 logger = get_article_monitor_logger()
 
@@ -81,8 +81,6 @@ def _author_link(name: str, user_id: str) -> str:
     return f"**{name}**"
 
 
-# 模組級 snA 鎖：同一個 snA 同時只能有一個 task 在處理（跨實例共用）
-_thread_locks: Dict[str, asyncio.Lock] = {}
 # 全域並行上限：同時最多處理 N 篇文章（避免 rate limit 和資源搶奪）
 _concurrency_semaphore = asyncio.Semaphore(3)
 # 每個討論串下一次可以 edit 的 monotonic 時戳
@@ -109,13 +107,6 @@ async def _edit_with_cooldown(msg: discord.Message, **kwargs) -> None:
         raise
     # discord.py 吃到 429 會自己等完重試：間隔從真正編完的時間起算
     _next_edit_at[channel_id] = max(_next_edit_at[channel_id], time.monotonic() + THREAD_EDIT_INTERVAL)
-
-
-def _get_thread_lock(content_key: str) -> asyncio.Lock:
-    """取得或建立某個 snA 的 asyncio.Lock。"""
-    if content_key not in _thread_locks:
-        _thread_locks[content_key] = asyncio.Lock()
-    return _thread_locks[content_key]
 
 
 class BahamutMonitor(BaseContentMonitor):
@@ -437,7 +428,7 @@ class BahamutMonitor(BaseContentMonitor):
             content_key = f"bahamut:{board_id}:{post_id}"
 
             # 同一個 snA 加鎖，避免手動指令和排程同時處理同一篇
-            lock = _get_thread_lock(content_key)
+            lock = content_send_lock("bahamut", f"{board_id}:{post_id}")
             if lock.locked():
                 logger.info("snA 正在處理中，跳過: %s", content_key)
                 return None
