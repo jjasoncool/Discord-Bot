@@ -4,7 +4,7 @@
 下層：`services.llm_service.LLMService`（生成）、`ambient_hooks`（鉤子閘）、`ambient_memory`（偏好與招牌梗召回）、
 `ambient_insult`（被罵的應對與記仇名單）、`ambient_search`（判斷時可以先查一次遊戲情報或網路）、
 `llm.preprocess`（聊天行格式、人名錨點、貼文與表情描述）、`llm.storage.ai_interactions_store`（互動紀錄）、
-`llm.client.lemonade_gate`（前景讓位）。
+`llm.client.lemonade_gate`（前景讓位）、`utils.discord_content`（回覆太長時切段）。
 
 介面：
 - `maybe_ambient_reply(bot, message)`：入口。硬過濾、靜默期合併 burst、判斷被點名／接續，然後交給單次評估。
@@ -25,6 +25,8 @@
 - 模型判定被惡意辱罵：不回文字、按表情、記仇；標記夾在文字裡則整則不送。
 - 查詢工具（`ambient_search`）三種來源都給同一份宣告與規則，提示詞快取才穩；今天的日期放 user 段、不放 system 段
   （system 段一變整份快取都可能重讀）。輸出夾著工具呼叫的原文一律當 [PASS]，不會貼進群裡。
+- 被 @ 時給輸出上限，想太久撞到就關掉思考再答一次（點名的人一定收得到回覆）；自發插話逾時就略過。
+- 回覆超過 Discord 上限只送第一段；用回覆送出時也不 @ 任何人。
 
 例外與決策：靜默期依對話節奏切換（熱聊等不到安靜，而且插話本來就不需要空檔）；純機率的減壓閥已被鉤子閘取代
 （隨機丟棄會丟掉好時機、留下爛時機，鉤子有判斷依據）。
@@ -69,10 +71,11 @@ from llm.client.lemonade_gate import foreground_recently_active, stream_busy
 from sys_settings.time_settings import APP_TZ
 from llm.preprocess.vision_image import DEFAULT_MAX_FRAMES, extract_key_frames, is_vision_image
 from llm.logger_factory import get_or_create_file_logger
-from services.llm_service import LLMService
+from services.llm_service import LLMService, TRUNCATED_NOTE
 from sys_settings.llm_settings import AmbientChatSettings
 from utils.utils import ChannelConfig
 from utils.background_tasks import spawn
+from utils.discord_content import DISCORD_MESSAGE_LIMIT, split_message
 
 logger = logging.getLogger(__name__)
 
@@ -289,17 +292,30 @@ def _rag_to_persona_lines(rag_context: Optional[list]) -> Optional[list[str]]:
     return lines or None
 
 
+def _mentioned_user_ids(message: discord.Message) -> list[str]:
+    """最新這則 @ 了誰（去掉 bot 自己）：從原文的 <@id> 抽，Discord 解析好的 mentions 也算。
+    給模型看的文字已經把 @ 換成名字，從那裡抽不到；人物卡檢索、回憶對象都要用這份。"""
+    from llm.persona.persona_card_builder import extract_mentioned_user_ids
+
+    bot_id = str(message.guild.me.id) if message.guild and message.guild.me else None
+    ids = [*extract_mentioned_user_ids(message.content or ""), *(str(m.id) for m in (getattr(message, "mentions", None) or []))]
+    return [uid for uid in dict.fromkeys(ids) if uid != bot_id]
+
+
 async def _build_persona_context(
-    message: discord.Message, query: str, participant_ids: list[int]
+    message: discord.Message, query: str, participant_ids: list[int], mentioned_ids: Optional[list[str]] = None,
 ) -> Optional[list[str]]:
     """Phase B：召回在場成員 persona card（intro/impression/auto_personality）。
 
     走既有 `retrieve_rag_context_sync`（吃純 id、不需 interaction）；sync LlamaIndex 放 executor。
-    embedding 走 Lemonade 獨立 port（不卸載插話模型）。per-channel 短 TTL 快取避免每則打 pgvector。
+    embedding 走 Lemonade 獨立 port（不卸載插話模型）。per-channel 短 TTL 快取避免每則打 pgvector；
+    被 @ 的人不同就另算一份（被 @ 的人一定要拿到卡）。
     best-effort：任何失敗回退到舊快取或 None，不影響插話本體。
     """
+    mentioned_ids = list(mentioned_ids or [])
     now = time.monotonic()
-    cached = _PERSONA_CACHE.get(message.channel.id)
+    cache_key = (message.channel.id, tuple(mentioned_ids))
+    cached = _PERSONA_CACHE.get(cache_key)
     if cached and (now - cached[0]) < _SETTINGS.persona_cache_seconds:
         return cached[1]
 
@@ -320,6 +336,8 @@ async def _build_persona_context(
                 participant_ids,
                 logger,
                 _SETTINGS.persona_top_k,
+                # 檢索字串裡的 @ 已經換成名字，被 @ 的人要明說，檢索端才找得到他的卡
+                mentioned_user_ids=mentioned_ids,
                 member_names=names,
             ),
         )
@@ -338,7 +356,7 @@ async def _build_persona_context(
         logger.debug("ambient persona 召回失敗：%s", exc)
         return cached[1] if cached else None
 
-    _PERSONA_CACHE[message.channel.id] = (now, persona_context)
+    _PERSONA_CACHE[cache_key] = (now, persona_context)
     return persona_context
 
 
@@ -446,10 +464,10 @@ async def _resolve_callback_target(message: discord.Message, query: str) -> Opti
     """
     if message.guild is None:
         return None
-    from llm.persona.persona_card_builder import expand_alias_candidates, extract_mentioned_user_ids
+    from llm.persona.persona_card_builder import expand_alias_candidates
 
-    bot_id = str(message.guild.me.id) if message.guild.me else None
-    uniq_mentions = list(dict.fromkeys(m for m in extract_mentioned_user_ids(query) if m != bot_id))
+    # 從原訊息抓 @（給模型看的 query 已把 @ 換成名字，從那裡抓不到）
+    uniq_mentions = _mentioned_user_ids(message)
     if len(uniq_mentions) == 1:
         return uniq_mentions[0]
     if uniq_mentions:  # 多個 mention → 模糊，不猜
@@ -1268,9 +1286,11 @@ def _today_line(now: datetime) -> str:
 
 async def _prepare_search_tools(message: discord.Message, stripped: str, participant_ids: list[int], trace_id: str):
     """這次插話要不要給查詢工具（開關、額度在 ambient_search 判）；名字檢查用的名單第一次要用時才去拿。"""
+    # 名單要含被 @ 的人：他近期沒發言就不在參與者裡，但他的自介、印象暱稱會隨人物卡進 prompt、最容易被拿去查
+    people = [*participant_ids, *_mentioned_user_ids(message)]
     return await ambient_search.prepare(
         stripped or "", now=lambda: datetime.now(APP_TZ),
-        names=functools.partial(ambient_search.name_parts_for, message.guild, list(participant_ids)),
+        names=functools.partial(ambient_search.name_parts_for, message.guild, people),
         trace_id=trace_id,
     )
 
@@ -1362,7 +1382,7 @@ async def _gather_inputs(
 
     # 認得人——召回在場成員 persona card（best-effort；用真正的觸發文字當檢索 query）
     retrieval_query = stripped or "(圖片或無文字)"
-    persona_cards = await _build_persona_context(message, retrieval_query, participant_ids)
+    persona_cards = await _build_persona_context(message, retrieval_query, participant_ids, _mentioned_user_ids(message))
     # 發話者的 trusted 偏好事實（best-effort）
     memory_lines = await recall_lines(message.guild.id, message.author.id)
     # 招牌梗：在場成員的 trusted 標籤（衰減+三道閘；spicy 在 dark-launch 期間不召回）
@@ -1471,6 +1491,8 @@ async def _generate(inputs: _Inputs, ambient_model: str, directed: bool) -> tupl
         max_tool_rounds=ambient_search.max_tool_rounds(),
         tool_nudge=ambient_search.NUDGE,
         tools_plain_fallback=False,
+        # 被 @ 時給輸出上限：想太久撞到就關掉思考再答一次，點名的人一定收得到回覆
+        max_tokens=_SETTINGS.directed_max_tokens if directed else None,
     )
 
     # 模型第一行宣告「我在接第幾則」→ 剝出來當 reply 錨點，其餘才是要講的話
@@ -1481,6 +1503,9 @@ async def _generate(inputs: _Inputs, ambient_model: str, directed: bool) -> tupl
     elif "<tool_call>" in raw_reply or "</tool_call>" in raw_reply:
         outcome = "pass"   # 工具呼叫漏成文字：不能貼進群裡
         logger.info("ambient 回答夾著工具呼叫的原文，整則不送 trace=%s", inputs.trace_id)
+    elif raw_reply.endswith(TRUNCATED_NOTE):
+        outcome = "pass"   # 關掉思考重答後仍被上限切斷：半句話與那行註記都不能貼進群裡
+        logger.info("ambient 回答被長度上限切斷，整則不送 trace=%s", inputs.trace_id)
     elif _is_silence(reply, _SETTINGS.silence_sentinel):
         outcome = "pass"
     elif ambient_insult.is_marker(reply):
@@ -1529,27 +1554,34 @@ async def _deliver(
         if anchor is not None and anchor.author.id in gate.cold_ids:
             _log_skip(message.channel.id, f"模型選了 #{line_choice}，是最近罵過它的人的話 → 不送")
             return None
+    if len(reply) > DISCORD_MESSAGE_LIMIT:
+        # 超過上限整則會被 Discord 拒絕，等於沒回；插話本來就該一兩句，只送第一段、記下來
+        logger.warning("ambient 回覆 %d 字超過 %d 字上限，只送第一段 trace=%s", len(reply), DISCORD_MESSAGE_LIMIT, trace_id)
+        reply = split_message(reply, DISCORD_MESSAGE_LIMIT - 10)[0]   # 留餘裕：暴雷標記跨切點時切段會補 ||
+    # 回覆也不 @ 任何人：模型萬一寫出 @everyone 或 @某人，不能真的通知到
+    no_pings = discord.AllowedMentions.none()
     sent_msg = None
     try:
         if directed:
             try:
-                sent_msg = await message.reply(reply, mention_author=False)
+                sent_msg = await message.reply(reply, mention_author=False, allowed_mentions=no_pings)
             except discord.HTTPException as reply_exc:
-                # 原訊息可能已被刪除（reply reference 失效，50035 Unknown message）→
-                # 退而求其次直接發到頻道，照樣回得到、只是沒有 reply 串接
-                logger.info("ambient reply 失敗（原訊息可能已刪？）trace=%s：%s → 改直接發頻道", trace_id, reply_exc)
-                sent_msg = await message.channel.send(reply, allowed_mentions=discord.AllowedMentions.none())
+                # 原訊息被刪（reply reference 失效，50035）就直接發到頻道，照樣回得到、只是沒有 reply 串接；
+                # 其他原因一樣退回頻道，但分開記，才看得出不是訊息被刪
+                why = "原訊息已刪" if getattr(reply_exc, "code", None) == 50035 else f"送出失敗 {reply_exc}"
+                logger.info("ambient reply 失敗（%s）trace=%s → 改直接發頻道", why, trace_id)
+                sent_msg = await message.channel.send(reply, allowed_mentions=no_pings)
         else:
             if anchor is not None:
                 try:
-                    sent_msg = await anchor.reply(reply, mention_author=False)
+                    sent_msg = await anchor.reply(reply, mention_author=False, allowed_mentions=no_pings)
                 except discord.HTTPException as anchor_exc:
                     logger.info(
                         "ambient 錨定 #%s 失敗（原訊息可能已刪？）trace=%s：%s → 改直接發頻道",
                         line_choice, trace_id, anchor_exc,
                     )
             if sent_msg is None:
-                sent_msg = await message.channel.send(reply, allowed_mentions=discord.AllowedMentions.none())
+                sent_msg = await message.channel.send(reply, allowed_mentions=no_pings)
     except discord.HTTPException as exc:
         logger.warning("ambient 送出回覆失敗 trace=%s：%s", trace_id, exc)
         return None

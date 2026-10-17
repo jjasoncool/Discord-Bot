@@ -482,6 +482,10 @@ class AmbientChatSettings(BaseSettings):
     # 看門狗：單一 pass 超過此秒數視為卡住 → 取消，避免一次生成卡死整個頻道的序列處理。
     # 要夠長以容納冷載入(model load 30-60s)+生成。
     pass_timeout_seconds: float = 180.0
+    # 被 @、被回覆時的輸出上限（含思考）：想太久撞到就關掉思考再答一次，點名的人才一定收得到回覆。
+    # 要比 180 秒逾時能寫完的量（約 20 token/秒 → 3,400）低，否則永遠是逾時先到、沒有重答的機會；
+    # 自發插話不設上限，逾時就略過本來就沒差
+    directed_max_tokens: int = 3000
     # （已移除 judge_sampling_rate 純機率減壓閥：隨機丟棄評估會丟掉好時機、留下爛時機，
     #   完全被下面有判斷依據的鉤子閘取代。要降載請調 hook_threshold，不要再加機率閥。）
 

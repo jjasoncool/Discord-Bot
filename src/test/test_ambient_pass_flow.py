@@ -4,7 +4,8 @@
 冷卻與額度怎麼算、接續怎麼武裝、互動紀錄記了什麼。模型與 Discord 都是假的，只有 ambient_reply
 本身是真的。
 另守：查詢工具有就交給模型（一輪、插話的提醒、不退回不帶工具的呼叫），沒有就跟原本一樣；今天的日期一起送；
-夾著工具呼叫原文的回答不送。
+被 @ 才有輸出上限；夾著工具呼叫原文的回答不送；回覆超過 Discord 上限只送第一段、回覆不 @ 任何人；
+最新這則 @ 的人要傳進人物卡檢索與回憶對象（給模型看的文字已把 @ 換成名字，從那裡抓不到）。
 """
 import asyncio
 import os
@@ -128,6 +129,7 @@ class PassFlowTests(unittest.TestCase):
             _get_llm=lambda: self.llm,
         )
         self.evaluate_hook = stubs["evaluate_hook"]
+        self.persona_builder = stubs["_build_persona_context"]
         self.prepare_search = stubs["_prepare_search_tools"]
         with mock.patch.multiple(ambient_reply, **stubs), \
                 mock.patch.object(ambient_insult, "grudges", _grudges), \
@@ -315,7 +317,10 @@ class PassFlowTests(unittest.TestCase):
         self._model_says("上個版本的。")
         msg = _message()
         self._run(msg, directed=True)
-        msg.reply.assert_awaited_once_with("上個版本的。", mention_author=False)
+        args, kwargs = msg.reply.await_args
+        self.assertEqual(("上個版本的。",), args)
+        self.assertFalse(kwargs["mention_author"])
+        self.assertFalse(kwargs["allowed_mentions"].everyone or kwargs["allowed_mentions"].users, "回覆不 @ 任何人")
         msg.channel.send.assert_not_awaited()
         self.assertEqual("reply", self.debug_writes[-1]["outcome"])
         self.assertEqual("上個版本的。", self.debug_writes[-1]["reply"])
@@ -335,7 +340,10 @@ class PassFlowTests(unittest.TestCase):
         self._model_says("#1\n我也覺得")
         msg = _message()
         self._run(msg)
-        self.earlier.reply.assert_awaited_once_with("我也覺得", mention_author=False)
+        args, kwargs = self.earlier.reply.await_args
+        self.assertEqual(("我也覺得",), args)
+        self.assertFalse(kwargs["mention_author"])
+        self.assertFalse(kwargs["allowed_mentions"].everyone or kwargs["allowed_mentions"].users)
         msg.channel.send.assert_not_awaited()
         self.assertEqual("#1\n我也覺得", self.debug_writes[-1]["reply"])   # debug 留原樣，看得出選了哪條
         self.assertEqual(EARLIER_AUTHOR, self._state()["last_anchor_author_id"])
@@ -346,7 +354,8 @@ class PassFlowTests(unittest.TestCase):
         self._model_says("#2\n我也覺得")
         msg = _message()
         self._run(msg)
-        msg.reply.assert_awaited_once_with("我也覺得", mention_author=False)
+        args, kwargs = msg.reply.await_args
+        self.assertEqual((("我也覺得",), False), (args, kwargs["mention_author"]))
         msg.channel.send.assert_not_awaited()
 
     def test_spontaneous_answer_without_a_number_is_sent_bare(self):
@@ -432,6 +441,7 @@ class PassFlowTests(unittest.TestCase):
         self._run(_message())
         kw = self._generate_kwargs()
         self.assertIsNone(kw["tool_runner"])
+        self.assertIsNone(kw["max_tokens"], "自發插話不設輸出上限")
 
     def test_search_tools_are_handed_over_with_one_round_the_ambient_nudge_and_no_plain_fallback(self):
         self.search_tools = SimpleNamespace(mode="dry_run", tools=[{"function": {"name": "web_search"}}], instructions="規則")
@@ -446,6 +456,10 @@ class PassFlowTests(unittest.TestCase):
         self._run(_message(), directed=True)
         self.assertRegex(self._generate_kwargs()["today"], r"^\d{4}-\d{2}-\d{2}（星期.）$")
 
+    def test_only_directed_replies_get_the_length_cap(self):
+        self._run(_message(), directed=True)
+        self.assertEqual(ambient_reply._SETTINGS.directed_max_tokens, self._generate_kwargs()["max_tokens"])
+
     def test_a_leaked_tool_call_is_never_sent(self):
         self._model_says('<tool_call>{"name": "web_search"}</tool_call>')
         msg = _message()
@@ -453,6 +467,69 @@ class PassFlowTests(unittest.TestCase):
         msg.reply.assert_not_awaited()
         msg.channel.send.assert_not_awaited()
         self.assertEqual("pass", self.debug_writes[-1]["outcome"])
+
+    def test_an_overlong_reply_is_cut_to_one_message(self):
+        for label, text in (("純文字", "好長一句。" * 500), ("暴雷跨切點", "字" * 1995 + "||暴雷暴雷暴雷暴雷||" + "字" * 50)):
+            with self.subTest(label):
+                self._model_says(text)
+                msg = _message()
+                with self.assertLogs("llm.ambient.ambient_reply", level="WARNING"):
+                    self._run(msg, directed=True)
+                (sent,), _kwargs = msg.reply.await_args
+                self.assertLessEqual(len(sent), 2000, "切段補的暴雷標記也不能超過上限")
+                self.assertTrue(sent.startswith(text[:5]))
+
+    def test_a_reply_cut_by_the_length_cap_is_not_sent(self):
+        self._model_says("半句話\n" + ambient_reply.TRUNCATED_NOTE)
+        msg = _message()
+        self._run(msg, directed=True)
+        msg.reply.assert_not_awaited()
+        msg.channel.send.assert_not_awaited()
+        self.assertEqual("pass", self.debug_writes[-1]["outcome"])
+
+    def test_people_mentioned_are_on_the_name_check_list(self):
+        msg = _message(f"<@{EARLIER_AUTHOR}> 生日幾號")
+        with mock.patch.object(ambient_search, "prepare", mock.AsyncMock(return_value=None)) as prepare:
+            asyncio.run(ambient_reply._prepare_search_tools(msg, "某人 生日幾號", [SPEAKER], "t"))
+        names = prepare.await_args.kwargs["names"]          # functools.partial(name_parts_for, guild, people)
+        self.assertEqual([SPEAKER, str(EARLIER_AUTHOR)], names.args[1], "近期發言的人加上被 @ 的人")
+
+    def test_mentioned_people_are_looked_up_even_though_the_text_names_them(self):
+        msg = _message(f"<@{EARLIER_AUTHOR}> <@{BOT_ID}> 你覺得呢")
+        msg.mentions = [SimpleNamespace(id=EARLIER_AUTHOR, display_name="克羅", name="克羅"), BOT_USER]
+        self._run(msg, directed=True)
+        self.assertEqual([str(EARLIER_AUTHOR)], self.persona_builder.await_args.args[3], "被 @ 的人（去掉 bot）要傳進人物卡檢索")
+
+
+class MentionLookupTests(unittest.TestCase):
+    """被 @ 的人：人物卡檢索收到的是 id 清單，回憶對象也認得 @。"""
+
+    def setUp(self):
+        ambient_reply._PERSONA_CACHE.clear()
+        self.addCleanup(ambient_reply._PERSONA_CACHE.clear)
+
+    def test_persona_retrieval_is_told_who_was_mentioned(self):
+        msg = _message(f"<@{EARLIER_AUTHOR}> 你覺得呢")
+        seen = {}
+
+        def fake_retrieve(question, guild_id, requester, participants, logger, top_k, **kwargs):
+            seen.update(kwargs)
+            return [], {}
+
+        with mock.patch("llm.retrievers.context_retriever.retrieve_rag_context_sync", fake_retrieve), \
+                mock.patch("llm.persona.member_names.member_names_from_guild", return_value={}), \
+                mock.patch("llm.persona.member_names.name_map_lines", return_value=[]):
+            asyncio.run(ambient_reply._build_persona_context(msg, "某人 你覺得呢", [SPEAKER], [str(EARLIER_AUTHOR)]))
+        self.assertEqual([str(EARLIER_AUTHOR)], seen["mentioned_user_ids"])
+
+    def test_recall_target_comes_from_the_original_message_not_the_renamed_text(self):
+        msg = _message(f"<@{EARLIER_AUTHOR}> 上次說的那個")
+        target = asyncio.run(ambient_reply._resolve_callback_target(msg, "某人#7489 上次說的那個"))
+        self.assertEqual(str(EARLIER_AUTHOR), target)
+
+    def test_the_bot_itself_is_not_a_mention(self):
+        msg = _message(f"<@{BOT_ID}> 在嗎")
+        self.assertEqual([], ambient_reply._mentioned_user_ids(msg))
 
 
 if __name__ == "__main__":
