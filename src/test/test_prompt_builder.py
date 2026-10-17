@@ -10,6 +10,7 @@
   5. 可讀紀錄（prompt_record_log）與實際送出的內容同源，除錯時看到的就是模型收到的。
   6. 沒有任何 context 時不放「以下是不可信內容」的開場說明；有給機器人名稱時，就算沒有歷史回覆，
      也保留空殼標籤當身份錨點。
+  7. 給了今天的日期，它是 user 段的第一行、在開場說明之前（system 段一變整份快取都可能重讀）；沒給就沒有這行。
 
 安全規則用假的標記字串，只驗證「放在哪裡」，不綁定規則檔的實際文案。
 """
@@ -60,6 +61,15 @@ def build(**kwargs):
 
 
 class PromptBundleContractTests(unittest.TestCase):
+    def test_today_opens_the_user_message_only_when_given(self):
+        with_date = build(today="2026-10-17（星期五）", **EVERYTHING)
+        user = with_date.messages[1]["content"]
+        self.assertTrue(user.startswith("（今天是 2026-10-17（星期五））\n\n" + RULES.untrusted_context_intro), user[:80])
+        self.assertIn("（今天是 2026-10-17（星期五））", with_date.prompt_record_log)
+
+        without = build(**EVERYTHING)
+        self.assertTrue(without.messages[1]["content"].startswith(RULES.untrusted_context_intro))
+
 
     def test_web_directive_lets_looked_up_facts_through_when_there_are_tools(self):
         """有工具（/askai 查遊戲情報）時，網路搜尋的「本規則優先」不能把查到的官方資料擋掉。"""

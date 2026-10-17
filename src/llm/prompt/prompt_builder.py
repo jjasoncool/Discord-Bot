@@ -49,8 +49,12 @@ def build_prompt_bundle(
     replied_to_from: Optional[str] = None,
     replied_to_text: Optional[str] = None,
     has_tools: bool = False,
+    today: Optional[str] = None,
 ) -> PromptBundle:
     """建立同源 prompt bundle（給 Ollama 與給 log 共用）。
+
+    today: 今天的日期（例：2026-10-17（星期五）），放在 user 段最前面。system 段任何位置一變，整份提示詞快取
+        都可能從頭重讀，user 段本來每次就整段重讀。插話傳（它的聊天行只有時:分，模型判斷不了查到的東西新不新）
 
     chat_context: 純文字聊天記錄（每則一個字串，例如 "[14:30] 老哥: 昨天抽卡又保底了"）
     bot_history: Bot 自身先前的回覆（獨立於 chat_history 額度外）
@@ -76,6 +80,8 @@ def build_prompt_bundle(
         <web_context>」，否則查到的情報（官方公告的日期、兌換碼、網址）會被這條「本規則優先」擋掉。
     """
     composed_user_prompt = ""
+    if today:
+        composed_user_prompt += f"（今天是 {_sanitize_text(today)}）\n\n"
 
     has_context = bool(
         chat_context or bot_history or persona_context or recalled_context

@@ -10,6 +10,9 @@
   - 查過之後才失敗：照實回報錯誤（不改用沒查的回答），錯誤紀錄裡看得到已經查了什麼
   - 給了長度上限、思考卻把上限用完還沒寫出答案：不用同樣的思考設定重跑（只會再想完一次），改成關掉思考、
     不帶工具、用已經查到的資料再答一次；仍沒答案才回「想太久」，不叫人把問題拆小。沒給上限的呼叫端不重答
+  - 答案才開了頭就被上限切（結尾帶截斷註記，帶工具的路徑也會加）：一樣關掉思考再答一次；重答仍被切就照截斷的回答
+  - 查滿輪數的提醒文字由呼叫端給（沒給就用 /askai 那句）；呼叫端可以不要「改用不帶工具的呼叫」這條退路：
+    第一次呼叫失敗照實回報、提醒後還要工具就回空字串（插話把空字串當沒話講）
   - 工具的使用規則只在有工具時接在系統提示詞後面；網路搜尋的指示知道這次有工具
   - 沒給工具、或工具清單是空的：跟原本一樣一問一答
   - 模型呼叫失敗：一樣回友善錯誤訊息（和沒有工具的路徑共用）
@@ -31,7 +34,7 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from llm.client.http_client import LlmTimeoutError  # noqa: E402
-from services.llm_service import LLMAPIError  # noqa: E402
+from services.llm_service import LLMAPIError, TOOL_ROUNDS_NUDGE, TRUNCATED_NOTE  # noqa: E402
 from llm.prompt.prompt_builder import PromptBundle  # noqa: E402
 from services.llm_service import ChatMessageResult, LLMService  # noqa: E402
 
@@ -245,6 +248,46 @@ class GenerateReplyToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.reply.startswith("⚠️"))
 
 
+class CallerControlledLoopTests(GenerateReplyToolTests):
+    """插話也用同一個迴圈：提醒文字由呼叫端給；呼叫端可以不要「改用不帶工具的呼叫」這條退路。"""
+
+    async def test_the_nudge_is_the_callers_words(self):
+        self.replies = [wants(call("c1")), wants(call("c2")), says("最後回答")]
+
+        await self.ask(FakeRunner(), max_tool_rounds=1, tool_nudge="（系統：這次不能再查了，沒把握就 [PASS]）")
+
+        self.assertEqual(self.model_calls[-1]["messages"][-1],
+                         {"role": "user", "content": "（系統：這次不能再查了，沒把握就 [PASS]）"})
+
+    async def test_the_default_nudge_is_askais(self):
+        self.replies = [wants(call("c1")), wants(call("c2")), says("最後回答")]
+
+        await self.ask(FakeRunner(), max_tool_rounds=1)
+
+        self.assertEqual(self.model_calls[-1]["messages"][-1]["content"], TOOL_ROUNDS_NUDGE)
+
+    async def test_without_the_plain_fallback_a_first_call_failure_is_reported(self):
+        async def chat_with_tools(**kwargs):
+            raise LLMAPIError("回應格式異常: 空 content 且無 tool_calls", kind="empty_content")
+
+        self.svc.chat_with_tools = chat_with_tools
+        with self.assertLogs("services.llm_service", level="ERROR"):
+            result = await self.ask(FakeRunner(), tools_plain_fallback=False)
+
+        self.assertEqual(result.error_kind, "empty_content")
+        self.svc.chat_raw.assert_not_awaited()
+
+    async def test_without_the_plain_fallback_still_wanting_tools_after_the_nudge_means_nothing_to_say(self):
+        self.replies = [wants(call("c1")), wants(call("c2")), wants(call("c3"))]
+
+        result = await self.ask(FakeRunner(), max_tool_rounds=1, tools_plain_fallback=False)
+
+        self.assertEqual(result.reply, "")
+        self.assertIsNone(result.error_kind)
+        self.svc.chat_raw.assert_not_awaited()
+        self.assertEqual(len(self.model_calls), 3, "叫工具 → 提醒 → 還要工具就停，不多呼叫一次")
+
+
 class AnswerLengthCapTests(GenerateReplyToolTests):
     """回答長度上限（max_tokens）要一路帶到每一次模型呼叫：帶工具的每一輪、改用一般呼叫時都一樣；沒給就不送。"""
 
@@ -265,6 +308,49 @@ class AnswerLengthCapTests(GenerateReplyToolTests):
 
 def thought_too_long():
     return LLMAPIError("回答超過長度上限，沒有產出內容", kind="length")
+
+
+class CutOffAnswerTests(GenerateReplyToolTests):
+    """思考用掉大半上限、答案才開了頭就被切：關掉思考再答一次。"""
+
+    async def test_a_cut_off_plain_answer_is_answered_again_without_thinking(self):
+        self.svc.chat_raw = mock.AsyncMock(side_effect=["半句\n" + TRUNCATED_NOTE, "完整的回答"])
+
+        with self.assertLogs("services.llm_service", level="WARNING"):
+            result = await self.svc.generate_reply(prompt="深塔多久重置？", system="你是 bot", max_tokens=3000)
+
+        self.assertEqual(result.reply, "完整的回答")
+        self.assertIsNone(result.error_kind)
+        first, second = self.svc.chat_raw.await_args_list
+        self.assertEqual((True, False), (first.kwargs["think"], second.kwargs["think"]))
+
+    async def test_a_cut_off_answer_after_searching_gets_the_note_and_is_answered_again(self):
+        self.replies = [wants(call("c1")), says("半句", finish="length")]
+
+        with self.assertLogs("services.llm_service", level="WARNING"):
+            result = await self.ask(FakeRunner(), max_tokens=3000)
+
+        self.assertEqual(result.reply, "一般回答")                           # chat_raw 關掉思考的那次
+        plain = self.svc.chat_raw.await_args.kwargs
+        self.assertIs(plain["think"], False)
+        self.assertEqual(plain["messages"][-1]["role"], "tool", "重答帶著已經查到的資料")
+
+    async def test_still_cut_off_without_thinking_keeps_the_note(self):
+        self.svc.chat_raw = mock.AsyncMock(return_value="又是半句\n" + TRUNCATED_NOTE)
+
+        with self.assertLogs("services.llm_service", level="WARNING"):
+            result = await self.svc.generate_reply(prompt="深塔多久重置？", system="你是 bot", max_tokens=3000)
+
+        self.assertTrue(result.reply.endswith(TRUNCATED_NOTE), "呼叫端看得出結尾不是寫完的")
+        self.assertEqual(2, self.svc.chat_raw.await_count, "只重答一次")
+
+    async def test_without_a_cap_a_cut_off_tool_answer_is_returned_as_is(self):
+        self.replies = [wants(call("c1")), says("半句", finish="length")]
+
+        result = await self.ask(FakeRunner())
+
+        self.assertEqual(result.reply, "半句")
+        self.svc.chat_raw.assert_not_awaited()
 
 
 class ThoughtTooLongTests(GenerateReplyToolTests):

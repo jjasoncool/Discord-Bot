@@ -190,6 +190,9 @@ TRUNCATED_NOTE = "（回答到長度上限被截斷）"
 THOUGHT_TOO_LONG_REPLY = "⚠️ 這題想太久，沒整理出答案。換個問法再問一次看看。"
 #: 撞到長度上限時記進 anomaly log 的思考結尾長度：看得出卡在哪就夠，整段會撐爆 log
 REASONING_TAIL_CHARS = 1500
+#: 查滿輪數還想查時提醒模型的話（/askai 的語氣：要它回答）。插話另給自己那句（`generate_reply` 的 `tool_nudge`）：
+#: 這句會把本該閉嘴的插話推向開口
+TOOL_ROUNDS_NUDGE = "（不能再查了。請就上面已經查到的資料，直接回答原本的問題。）"
 
 
 @dataclass(frozen=True)
@@ -802,9 +805,15 @@ class LLMService:
         trace_id: Optional[str],
         max_tool_rounds: int,
         max_tokens: Optional[int] = None,
+        nudge: Optional[str] = None,
+        plain_fallback: bool = True,
     ) -> str:
         """讓模型自己決定要不要先用工具查，再回答。回傳回答；送出的 messages 與工具呼叫紀錄**邊做邊寫進**
         `progress`／`transcript`（呼叫端給的空 list）——中途失敗時，錯誤紀錄才看得到已經查了什麼。
+
+        `nudge`：查滿輪數還想查時提醒模型的話，沒給就用 /askai 那句。`plain_fallback=False`：不走「改用不帶工具的
+        呼叫」這條退路——第一次呼叫失敗照實往外丟、提醒後還要工具就回空字串（插話把空字串當沒話講；它每次
+        插話只該查一次，退路會讓本該閉嘴的那次多跑一整輪、整段重讀）。
 
         - **每一輪的設定都一樣**：照 /askai 原本的思考設定、帶同一份工具清單。模型直接回答，或先叫工具
           （最多 `max_tool_rounds` 輪）；不查的問題就是一次呼叫，和沒有工具時一樣
@@ -831,7 +840,7 @@ class LLMService:
             try:
                 result = await self.chat_with_tools(messages=messages, tools=runner.tools, think=think, **common)
             except LLMAPIError as exc:
-                if answered_once or exc.kind == "length":
+                if answered_once or exc.kind == "length" or not plain_fallback:
                     raise
                 logger.warning("工具輪 trace=%s 帶工具的第一次呼叫失敗（%s），這次不查、照原本的方式回答",
                                trace_id or "-", exc)
@@ -849,11 +858,18 @@ class LLMService:
                             "、".join(call_name_and_arguments(c)[0] for c in result.tool_calls))
                 continue
             if result.content.strip() and not result.tool_calls:
+                if result.finish_reason == "length" and max_tokens is not None:
+                    # 和不帶工具的 chat_raw 一樣：撞到呼叫端給的上限，要讓看的人（與呼叫端）知道結尾不是寫完的
+                    return result.content.rstrip() + "\n" + TRUNCATED_NOTE
                 return result.content
             if not nudged:
                 nudged = True
-                messages.append({"role": "user", "content": "（不能再查了。請就上面已經查到的資料，直接回答原本的問題。）"})
+                messages.append({"role": "user", "content": nudge or TOOL_ROUNDS_NUDGE})
                 continue
+            if not plain_fallback:
+                logger.info("工具輪 trace=%s 查滿 %d 輪仍只給工具呼叫，呼叫端不要不帶工具的回答：當作沒話講",
+                            trace_id or "-", rounds)
+                return ""
             logger.warning("工具輪 trace=%s 查滿 %d 輪仍只給工具呼叫，改用不帶工具的呼叫取得回答", trace_id or "-", rounds)
             return await self.chat_raw(messages=messages, think=think, **common)
 
@@ -887,22 +903,28 @@ class LLMService:
         tool_runner: Optional[ToolRunner] = None,
         max_tool_rounds: int = 2,
         max_tokens: Optional[int] = None,
+        tool_nudge: Optional[str] = None,
+        tools_plain_fallback: bool = True,
+        today: Optional[str] = None,
     ) -> "GenerateReplyResult":
-        """/askai 專用：組 prompt bundle → 呼叫 `chat_raw` → 回 GenerateReplyResult。
+        """組 prompt bundle → 呼叫模型 → 回 GenerateReplyResult；/askai、插話、日記、印象審核都走這裡。
 
-        將 Ollama 各類例外翻譯成使用者友善的 ⚠️ 訊息，caller 收到字串即可。
+        將後端各類例外翻譯成使用者友善的 ⚠️ 訊息，caller 收到字串即可。
         前兩個欄位仍可 tuple unpacking（`reply, log = await generate_reply(...)`）以保持與舊 caller 相容。
 
         `keep_alive` 轉交給 `chat_raw`；不同 caller（/askai / moderation）可獨立設值。
         `trace_id` 串接 caller 與 anomaly log，失敗時可由 ERROR log 一鍵追到 raw response。
 
-        `tool_runner` 給了（而且有工具）就讓模型自己決定要不要先查（/askai 的情報搜尋），見 `_answer_with_tools`；
-        沒給就跟原本一樣一問一答。錯誤訊息、圖片退成 PNG 重試兩種路徑共用。
+        `tool_runner` 給了（而且有工具）就讓模型自己決定要不要先查（/askai 的情報與網路搜尋、插話的查詢），
+        見 `_answer_with_tools`；沒給就跟原本一樣一問一答。錯誤訊息、圖片退成 PNG 重試兩種路徑共用。
         有工具時才把這組工具的使用規則（`tool_runner.instructions`）接在系統提示詞後面：沒工具時提示詞跟原本完全一樣。
+        `tool_nudge`、`tools_plain_fallback`：查滿輪數時提醒模型的話、要不要「改用不帶工具的呼叫」這條退路
+        （/askai 用預設；插話換成自己的提醒、關掉退路）。
+        `today`：放在 user 段最前面的日期（插話傳；它的聊天行只有時:分，模型判斷不了查到的東西新不新）。
 
-        呼叫端給了 `max_tokens`、而模型開著思考卻想到上限還沒寫出答案：關掉思考、不帶工具，用已經查到的資料
-        （工具輪的 messages）再答一次——同樣的設定重跑只會再想完一次。仍沒有答案才回「想太久」。
-        沒給上限的呼叫端（插話、日記）不會走到這裡。
+        呼叫端給了 `max_tokens`、而模型開著思考卻想到上限還沒寫出答案（或答案才開了頭就被切，結尾有
+        `TRUNCATED_NOTE`）：關掉思考、不帶工具，用已經查到的資料（工具輪的 messages）再答一次——同樣的設定
+        重跑只會再想完一次。仍沒有答案才回「想太久」；重答仍被切就照截斷的回答。沒給上限的呼叫端不會走到這裡。
         """
         use_tools = tool_runner is not None and bool(tool_runner.tools)
         instructions = getattr(tool_runner, "instructions", "") if use_tools else ""
@@ -929,6 +951,7 @@ class LLMService:
             bot_display_name=bot_display_name,
             replied_to_from=replied_to_from,
             replied_to_text=replied_to_text,
+            today=today,
         )
 
         target_model = self._resolve_runtime_model(model)
@@ -946,7 +969,7 @@ class LLMService:
                     messages, tool_runner, progress=progress, transcript=transcript_so_far, model=target_model,
                     think=target_think, temperature=temperature, top_p=top_p, num_ctx=num_ctx, timeout=timeout,
                     keep_alive=keep_alive, trace_id=trace_id, max_tool_rounds=max_tool_rounds,
-                    max_tokens=max_tokens,
+                    max_tokens=max_tokens, nudge=tool_nudge, plain_fallback=tools_plain_fallback,
                 )
                 return text, list(progress), list(transcript_so_far)
             text = await self.chat_raw(
@@ -970,8 +993,25 @@ class LLMService:
                 return bundle.prompt_record_log
             return bundle.prompt_record_log + "\n<tool_rounds>\n" + "\n".join(transcript) + "\n</tool_rounds>"
 
+        async def without_thinking(retry_messages: list[dict[str, object]]) -> str:
+            # 想太久的補救：關掉思考、不帶工具，用已經查到的資料再答一次（同樣的設定重跑只會再想完一次）
+            return await self.chat_raw(
+                model=target_model, messages=retry_messages, think=False, temperature=temperature,
+                top_p=top_p, repeat_penalty=repeat_penalty, num_ctx=num_ctx, timeout=timeout,
+                keep_alive=keep_alive, max_tokens=max_tokens, trace_id=trace_id,
+            )
+
         try:
             reply, final_messages, transcript = await answer(sent_messages)
+            if reply.endswith(TRUNCATED_NOTE) and target_think and max_tokens is not None:
+                # 想到快用完上限才開始寫、答案被切到一半：和「什麼都沒寫出來」用同一個補救
+                logger.warning("LLM 回答被長度上限切斷 trace=%s：關掉思考再答一次", trace_label)
+                retry_messages = list(progress) or list(sent_messages)
+                try:
+                    reply = await without_thinking(retry_messages)
+                    final_messages = retry_messages
+                except (LLMAPIError, LlmTimeoutError, LlmConnectionError) as retry_exc:
+                    logger.warning("LLM 關掉思考重答仍失敗 trace=%s：%s，照截斷的回答", trace_label, retry_exc)
             return GenerateReplyResult(
                 reply=reply,
                 prompt_record_log=record_log(transcript),
@@ -1011,11 +1051,7 @@ class LLMService:
                 retry_messages = list(progress) or list(sent_messages)
                 if target_think and max_tokens is not None:
                     try:
-                        reply = await self.chat_raw(
-                            model=target_model, messages=retry_messages, think=False, temperature=temperature,
-                            top_p=top_p, repeat_penalty=repeat_penalty, num_ctx=num_ctx, timeout=timeout,
-                            keep_alive=keep_alive, max_tokens=max_tokens, trace_id=trace_id,
-                        )
+                        reply = await without_thinking(retry_messages)
                         logger.info("LLM 關掉思考重答 trace=%s：有回答", trace_label)
                         return GenerateReplyResult(
                             reply=reply,
