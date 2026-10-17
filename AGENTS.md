@@ -12,7 +12,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 
 1. 讀 `AI_HANDOFF_AND_TODO.md` 的「現況摘要」與這次任務相關的區塊（用標題或 `@meta id` 找，不必整份讀）。
 2. `git status`：有不是你改的檔案，代表另一個 agent 正在做，先避開那些檔案；需要動到時先告訴使用者。
-3. 要寫的東西先對照下方「共用元件」，並 grep 同類做法的**所有**實作。已經有兩份以上，就先抽成共用元件（放 `src/utils/`，只抽機制、長相留給呼叫端），再接新功能。
+3. 要寫的東西先對照下方「共用元件」，並 grep 同類做法的**所有**實作。已經有兩份以上，就先抽成共用元件（放 `src/utils/`，只抽機制、長相留給呼叫端），再接新功能。現有程式裡找到的重複（同一套流程寫兩份、同一條規則散在幾處）也一樣要收，排進順序做；「沿用現有架構、最小修改」管的是收的時候不另起一套分層，不是不收的理由。
 
 ## 收工（三項都做到才算完成）
 
@@ -58,7 +58,8 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 寫 log | `logging.getLogger(__name__)`；去向、等級、分類改 `src/settings/logging.json`；類別 logger 用 `get_article_monitor_logger()`／`get_llm_anomaly_logger()`；同容器另開的行程用 `configure_logging(force=True, root_handlers=[…])` 寫自己的檔（兩個行程寫同一個輪替檔會互相蓋掉） |
 | 本機時區 | `sys_settings.time_settings.APP_TZ` |
 | 遊戲公告的時間 | `services.events.event_time_parser.SERVER_TZ`（值同為 UTC+8，但語意不同，兩者不可合併） |
-| 連 pgvector | `LLMServiceSettings().pgvector_connect()` |
+| 連 pgvector；LlamaIndex 向量庫 | `LLMServiceSettings().pgvector_connect()`／`pgvector_cursor()`；向量庫（聊天、成員資料、檢索）用 `pgvector_vector_store(table_name=…, embed_dim=…)`（借出連線前先確認活著，守衛擋直接 `from_params`） |
+| 轉發來源同一篇內容的送出鎖（推送與輪詢、手動指令與排程撞在一起只送一份） | `services.relay.base_monitor.content_send_lock(content_type, content_id)`（鎖內再查一次已送紀錄才送；巴哈、公告、FB、IT 都用它） |
 | 實體表名 | `HYBRID_RETRIEVAL_SETTINGS.chat_table()`／`.source_table(key)`／`.physical_table(name)`（含 identifier 消毒） |
 | 讀會被手改、改了就要生效的檔案（prompt、字典、開關、config.json、LLM runtime 設定） | 機制只有一份：`utils.hot_files.read_text()`／`read_json()`／`read_parsed(path, parse=…)`（mtime 快取、壞檔沿用上次）。各檔的解析、驗證、寫入在呼叫端：config.json 走 `ChannelConfig.load_config`／`update_config`、開關走 `switches.current()`、LLM runtime 設定走 `sys_settings.llm_settings.load_llm_runtime_config`（已接熱讀檔，LLMService 也用它）、字典走 `emoji_dictionary`／`sticker_dictionary`；不要在 `hot_files` 加認得特定檔案的函式 |
 | 清理聊天文字 | `llm.persona.personality_extractor._clean_text_for_extraction()` |
@@ -71,7 +72,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 版本更新時刻 | `services.events.event_scheduler.VersionDateResolver`（`refresh()`、`update_starts()`；只看時間，不看版本號） |
 | GPU 獨佔（產圖時卸載 LLM） | `llm.client.lemonade_gate.gpu_exclusive(owner, lease_seconds)`（另開的行程、search-mcp 容器也一起排隊：跨行程鎖檔，跨容器靠 compose 掛同一個 `gpu_lock/` 並設 `LEMONADE_GPU_LOCK_PATH`）；沒有 event loop 的同步程式（情報搜尋的批次算向量、MCP）用 `gpu_exclusive_sync()`；拿著閘門算 embedding 一律 `make_safe_llm_embedding(holding_gpu_gate=True)`（短逾時、不重試、排隊有上限，後端卡住時早點放鎖） |
 | 判斷 LLM 後端連不上或逾時（該停手、晚點再試，不是請求本身的問題） | `llm.client.http_client.is_unreachable` |
-| 讓模型先用工具查、再回答（每輪都照原本的思考設定、帶同一份工具清單，不查就只呼叫一次；查滿輪數保證有文字） | `LLMService.generate_reply(tool_runner=…)`（工具介面 `llm.client.tool_calls.ToolRunner`；/askai 查情報用它，不要再寫一份迴圈） |
+| 讓模型先用工具查、再回答（每輪都照原本的思考設定、帶同一份工具清單，不查就只呼叫一次；查滿輪數的提醒文字與「要不要改用不帶工具的呼叫」由呼叫端決定） | `LLMService.generate_reply(tool_runner=…, tool_nudge=…, tools_plain_fallback=…)`（工具介面 `llm.client.tool_calls.ToolRunner`；/askai 查情報、插話的查詢都用它，不要再寫一份迴圈）；要給模型今天日期用 `today=`（放 user 段，不動 system 段的快取） |
 | 工具呼叫的訊息格式（模型要呼叫工具的 assistant 訊息、`role: tool` 回覆、取工具名稱與解析參數） | `llm.client.tool_calls`（`assistant_message`／`tool_message`／`call_name_and_arguments`／`parse_arguments`；迴圈、預算、工具怎麼跑留給呼叫端。人格萃取 agent 與 /askai 情報搜尋共用） |
 | 幾組工具一起交給同一個工具輪（例：遊戲情報＋網路搜尋） | `llm.client.tool_calls.combine_runners`（宣告照順序接、使用規則依序接、呼叫依名稱交給宣告它的那組；沒工具的連規則一起略過） |
 | 按鈕、指令的操作權限 | `utils.utils.check_guild`（`owner_only`／`admin_only`／`required_role`／`permission="manage_messages"` 這類 Discord 權限；不通過時自己回只有本人看得到的訊息） |
@@ -84,6 +85,9 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 取得 thread（封存的也拿得到）、解除封存 | `utils.discord_threads.fetch_thread`／`reopen_thread`（封存的 thread 改不了、刪不了訊息） |
 | 讀綁定的頻道 id（可能沒綁） | `ChannelConfig.get_configured_id(key)`（沒綁回 None，不必自己比 `DEFAULT_ID`） |
 | 搜尋公告、官方 FB、PTT、巴哈的內容；讀全文（附推文、留言） | `services.search`（`SearchIndex.search`／`fetch`；索引從 `articles.db` 唯讀增量同步；用語、評估數字見 `AI_HANDOFF_AND_TODO.md` 的 `mcp-search-tools` 區塊）；MCP 殼是 `llm.mcp_server`，常駐在 compose 的 `search-mcp` 服務（背景同步與每日維護 `services.search.background`）；bot 端（discord-bot 沒掛索引）一律當 MCP 客戶端用 `llm.retrievers.intel`（`run_with_intel` 依開關準備工具、交給回答流程並記經過，`also=` 帶其他一起給模型的工具；`prepare_intel_session`；每次工具呼叫各開短連線，見模組說明） |
+| 插話判斷時先查一次（遊戲情報＋網路、每次 1 次、每天上限、名字檢查、記錄模式） | `llm.ambient.ambient_search`（`prepare` 回那組工具或 None、`AmbientSearchTools`；開關 `ambient_search_mode`、細項 `AmbientSearchSettings`；規則 `settings/prompts/ambient_search_rules.txt`） |
+| 要送出網的查詢字是不是在指群友（名字、#尾碼、長數字、email） | `llm.persona.member_names.query_names_member(query, parts)`（名字片段用 `name_parts`；插話用 `ambient_search.name_parts_for` 拿全伺服器的） |
+| 每天最多做幾次的計數（換日歸零） | `utils.daily_quota.DailyQuota`（看圖補字典、插話查詢都用它；守衛擋自己用 `["", 0]` 記） |
 | 網路搜尋（SearXNG；哪類題目用哪組引擎、窄路由結果太少換通用引擎補查） | `llm.retrievers.web.search_web`（路由用 `intent.classify_route`；直接呼叫 `fetch_web_results` 守衛擋）；給模型當工具用 `WebSearchTools`（/askai 開關 `askai_web_search_mode`：keyword 先查好塞進 prompt、tool 由模型和遊戲情報一起決定；工具模式的題目類型由模型選 `kind`，每種類型的引擎寫在 `tools._KINDS`）；SearXNG 的直接答案（匯率、天氣）在 `WebRetrievalOutcome.answers`；被擋的引擎自動暫避 |
 | 官方公告、巴哈單一樓層的原文網址 | `services.source_urls`（`official_article_url`、`bahamut_floor_url`） |
 | 合併多份排名（關鍵字＋向量的混合檢索） | `utils.rank_fusion`（`rrf_score`／`fuse_rankings`；只看名次、不看各自的分數） |
