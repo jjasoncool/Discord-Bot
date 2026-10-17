@@ -24,6 +24,7 @@ from llm.preprocess import emoji_dictionary, sticker_cache, sticker_dictionary
 from llm.preprocess.external_emoji import custom_emojis, sticker_image_url
 from llm.preprocess.vision_image import download_images
 from utils import hot_files
+from utils.daily_quota import DailyQuota
 from llm.prompt.answer_line import final_line
 from sys_settings.llm_settings import EmojiAutofillSettings
 from sys_settings.time_settings import APP_TZ
@@ -37,8 +38,8 @@ _lock = asyncio.Lock()
 _in_flight: set[str] = set()
 #: 對象 → 這個時間之前不再看（看不出來、失敗、試跑看過）
 _retry_after: dict[str, float] = {}
-#: (日期, 今天已看幾張)
-_quota: list = ["", 0]
+#: 今天已看幾張（換日歸零）
+_quota = DailyQuota(_SETTINGS.daily_limit)
 _LLM = None
 
 
@@ -104,16 +105,6 @@ def _minutes(hhmm: str) -> int:
 def _in_quiet_hours(now: datetime) -> bool:
     start, end, t = _minutes(_SETTINGS.quiet_start), _minutes(_SETTINGS.quiet_end), now.hour * 60 + now.minute
     return start <= t < end if start <= end else (t >= start or t < end)
-
-
-def _take_quota(now: datetime) -> bool:
-    today = now.strftime("%Y-%m-%d")
-    if _quota[0] != today:
-        _quota[0], _quota[1] = today, 0
-    if _quota[1] >= _SETTINGS.daily_limit:
-        return False
-    _quota[1] += 1
-    return True
 
 
 def _still_needed(t: Target) -> bool:
@@ -186,7 +177,7 @@ async def _handle(t: Target, context: list[str], session) -> None:
     now = _now()
     if _in_quiet_hours(now) or not _still_needed(t):
         return
-    if not _take_quota(now):
+    if not _quota.take(now, _SETTINGS.daily_limit):
         logger.info("看圖補字典：今天已達上限 %d 張，%s 等下次被看到再補", _SETTINGS.daily_limit, t.key)
         return
     # 先記下次可再看的時間：看不出來、失敗都要等；寫入成功的本來就不會再被挑中

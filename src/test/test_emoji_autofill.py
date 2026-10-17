@@ -230,7 +230,7 @@ class ObserveTests(FilesTestBase):
         super().setUp()
         af._in_flight.clear()
         af._retry_after.clear()
-        af._quota[:] = ["", 0]
+        af._quota.reset()
         self.addCleanup(af._retry_after.clear)
         self.answer = "擔心困惑 | think"
         self.ask = mock.AsyncMock(side_effect=lambda *a, **k: self.answer)
@@ -285,7 +285,7 @@ class ObserveTests(FilesTestBase):
         self.assertEqual(self.ask.await_count, 1)
         # 前一個表情還在看的時候，同一個新表情連來兩則：排隊的只能算一次
         af._retry_after.clear()
-        af._quota[:] = ["", 0]   # 別讓每日上限替去重擋掉第三次
+        af._quota.reset()   # 別讓每日上限替去重擋掉第三次
         self.ask.reset_mock()
         self.run_observe(msg("<:FR16:5>"), msg("<:moon2:6>"), msg("<:moon2:6>"))
         self.assertEqual(self.ask.await_count, 2)

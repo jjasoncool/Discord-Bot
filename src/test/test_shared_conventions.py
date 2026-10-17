@@ -424,6 +424,27 @@ def _find_switch_fields(path: Path) -> list[int]:
     return hits
 
 
+def _find_hand_rolled_daily_quotas(path: Path) -> list[int]:
+    """`_quota = ["", 0]` 這種自己用（日期, 次數）記每天額度的寫法。每天幾次的計數一律用 `utils.daily_quota.DailyQuota`
+    （看圖補字典原本自己寫一份，插話查詢要第二份時抽出來）。寫法是個 list 字面值，所以走 AST。"""
+    hits: list[int] = []
+    for node in ast.walk(_parse(path)):
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        value = node.value
+        if not (isinstance(value, ast.List) and len(value.elts) == 2
+                and all(isinstance(e, ast.Constant) for e in value.elts)
+                and isinstance(value.elts[0].value, str) and isinstance(value.elts[1].value, int)):
+            continue
+        if any(isinstance(t, ast.Name) and "quota" in t.id.lower() for t in targets):
+            hits.append(node.lineno)
+    return hits
+
+
 def _find_ffprobe_calls(path: Path) -> list[int]:
     """找自己組 ffprobe 指令的地方。讀影片長度一律走 `utils.media_probe.probe_duration`（逾時、失敗回 0、
     收掉子行程只有一份）。指令寫在字串裡，所以走 AST。"""
@@ -748,6 +769,12 @@ RULES = [
         finder=_find_config_json_writes,
         canonical="ChannelConfig.update_config（重讀最新內容、只改這次的 key、安全寫入加備份）",
         allowed={"utils/utils.py"},
+    ),
+    Rule(
+        name="每天最多做幾次的計數（換日歸零）",
+        finder=_find_hand_rolled_daily_quotas,
+        canonical="utils.daily_quota.DailyQuota",
+        allowed=set(),
     ),
     Rule(
         name="讀影片長度（ffprobe）",
