@@ -134,6 +134,27 @@ class LLMServiceSettings(BaseSettings):
         finally:
             conn.close()
 
+    def pgvector_vector_store(self, *, table_name: str, embed_dim: int, hybrid_search: bool = True):
+        """建 LlamaIndex 的 PGVectorStore；聊天、成員資料、檢索三個向量庫都從這裡拿。
+
+        借出連線前先確認它還活著（`pool_pre_ping`）：資料庫會把閒置太久的連線關掉，池子不知道，
+        下一個拿到那條連線的操作必定失敗；成員偏好寫入曾因此在「先刪舊的、再寫新的」中間失敗而丟資料。
+        延後 import llama_index：讓沒裝它的環境也能匯入本設定模組。
+        """
+        from llama_index.vector_stores.postgres import PGVectorStore
+
+        return PGVectorStore.from_params(
+            database=self.pgvector_db,
+            host=self.pgvector_host,
+            password=self.pgvector_password,
+            port=self.pgvector_port,
+            user=self.pgvector_user,
+            table_name=table_name,
+            embed_dim=embed_dim,
+            hybrid_search=hybrid_search,
+            create_engine_kwargs={"pool_pre_ping": True},
+        )
+
     def build_pgvector_database_url(self) -> str:
         """由 PGVECTOR_* 參數在程式內組裝 asyncpg 連線字串。"""
         encoded_user = quote_plus(self.pgvector_user)

@@ -165,15 +165,9 @@ def _get_or_build_vector_index(table_name: str, logger: logging.Logger) -> Any |
                 _VECTOR_INDEX_CACHE.pop(key, None)
 
         try:
-            vector_store = PGVectorStore.from_params(
-                database=LLM_SETTINGS.pgvector_db,
-                host=LLM_SETTINGS.pgvector_host,
-                password=LLM_SETTINGS.pgvector_password,
-                port=LLM_SETTINGS.pgvector_port,
-                user=LLM_SETTINGS.pgvector_user,
+            vector_store = LLM_SETTINGS.pgvector_vector_store(
                 table_name=table_name,
                 embed_dim=HYBRID_RETRIEVAL_SETTINGS.pgvector_embed_dim,
-                hybrid_search=True,
             )
             index = VectorStoreIndex.from_vector_store(
                 vector_store=vector_store,

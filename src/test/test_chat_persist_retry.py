@@ -383,6 +383,19 @@ class ChatIndexTimeoutTests(unittest.TestCase):
 
         self.assertIs(make.call_args.kwargs["holding_gpu_gate"], True)
 
+    def test_chat_vector_store_checks_the_connection_before_using_it(self):
+        saved = store_chat._chat_index_cache
+        store_chat._chat_index_cache = None
+        self.addCleanup(setattr, store_chat, "_chat_index_cache", saved)
+        with patch("llm.client.embedding_client.make_safe_llm_embedding"), \
+                patch("llama_index.vector_stores.postgres.PGVectorStore.from_params") as from_params, \
+                patch("llama_index.core.VectorStoreIndex.from_vector_store", return_value=MagicMock()), \
+                self.assertLogs(store_chat.logger, "INFO"):
+            store_chat._get_chat_index()
+
+        # 資料庫關掉閒置連線後，池子裡那條還在；借出前不先確認，下一次寫入必定失敗
+        self.assertEqual({"pool_pre_ping": True}, from_params.call_args.kwargs.get("create_engine_kwargs"))
+
 
 if __name__ == "__main__":
     unittest.main()

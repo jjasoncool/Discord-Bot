@@ -9,6 +9,8 @@
   - 全站時區：八處各自寫死 UTC+8，四種命名；唯一可設定的來源只有一處在用
     （2026-09-02 追加：regex 版守衛被 `timezone as _tz` 的 import 別名繞過，改走 AST）
   - pgvector 連線：六處抄同樣的五個參數；要加 timeout 或換驅動得改六個地方
+  - 向量庫建立：三處各自 `PGVectorStore.from_params`，都沒有借出前檢查，資料庫關掉閒置連線後
+    第一次寫入必失敗，成員偏好因此丟過
   - prompt 載入：三份一字不差的 mtime 快取實作
 
 **新增共用元件時，順手在 `RULES` 加一條**，下一個人（或下一輪的 AI）就不會重造。
@@ -653,6 +655,12 @@ RULES = [
         name="pgvector 連線",
         pattern=r"psycopg2\.connect\(",
         canonical="LLMServiceSettings.pgvector_connect()",
+        allowed={"sys_settings/llm_settings.py"},
+    ),
+    Rule(
+        name="LlamaIndex 向量庫（PGVectorStore）的建立：三處各自建，就會有一處漏掉借出前檢查",
+        pattern=r"PGVectorStore\.from_params\(",
+        canonical="LLMServiceSettings.pgvector_vector_store(table_name=…, embed_dim=…)",
         allowed={"sys_settings/llm_settings.py"},
     ),
     Rule(

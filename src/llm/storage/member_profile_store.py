@@ -287,15 +287,9 @@ class PgVectorMemberProfileStore:
                 return self._index
 
             embed_model = self._get_embed_model()
-            vector_store = PGVectorStore.from_params(
-                database=self.settings.pgvector_db,
-                host=self.settings.pgvector_host,
-                password=self.settings.pgvector_password,
-                port=self.settings.pgvector_port,
-                user=self.settings.pgvector_user,
+            vector_store = self.settings.pgvector_vector_store(
                 table_name=self.table_name,
                 embed_dim=self.embed_dim,
-                hybrid_search=True,
             )
             self._index = VectorStoreIndex.from_vector_store(
                 vector_store=vector_store,

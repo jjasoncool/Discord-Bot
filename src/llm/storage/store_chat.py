@@ -327,7 +327,6 @@ def _get_chat_index():
     global _chat_index_cache
 
     from llama_index.core import VectorStoreIndex
-    from llama_index.vector_stores.postgres import PGVectorStore
     from llm.client.embedding_client import make_safe_llm_embedding
     from sys_settings.llm_settings import LLMServiceSettings, load_llm_runtime_config
     from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
@@ -348,15 +347,9 @@ def _get_chat_index():
             runtime_config=runtime_config,
             holding_gpu_gate=True,     # flush 拿著 GPU 閘門算 embedding
         )
-        vector_store = PGVectorStore.from_params(
-            database=settings.pgvector_db,
-            host=settings.pgvector_host,
-            password=settings.pgvector_password,
-            port=settings.pgvector_port,
-            user=settings.pgvector_user,
+        vector_store = settings.pgvector_vector_store(
             table_name=HYBRID_RETRIEVAL_SETTINGS.get_chat_table_name(),
             embed_dim=HYBRID_RETRIEVAL_SETTINGS.pgvector_embed_dim,
-            hybrid_search=True,
         )
         index = VectorStoreIndex.from_vector_store(
             vector_store=vector_store,
