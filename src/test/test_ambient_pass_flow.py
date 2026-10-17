@@ -3,6 +3,8 @@
 斷言使用者看得到的事：哪些情況不勞動模型、模型回了什麼就送到哪裡（reply 還是裸送）、送出後
 冷卻與額度怎麼算、接續怎麼武裝、互動紀錄記了什麼。模型與 Discord 都是假的，只有 ambient_reply
 本身是真的。
+另守：查詢工具有就交給模型（一輪、插話的提醒、不退回不帶工具的呼叫），沒有就跟原本一樣；今天的日期一起送；
+夾著工具呼叫原文的回答不送。
 """
 import asyncio
 import os
@@ -20,7 +22,7 @@ if SRC_DIR not in sys.path:
 
 import discord  # noqa: E402
 
-from llm.ambient import ambient_insult, ambient_reply  # noqa: E402
+from llm.ambient import ambient_insult, ambient_reply, ambient_search  # noqa: E402
 from llm.ambient.ambient_hooks import HookDecision  # noqa: E402
 
 BOT_ID = 1385591938438135848
@@ -84,6 +86,7 @@ class PassFlowTests(unittest.TestCase):
         self.persona_cards = None
         self.memory_lines = None
         self.tag_lines = None
+        self.search_tools = None
 
     def _model_says(self, reply, error_kind=None):
         self.llm.generate_reply.return_value = SimpleNamespace(
@@ -118,12 +121,14 @@ class PassFlowTests(unittest.TestCase):
             recall_signature_tags=mock.AsyncMock(return_value=self.tag_lines),
             _build_chat_callback_context=mock.AsyncMock(return_value=None),
             _build_style_refs=mock.AsyncMock(return_value=None),
+            _prepare_search_tools=mock.AsyncMock(side_effect=lambda *a, **k: self.search_tools),
             _write_ambient_debug=lambda **k: self.debug_writes.append(k),
             _log_skip=lambda cid, reason: self.skips.append(reason),
             _record_ambient_interaction=self.record_interaction,
             _get_llm=lambda: self.llm,
         )
         self.evaluate_hook = stubs["evaluate_hook"]
+        self.prepare_search = stubs["_prepare_search_tools"]
         with mock.patch.multiple(ambient_reply, **stubs), \
                 mock.patch.object(ambient_insult, "grudges", _grudges), \
                 mock.patch.object(ambient_insult, "enabled", lambda: True):
@@ -142,6 +147,7 @@ class PassFlowTests(unittest.TestCase):
         msg = _message("笑死")
         self._run(msg, burst=[_message("XD"), msg])
         self.llm.generate_reply.assert_not_awaited()
+        self.prepare_search.assert_not_awaited()          # 閘門擋下的不去準備查詢工具（不連 search-mcp）
         self.assertTrue(any("burst" in s for s in self.skips))
 
     def test_one_substantive_message_in_the_burst_lets_it_through(self):
@@ -189,6 +195,7 @@ class PassFlowTests(unittest.TestCase):
         self.hook = _hook(passed=False, veto="nobody")
         self._run(_message())
         self.llm.generate_reply.assert_not_awaited()
+        self.prepare_search.assert_not_awaited()          # 鉤子閘擋下的也不去準備查詢工具
         self.evaluate_hook.assert_awaited_once()
         self.assertTrue(any("鉤子" in s and "nobody" in s for s in self.skips))
         self._run(_message(), directed=True)
@@ -419,6 +426,33 @@ class PassFlowTests(unittest.TestCase):
         self._run(_message(), directed=True, followup=True)
         kw = self.record_interaction.await_args.kwargs
         self.assertEqual((True, True), (kw["directed"], kw["followup"]))
+
+    # ── 查詢工具、日期、長度上限 ──
+    def test_without_search_tools_the_model_gets_no_tool_runner(self):
+        self._run(_message())
+        kw = self._generate_kwargs()
+        self.assertIsNone(kw["tool_runner"])
+
+    def test_search_tools_are_handed_over_with_one_round_the_ambient_nudge_and_no_plain_fallback(self):
+        self.search_tools = SimpleNamespace(mode="dry_run", tools=[{"function": {"name": "web_search"}}], instructions="規則")
+        self._run(_message(), directed=True)
+        kw = self._generate_kwargs()
+        self.assertIs(self.search_tools, kw["tool_runner"])
+        self.assertEqual(1, kw["max_tool_rounds"])
+        self.assertEqual(ambient_search.NUDGE, kw["tool_nudge"])
+        self.assertIs(False, kw["tools_plain_fallback"])
+
+    def test_today_is_sent_with_the_prompt(self):
+        self._run(_message(), directed=True)
+        self.assertRegex(self._generate_kwargs()["today"], r"^\d{4}-\d{2}-\d{2}（星期.）$")
+
+    def test_a_leaked_tool_call_is_never_sent(self):
+        self._model_says('<tool_call>{"name": "web_search"}</tool_call>')
+        msg = _message()
+        self._run(msg, directed=True)
+        msg.reply.assert_not_awaited()
+        msg.channel.send.assert_not_awaited()
+        self.assertEqual("pass", self.debug_writes[-1]["outcome"])
 
 
 if __name__ == "__main__":

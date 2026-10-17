@@ -37,5 +37,10 @@
     "dry_run：查、記 log 說會補幾則，不寫（試跑用）",
     "on：把 raw 備份有、聊天向量庫沒有的訊息補進向量庫，每 15 分鐘 20 則，只補近 14 天"
   ],
-  "chat_index_backfill_mode": "on"
+  "chat_index_backfill_mode": "on",
+  "_ambient_search_mode 可以填": [
+    "off：插話不查、不給工具；提示詞只多了 user 段開頭的今天日期",
+    "dry_run：記錄模式——琇紫判斷要不要插話時可以想查一次遊戲情報或網路，但只記下她想查什麼（名字檢查的判定一起記進 discord_bot.log），不上網、不給她結果；每天最多記 30 次。全開要等記錄週看過紀錄再加"
+  ],
+  "ambient_search_mode": "dry_run"
 }

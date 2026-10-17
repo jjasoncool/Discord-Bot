@@ -564,6 +564,34 @@ class AmbientChatSettings(BaseSettings):
         return (init_settings,)
 
 
+class AmbientSearchSettings(BaseSettings):
+    """插話上網查（`llm.ambient.ambient_search`）的細項；開關在 settings/switches.json 的 `ambient_search_mode`。
+    只吃 class 預設值。"""
+
+    #: 每天最多幾次有查的插話（成本在多出來的那一輪模型呼叫）；用完當天不再宣告工具
+    daily_limit: int = 30
+    #: 一次插話最多查幾輪；同一輪只執行第一個工具呼叫
+    max_tool_rounds: int = 1
+    #: 插話專用的查詢規則（接在插話 prompt 後面，只在有工具時給；改檔即生效）
+    rules_path: str = prompt_file("ambient_search_rules.txt")
+    #: 準備情報工具（連 search-mcp 列工具）最多等幾秒：它卡住時不該拖住每一次插話
+    intel_prepare_seconds: float = 5.0
+
+    model_config = SettingsConfigDict(extra="forbid", frozen=True)
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: Any,
+        env_settings: Any,
+        dotenv_settings: Any,
+        file_secret_settings: Any,
+    ) -> Tuple[Any, ...]:
+        """停用 env/dotenv，僅接受初始化參數與 class 預設值。"""
+        return (init_settings,)
+
+
 class PersonaAgentSettings(BaseSettings):
     """人格擷取 agent 的排程設定。
 

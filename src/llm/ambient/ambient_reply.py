@@ -2,8 +2,9 @@
 
 架構定位：功能層（`llm/ambient`）。上層：介面層的 `discord_bot.on_message`（背景 task 執行，不阻塞訊息處理）。
 下層：`services.llm_service.LLMService`（生成）、`ambient_hooks`（鉤子閘）、`ambient_memory`（偏好與招牌梗召回）、
-`ambient_insult`（被罵的應對與記仇名單）、`llm.preprocess`（聊天行格式、人名錨點、貼文與表情描述）、
-`llm.storage.ai_interactions_store`（互動紀錄）、`llm.client.lemonade_gate`（前景讓位）。
+`ambient_insult`（被罵的應對與記仇名單）、`ambient_search`（判斷時可以先查一次遊戲情報或網路）、
+`llm.preprocess`（聊天行格式、人名錨點、貼文與表情描述）、`llm.storage.ai_interactions_store`（互動紀錄）、
+`llm.client.lemonade_gate`（前景讓位）。
 
 介面：
 - `maybe_ambient_reply(bot, message)`：入口。硬過濾、靜默期合併 burst、判斷被點名／接續，然後交給單次評估。
@@ -22,6 +23,8 @@
 - 生成走 `LLMService.generate_reply(model=ambient_model)`，與 /askai 共用 `stream_exclusive` 序列化；/askai 活躍
   窗口內背景插話讓位，避免換模型 ping-pong。
 - 模型判定被惡意辱罵：不回文字、按表情、記仇；標記夾在文字裡則整則不送。
+- 查詢工具（`ambient_search`）三種來源都給同一份宣告與規則，提示詞快取才穩；今天的日期放 user 段、不放 system 段
+  （system 段一變整份快取都可能重讀）。輸出夾著工具呼叫的原文一律當 [PASS]，不會貼進群裡。
 
 例外與決策：靜默期依對話節奏切換（熱聊等不到安靜，而且插話本來就不需要空檔）；純機率的減壓閥已被鉤子閘取代
 （隨機丟棄會丟掉好時機、留下爛時機，鉤子有判斷依據）。
@@ -49,7 +52,7 @@ from llm.storage.ai_interactions_store import (
     mark_got_reply,
     record_interaction,
 )
-from llm.ambient import ambient_insult
+from llm.ambient import ambient_insult, ambient_search
 from llm.ambient.ambient_hooks import HookDecision, evaluate as evaluate_hook
 from llm.ambient.ambient_memory import enqueue_for_memory, recall_lines, recall_signature_tags
 from llm.preprocess.chat_line import (
@@ -1150,6 +1153,9 @@ class _Inputs:
     recalled_context: Optional[list]
     style_refs: Optional[list]
     grudge: object
+    # 這次插話給模型的查詢工具（開關關、額度用完就 None）與今天的日期
+    search_tools: Optional[object] = None
+    today: str = ""
     # 只給 debug 摘要用的計數
     persona_count: int = 0
     memory_count: int = 0
@@ -1253,6 +1259,22 @@ async def _pass_gates(bot, message, directed: bool, followup: bool, burst: Optio
     return _Gate(tracker=tracker, grudges=grudges, cold_ids=cold_ids)
 
 
+_WEEKDAYS = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
+
+
+def _today_line(now: datetime) -> str:
+    return f"{now:%Y-%m-%d}（{_WEEKDAYS[now.weekday()]}）"
+
+
+async def _prepare_search_tools(message: discord.Message, stripped: str, participant_ids: list[int], trace_id: str):
+    """這次插話要不要給查詢工具（開關、額度在 ambient_search 判）；名字檢查用的名單第一次要用時才去拿。"""
+    return await ambient_search.prepare(
+        stripped or "", now=lambda: datetime.now(APP_TZ),
+        names=functools.partial(ambient_search.name_parts_for, message.guild, list(participant_ids)),
+        trace_id=trace_id,
+    )
+
+
 async def _gather_inputs(
     bot, message: discord.Message, directed: bool, followup: bool, gate: _Gate,
     stripped: str, has_image: bool,
@@ -1352,12 +1374,14 @@ async def _gather_inputs(
     persona_context = (
         (persona_cards or []) + (memory_lines or []) + (tag_lines or [])
     ) or None
+    search_tools = await _prepare_search_tools(message, stripped, participant_ids, trace_id)
 
     return _Inputs(
         trace_id=trace_id, system_prompt=system_prompt, prompt_text=prompt_text,
         chat_context=chat_context, thread_map=thread_map, hook=hook, image_payload=image_payload,
         replied_msg=replied_msg, replied_to_from=replied_to_from, replied_to_text=replied_to_text,
         asker_for_bundle=asker_for_bundle, bot_display_name=bot_display_name,
+        search_tools=search_tools, today=_today_line(datetime.now(APP_TZ)),
         persona_context=persona_context, recalled_context=callback_lines, style_refs=style_ref_lines,
         grudge=grudge, persona_count=len(persona_cards or []), memory_count=len(memory_lines or []),
     )
@@ -1410,14 +1434,16 @@ async def _generate(inputs: _Inputs, ambient_model: str, directed: bool) -> tupl
     outcome ∈ reply／pass／insult／error:<kind>，prompt 與原樣輸出一律寫進 debug 檔。"""
     hook = inputs.hook
     # debug 摘要（discord_bot.log）：一眼看出各層 context 各抓到幾筆 + 有沒有圖 + 有沒有接到被回覆訊息
+    tools = inputs.search_tools
     logger.info(
         "ambient 生成 trace=%s directed=%s model=%s | chat=%d persona=%d memory=%d "
-        "callback=%d style=%d signals=%d img=%d reply_to=%d mood=%d",
+        "callback=%d style=%d signals=%d img=%d reply_to=%d mood=%d search=%s tools=%d",
         inputs.trace_id, directed, ambient_model,
         len(inputs.chat_context or []), inputs.persona_count, inputs.memory_count,
         len(inputs.recalled_context or []), len(inputs.style_refs or []),
         len(hook.signals) if hook is not None else 0,
         len(inputs.image_payload or []), 1 if inputs.replied_to_text else 0, 1 if inputs.grudge is not None else 0,
+        getattr(tools, "mode", "off"), len(tools.tools) if tools is not None else 0,
     )
     result = await _get_llm().generate_reply(
         prompt=inputs.prompt_text,
@@ -1439,6 +1465,12 @@ async def _generate(inputs: _Inputs, ambient_model: str, directed: bool) -> tupl
         # 天生不含「等鎖排隊」時間）→ 取代外層 watchdog，避免排在 /askai 後面被誤砍。
         timeout=int(_SETTINGS.pass_timeout_seconds),
         trace_id=inputs.trace_id,
+        today=inputs.today,
+        # 查詢工具：三種來源同一份宣告（快取才穩）；一輪只查一次、查滿的提醒用插話的口吻、不退回不帶工具的呼叫
+        tool_runner=tools,
+        max_tool_rounds=ambient_search.max_tool_rounds(),
+        tool_nudge=ambient_search.NUDGE,
+        tools_plain_fallback=False,
     )
 
     # 模型第一行宣告「我在接第幾則」→ 剝出來當 reply 錨點，其餘才是要講的話
@@ -1446,6 +1478,9 @@ async def _generate(inputs: _Inputs, ambient_model: str, directed: bool) -> tupl
     line_choice, reply = _parse_line_choice(raw_reply)
     if result.error_kind:
         outcome = f"error:{result.error_kind}"
+    elif "<tool_call>" in raw_reply or "</tool_call>" in raw_reply:
+        outcome = "pass"   # 工具呼叫漏成文字：不能貼進群裡
+        logger.info("ambient 回答夾著工具呼叫的原文，整則不送 trace=%s", inputs.trace_id)
     elif _is_silence(reply, _SETTINGS.silence_sentinel):
         outcome = "pass"
     elif ambient_insult.is_marker(reply):

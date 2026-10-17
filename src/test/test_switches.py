@@ -79,6 +79,7 @@ class SwitchesTests(unittest.TestCase):
 
     def test_defaults_are_safe(self):
         self.assertEqual(switches.Switches().telegram_filter_mode, "off")
+        self.assertEqual(switches.Switches().ambient_search_mode, "off")
 
 
 if __name__ == "__main__":

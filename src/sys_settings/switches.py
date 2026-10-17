@@ -58,6 +58,11 @@ class Switches(BaseModel):
     #: 沒來得及寫的）定期補寫。off＝不查；dry_run＝查、記 log（幾則、會排幾則），不寫；on＝排進聊天記憶的寫入佇列。
     #: 預設 dry_run：只讀不寫，跟 off 一樣安全，又能先從 log 看到要補多少再決定切到 on
     chat_index_backfill_mode: Literal["off", "dry_run", "on"] = "dry_run"
+    #: 插話上網查（llm.ambient.ambient_search）：琇紫判斷要不要插話的同一次生成裡，可以先查一次遊戲情報或網路。
+    #: dry_run＝記錄模式：工具照宣告、名字檢查照做、額度照扣，但不出網、不給她結果，只記下她想查什麼（先確認沒把
+    #: 群友名字送出去，再決定全開）；off＝不給工具，system 段跟原本一樣（user 段照樣帶今天日期）。全開（on）等記錄週
+    #: 看過紀錄再加
+    ambient_search_mode: Literal["off", "dry_run"] = "off"
 
 
 def _parse(raw: str) -> Switches:
