@@ -287,9 +287,15 @@ class AskAIWebSettings(BaseSettings):
         validation_alias="SEARXNG_URL",
     )
     # 明確指定 engines 會繞過 SearXNG 的 disabled 設定，死掉的引擎要在這裡拿掉才有效。
-    # 名單依實測收斂（詳見 handoff）：只有 bing / duckduckgo 系穩定，reuters 供 lang=en 路由。
-    default_engines: str = "bing,duckduckgo"
-    news_engines: str = "bing news,duckduckgo news,reuters"
+    # 名單依 24 小時穩定度測試收斂：yahoo 72 次全查得到、全對題；duckduckgo 97%（偶爾真人驗證）。
+    # bing 對題只七成、常回 0 筆，回垃圾時 SearXNG 不算錯誤、會直接混進結果（出過成人內容）；yandex 查得到但也回過成人網站
+    default_engines: str = "yahoo,duckduckgo"
+    # 新聞：有日期的引擎不限時間、結果照日期新到舊排（duckduckgo news 全附日期、七成是一週內的）；
+    # 不給日期的引擎排不了，保留它自己支援的一週條件、排在有日期的後面（怎麼合併見 search._search_news）。
+    # reuters 升級後回 401，拿掉
+    news_engines: str = "duckduckgo news"
+    news_undated_engines: str = "bing news"
+    news_undated_time_range: str = "week"
     # 工具模式的天氣、匯率類型用 SearXNG 內建的專用引擎，答案在回應的 answers（不用註冊、不用授權碼）。
     # openmeteo 在 settings.yml 是 disabled，但明確指定 engines 一樣會跑（10-09 實測）；它只認英文地名
     weather_engines: str = "openmeteo"

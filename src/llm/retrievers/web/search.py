@@ -3,6 +3,7 @@
 /askai 的兩種用法共用這一份（開關 `askai_web_search_mode`）：關鍵字模式由 `intent.should_search` 決定要不要查、
 用 `intent._ROUTE_RULES` 路由，查完塞進 prompt；工具模式由模型決定要不要查、選題目類型，路由寫在 `tools._KINDS`
 （兩張表刻意分開：關鍵字模式是保留下來退回用的舊做法）。兩種用法共用的是「怎麼查、結果太少怎麼補查、快取」這一份。
+新聞的查法另在 `_search_news`：有日期的引擎不限時間、照日期新到舊排，沒日期的引擎用自己的時間條件、排在後面。
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ import logging
 import time
 from typing import Any
 
-from .searxng import WebRetrievalOutcome, fetch_web_results
+from .searxng import WebResult, WebRetrievalOutcome, fetch_web_results
 
 logger = logging.getLogger(__name__)
 
@@ -72,22 +73,60 @@ async def search_web(
     return outcome
 
 
+def _newest_first(results: list[WebResult]) -> list[WebResult]:
+    """有日期的照日期新到舊排；沒日期的照原順序接在後面（沒日期的不能當成最新）。"""
+    dated = [r for r in results if r.published_date]
+    undated = [r for r in results if not r.published_date]
+    return sorted(dated, key=lambda r: r.published_date or "", reverse=True) + undated
+
+
+async def _search_news(query: str, *, settings: Any, time_range: str | None, language: str | None,
+                       log: logging.Logger) -> WebRetrievalOutcome:
+    """新聞：有日期的引擎不限時間（呼叫端沒指定的話）、結果照日期新到舊排——限一週會把最準的新聞引擎整個擋掉，
+    不限又會混進舊文，照日期排兩邊都顧到。不給日期的引擎排不了，另外一次請求、用它自己支援的時間條件，結果接在
+    有日期的後面。送 engines 不送 categories：同送時 SearXNG 取聯集，會把停用的引擎一起叫來陪跑。"""
+    # 有日期的多抓幾倍再排：SearXNG 回的是相關度順序，只抓 top_k 再排，排在後面的新聞永遠進不來
+    dated = await fetch_web_results(query, settings=settings, engines=settings.news_engines, categories=None,
+                                    limit=settings.top_k * 4, time_range=time_range, language=language,
+                                    logger_override=log)
+    if not settings.news_undated_engines:
+        return WebRetrievalOutcome(results=_newest_first(dated.results)[: settings.top_k], meta=dated.meta,
+                                   answers=dated.answers)
+    undated = await fetch_web_results(query, settings=settings, engines=settings.news_undated_engines,
+                                      categories=None, time_range=settings.news_undated_time_range,
+                                      language=language, logger_override=log)
+    seen = {r.url for r in dated.results}
+    results = (_newest_first(dated.results) + [r for r in undated.results if r.url not in seen])[: settings.top_k]
+    both_failed = bool(dated.meta.get("error") and undated.meta.get("error"))
+    meta = {
+        **dated.meta,
+        "result_count": len(results),
+        # 一邊出錯、另一邊有回應就不算整次失敗（補查看 error 決定要不要再查）
+        "error": dated.meta.get("error") if both_failed else None,
+        "unresponsive_engines": [*(dated.meta.get("unresponsive_engines") or []),
+                                 *(undated.meta.get("unresponsive_engines") or [])],
+        "dated": {"engines": dated.meta.get("engines"), "result_count": len(dated.results),
+                  "error": dated.meta.get("error")},
+        "undated": {"engines": undated.meta.get("engines"), "time_range": settings.news_undated_time_range,
+                    "result_count": len(undated.results), "error": undated.meta.get("error")},
+    }
+    return WebRetrievalOutcome(results=results, meta=meta, answers=dated.answers or undated.answers)
+
+
 async def _search(query: str, *, settings: Any, categories: str | None, time_range: str | None,
                   language: str | None, engines: str | None, log: logging.Logger) -> WebRetrievalOutcome:
-    query_categories = categories
     if engines is None and categories == "news":
-        # engines 與 categories 二選一：同送時 SearXNG 取聯集，會把停用的引擎一起叫來陪跑
-        engines = settings.news_engines
-        query_categories = None
-    outcome = await fetch_web_results(
-        query,
-        settings=settings,
-        engines=engines,
-        categories=query_categories,
-        time_range=time_range,
-        language=language,
-        logger_override=log,
-    )
+        outcome = await _search_news(query, settings=settings, time_range=time_range, language=language, log=log)
+    else:
+        outcome = await fetch_web_results(
+            query,
+            settings=settings,
+            engines=engines,
+            categories=categories,
+            time_range=time_range,
+            language=language,
+            logger_override=log,
+        )
 
     # 門檻不是 0：news engines 常「只吐 1 筆」，那種半死不活的結果會擋掉補查 → 安靜降級。
     # 只在「沒出錯」時補查：timeout / http error 代表 SearXNG 本身異常，重試無益；本來就是通用、不限時的也不重查。

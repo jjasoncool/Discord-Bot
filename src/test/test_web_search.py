@@ -1,7 +1,8 @@
 """一次網路搜尋（`llm/retrievers/web/search.py` 的 `search_web`）：/askai 的關鍵字模式與工具模式共用。
 
 守的底線：
-  - 新聞路由改送新聞引擎、不送 categories（同送時 SearXNG 取聯集，會把停用的引擎叫來陪跑）
+  - 新聞路由改送新聞引擎、不送 categories（同送時 SearXNG 取聯集，會把停用的引擎叫來陪跑）；有日期的引擎不限時間、
+    結果照日期新到舊排，沒日期的引擎另外一次請求、用自己的時間條件、排在有日期的後面；只有一邊出錯不算整次失敗
   - 窄路由（限類別或限時間，任一個就算）結果太少：換通用引擎、不限類別與時間再查一次，合併去重、窄路由的排前面、不超過 top_k；
     經過記在 meta.fallback
   - 補查也沒結果：留著主搜的結果，meta 記下補查過
@@ -35,8 +36,9 @@ from test.test_shared_conventions import _find_direct_searxng_queries  # noqa: E
 SETTINGS = AskAIWebSettings(top_k=5, fallback_min_results=3)   # 容器的通用環境變數（TOP_K）會蓋預設值
 
 
-def hit(n, prefix="a"):
-    return WebResult(title=f"{prefix}{n}", url=f"https://{prefix}.example/{n}", snippet="s", engine="bing")
+def hit(n, prefix="a", date=None):
+    return WebResult(title=f"{prefix}{n}", url=f"https://{prefix}.example/{n}", snippet="s", engine="bing",
+                     published_date=date)
 
 
 def outcome(results, error=None, answers=()):
@@ -60,13 +62,50 @@ class SearchWebTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(patcher.stop)
 
     async def test_news_goes_to_the_news_engines_without_categories(self):
-        self.replies = [outcome([hit(i) for i in range(5)])]
+        self.replies = [outcome([hit(i) for i in range(5)]), outcome([])]
 
-        await search_web("台股 收盤", settings=SETTINGS, categories="news", time_range="week")
+        await search_web("台股 收盤", settings=SETTINGS, categories="news")
 
-        (call,) = self.calls
-        self.assertEqual((call["engines"], call["categories"], call["time_range"]),
-                         (SETTINGS.news_engines, None, "week"))
+        dated, undated = self.calls
+        self.assertEqual((dated["engines"], dated["categories"], dated["time_range"]),
+                         (SETTINGS.news_engines, None, None))                          # 有日期的引擎不限時間
+        self.assertEqual((undated["engines"], undated["categories"], undated["time_range"]),
+                         (SETTINGS.news_undated_engines, None, SETTINGS.news_undated_time_range))   # 沒日期的用自己的一週
+
+    async def test_news_is_newest_first_with_undated_results_last(self):
+        self.replies = [outcome([hit(1, date="2026-10-10"), hit(2, date="2026-10-16"), hit(3), hit(4, date="2026-10-14")]),
+                        outcome([hit(9, "b"), hit(2, date="2026-10-16")])]           # 同一個網址兩邊都有：只留一份
+
+        result = await search_web("颱風", settings=SETTINGS, categories="news")
+
+        self.assertEqual([r.title for r in result.results], ["a2", "a4", "a1", "a3", "b9"])
+        self.assertNotIn("fallback", result.meta, "合起來夠多就不補查")
+
+    async def test_news_is_sorted_over_more_than_the_top_k_before_cutting(self):
+        # SearXNG 回的是相關度順序；只抓前 5 筆再排，相關度第 6 名以後的新聞永遠進不來
+        dated = [hit(i, date=f"2026-09-{10 + i:02d}") for i in range(1, 8)] + [hit(8, date="2026-10-16")]
+        self.replies = [outcome(dated), outcome([])]
+
+        result = await search_web("鳴潮 改版", settings=SETTINGS, categories="news")
+
+        self.assertEqual(SETTINGS.top_k * 4, self.calls[0]["limit"], "有日期的那次多抓幾倍")
+        self.assertEqual("a8", result.results[0].title, "最新的排第一，就算相關度排在第 8")
+        self.assertEqual(SETTINGS.top_k, len(result.results))
+
+    async def test_default_engines_leave_bing_out(self):
+        # 24 小時穩定度測試：bing 對題只七成、常回 0 筆，回垃圾時 SearXNG 不算錯誤、會直接混進結果（出過成人內容）
+        engines = AskAIWebSettings().default_engines.split(",")
+        self.assertNotIn("bing", engines)
+        self.assertIn("yahoo", engines)
+
+    async def test_news_with_one_side_failing_is_not_a_failed_search(self):
+        self.replies = [outcome([], error="timeout"), outcome([hit(i, "b") for i in range(3)])]
+
+        result = await search_web("颱風", settings=SETTINGS, categories="news")
+
+        self.assertIsNone(result.meta["error"])
+        self.assertEqual(len(result.results), 3)
+        self.assertEqual(result.meta["undated"]["result_count"], 3)
 
     async def test_too_few_narrow_results_are_topped_up_from_general_engines(self):
         self.replies = [outcome([hit(1), hit(2)]),
@@ -93,7 +132,7 @@ class SearchWebTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([r.title for r in result.results], ["a1", "b2", "b3"])
 
     async def test_empty_fallback_keeps_the_primary_results(self):
-        self.replies = [outcome([hit(1)]), outcome([])]
+        self.replies = [outcome([hit(1)]), outcome([]), outcome([])]      # 有日期的、沒日期的、補查
 
         result = await search_web("NBA 戰績", settings=SETTINGS, categories="news", time_range="week")
 

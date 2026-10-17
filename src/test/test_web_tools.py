@@ -4,7 +4,7 @@
   - 宣告一個 web_search 工具，query 必填、kind（題目類型）選填；使用規則讀 `askai_web_rules.txt`（正式環境的預設路徑讀得到，
     只在有這個工具時才給模型）
   - 說明與規則不把《鳴潮》寫死排除：情報工具不在時（開關關著、search-mcp 連不上）只剩這個工具，遊戲問題也要能查
-  - 題目類型由模型選，不用關鍵字分類（關鍵字過濾分不準）：一般搜尋不限時間（bing 不支援時間範圍，帶了會被跳過）；新聞限一週；
+  - 題目類型由模型選，不用關鍵字分類（關鍵字過濾分不準）：一般搜尋不限時間；新聞也不限時間（結果照日期新到舊排，排法在 search）；
     天氣、匯率指定專用引擎（天氣用英文語系）；查詢字沒有中文時用英文語系；沒給 kind 就是一般；不認得的 kind 回錯誤
   - 天氣、匯率的查詢字先整理成引擎認得的樣子（天氣只留英文地名、匯率整理成「1000 USD to TWD」）
   - 天氣、匯率的引擎有跑卻沒答案時回寫法提示（note）；引擎這次沒回應時照實回錯誤，不叫模型改寫
@@ -101,16 +101,16 @@ class WebSearchToolsTests(unittest.TestCase):
         self.assertEqual(self.route(stock), (None, None, None, None))
         self.assertEqual(runner.calls[0]["kind"], "general")
 
-    def test_news_is_limited_to_a_week_and_keeps_the_model_keywords(self):
+    def test_news_is_not_limited_in_time_and_keeps_the_model_keywords(self):
         runner = self.tools()
 
         self.run_tool(runner, '{"query": "nasdaq tech stocks", "kind": "news"}')
         self.run_tool(runner, '{"query": "iPhone 17 新聞", "kind": "news"}')
 
         english, chinese = self.searches
-        self.assertEqual(self.route(english), ("news", "week", "en", None))         # 沒有中文：英文語系
+        self.assertEqual(self.route(english), ("news", None, "en", None))          # 沒有中文：英文語系；不限時間
         self.assertEqual(chinese["query"], "iPhone 17 新聞")                       # 不剝字
-        self.assertEqual(self.route(chinese), ("news", "week", None, None))        # 有中文就用中文語系
+        self.assertEqual(self.route(chinese), ("news", None, None, None))          # 有中文就用中文語系
 
     def test_weather_and_currency_use_their_own_engines(self):
         self.outcome = WebRetrievalOutcome(results=[], meta={"error": None}, answers=["答案"])

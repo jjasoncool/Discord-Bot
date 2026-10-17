@@ -6,7 +6,7 @@
 
   - 題目類型由模型選（`kind`：一般／新聞／天氣／匯率），不用關鍵字分類（關鍵字分不準：
     「台北今天幾度」被「今天」帶去新聞、「明天台北會下雨嗎」什麼都沒命中）。每種類型用哪些引擎、要不要限時間
-    寫在 `_KINDS`：那是實測出來的引擎特性（例：bing 不支援時間範圍，一般搜尋帶了就整個被跳過），不交給模型
+    寫在 `_KINDS`：那是實測出來的引擎特性（例：新聞不限時間、照日期排，限一週會把最準的新聞引擎擋掉），不交給模型
   - 天氣、匯率走 SearXNG 內建的專用引擎，答案在 `answers`。查詢字先整理成引擎認得的樣子（天氣只留英文地名、
     匯率整理成「1 USD to TWD」）；引擎有跑卻沒答案才回寫法提示，引擎這次沒回應就照實說，不叫模型改寫
   - 查詢字只去掉「幫我查」這類贅字：模型寫的已經是關鍵字，不套用關鍵字模式給使用者原句用的新聞剝字（會切壞專有名詞）
@@ -30,11 +30,11 @@ from .search import search_web
 
 logger = logging.getLogger(__name__)
 
-#: 模型選的題目類型 → 怎麼查。新聞照舊限一週（拿掉會混進舊文，等評估集比過再決定）；一般搜尋不限時間
-#: （bing 不支援時間範圍，帶了會被跳過）；天氣、匯率指定 SearXNG 的專用引擎（引擎名稱在 AskAIWebSettings）
+#: 模型選的題目類型 → 怎麼查。新聞不限時間、結果照日期新到舊排（怎麼查、怎麼排在 `search._search_news`）；
+#: 一般搜尋不限時間；天氣、匯率指定 SearXNG 的專用引擎（引擎名稱在 AskAIWebSettings）
 _KINDS: dict[str, dict[str, Any]] = {
     "general": {},
-    "news": {"categories": "news", "time_range": "week"},
+    "news": {"categories": "news"},
     "weather": {"engines": "weather_engines", "language": "en", "label": "天氣",
                 "hint": "天氣引擎沒找到這個地點：query 只寫英文地名（例：Taipei、Kaohsiung），不要加其他字"},
     "currency": {"engines": "currency_engines", "label": "匯率",
@@ -66,8 +66,8 @@ WEB_SEARCH_TOOL: dict[str, Any] = {
         "name": "web_search",
         # 不寫死「《鳴潮》以外」：情報工具不在時（開關關著、search-mcp 連不上）只剩這個工具，遊戲問題也要能查
         "description": (
-            "一般網路搜尋。查需要即時或外部資訊的事：新聞時事、天氣、股價匯率、體育賽程比分、其他遊戲或軟體的消息。"
-            "《鳴潮》的問題有 search（遊戲情報）時先用 search，沒有時也用這個查。"
+            "一般網路搜尋。查需要即時或外部資訊的事：新聞時事、天氣、股價匯率、體育賽程比分、其他遊戲或軟體的消息、"
+            "網路流行語或梗的意思。《鳴潮》的問題有 search（遊戲情報）時先用 search，沒有時也用這個查。"
             "回傳 answers（直接答案：天氣預報、匯率，有的話）與 results（標題、網址、摘要、日期）。"
         ),
         "parameters": {
@@ -76,12 +76,12 @@ WEB_SEARCH_TOOL: dict[str, Any] = {
                 "query": {
                     "type": "string",
                     "description": "空白分隔的主題關鍵字。weather 只寫英文地名（例：Taipei），不寫時間；"
-                                   "currency 寫成「1 USD to TWD」；news 不用寫時間詞（本來就只查近一週）",
+                                   "currency 寫成「1 USD to TWD」；news 不用寫時間詞（結果照日期新到舊排）",
                 },
                 "kind": {
                     "type": "string",
                     "enum": list(_KINDS),
-                    "description": "題目類型：news＝近期新聞時事；weather＝天氣預報；currency＝匯率換算；"
+                    "description": "題目類型：news＝新聞時事；weather＝天氣預報；currency＝匯率換算；"
                                    "其他（股價、比分、其他遊戲或軟體、一般資訊）用 general。沒給就是 general",
                 },
             },
