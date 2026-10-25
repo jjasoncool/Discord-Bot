@@ -80,7 +80,8 @@ _clock = time.monotonic
 _async_sleep = asyncio.sleep
 
 #: 跨行程的鎖檔。同一個容器的行程共用 /tmp；跨容器（discord-bot 與 search-mcp）由 docker-compose 把同一個
-#: 主機資料夾掛進兩邊、用 LEMONADE_GPU_LOCK_PATH 指過去——各容器的 /tmp 是分開的，用預設值會各排各的隊。
+#: 主機資料夾（repo 的 `run/gpu_lock/`）掛成兩邊的 /gpu_lock、用 LEMONADE_GPU_LOCK_PATH 指過去——各容器的 /tmp 是分開的，
+#: 用預設值會各排各的隊。
 #: 單元測試由 test/__init__.py 換成暫存檔，不跟執行中的 bot 搶
 CROSS_PROCESS_LOCK_PATH = os.getenv("LEMONADE_GPU_LOCK_PATH", "/tmp/lemonade_gpu.lock")
 #: 別的行程拿著鎖時，多久再試一次

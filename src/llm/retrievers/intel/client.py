@@ -1,7 +1,7 @@
 """bot 端的情報搜尋客戶端：透過 MCP 連常駐的 search-mcp（`llm.mcp_server --http`），把它的 search／fetch
 交給模型當工具用。
 
-為什麼走 MCP、不直接 import `services.search`：搜尋索引只掛在 search-mcp 容器（discord-bot 沒掛 `search_data/`），
+為什麼走 MCP、不直接 import `services.search`：搜尋索引只掛在 search-mcp 容器（discord-bot 沒掛 `/search_data`），
 索引也只該有一個行程在寫；search-mcp 停掉時連線立刻失敗，/askai 照原本的方式回答（R12 之後的決定）。
 
   - **每次工具呼叫各開一條短連線**（列工具清單也是）：search-mcp 是 stateless HTTP，多一次握手只要幾毫秒。

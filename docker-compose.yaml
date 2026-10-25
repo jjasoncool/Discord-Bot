@@ -4,6 +4,15 @@ x-main-build: &main-build
   context: .
   dockerfile: docker/discord_bot/dockerfile
 
+# discord-bot 與 search-mcp 共用的 GPU 鎖檔（跨容器 flock）：兩邊必須是同一個主機目錄，各容器的 /tmp 是分開的。
+# 目錄不存在就啟動失敗，不讓 Docker 以 root 建一個 appuser 開不了鎖檔的目錄
+x-gpu-lock-mount: &gpu-lock-mount
+  type: bind
+  source: ./run/gpu_lock
+  target: /gpu_lock
+  bind:
+    create_host_path: false
+
 services:
   discord-bot:
     build: *main-build
@@ -24,10 +33,7 @@ services:
     # 啟動測試還在跑時 PID 1 是 bash，停止一樣要等 10 秒被強制結束。
     stop_signal: SIGINT
     expose:
-      # notify server，兩組端點各自驗證、憑證互不通用：
-      #   /notify/*：scraper 的通知，驗證 X-Notify-Secret
-      #   /v1/*：hermes 的 OpenAI 相容模型端點，驗證 Bearer HERMES_API_KEY
-      - "5000"
+      - "5000"  # notify server：/notify/* 給 scraper（驗 X-Notify-Secret）、/v1/* 給 hermes 用模型（驗 HERMES_API_KEY）
     volumes:
       - type: bind
         source: ./src
@@ -35,10 +41,7 @@ services:
       - type: bind
         source: ./logs
         target: /logs
-      # GPU 鎖檔和 search-mcp 共用：兩個容器的 /tmp 是分開的，鎖檔放各自的 /tmp 就各排各的隊
-      - type: bind
-        source: ./gpu_lock
-        target: /gpu_lock
+      - *gpu-lock-mount
     env_file:
       - .env
     environment:
@@ -47,7 +50,7 @@ services:
       - LEMONADE_GPU_LOCK_PATH=/gpu_lock/lemonade_gpu.lock
     networks:
       - discord-net
-      - hermes-net  # 呼叫 hermes:8642，並對 hermes 提供 /v1 模型端點
+      - hermes-net
     depends_on:
       pgvector:
         condition: service_healthy
@@ -71,13 +74,13 @@ services:
       - type: bind
         source: ./logs
         target: /logs
-      # 搜尋索引（從 articles.db 建出來的衍生資料，刪掉會自動重建）
+      # 搜尋索引：從 articles.db 建出來的衍生資料，刪掉會自動重建；程式只認容器內的 /search_data
       - type: bind
-        source: ./search_data
+        source: ./cache/search-mcp
         target: /search_data
-      - type: bind
-        source: ./gpu_lock
-        target: /gpu_lock
+        bind:
+          create_host_path: false
+      - *gpu-lock-mount
     environment:
       - TZ=Asia/Taipei
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -89,20 +92,14 @@ services:
       - PGVECTOR_PASSWORD=${PGVECTOR_PASSWORD:?PGVECTOR_PASSWORD_required}
     networks:
       - discord-net
-      - hermes-net  # 對 hermes 提供 MCP 端點 http://search-mcp:8765/mcp
+      - hermes-net
     depends_on:
       pgvector:
         condition: service_healthy
 
-  # Hermes agent（官方映像）：bot 的附屬服務。不登入 Discord，只由 bot 呼叫，輸出由 bot 以自身身分發佈。
-  #   API：OpenAI 相容 API server（:8642），驗證 Bearer HERMES_API_KEY
-  #   推論：經 bot 的 /v1 端點（http://discord-bot:5000/v1），由 bot 驗證模型白名單、取得 GPU 鎖後轉發至 Lemonade
-  #   情報：search-mcp 的 MCP 端點（http://search-mcp:8765/mcp）
-  # 網路只接 hermes-net，理由見 networks.hermes-net。
-  # profile "hermes"：預設的 `docker compose up -d` 不啟動此服務，以 `docker compose --profile hermes up -d hermes` 啟動；
-  # 停用後不影響 bot 其他功能。
-  # 狀態目錄 ./hermes_home 掛載為 /opt/data（設定、記憶、session、skill，不進版控）。首次啟動前須先建立目錄，
-  # 並執行 `docker compose --profile hermes run --rm -it hermes setup` 產生 config.yaml。
+  # Hermes agent（官方映像）：bot 的附屬服務，不登入 Discord，只由 bot 經 API server（:8642）呼叫。
+  # 用模型走 bot 的 http://discord-bot:5000/v1（排同一把 GPU 鎖、過模型白名單），查情報走 search-mcp 的 MCP。
+  # 掛 profile：設定目錄還沒準備好之前，整批 up 不會帶起它。首次設定：docker compose run --rm --no-deps -it hermes setup
   hermes:
     image: nousresearch/hermes-agent:stable
     container_name: hermes
@@ -110,26 +107,26 @@ services:
     restart: always
     command: ["gateway", "run"]
     expose:
-      - "8642"  # OpenAI 相容 API，bot 以 http://hermes:8642/v1 呼叫
+      - "8642"
     volumes:
       - type: bind
-        source: ./hermes_home
+        source: ./data/hermes  # 設定、記憶、session、skill；不進版控、要備份
         target: /opt/data
+        bind:
+          create_host_path: false
     environment:
       - TZ=Asia/Taipei
-      # 映像預設以 uid 10000 執行，並將 /opt/data 的擁有者改為該 uid。改用主機帳號的 uid/gid，./hermes_home 才能直接編輯、不需 sudo
+      # 映像預設用 uid 10000 跑並把 /opt/data 改成它的；對齊主機帳號，設定檔才不用 sudo 改
       - HERMES_UID=1000
       - HERMES_GID=1000
       - API_SERVER_ENABLED=true
       - API_SERVER_HOST=0.0.0.0
-      # 不使用 `:?` 必填語法：compose 對整份檔案做變數插值，未啟用的 profile 也在內，.env 缺值時所有服務都無法啟動。
-      # 金鑰為空時 Hermes 拒絕啟用 API server，不會以無驗證狀態開放
+      # 不能寫 `:?` 必填：compose 連沒啟用的 profile 也插值，.env 缺值會讓所有服務起不來；空值時 Hermes 自己不開 API server
       - API_SERVER_KEY=${HERMES_API_KEY:-}
     mem_limit: 2g
     networks:
       - hermes-net
-    # 不宣告依賴 discord-bot：compose 啟動服務時會一併重建設定已變更的依賴，
-    # 宣告後 `up -d hermes` 可能連帶重建 bot（重跑啟動 gate、中斷語音，也不會避開維護時段）。bot 不可用期間由 Hermes 重試
+    # 不依賴 discord-bot：點名 up hermes 時 compose 會順便重建設定有變的依賴，不該因此重啟 bot
     depends_on:
       - search-mcp
 
@@ -202,6 +199,7 @@ services:
     expose:
       - "5432"
     volumes:
+      # 掛整個叢集目錄（內含 18/docker），不只掛 PGDATA：PG18 起 PGDATA 依主版本分層，之後 pg_upgrade --link 才能在同一個掛載點上跑
       - vector_data:/var/lib/postgresql
     environment:
       - TZ=Asia/Taipei
@@ -226,13 +224,15 @@ services:
     ports:
       - "127.0.0.1:8888:8080"  # 僅本機 browser 測試用，不對外
     volumes:
+      # 手改的設定，進版控；secret_key 只留佔位字，實際值由 SEARXNG_SECRET 給（簽 cookie 用，不是存取金鑰，內網實例用預設即可）
       - type: bind
-        source: ./searxng
+        source: ./config/searxng
         target: /etc/searxng
+      - searxng_cache:/var/cache/searxng  # 映像宣告的快取目錄；不宣告的話每次重建容器都多一個匿名 volume
     environment:
       - TZ=Asia/Taipei
       # 官方 entrypoint 預設會 `chown -R searxng:searxng /etc/searxng`，把 bind mount 出來的
-      # ./searxng 搶成 uid 977 → 主機端要 sudo 才改得動設定。關掉它，設定檔就能用一般身分編輯。
+      # ./config/searxng 搶成 uid 977 → 主機端要 sudo 才改得動設定。關掉它，設定檔就能用一般身分編輯。
       # 安全：SearXNG 只「讀」settings.yml（entrypoint 的 setup() 只在檔案不存在時才從樣板產生），
       # 而且主程序是以 root 跑，讀 644 的檔案沒有問題。關掉只會在啟動 log 印一行 warning。
       # 注意：改這行要 `docker compose up -d searxng` 重建容器，`docker restart` 不會套用新 env。
@@ -248,7 +248,7 @@ networks:
   discord-net:
     driver: bridge
   # hermes 專用的隔離網路，成員為 hermes、discord-bot、search-mcp。
-  # hermes 不可直連 Lemonade：Lemonade 沒有驗證，直連會繞過 bot 的 GPU 鎖與模型白名單。外網與宿主機一併阻斷。
+  # hermes 不可直連 Lemonade：外網與宿主機一併阻斷。
   #   internal：不提供預設路由，阻斷對外連線
   #   gateway_mode_ipv4=isolated：bridge 不配置 IPv4 位址，阻斷容器存取宿主機上監聽 0.0.0.0 的服務
   #   （sshd、Cockpit、passimd）；須搭配 internal 使用
@@ -259,9 +259,12 @@ networks:
       com.docker.network.bridge.gateway_mode_ipv4: isolated
 
 volumes:
+  # pgvector 的資料：綁到 repo 的 data/pgvector（相對路徑以 compose 檔所在目錄解析，不用 ${PWD}）。
+  # device 建立後就固定，改路徑要先 docker volume rm 再 up
   vector_data:
     driver: local
     driver_opts:
       type: none
       o: bind
-      device: ${PWD}/vector_data
+      device: ./data/pgvector
+  searxng_cache:  # 映像宣告的快取，可重建、主機不需要讀

@@ -1,7 +1,8 @@
 """搜尋索引：從 scraper 的 articles.db 唯讀增量同步到自己的 SQLite FTS5 索引，再做關鍵字搜尋。
 
 為什麼另開一個索引檔、不在 articles.db 上建 FTS：articles.db 是 scraper 的資料（使用者資料），
-這裡**只准唯讀開**；索引是可以刪掉重建的衍生資料，放在 repo 根目錄的 `search_data/`（見 `SEARCH_SETTINGS.index_path`）。
+這裡**只准唯讀開**；索引是可以刪掉重建的衍生資料，放在容器的 `/search_data`（主機端是 repo 的 `cache/search-mcp/`，
+見 `SEARCH_SETTINGS.index_path`）。
 
 搜尋分兩段（常見的「召回＋重排」）：
   1. 召回：全詞（三字組索引，含全部長關鍵字）、兩字組 BM25（整句或關鍵字切成兩字一組）、

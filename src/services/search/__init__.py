@@ -5,7 +5,7 @@
   - `SearchIndex.fetch(doc_id, page=)`：讀全文（附 PTT 推文、巴哈留言），分頁
 
 本套件**不 import discord 與 mcp**：它跑在獨立的 search-mcp 行程裡。bot 不直接 import 它（discord-bot 沒掛
-`search_data/`），而是當 MCP 客戶端連 search-mcp（`llm.retrievers.intel`）。
+索引目錄 `/search_data`），而是當 MCP 客戶端連 search-mcp（`llm.retrievers.intel`）。
 用語：文件＝可以直接給人一個連結的那一篇（`sources.py`）；評估數字記在 `AI_HANDOFF_AND_TODO.md` 的 `mcp-search-tools` 區塊。
 """
 from services.search.index import (

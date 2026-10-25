@@ -38,13 +38,13 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 2. 以下一律視為「高風險資料」：
    - bot 執行時寫的檔（`src/settings/runtime/*.json`：透過 Discord 設的值與它自己的紀錄——面板、點名、音樂、價格表、關鍵字監控；`src/services/sent_articles.db`）
    - 使用者設定檔（例：`src/config.json`）
-   - 快取、歷史紀錄、session、資料庫檔（例：`src/scraper/articles.db`、pgvector 資料、`/logs` 下的歷史紀錄、Telegram session）
+   - 快取、歷史紀錄、session、資料庫檔（例：`src/scraper/articles.db`、pgvector 資料 `data/pgvector/`、Hermes 的設定與記憶 `data/hermes/`、`/logs` 下的歷史紀錄與備份、Telegram session）
 3. 如需修改高風險資料檔，必須先說明風險與影響、提供備份／回復方案、取得使用者同意。
 4. 若發生誤刪／誤覆寫，立即升級為高嚴重性事故：凍結 → 復原 → 記錄防再發。
 
 ## 資料與環境（硬規則）
 
-- **Docker 只做唯讀查詢**：`ps`、`logs --since …`、`exec` 查詢、`inspect`。`compose up/down/restart/build`、`rm`、`rmi` 給指令讓使用者執行。例外：在 `search-mcp` 容器裡（`docker exec search-mcp …`）的情報搜尋指令可以直接執行——stdio 備用的 MCP server（`python -m llm.mcp_server`）、手動同步索引（`python -m services.search`）、搜尋評估（`python -m services.search.eval.evaluate`）與批次算向量（`python -m services.search.embed`），它們只寫自己的索引檔（repo 根目錄 `search_data/`）、評估報告 `services/search/eval/reports/` 與 pgvector 的 `data_search_chunks` 表（不碰其他表）。discord-bot 容器沒掛 `search_data/`，在那裡跑會失敗。
+- **Docker 只做唯讀查詢**：`ps`、`logs --since …`、`exec` 查詢、`inspect`。`compose up/down/restart/build`、`rm`、`rmi` 給指令讓使用者執行。例外：在 `search-mcp` 容器裡（`docker exec search-mcp …`）的情報搜尋指令可以直接執行——stdio 備用的 MCP server（`python -m llm.mcp_server`）、手動同步索引（`python -m services.search`）、搜尋評估（`python -m services.search.eval.evaluate`）與批次算向量（`python -m services.search.embed`），它們只寫自己的索引檔（容器內 `/search_data`，主機端 repo 根目錄 `cache/search-mcp/`）、評估報告 `services/search/eval/reports/` 與 pgvector 的 `data_search_chunks` 表（不碰其他表）。discord-bot 容器沒掛 `/search_data`，在那裡跑會失敗。
 - **每天 04:00～約 07:30 是維護時段**（人格萃取、persona agent），這段時間請使用者不要重啟 discord-bot。
 - **bot 會長時間不重啟**：會變的外部資料（官方公告、設定）每次用到時重讀，不在啟動時只讀一次。
 - 讀 `articles.db` 用 `mode=ro`：它是 WAL 模式，`immutable=1` 會看不到還在 WAL 裡的新資料。
@@ -70,7 +70,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 面板置底 | `utils.panel_bump.PanelBumper`（`bump`／`bump_safe`；有人講話就置底用 `request_bump`） |
 | 已發送去重 | StateDB `sent_content`（`is_content_sent`／`mark_content_as_sent`） |
 | 版本更新時刻 | `services.events.event_scheduler.VersionDateResolver`（`refresh()`、`update_starts()`；只看時間，不看版本號） |
-| GPU 獨佔（產圖時卸載 LLM） | `llm.client.lemonade_gate.gpu_exclusive(owner, lease_seconds)`（另開的行程、search-mcp 容器也一起排隊：跨行程鎖檔，跨容器靠 compose 掛同一個 `gpu_lock/` 並設 `LEMONADE_GPU_LOCK_PATH`）；沒有 event loop 的同步程式（情報搜尋的批次算向量、MCP）用 `gpu_exclusive_sync()`；拿著閘門算 embedding 一律 `make_safe_llm_embedding(holding_gpu_gate=True)`（短逾時、不重試、排隊有上限，後端卡住時早點放鎖） |
+| GPU 獨佔（產圖時卸載 LLM） | `llm.client.lemonade_gate.gpu_exclusive(owner, lease_seconds)`（另開的行程、search-mcp 容器也一起排隊：跨行程鎖檔，跨容器靠 compose 把同一個主機目錄 `run/gpu_lock/` 掛成 `/gpu_lock` 並設 `LEMONADE_GPU_LOCK_PATH`）；沒有 event loop 的同步程式（情報搜尋的批次算向量、MCP）用 `gpu_exclusive_sync()`；拿著閘門算 embedding 一律 `make_safe_llm_embedding(holding_gpu_gate=True)`（短逾時、不重試、排隊有上限，後端卡住時早點放鎖） |
 | 判斷 LLM 後端連不上或逾時（該停手、晚點再試，不是請求本身的問題） | `llm.client.http_client.is_unreachable` |
 | 讓模型先用工具查、再回答（每輪都照原本的思考設定、帶同一份工具清單，不查就只呼叫一次；查滿輪數的提醒文字與「要不要改用不帶工具的呼叫」由呼叫端決定） | `LLMService.generate_reply(tool_runner=…, tool_nudge=…, tools_plain_fallback=…)`（工具介面 `llm.client.tool_calls.ToolRunner`；/askai 查情報、插話的查詢都用它，不要再寫一份迴圈）；要給模型今天日期用 `today=`（放 user 段，不動 system 段的快取） |
 | 工具呼叫的訊息格式（模型要呼叫工具的 assistant 訊息、`role: tool` 回覆、取工具名稱與解析參數） | `llm.client.tool_calls`（`assistant_message`／`tool_message`／`call_name_and_arguments`／`parse_arguments`；迴圈、預算、工具怎麼跑留給呼叫端。人格萃取 agent 與 /askai 情報搜尋共用） |

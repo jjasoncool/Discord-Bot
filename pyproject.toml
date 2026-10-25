@@ -5,7 +5,8 @@
 target-version = "py312"
 line-length = 130
 src = ["src"]
-extend-exclude = ["doc", "logs", "search_data", "searxng", "src/scraper/db/migrations"]
+# data、cache、run 是執行期資料（pgvector 的檔 root 擁有、讀不到），不帶路徑執行 ruff 時才會掃到，先排除
+extend-exclude = ["doc", "logs", "data", "cache", "run", "src/scraper/db/migrations"]
 
 [tool.ruff.lint]
 # 先只開「一定是錯」的那幾類：語法與未定義名稱（F）、少數會咬人的寫法（B）、沒用到的 import。

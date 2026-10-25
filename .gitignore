@@ -1,7 +1,10 @@
 .env
 logs/*
-vector_data/*
-searxng/*
+# 執行期資料依生命週期分層（開頭的斜線只錨定根目錄，不會連 src/scraper/data 一起忽略）：
+# data/ 不能重建、要備份（pgvector、hermes）；cache/ 可重建的衍生資料（search-mcp 的索引）；run/ 執行期暫存（GPU 鎖檔）
+/data/
+/cache/
+/run/
 __pycache__/
 src/music/cache/
 monitored_channels.json
@@ -23,9 +26,4 @@ src/services/sent_articles.db-shm
 src/services/sent_articles.db-wal
 # bot 執行時寫的資料（透過 Discord 設的值＋它自己的紀錄：面板、點名、音樂、價格表、關鍵字監控）：整個資料夾不進版控
 src/settings/runtime/
-
-# search-mcp 情報搜尋的索引：從 articles.db 建出來的衍生資料，刪掉會自動重建（容器掛 /search_data）
-search_data/
-# discord-bot 與 search-mcp 共用的 GPU 鎖檔
-gpu_lock/
 src/services/search/eval/private/
