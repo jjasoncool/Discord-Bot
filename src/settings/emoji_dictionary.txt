@@ -239,7 +239,7 @@ wfrog_stock_decline = agree
 wfrog_stock_rise = 股票大漲、興奮 | negative
 
 # === 自動偵測 2026-08-10（待填寫） ===
-Dorothy_love = agree
+Dorothy_love = Dorothy 愛心、喜歡 | agree
 Dorothy_question = 疑惑、問問 | neutral
 Dorothy_wink = 得意眨眼 | laugh
 
@@ -340,3 +340,28 @@ yc_look = 驚訝、震驚 | think
 eri = 打招呼、比讚 | neutral
 SyuenSquish = 害羞、呆住 | neutral
 dalao = 尊敬大佬、佩服 | agree
+07 = 興奮、期待 | laugh
+KG_Chisa_question = 疑惑、問問 | think
+PGR_AlisaPower = 興奮、開心 | neutral
+Pog = 震驚、哇 | think
+cat_speechless = 無語、說不出話 | negative
+E_Dalao = 稱讚大佬、崇拜 | agree
+T_ChatEmo_A_08 = 祈禱、拜託 | neutral
+aWOGGERS = 震驚、嚇到 | think
+PGR_LuciaIceShadowMax = 得意、壞笑 | laugh
+PGR_LuciaIceShadow = 得意、壞笑 | laugh
+FR14 = 震驚、嚇到 | think
+001 = 驚訝、震驚 | think
+OO = 得意、開心 | laugh
+E_Cat_Police = 警察、執法 | neutral
+60582wiggleseyebrows = 溫柔微笑 | neutral
+wd_taipei_good = 台北加油、順順利利 | agree
+penn = 斜眼懷疑 | think
+_26 = 吐舌頭、俏皮 | laugh
+138 = 開心大笑 | laugh
+FMSS2 = 害羞、開心 | agree
+nigafrog = 震驚、呆滯 | think
+Frog_WorryHmmm = 擔憂、祈禱 | think
+frogeworryDumb = 困惑、發呆 | think
+UN_PutLitterInItsPlace = 講道理、好好說 | neutral
+UN_Pop = 驚訝、無語 | think
