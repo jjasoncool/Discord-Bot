@@ -24,7 +24,10 @@ services:
     # 啟動測試還在跑時 PID 1 是 bash，停止一樣要等 10 秒被強制結束。
     stop_signal: SIGINT
     expose:
-      - "5000"  # notify server，供 scraper 內網通知用
+      # notify server，兩組端點各自驗證、憑證互不通用：
+      #   /notify/*：scraper 的通知，驗證 X-Notify-Secret
+      #   /v1/*：hermes 的 OpenAI 相容模型端點，驗證 Bearer HERMES_API_KEY
+      - "5000"
     volumes:
       - type: bind
         source: ./src
@@ -44,6 +47,7 @@ services:
       - LEMONADE_GPU_LOCK_PATH=/gpu_lock/lemonade_gpu.lock
     networks:
       - discord-net
+      - hermes-net  # 呼叫 hermes:8642，並對 hermes 提供 /v1 模型端點
     depends_on:
       pgvector:
         condition: service_healthy
@@ -85,9 +89,49 @@ services:
       - PGVECTOR_PASSWORD=${PGVECTOR_PASSWORD:?PGVECTOR_PASSWORD_required}
     networks:
       - discord-net
+      - hermes-net  # 對 hermes 提供 MCP 端點 http://search-mcp:8765/mcp
     depends_on:
       pgvector:
         condition: service_healthy
+
+  # Hermes agent（官方映像）：bot 的附屬服務。不登入 Discord，只由 bot 呼叫，輸出由 bot 以自身身分發佈。
+  #   API：OpenAI 相容 API server（:8642），驗證 Bearer HERMES_API_KEY
+  #   推論：經 bot 的 /v1 端點（http://discord-bot:5000/v1），由 bot 驗證模型白名單、取得 GPU 鎖後轉發至 Lemonade
+  #   情報：search-mcp 的 MCP 端點（http://search-mcp:8765/mcp）
+  # 網路只接 hermes-net，理由見 networks.hermes-net。
+  # profile "hermes"：預設的 `docker compose up -d` 不啟動此服務，以 `docker compose --profile hermes up -d hermes` 啟動；
+  # 停用後不影響 bot 其他功能。
+  # 狀態目錄 ./hermes_home 掛載為 /opt/data（設定、記憶、session、skill，不進版控）。首次啟動前須先建立目錄，
+  # 並執行 `docker compose --profile hermes run --rm -it hermes setup` 產生 config.yaml。
+  hermes:
+    image: nousresearch/hermes-agent:stable
+    container_name: hermes
+    profiles: ["hermes"]
+    restart: always
+    command: ["gateway", "run"]
+    expose:
+      - "8642"  # OpenAI 相容 API，bot 以 http://hermes:8642/v1 呼叫
+    volumes:
+      - type: bind
+        source: ./hermes_home
+        target: /opt/data
+    environment:
+      - TZ=Asia/Taipei
+      # 映像預設以 uid 10000 執行，並將 /opt/data 的擁有者改為該 uid。改用主機帳號的 uid/gid，./hermes_home 才能直接編輯、不需 sudo
+      - HERMES_UID=1000
+      - HERMES_GID=1000
+      - API_SERVER_ENABLED=true
+      - API_SERVER_HOST=0.0.0.0
+      # 不使用 `:?` 必填語法：compose 對整份檔案做變數插值，未啟用的 profile 也在內，.env 缺值時所有服務都無法啟動。
+      # 金鑰為空時 Hermes 拒絕啟用 API server，不會以無驗證狀態開放
+      - API_SERVER_KEY=${HERMES_API_KEY:-}
+    mem_limit: 2g
+    networks:
+      - hermes-net
+    # 不宣告依賴 discord-bot：compose 啟動服務時會一併重建設定已變更的依賴，
+    # 宣告後 `up -d hermes` 可能連帶重建 bot（重跑啟動 gate、中斷語音，也不會避開維護時段）。bot 不可用期間由 Hermes 重試
+    depends_on:
+      - search-mcp
 
   scraper:
     build:
@@ -203,6 +247,16 @@ services:
 networks:
   discord-net:
     driver: bridge
+  # hermes 專用的隔離網路，成員為 hermes、discord-bot、search-mcp。
+  # hermes 不可直連 Lemonade：Lemonade 沒有驗證，直連會繞過 bot 的 GPU 鎖與模型白名單。外網與宿主機一併阻斷。
+  #   internal：不提供預設路由，阻斷對外連線
+  #   gateway_mode_ipv4=isolated：bridge 不配置 IPv4 位址，阻斷容器存取宿主機上監聽 0.0.0.0 的服務
+  #   （sshd、Cockpit、passimd）；須搭配 internal 使用
+  hermes-net:
+    driver: bridge
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
 
 volumes:
   vector_data:
