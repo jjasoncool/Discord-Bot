@@ -73,11 +73,20 @@ class TelegramDatabase:
         finally:
             await conn.close()
 
-    async def close(self) -> None:
-        """關閉連線池。"""
-        if self.pool is not None:
-            await self.pool.close()
-            self.pool = None
+    async def close(self, *, timeout: float = 5.0) -> None:
+        """關閉連線池；借出去還沒歸還的連線最多等 `timeout` 秒，之後直接切斷。
+
+        `pool.close()` 會等到所有連線歸還才回來。容器停機只有 10 秒寬限，收尾卡住就會被 SIGKILL，
+        什麼都沒關到；逾時改用 `terminate()` 強制切斷，至少讓行程在寬限內結束。
+        """
+        if self.pool is None:
+            return
+        pool, self.pool = self.pool, None
+        try:
+            await asyncio.wait_for(pool.close(), timeout)
+        except asyncio.TimeoutError:
+            logger.warning("關閉連線池等了 %.1f 秒仍有連線未歸還，改為強制切斷", timeout)
+            pool.terminate()
 
     async def init_db(self) -> None:
         """初始化 schema（可重複執行，適合容器啟動時自動建表）。"""

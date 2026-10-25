@@ -311,13 +311,13 @@ async def run_telegram_scraper(config: TelegramConfig) -> None:
             await handle_new_message(event, client, config, runtime_watcher, db)
 
     catchup_task: asyncio.Task | None = None
+    refetch_listen_conn = None
     try:
         logger.info("[Telegram] 正在啟動 client...")
         await client.start()
 
         # on-demand 重抓監聽：越早起越好——歷史掃描可能很久，這段期間也要能收 relay 的
         # /resend_article 重抓通知。用常駐 client 抓指定訊息、補齊自訂表情後回填 DB。
-        refetch_listen_conn = None
         refetch_tasks: set = set()
         try:
             refetch_listen_conn = await db.pool.acquire()
@@ -401,4 +401,11 @@ async def run_telegram_scraper(config: TelegramConfig) -> None:
                 await catchup_task
             except (asyncio.CancelledError, Exception):
                 pass
+        if refetch_listen_conn is not None:
+            # pool.close() 會等所有借出的連線歸還；這條監聽連線不還，收尾就一直等到容器被 SIGKILL。
+            # release 會順便 UNLISTEN；連線已斷時 asyncpg 自己會丟棄
+            try:
+                await db.pool.release(refetch_listen_conn)
+            except Exception as exc:  # 邊界：收尾的最後一步，失敗只記錄，不擋後面的 db.close()
+                logger.warning(f"[Telegram] 歸還重抓監聽連線失敗: {exc}")
         await db.close()

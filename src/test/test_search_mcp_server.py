@@ -7,7 +7,8 @@
   - 參數錯（不認得的來源、沒有的 id）要把**可讀的原因**送回模型，讓它改參數重試
   - 模型給了使用者的原句（`question`），重新排序要讀到原句，不是拆過的關鍵字
   - 常駐模式（`--http`）：聽設定的 port、開背景工作（定期同步、每日維護）；只接受本機與 docker 服務名稱的 Host
-    （防 DNS rebinding）；stdio 模式不開背景工作
+    （防 DNS rebinding）；收到停止訊號後還開著的連線最多等 `mcp_shutdown_grace_seconds`（Claude Code 的 MCP 客戶端
+    一直連著，沒有上限會等到 Docker 10 秒後 SIGKILL）；stdio 模式不開背景工作
 
 執行：
     cd src && python -m unittest test.test_search_mcp_server -v
@@ -138,15 +139,17 @@ class HttpModeTests(unittest.TestCase):
 
     def test_http_mode_serves_on_the_configured_port_and_starts_background_work(self):
         with mock.patch("utils.logger_config.configure_logging"), \
-                mock.patch.object(mcp_server.server, "run") as run, \
+                mock.patch("uvicorn.Server") as Server, \
                 mock.patch("services.search.background.start_in_background") as background:
             mcp_server.main(["--http"])
 
         background.assert_called_once()
-        transport = run.call_args.args[0]
-        self.assertEqual(transport, "streamable-http")
-        self.assertEqual(run.call_args.kwargs["port"], SEARCH_SETTINGS.mcp_port)
-        self.assertEqual(run.call_args.kwargs["host"], "0.0.0.0")   # 容器裡要聽所有介面，compose 才轉得進來
+        Server.return_value.run.assert_called_once()
+        config = Server.call_args.args[0]
+        self.assertEqual(config.port, SEARCH_SETTINGS.mcp_port)
+        self.assertEqual(config.host, "0.0.0.0")   # 容器裡要聽所有介面，compose 才轉得進來
+        self.assertEqual(config.timeout_graceful_shutdown, SEARCH_SETTINGS.mcp_shutdown_grace_seconds)
+        self.assertGreater(SEARCH_SETTINGS.mcp_shutdown_grace_seconds, 0)
 
     def test_stdio_mode_does_not_start_background_work(self):
         with mock.patch("utils.logger_config.configure_logging"), \

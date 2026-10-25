@@ -133,6 +133,24 @@ def http_options() -> dict[str, Any]:
     }
 
 
+def uvicorn_config(app: Any) -> "uvicorn.Config":
+    """常駐模式的 uvicorn 設定（`main` 與測試共用）。
+
+    不用 MCP 套件自己的 `server.run("streamable-http")`：它建的 uvicorn 沒設 `timeout_graceful_shutdown`，
+    收到停止訊號後會等所有連線關掉才結束，而 Claude Code 的 MCP 客戶端一直連著，結果每次都等到 Docker
+    10 秒後 SIGKILL（exit 137）。這裡只多設一個等待上限，其餘和套件相同。
+    """
+    import uvicorn
+
+    return uvicorn.Config(
+        app,
+        host=SEARCH_SETTINGS.mcp_host,
+        port=SEARCH_SETTINGS.mcp_port,
+        log_level=server.settings.log_level.lower(),
+        timeout_graceful_shutdown=SEARCH_SETTINGS.mcp_shutdown_grace_seconds,
+    )
+
+
 def main(argv: Optional[list[str]] = None) -> None:
     from utils.logger_config import configure_logging
 
@@ -153,7 +171,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     configure_logging(force=True, root_handlers=["console", "mcp_file"])
     logger.info("MCP server 啟動（HTTP，port %d）", SEARCH_SETTINGS.mcp_port)
     background.start_in_background()
-    server.run("streamable-http", port=SEARCH_SETTINGS.mcp_port, **http_options())
+    import uvicorn
+
+    uvicorn.Server(uvicorn_config(server.streamable_http_app(**http_options()))).run()
 
 
 if __name__ == "__main__":

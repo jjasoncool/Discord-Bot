@@ -83,6 +83,9 @@ class SearchSettings(BaseSettings):
     mcp_port: int = 8765
     #: 允許的 Host 標頭（MCP 套件防 DNS rebinding）：本機連進來、或同一個 docker 網路用服務名稱連
     mcp_allowed_hosts: tuple[str, ...] = ("127.0.0.1:*", "localhost:*", "search-mcp:*")
+    #: 收到停止訊號後，還開著的連線最多等幾秒就關掉。Claude Code 的 MCP 客戶端會一直連著，
+    #: 不設上限的話 uvicorn 會等到 Docker 的 10 秒 SIGKILL，收尾都沒跑
+    mcp_shutdown_grace_seconds: float = 2.0
     #: 背景每幾秒同步一次（`services.search.background`）。比搜尋時的同步間隔（`sync_min_interval_seconds`）短，
     #: 搜尋時就幾乎輪不到自己同步；巴哈爬蟲每小時重存約 2 萬列，趁剛寫完還在記憶體快取時先消化
     background_sync_seconds: float = 50.0
