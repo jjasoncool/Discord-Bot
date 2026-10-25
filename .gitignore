@@ -13,7 +13,7 @@ src/scraper/articles_bk*.db
 src/services/sent_articles.json
 src/services/sent_articles_bk.json
 staged_diff.txt
-doc/interview/
+doc/
 
 # Telethon session（避免把登入憑證提交到版本庫）
 src/telegram_scraper/session/
