@@ -180,6 +180,17 @@ class HybridRetrievalSettings(BaseModel):
             raise ValueError("retrieval_sources 必須包含啟用中的 discord_chat 設定")
         return chat_source.table_name
 
+    def chat_table_is_shared(self) -> bool:
+        """聊天表有沒有被別的啟用中來源共用（同一個 table_name）。
+
+        共用時查聊天要用 doc_type 篩掉別人的列；專用表不該篩：那個 JSON 欄位沒有統計資料，規劃器會把它當成
+        只有極少數列符合，寧可全表掃描也不用向量索引。
+        """
+        chat_table = self.get_chat_table_name()
+        return any(source.table_name == chat_table
+                   for key, source in self.retrieval_sources.items()
+                   if key != "discord_chat" and source.enabled)
+
     def resolve_fusion_weights(self) -> tuple[float, float]:
         """取得 BM25/Vector 融合權重。"""
         if self.hybrid_alpha is not None:

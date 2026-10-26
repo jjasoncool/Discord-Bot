@@ -311,6 +311,10 @@ def _build_bm25_rank(
 
 #: 折疊前多撈幾倍：同一句的向量幾乎相同、名次連號，只撈 limit 筆再折會剩不到幾則；距離排序的成本在掃描，不在筆數
 _COLLAPSE_OVERFETCH = 4
+#: 全庫搜尋的 hnsw.ef_search（pgvector 上限）。聊天表裡同一句話重複幾十次、向量一模一樣，HNSW 圖裡這種點只跟彼此相連、
+#: 從外面進去的邊很少，搜尋束太窄會整團繞過：實測 ef 200 時「臥槽」那 72 列一列都沒回來、400 回 2 列、1000 回 70 列；
+#: 熱快取下 1000 只多花約 20 ms（4～6 ms → 15～29 ms），冷快取的十幾秒是磁碟讀索引頁、和 ef 無關
+_FULL_CORPUS_EF_SEARCH = 1000
 #: 向量欄名只能長這樣（直接拼進 SQL）
 _EMBEDDING_COLUMN = re.compile(r"^[a-z_][a-z0-9_]*$")
 
@@ -419,7 +423,12 @@ def search_chat(
     select_cols = ["metadata_->>'message_id' AS mid", "text", "metadata_->>'author_id' AS author",
                    f"{embedding_column} <=> %s::vector AS dist", "metadata_->>'timestamp' AS ts"]
     params: list[Any] = [vector_literal]
-    where = ["metadata_->>'doc_type' = 'discord_chat'", f"{embedding_column} IS NOT NULL"]
+    where = [f"{embedding_column} IS NOT NULL"]
+    if HYBRID_RETRIEVAL_SETTINGS.chat_table_is_shared():
+        # 只有聊天表和別的來源共用時才篩 doc_type。專用表不篩：metadata_->>'doc_type' 沒有統計資料，規劃器會估成
+        # 只有 0.5% 的列符合、算出向量索引要撈兩萬筆才湊得滿，於是改走全表掃描（全庫 top-100 從毫秒變成一百多秒）
+        where.append("metadata_->>'doc_type' = %s")
+        params.append(HYBRID_RETRIEVAL_SETTINGS.get_source("discord_chat").doc_type)
     if min_chars:
         where.append("length(text) >= %s")
         params.append(int(min_chars))
@@ -452,8 +461,10 @@ def search_chat(
             with conn.cursor() as cur:
                 # 聊天表建了 HNSW 索引之後才有作用，沒索引時設了無害：索引一次最多回 ef_search 筆，再套頻道、時間、
                 # 作者的篩選會不足額；iterative_scan 讓它不足時繼續往外找（同 services/search/vectors.py）。
+                # 全庫搜尋一律開到上限（理由在 _FULL_CORPUS_EF_SEARCH）；窗內重排走 message_id 的索引，這個值用不到。
                 # SET LOCAL 只活在這個交易裡
-                cur.execute("SET LOCAL hnsw.ef_search = %s", (min(1000, max(100, 2 * fetch_limit)),))   # pgvector 上限 1000
+                ef_search = _FULL_CORPUS_EF_SEARCH if candidate_ids is None else min(1000, max(100, 2 * fetch_limit))
+                cur.execute("SET LOCAL hnsw.ef_search = %s", (ef_search,))
                 cur.execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
                 cur.execute(sql, tuple(params))
                 rows = cur.fetchall()

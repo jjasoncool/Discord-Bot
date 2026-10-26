@@ -8,7 +8,8 @@
   - 有 reranker 時在 bot 的 GPU 閘門裡重排、照它的分數挑相關訊息、低於門檻的不進；閘門等不到、reranker 壞掉或回錯筆數
     就照融合名次
   - 品質閘認得寫進向量庫的格式（`:描述:`、`[貼圖：…]`）
-  - 查詢前設 HNSW 的 ef_search 與 iterative_scan（索引建好才有作用，沒索引時無害）
+  - 查詢前設 HNSW 的 ef_search 與 iterative_scan（索引建好才有作用，沒索引時無害）；全庫搜尋把 ef_search 開到上限 1000，窗內重排不用
+  - 專用的聊天表不帶 doc_type 篩選（沒統計的 JSON 欄位會讓規劃器放著 HNSW 走全表掃描）；只有和別的來源共用一張表時才篩
   - 插話回憶把 min_chars 交給 search_chat，注入行尾標「同一人說過 N 次」
 
 hermetic：假的連線、假的 embedding、假的 reranker，不碰模型與資料庫。
@@ -126,6 +127,36 @@ class SearchChatCollapseTests(unittest.TestCase):
              mock.patch.object(cr, "_pgvector_connect", lambda: _Conn(cursor)):
             result = cr.search_chat(question="吃瓜", limit=2, logger=LOG, **kwargs)
         return result, cursor
+
+    def test_full_corpus_search_opens_ef_search_to_the_pgvector_limit(self):
+        """同一句話重複幾十次的向量一模一樣，ef_search 太窄會把整團繞過（實測 200 一列都沒回來、1000 才回來）。"""
+        _, cursor = self._run(return_meta=True)
+        self.assertEqual(cursor.ef_values, [1000])
+
+    def test_window_reranking_keeps_the_small_ef_search(self):
+        _, cursor = self._run(return_meta=True, candidate_ids=["1", "2", "3"])
+        self.assertEqual(cursor.ef_values, [100])   # max(100, 2×撈取筆數)；走 message_id 索引，這個值其實用不到
+
+    def test_a_dedicated_chat_table_is_queried_without_a_doc_type_filter(self):
+        """專用表帶了 doc_type 篩選，規劃器會放著 HNSW 不用（那個欄位沒統計、估成只剩 0.5% 的列）。"""
+        _, cursor = self._run(return_meta=True)
+        self.assertNotIn("doc_type", cursor.sql)
+        self.assertIn("IS NOT NULL", cursor.sql)
+
+    def test_a_shared_chat_table_still_filters_by_doc_type(self):
+        from sys_settings.pgvector_settings import HybridRetrievalSettings, RetrievalSourceConfig
+        shared = HybridRetrievalSettings(retrieval_sources={
+            "discord_chat": RetrievalSourceConfig(source_key="discord_chat", table_name="shared_index",
+                                                  doc_type="discord_chat", enabled=True, persist_mode="auto"),
+            "member_profile": RetrievalSourceConfig(source_key="member_profile", table_name="shared_index",
+                                                    doc_type="member_profile", enabled=True, persist_mode="manual"),
+        })
+        self.assertTrue(shared.chat_table_is_shared())
+        self.assertFalse(cr.HYBRID_RETRIEVAL_SETTINGS.chat_table_is_shared())   # 預設設定：各來源各一張表
+        with mock.patch.object(cr, "HYBRID_RETRIEVAL_SETTINGS", shared):
+            _, cursor = self._run(return_meta=True)
+        self.assertIn("metadata_->>'doc_type' = %s", cursor.sql)
+        self.assertIn("discord_chat", cursor.params)
 
     def test_same_author_same_text_collapses_to_the_latest_copy_with_the_nearest_distance(self):
         result, _ = self._run(return_meta=True)
