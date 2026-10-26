@@ -66,7 +66,7 @@ from llm.preprocess.chat_line import (
 from llm.preprocess import person_anchor
 from llm.preprocess.external_emoji import external_emoji_context
 from llm.preprocess.tweet_context import expand_tweets
-from llm.preprocess.emoji_text_utils import is_emoji_or_symbol_only
+from llm.preprocess.emoji_text_utils import is_emoji_or_symbol_only, is_link_only
 from llm.client.lemonade_gate import foreground_recently_active, stream_busy
 from sys_settings.time_settings import APP_TZ
 from llm.preprocess.vision_image import DEFAULT_MAX_FRAMES, extract_key_frames, is_vision_image
@@ -149,14 +149,6 @@ def _load_ambient_prompt() -> str:
 def _is_command_like(stripped: str) -> bool:
     """像指令的訊息（! 前綴或誤打的 / 斜線）不插。"""
     return stripped.startswith("!") or stripped.startswith("/")
-
-
-def _is_link_only(stripped: str) -> bool:
-    """整則只有連結（無可聊的文字）不插。"""
-    tokens = stripped.split()
-    return bool(tokens) and all(
-        t.startswith("http://") or t.startswith("https://") for t in tokens
-    )
 
 
 def _is_directed(bot, message: discord.Message) -> bool:
@@ -416,7 +408,7 @@ def _log_callback_debug(
     """候選級 debug（gated by callback_debug）：每筆候選的作者/距離/反應/三因子分/最終排序分/過哪關。
 
     純 log、不影響回傳。調參就看這裡的真實距離 d=：相關的米拉舊話落哪、無關的落哪 → 把地板設中間。
-    tag：drop:DIST/SHORT/QUAL（被距離地板/品質閘刷掉）｜CHOSEN（採用）｜RANKOUT（過閘但排序輸、超過 top_k）；
+    tag：drop:DIST/QUAL（被距離地板/品質閘刷掉；太短的在 SQL 就擋掉、不會出現）｜CHOSEN（採用）｜RANKOUT（過閘但排序輸、超過 top_k）；
     後綴 ·BF＝backfill 補滿進來的（距離其實超地板，因地板內不足 callback_min_results 才補）。
     a=作者 id 後四碼。mode：target:名字＝B（撈本人原話，地板較寬）｜topic（全作者，地板較嚴）。
     合併分只用來排序、不當門檻；相關性閘＝d ≤ 地板（max_dist），但數量不足 min 時會放寬地板 backfill。
@@ -436,7 +428,7 @@ def _log_callback_debug(
         ds = f"{d:.3f}" if isinstance(d, (int, float)) else "None"
         if mid not in survivor_mids:
             text = (c.get("text") or "").strip()
-            tag = "DIST" if (d is None or d > md) else ("SHORT" if len(text) < _SETTINGS.callback_min_chars else "QUAL")
+            tag = "DIST" if (d is None or d > md) else "QUAL"   # 太短的在 SQL 就擋掉了（callback_min_chars），不會到這裡
             rows.append(f"  [drop:{tag}] a={a} d={ds} \"{snippet}\"")
         else:
             relv, impv, recv = detail.get(mid, (0.0, 0.0, 0.0))
@@ -502,6 +494,8 @@ async def _build_chat_callback_context(
     """Phase D：撈本頻道語意相關舊訊息，回「模糊印象」行（或 None）。
 
     閘：① 絕對距離地板（mode-specific：target 寬、topic 嚴）+ ② 品質閘。撈不到就 None。
+    候選池本身已經乾淨一半：`search_chat` 在 SQL 擋掉不到 callback_min_chars 字的、同一人同一句只回一則並帶
+    repeat_count（注入行尾標「同一人說過 N 次」，口頭禪對模型是訊號）；這裡的品質閘再擋純表情／貼圖／連結。
     relevance×importance×recency 合併分「只拿來排序」決定撈哪 top_k，不當門檻——這修掉了
     舊版「只撈到一條 → min-max 給 0.5 → 被 min_score 拒」的 bug（常常 callback=0 的元兇）。
     有 target → 撈本人原話（author 過濾）；無 → 全作者話題。預設開（callback_enabled）。
@@ -540,6 +534,7 @@ async def _build_chat_callback_context(
                 before_timestamp=before_ts,
                 author_id=target_id,                  # 有 target → 只撈本人原話；None → 全作者
                 return_meta=True,
+                min_chars=_SETTINGS.callback_min_chars,   # SQL 就擋掉太短的，候選池不被反應詞佔掉
             ),
         )
     except Exception as exc:
@@ -567,9 +562,7 @@ async def _build_chat_callback_context(
         text = (c.get("text") or "").strip()
         if dist is None:
             continue
-        if len(text) < _SETTINGS.callback_min_chars:
-            continue
-        if is_emoji_or_symbol_only(text) or _is_link_only(text):
+        if is_emoji_or_symbol_only(text) or is_link_only(text):
             continue
         (survivors if dist <= max_dist else backfill).append({**c, "text": text})
     if len(survivors) < _SETTINGS.callback_min_results and backfill:
@@ -624,7 +617,9 @@ async def _build_chat_callback_context(
         aid = c.get("author_id") or ""
         member = message.guild.get_member(int(aid)) if aid.isdigit() else None
         author = name_with_anchor(member) if member else person_anchor.label("某人", aid)
-        lines.append(f"[{_format_recalled_ts(c.get('timestamp'))}] {author}: {gist}")
+        repeat = int(c.get("repeat_count") or 1)
+        note = f"（同一人說過 {repeat} 次）" if repeat > 1 else ""
+        lines.append(f"[{_format_recalled_ts(c.get('timestamp'))}] {author}: {gist}{note}")
 
     if _SETTINGS.callback_debug:
         _log_callback_debug(query=query, candidates=candidates, survivors=survivors,
@@ -1137,7 +1132,7 @@ def _passes_content_gate(msg: discord.Message) -> bool:
         return False
     if _has_image(msg):
         return True  # 有圖，圖就是內容
-    if not stripped or _is_link_only(stripped):
+    if not stripped or is_link_only(stripped):
         return False
     if is_emoji_or_symbol_only(stripped):
         return False

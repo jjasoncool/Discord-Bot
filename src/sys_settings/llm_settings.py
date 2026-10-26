@@ -225,6 +225,15 @@ class AskAICommandSettings(BaseSettings):
     #: 一題回答最多產出幾個 token（含思考）。沒上限時一題寫不停會拿著顯示卡寫到逾時（實測 6,000～8,600 個 token 沒寫完）；
     #: 以常見的生成速度，這個值能在逾時前寫完
     answer_max_tokens: int = 4096
+    #: 相關訊息的重排（開關 askai_rerank_mode）：融合名次前幾則送 reranker 連問題一起讀、重新打分
+    rerank_candidates: int = 30
+    #: 重排前最多等 GPU 幾秒（插話正在長回答時等不到就照融合名次）；拿到閘門後的租約秒數：reranker 是同步呼叫、途中
+    #: 續不了租，租約要蓋過它單次 60 秒的逾時加上第一次冷載入（最多 180 秒），到期只會取消重排本身、照融合名次
+    rerank_gpu_wait_seconds: float = 10.0
+    rerank_lease_seconds: float = 240.0
+    #: reranker 分數低於這個值的不進 prompt；None＝不設門檻。實測分數非常兩極（答得到的 0.95 以上、不相干的 0.0001
+    #: 以下），0.1 只擋明顯不相干的；分布記在 askai_response_history 的 retrieval_debug.reranked，要調看那裡
+    rerank_min_score: float | None = 0.1
 
     discord_context_begin: str = "<context:discord_chat_begin>"
     discord_context_end: str = "</context:discord_chat_end>"

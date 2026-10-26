@@ -1,14 +1,18 @@
-"""Custom emoji 文字替換工具：把 `<:name:id>` / `<a:name:id>` 轉成 `:描述:`。
+"""自訂表情的語意化（`<:name:id>` → `:描述:`），以及「一則訊息有沒有可聊的文字」的判斷。
 
-用途：
-- store_chat 寫入 pgvector 前做語意化，避免 embed model 把 emoji token 當雜訊
-- 未來其他需要語意化訊息文字的地方也可共用
+架構定位：技術層（`llm/preprocess`），只依賴 `llm.preprocess.emoji_dictionary`。上層：聊天記憶寫入（`llm.storage.store_chat`、
+`chat_index_backfill`）、插話的內容閘與回憶（`llm.ambient.ambient_reply`）、/askai 的相關名額（`llm.retrievers.context_retriever`）。
+下層：表情字典（檔案改了就重讀）。
 
-和 personality_extractor 內的 `_clean_text_for_extraction` 的差別：
-- 這裡只做 custom emoji 替換；不動 URL、mention、空白
-- personality_extractor 是人格萃取專用的「深度清理」，會多做幾步
+介面：
+- `replace_custom_emoji_with_description(text)`：`<:name:id>`／`<a:name:id>` 換成 `:描述:`（規則見函式說明）。
+- `is_emoji_or_symbol_only(text)`：整則只有表情、貼圖或符號（沒有任何字詞）。
+- `is_link_only(text)`：整則只有網址。
+- `reload_descriptions()`：字典重寫後強制重讀，回有描述的筆數。
 
-字典讀取統一走 `llm.preprocess.emoji_dictionary`（檔案改了就重讀）。
+規則：
+- 兩種格式都認：Discord 原文（`<:name:id>`）與寫進向量庫後的文字（`:描述:`、`[貼圖：…]`），三個呼叫端才會用同一套標準。
+- 只做表情替換，不動 URL、mention、空白；人格萃取的深度清理在 `personality_extractor._clean_text_for_extraction`。
 """
 from __future__ import annotations
 
@@ -83,11 +87,35 @@ _UNICODE_EMOJI_PATTERN = re.compile(
 )
 
 
-def is_emoji_or_symbol_only(text: str) -> bool:
-    """文字去掉自訂 emoji `<:name:id>` 與 unicode emoji 後是不是空的（＝整則只有表情符號）。
+# 寫進聊天向量庫前，自訂表情已換成 `:描述:`、貼圖換成 `[貼圖：…]`（store_chat.compose_persist_text）。
+# 判斷「整則只有表情」時這兩種格式也要認：不然 14,612 則滿 8 字的純貼圖、1,732 則純表情描述會被當成有內容的回憶
+_DESCRIBED_EMOJI_PATTERN = re.compile(r":[^:\n]+:")
+_STICKER_TEXT_PATTERN = re.compile(r"\[貼圖：[^\]]*\]")
+# 字母、數字、中日韓文字；Python 的 \w 在 Unicode 模式下含中日韓
+_WORD_CHAR = re.compile(r"\w")
 
-    給「不該對純表情訊息觸發回應」這類判斷共用，複用本模組既有的 custom emoji pattern。
+
+def is_emoji_or_symbol_only(text: str) -> bool:
+    """整則是不是只有表情、貼圖或符號：去掉自訂 emoji `<:name:id>`、語意化後的 `:描述:`、貼圖 `[貼圖：…]`、unicode emoji
+    後，剩下的沒有任何字詞字元（「????????」「……」這種純標點也算）。
+
+    Discord 原文（插話的內容閘）與聊天向量庫存的文字（插話回憶、/askai 的候選）兩種格式都認得。
     """
     leftover = _CUSTOM_EMOJI_PATTERN.sub("", text or "")
-    leftover = _UNICODE_EMOJI_PATTERN.sub("", leftover).strip()
-    return leftover == ""
+    leftover = _DESCRIBED_EMOJI_PATTERN.sub("", leftover)
+    leftover = _STICKER_TEXT_PATTERN.sub("", leftover)
+    leftover = _UNICODE_EMOJI_PATTERN.sub("", leftover)
+    return _WORD_CHAR.search(leftover) is None
+
+
+_PREVIEW_TEXT_PATTERN = re.compile(r"\[預覽：[^\]]*\]")
+
+
+def is_link_only(text: str) -> bool:
+    """整則只有連結（每個空白分開的片段都是 http(s) 網址），沒有可聊、可當回憶的文字。
+
+    寫進向量庫的純連結訊息後面接著 Discord 抓到的 `[預覽：標題 - 描述]`（store_chat.compose_persist_text），判斷前先去掉：
+    「某人貼過一篇文章」不是值得當回憶注入的內容，預覽標題也不是他說的話。
+    """
+    tokens = _PREVIEW_TEXT_PATTERN.sub(" ", text or "").split()
+    return bool(tokens) and all(t.startswith("http://") or t.startswith("https://") for t in tokens)

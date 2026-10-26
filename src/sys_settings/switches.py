@@ -54,6 +54,9 @@ class Switches(BaseModel):
     #: /askai 的網路搜尋（SearXNG，llm.retrievers.web）：keyword＝問題裡有時事類關鍵字就先查好、塞進 prompt（舊做法）；
     #: tool＝做成工具，由模型和遊戲情報一起決定查哪邊（兩邊不會同時塞資料）；off＝不查。預設照舊做法
     askai_web_search_mode: Literal["off", "keyword", "tool"] = "keyword"
+    #: /askai 挑「相關」聊天訊息時的重排（和情報搜尋同一個 reranker）：on＝融合名次前 30 則連問題一起讀、重新打分，
+    #: 每題多等一次 GPU（約 1～2 秒）；off＝照關鍵字＋向量融合的名次。reranker 壞掉、GPU 等太久時自動照原本的名次
+    askai_rerank_mode: Literal["off", "on"] = "off"
     #: 聊天向量庫補寫（llm.storage.chat_index_backfill）：raw 備份有、聊天向量庫沒有的訊息（多半是停機前還在記憶體裡、
     #: 沒來得及寫的）定期補寫。off＝不查；dry_run＝查、記 log（幾則、會排幾則），不寫；on＝排進聊天記憶的寫入佇列。
     #: 預設 dry_run：只讀不寫，跟 off 一樣安全，又能先從 log 看到要補多少再決定切到 on

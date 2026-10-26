@@ -1,6 +1,7 @@
 import logging
 from pathlib import Path
 import asyncio
+import contextlib
 import functools
 import json
 import time
@@ -16,6 +17,7 @@ from discord.ext import commands
 from llm.logger_factory import build_askai_prompt_log, get_or_create_file_logger
 from llm.persona.persona_card_builder import extract_mentioned_user_ids
 from llm.retrievers.context_retriever import retrieve_discord_context, retrieve_rag_context_sync
+from services.search.rerank import LemonadeReranker
 from llm.retrievers.intel import run_with_intel
 from llm.retrievers.web import WebSearchTools, format_web_context_lines, search_web, should_search
 from llm.client.lemonade_gate import imagegen_busy, note_foreground_activity
@@ -332,6 +334,21 @@ class _AskaiInputs:
     interaction: Any = None       # 記錄回應歷史要 guild／channel／user
     model: str | None = None      # 第 2 段決定後填回，第 3 段記錄用
     think: bool | None = None
+
+
+_ASKAI_RERANKER = None
+
+
+def _askai_reranker():
+    """開關 askai_rerank_mode 開著才給 reranker：和情報搜尋同一個 `LemonadeReranker`（建立時不連線、不載模型）。
+    檢索層不認 services.search，由這裡交進去。閘門由檢索層用 bot 的 async 閘門拿（插話、產圖看得到持有者），
+    所以這裡讓 reranker 自己不拿鎖——它預設的 `gpu_exclusive_sync` 是給沒有 event loop 的行程用的。"""
+    global _ASKAI_RERANKER
+    if switches.current().askai_rerank_mode != "on":
+        return None
+    if _ASKAI_RERANKER is None:
+        _ASKAI_RERANKER = LemonadeReranker(gate=lambda **_: contextlib.nullcontext())
+    return _ASKAI_RERANKER
 
 
 def _context_limits(*, has_image: bool) -> dict[str, int]:
@@ -758,6 +775,11 @@ class LLMCommands(commands.Cog):
             max_context_to_send=limits["max_context_to_send"],
             taipei_tz=APP_TZ,
             logger=logger,
+            reranker=_askai_reranker(),
+            rerank_candidates=ASKAI_SETTINGS.rerank_candidates,
+            rerank_min_score=ASKAI_SETTINGS.rerank_min_score,
+            rerank_gpu_wait_seconds=ASKAI_SETTINGS.rerank_gpu_wait_seconds,
+            rerank_lease_seconds=ASKAI_SETTINGS.rerank_lease_seconds,
         )
         participant_user_ids = _participant_ids(discord_context)
 

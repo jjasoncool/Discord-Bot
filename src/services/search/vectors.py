@@ -190,7 +190,7 @@ class PgVectorStore:
             self.ensure_schema(con)
             with con.cursor() as cur:
                 # HNSW 每次最多回 ef_search 筆；有來源、日期篩選時開 iterative_scan，篩掉的不足額會再往下找
-                cur.execute("SET LOCAL hnsw.ef_search = %s", (max(100, k * 2),))
+                cur.execute("SET LOCAL hnsw.ef_search = %s", (min(1000, max(100, k * 2)),))   # pgvector 上限 1000，超過會被重設成預設
                 cur.execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
                 cur.execute(
                     f"SELECT doc_id, embedding <=> %s::vector AS distance FROM {self.table}"

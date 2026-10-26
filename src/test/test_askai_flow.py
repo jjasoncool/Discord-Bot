@@ -126,7 +126,8 @@ class _Harness:
         self.file_logs = {}
         self.debug_kwargs = None
         self.image_payload = ["B64"]
-        self.switch = SimpleNamespace(askai_web_search_mode=web_mode, askai_intel_search_mode=intel_mode)
+        self.switch = SimpleNamespace(askai_web_search_mode=web_mode, askai_intel_search_mode=intel_mode,
+                                      askai_rerank_mode="off")
         self.intent = SimpleNamespace(triggered=web_triggered, reason="r", trigger_keyword="天氣" if web_triggered else None,
                                       cleaned_query="台北 天氣" if web_triggered else None,
                                       categories=["general"], time_range="day", language="zh-TW")

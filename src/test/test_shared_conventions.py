@@ -445,6 +445,36 @@ def _find_hand_rolled_daily_quotas(path: Path) -> list[int]:
     return hits
 
 
+def _is_http_startswith(node: ast.AST) -> bool:
+    """`x.startswith("http://")`、`x.startswith(("http://", "https://"))` 這兩種寫法。"""
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "startswith"
+            and node.args):
+        return False
+    arg = node.args[0]
+    consts = arg.elts if isinstance(arg, ast.Tuple) else [arg]
+    return any(isinstance(c, ast.Constant) and isinstance(c.value, str) and c.value.startswith(("http://", "https://"))
+               for c in consts)
+
+
+def _find_link_only_checks_in_tree(tree: ast.AST) -> list[int]:
+    hits = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("all", "any")
+                and node.args and isinstance(node.args[0], ast.GeneratorExp)
+                and any(_is_http_startswith(inner) for inner in ast.walk(node.args[0].elt))):
+            hits.append(node.lineno)
+    return sorted(set(hits))
+
+
+def _find_hand_rolled_link_only_checks(path: Path) -> list[int]:
+    """`all(t.startswith("http://") or t.startswith("https://") for t in text.split())` 這種自己判斷「整則只有連結」
+    的寫法（單一字串或 tuple 都抓）。一律用 `llm.preprocess.emoji_text_utils.is_link_only`（純表情、純貼圖是同模組的
+    `is_emoji_or_symbol_only`），插話的內容閘、插話回憶、/askai 的相關名額才會用同一套標準。
+    只抓「每個片段都是網址」這個形狀：單獨的 `url.startswith("https://")` 是在驗網址，不是在判斷整則，不抓。
+    網址寫在字串裡，regex 規則看不到（字串會被遮掉），所以走 AST。"""
+    return _find_link_only_checks_in_tree(_parse(path))
+
+
 def _find_ffprobe_calls(path: Path) -> list[int]:
     """找自己組 ffprobe 指令的地方。讀影片長度一律走 `utils.media_probe.probe_duration`（逾時、失敗回 0、
     收掉子行程只有一份）。指令寫在字串裡，所以走 AST。"""
@@ -771,6 +801,16 @@ RULES = [
         allowed={"utils/utils.py"},
     ),
     Rule(
+        name="整則只有連結的判斷（純連結、純表情、純貼圖要同一套標準）",
+        finder=_find_hand_rolled_link_only_checks,
+        canonical="llm.preprocess.emoji_text_utils.is_link_only／is_emoji_or_symbol_only",
+        allowed={
+            "llm/preprocess/emoji_text_utils.py",
+            # 爬蟲是獨立容器，判斷的是網頁上的連結，不是聊天訊息
+            "scraper/",
+        },
+    ),
+    Rule(
         name="每天最多做幾次的計數（換日歸零）",
         finder=_find_hand_rolled_daily_quotas,
         canonical="utils.daily_quota.DailyQuota",
@@ -995,6 +1035,24 @@ class TimezoneGuardTests(unittest.TestCase):
     def test_ignores_timezone_utc(self):
         src = "from datetime import timezone\nUTC = timezone.utc\n"
         self.assertEqual(_find_hardcoded_utc_offsets_in_source(src), [])
+
+
+class LinkOnlyFinderTests(unittest.TestCase):
+    """「整則只有連結」規則的偵測器本身：抓 all(...) 裡的 startswith(http)（單一字串與 tuple），不抓單純驗網址的 startswith。"""
+
+    def _scan(self, src):
+        return _find_link_only_checks_in_tree(ast.parse(src))
+
+    def test_catches_plain_and_tuple_forms(self):
+        src = (
+            "def a(s):\n    return all(t.startswith('http://') or t.startswith('https://') for t in s.split())\n"
+            "def b(s):\n    return any(t.startswith(('http://', 'https://')) for t in s.split())\n"
+        )
+        self.assertEqual(self._scan(src), [2, 4])
+
+    def test_ignores_plain_url_validation(self):
+        src = "def ok(url):\n    return url.startswith('https://') and 'x' in url\n"
+        self.assertEqual(self._scan(src), [])
 
 
 class SleepUntilFinderTests(unittest.TestCase):

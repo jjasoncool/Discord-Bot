@@ -32,6 +32,11 @@
     "tool：做成工具，由模型自己決定要不要查網路（和遊戲情報一起決定，兩邊不會同時塞資料打架）"
   ],
   "askai_web_search_mode": "tool",
+  "_askai_rerank_mode 可以填": [
+    "off：/askai 挑相關聊天訊息照關鍵字＋向量融合的名次",
+    "on：融合名次前幾十則再讓 reranker 連問題一起讀、重新排序（則數在設定 rerank_candidates；每題多約 1 秒；顯示卡被佔著時等不到就照原本的名次）"
+  ],
+  "askai_rerank_mode": "on",
   "_chat_index_backfill_mode 可以填": [
     "off：不查",
     "dry_run：查、記 log 說會補幾則，不寫（試跑用）",
