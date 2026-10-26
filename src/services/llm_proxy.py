@@ -88,7 +88,9 @@ class LlmProxy:
         header = request.headers.get("Authorization", "")
         if not header.startswith(_BEARER):
             return False
-        return hmac.compare_digest(header[len(_BEARER):], self.settings.api_key)
+        # 用 bytes 比：str 版的 compare_digest 只收 ASCII，標頭帶非 ASCII 會變 TypeError、沒驗證的請求就打出 500
+        token = header[len(_BEARER):].encode("utf-8", "surrogateescape")
+        return hmac.compare_digest(token, self.settings.api_key.encode("utf-8"))
 
     async def handle_models(self, request: web.Request) -> web.Response:
         if not self._authorized(request):
@@ -101,7 +103,10 @@ class LlmProxy:
             logger.warning("拒絕模型請求：金鑰不符 remote=%s", request.remote)
             return _error(401, "金鑰不符", code="unauthorized")
         try:
-            body = await request.json()
+            # 本文上限只放大這個端點（長 context 的對話會超過 aiohttp 預設的 1 MiB），/notify 維持預設
+            body = await request.clone(client_max_size=self.settings.proxy_max_body_bytes).json()
+        except web.HTTPRequestEntityTooLarge:
+            return _error(413, "請求本文太大", code="body_too_large")
         except Exception:  # 邊界：對外的一次請求，本文壞掉只回 400
             return _error(400, "請求本文不是 JSON", code="invalid_json")
         if not isinstance(body, dict) or not isinstance(body.get("messages"), list):
@@ -113,9 +118,11 @@ class LlmProxy:
             return _error(400, f"模型 {model!r} 不在白名單，只放行 {sorted(allowed)}", code="model_not_found")
 
         cap = self.settings.proxy_max_tokens
-        requested = body.get("max_tokens")
-        if not isinstance(requested, int) or isinstance(requested, bool) or requested <= 0 or requested > cap:
-            body["max_tokens"] = cap
+        # llama.cpp 以 n_predict 優先蓋掉 max_tokens、OpenAI 的 max_completion_tokens 也等價：三個一起夾、只留 max_tokens，
+        # 不然帶 n_predict:-1 就能繞過上限寫到 ctx 填滿（租約每塊都續、擋不住）
+        requested = [body.pop(key, None) for key in ("max_tokens", "n_predict", "max_completion_tokens")]
+        valid = [v for v in requested if isinstance(v, int) and not isinstance(v, bool) and v > 0]
+        body["max_tokens"] = min(min(valid), cap) if valid else cap
         stream = bool(body.get("stream"))
         if stream:
             options = dict(body.get("stream_options") or {})
@@ -137,12 +144,18 @@ class LlmProxy:
                     return _error(503, "顯示卡忙碌，請稍後重試", code="gpu_busy",
                                   retry_after=self.settings.proxy_retry_after_seconds)
                 await self._llm.ensure_model_loaded(model)
+                if lease is not None:
+                    lease.renew()   # 冷載入可能吃掉大半租約；載入完成是可觀測的進展
                 if stream:
                     return await self._stream(request, body, model, trace, lease)
                 completion = await self._client.chat_completion_raw(body, timeout=self._timeout)
                 log_llm_usage(trace, model, completion)
                 return web.json_response(completion)
         except LlmAPIError as exc:
+            if exc.status in (401, 403):
+                # 原樣透傳 401 對方會以為是自己給 bot 的金鑰錯；這是後端在拒絕 bot，換成 502 並標明
+                logger.warning("模型後端拒絕驗證 HTTP %s trace=%s", exc.status, trace)
+                return _error(502, f"模型後端拒絕驗證（HTTP {exc.status}）", code="upstream_auth")
             # 後端回非 2xx：狀態碼與本文原樣交回去，對方才知道是請求的問題還是後端的問題
             return web.json_response(_upstream_error_body(exc), status=exc.status or 502)
         except Exception as exc:  # 邊界：對外的一次請求，連不上、逾時在這裡轉成狀態碼
@@ -162,9 +175,11 @@ class LlmProxy:
             response = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
             await response.prepare(request)
             usage_chunk: dict[str, Any] = {}
+            last_blank = True   # SSE 的 event 以空行結束；錯誤塊要寫在新的 event 裡，不能黏在前一個 data 行後面
             try:
                 async for line in upstream.aiter_lines():
                     await response.write((line + "\n").encode("utf-8"))
+                    last_blank = line == ""
                     if lease is not None:
                         lease.renew()
                     if line.startswith(_SSE_DATA) and ('"usage"' in line or '"timings"' in line):
@@ -183,7 +198,8 @@ class LlmProxy:
                 logger.warning("模型請求串流中斷 trace=%s: %s", trace, exc)
                 with contextlib.suppress(ConnectionResetError, ConnectionError):
                     payload = {"error": {"message": str(exc), "type": "server_error", "code": "stream_failed"}}
-                    await response.write((_SSE_DATA + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8"))
+                    prefix = "" if last_blank else "\n"
+                    await response.write((prefix + _SSE_DATA + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8"))
             with contextlib.suppress(ConnectionResetError, ConnectionError):
                 await response.write_eof()
         log_llm_usage(trace, model, usage_chunk)

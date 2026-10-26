@@ -242,6 +242,8 @@ class LlmHttpClient:
 
         給轉發用：對方（Hermes 這類客戶端）自己有重試與退避，這裡再重試會變成同一題佔著顯示卡寫好幾遍。
         非 2xx 丟 `LlmAPIError`（帶後端原文，讓呼叫端原樣交回去）；連不上、逾時的分類和 `chat_completion` 相同。
+        Lemonade 的「200 OK＋error 信封」也拆：downstream 卡死（network_error）就重載一次（有冷卻）再當連不上丟出去，
+        轉發端才會回 503 讓對方退避；其他信封當 `LlmAPIError`。
         """
         try:
             resp = await self._async.post(self._host + "/v1/chat/completions", json=body, timeout=timeout or self._timeout)
@@ -250,7 +252,11 @@ class LlmHttpClient:
         except httpx.RequestError as exc:
             raise LlmConnectionError(f"POST /chat/completions 連線錯誤: {exc}") from exc
         self._raise_for_status(resp)
-        return resp.json()
+        try:
+            return _unwrap_response_envelope(resp.json())
+        except _LemonadeUpstreamWedge as exc:
+            await asyncio.to_thread(self._try_heal_lemonade_backend, str(body.get("model") or ""))
+            raise LlmConnectionError(f"POST /chat/completions 後端卡住: {exc}") from exc
 
     @contextlib.asynccontextmanager
     async def chat_completion_stream(self, body: dict[str, Any], *, timeout: float | None = None):

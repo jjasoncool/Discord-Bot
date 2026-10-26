@@ -63,7 +63,7 @@ class NotifyServer:
         self.hermes_settings = hermes_settings or HermesSettings()
         self._runner: Optional[web.AppRunner] = None
         # 本文上限照模型端點的需要放大（aiohttp 預設 1 MiB，長 context 的對話會超過）；通知的本文本來就很小
-        self._app = web.Application(client_max_size=self.hermes_settings.proxy_max_body_bytes)
+        self._app = web.Application()   # 本文上限維持預設 1 MiB；/v1 端點自己放大（LlmProxy.handle_chat）
         # 來源 → 處理函式 的分派表
         self._handlers: Dict[str, Callable[..., Coroutine]] = {
             "bahamut": self._process_bahamut,
@@ -103,7 +103,8 @@ class NotifyServer:
         secret = self.settings.shared_secret
         if not secret:
             return True
-        return hmac.compare_digest(request.headers.get(SECRET_HEADER, ""), secret)
+        header = request.headers.get(SECRET_HEADER, "").encode("utf-8", "surrogateescape")
+        return hmac.compare_digest(header, secret.encode("utf-8"))   # bytes 版：非 ASCII 標頭不會變 TypeError
 
     async def stop(self) -> None:
         if self._runner:

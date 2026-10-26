@@ -24,7 +24,8 @@ class HermesSettings(BaseSettings):
     proxy_max_body_bytes: int = 32 * 1024 * 1024
     #: 每次呼叫最多讓模型寫幾個 token：串流時每一塊都會續租，租約擋不住寫不停的模型，只能靠這個上限
     proxy_max_tokens: int = 4096
-    #: 租約比 LLM 逾時再多幾秒：第一塊要等 prompt 讀完才來，64k 冷讀約 200 秒，租約不能比它短
+    #: 租約比 LLM 逾時再多幾秒：第一塊要等 prompt 讀完才來，64k 冷讀約 200 秒，所以 LLM_TIMEOUT 本身要比冷讀長
+    #: （.env.template 用 300）；載入完成會續一次租，之後每一塊續一次
     proxy_lease_extra_seconds: float = 30.0
 
     model_config = SettingsConfigDict(env_prefix="HERMES_", extra="ignore", frozen=True)

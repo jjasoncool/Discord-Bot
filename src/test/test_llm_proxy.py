@@ -193,7 +193,7 @@ class ForwardingTests(ProxyTestBase):
         self.assertEqual("".join(line + "\n" for line in SSE_LINES), received.decode())
         sent = self.upstream.calls[0][1]
         self.assertTrue(sent["stream_options"]["include_usage"], "串流要請後端在最後一塊附 usage")
-        self.assertEqual(len(SSE_LINES), self.gate.lease.renewals, "每寫出一行就續租")
+        self.assertEqual(len(SSE_LINES) + 1, self.gate.lease.renewals, "載入完成續一次，之後每寫出一行就續租")
         self.assertEqual(("exit", "hermes"), self.gate.events[-1])
         usage_line = next(line for line in logs.output if "llm_usage feature=hermes" in line)
         self.assertIn("prompt=10", usage_line)
@@ -228,6 +228,47 @@ class ForwardingTests(ProxyTestBase):
         self.assertEqual("backend_unavailable", (await response.json())["error"]["code"])
         self.assertEqual(("exit", "hermes"), self.gate.events[-1])
 
+    async def test_non_ascii_bearer_is_401_not_500(self):
+        client = await self.client_for(self.proxy())
+        response = await client.get("/v1/models", headers={"Authorization": "Bearer caf\u00e9"})
+        self.assertEqual(401, response.status)
+
+    async def test_n_predict_and_max_completion_tokens_cannot_bypass_the_cap(self):
+        client = await self.client_for(self.proxy())
+        body = {"model": MODEL, "messages": [], "max_tokens": 99999, "n_predict": -1, "max_completion_tokens": 99999}
+        await client.post("/v1/chat/completions", json=body, headers=AUTH)
+        sent = self.upstream.calls[-1][1]
+        self.assertEqual(256, sent["max_tokens"])
+        self.assertNotIn("n_predict", sent)
+        self.assertNotIn("max_completion_tokens", sent)
+        await client.post("/v1/chat/completions", json={"model": MODEL, "messages": [], "max_tokens": 100, "n_predict": 50}, headers=AUTH)
+        self.assertEqual(50, self.upstream.calls[-1][1]["max_tokens"], "幾個欄位都有效時取最小")
+
+    async def test_upstream_auth_failure_becomes_502(self):
+        client = await self.client_for(self.proxy(upstream=FakeUpstream(error=LlmAPIError("HTTP 401", status=401, detail="{}"))))
+        response = await client.post("/v1/chat/completions", json={"model": MODEL, "messages": []}, headers=AUTH)
+        self.assertEqual(502, response.status)
+        self.assertEqual("upstream_auth", (await response.json())["error"]["code"])
+
+    async def test_big_body_is_accepted_on_the_model_endpoint_only(self):
+        client = await self.client_for(self.proxy(proxy_max_body_bytes=4 * 1024 * 1024))
+        padding = "x" * (2 * 1024 * 1024)
+        response = await client.post("/v1/chat/completions", json={"model": "other", "messages": [], "pad": padding}, headers=AUTH)
+        self.assertEqual(400, response.status, "2 MiB 的本文要讀得進來（卡在模型白名單，不是 413）")
+        response = await client.post("/v1/chat/completions", json={"model": MODEL, "messages": [], "pad": padding * 3}, headers=AUTH)
+        self.assertEqual(413, response.status)
+
+    async def test_lease_is_renewed_once_the_model_is_loaded(self):
+        client = await self.client_for(self.proxy())
+        await client.post("/v1/chat/completions", json={"model": MODEL, "messages": []}, headers=AUTH)
+        self.assertEqual(1, self.gate.lease.renewals)
+
+    async def test_failure_right_after_a_data_line_still_ends_the_event_first(self):
+        client = await self.client_for(self.proxy(upstream=FakeUpstream(lines=SSE_LINES, fail_after=1)))
+        response = await client.post("/v1/chat/completions", json={"model": MODEL, "messages": [], "stream": True}, headers=AUTH)
+        text = (await response.read()).decode()
+        self.assertIn(SSE_LINES[0] + "\n\ndata: {\"error\"", text, "錯誤塊前要有空行，不能黏進前一個 event")
+
     async def test_failure_mid_stream_is_reported_inside_the_stream(self):
         client = await self.client_for(self.proxy(upstream=FakeUpstream(lines=SSE_LINES, fail_after=2)))
         response = await client.post("/v1/chat/completions", json={"model": MODEL, "messages": [], "stream": True}, headers=AUTH)
@@ -236,6 +277,34 @@ class ForwardingTests(ProxyTestBase):
         self.assertTrue(text.startswith(SSE_LINES[0] + "\n"), "出錯前的內容要先到")
         self.assertIn('"code": "stream_failed"', text)
         self.assertEqual(("exit", "hermes"), self.gate.events[-1])
+
+
+class RawCompletionEnvelopeTests(unittest.IsolatedAsyncioTestCase):
+    """真的 LlmHttpClient 的 raw 路徑：Lemonade 回 200＋error 信封時不能當成功交回去。"""
+
+    def _client(self, payload):
+        from llm.client.http_client import LlmHttpClient
+
+        client = LlmHttpClient(base_url="http://backend.test", timeout=1.0)
+        resp = SimpleNamespace(is_success=True, status_code=200, json=lambda: payload, text="")
+        client._async = SimpleNamespace(post=mock.AsyncMock(return_value=resp))
+        client._try_heal_lemonade_backend = mock.Mock(return_value=True)
+        return client
+
+    async def test_network_error_envelope_heals_once_and_counts_as_unreachable(self):
+        from llm.client.http_client import LlmConnectionError
+
+        client = self._client({"error": {"type": "network_error", "message": "Couldn't connect to server"}})
+        with self.assertRaises(LlmConnectionError):
+            await client.chat_completion_raw({"model": MODEL, "messages": []})
+        client._try_heal_lemonade_backend.assert_called_once_with(MODEL)
+
+    async def test_other_envelopes_are_upstream_errors_and_normal_bodies_pass(self):
+        client = self._client({"error": {"type": "server_error", "message": "boom"}})
+        with self.assertRaises(LlmAPIError):
+            await client.chat_completion_raw({"model": MODEL, "messages": []})
+        client = self._client({"choices": [{"message": {"content": "ok"}}]})
+        self.assertEqual("ok", (await client.chat_completion_raw({"model": MODEL, "messages": []}))["choices"][0]["message"]["content"])
 
 
 class NotifyServerWiringTests(unittest.IsolatedAsyncioTestCase):
@@ -251,7 +320,7 @@ class NotifyServerWiringTests(unittest.IsolatedAsyncioTestCase):
         with_key = self.server(KEY)
         self.assertIn("/v1/chat/completions", self.routes(with_key))
         self.assertIn("/v1/models", self.routes(with_key))
-        self.assertEqual(12345, with_key._app._client_max_size)
+        self.assertNotEqual(12345, with_key._app._client_max_size, "本文上限只放大 /v1 端點，/notify 維持預設")
 
     async def test_start_enables_handler_cancellation(self):
         server = self.server(KEY)
