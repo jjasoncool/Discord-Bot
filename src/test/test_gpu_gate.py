@@ -194,6 +194,19 @@ class SyncGateTests(_GateTestCase):
         self.assertEqual(entered, [True])
         self.hold_in_other_process().communicate("\n")   # 用完有放
 
+    def test_a_wait_limit_above_the_override_cap_still_raises_instead_of_barging_in(self):
+        """批次重算給 30 分鐘上限：等滿 15 分鐘不能「照常打模型」，要等到上限才丟 GpuBusy；放行窗也不適用。"""
+        now = [1000.0]   # 產生器自己 yield 要睡幾秒，這裡用一個手撥的時鐘
+        with mock.patch.object(gate, "_clock", lambda: now[0]), \
+             mock.patch.object(gate, "_CROSS_PROCESS_MAX_WAIT_S", 1.0), \
+             mock.patch.object(gate, "_skip_until", now[0] + 100.0), \
+             mock.patch.object(gate.fcntl, "flock", mock.Mock(side_effect=BlockingIOError)):
+            steps = gate._acquire_steps(0, max_wait=5.0)
+            with self.assertRaises(gate.GpuBusy):
+                for delay in steps:
+                    now[0] += delay
+            self.assertGreaterEqual(now[0] - 1000.0, 5.0, "要等到自己的上限，不是 15 分鐘的放行上限")
+
     @timing_sensitive
     async def test_sync_gate_gives_up_after_max_wait(self):
         """互動式查詢等不起：別的行程佔著超過上限就丟 GpuBusy，而且不會留著鎖。"""

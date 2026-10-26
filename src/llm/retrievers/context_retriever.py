@@ -38,6 +38,7 @@ import functools
 import logging
 import json
 import math
+import re
 import threading
 from collections import defaultdict
 from dataclasses import dataclass
@@ -310,6 +311,8 @@ def _build_bm25_rank(
 
 #: 折疊前多撈幾倍：同一句的向量幾乎相同、名次連號，只撈 limit 筆再折會剩不到幾則；距離排序的成本在掃描，不在筆數
 _COLLAPSE_OVERFETCH = 4
+#: 向量欄名只能長這樣（直接拼進 SQL）
+_EMBEDDING_COLUMN = re.compile(r"^[a-z_][a-z0-9_]*$")
 
 
 def _collapse_repeats(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
@@ -350,6 +353,7 @@ def search_chat(
     return_meta: bool = False,
     min_chars: int | None = None,
     collapse: bool = True,
+    embedding_column: str = "embedding",
 ):
     """對 discord_chat 向量庫做語意搜尋。
 
@@ -368,6 +372,8 @@ def search_chat(
     - collapse（預設開）：同一作者、`dedup_key` 相同的文字只留距離最近的一則，`repeat_count` 記這批候選裡它出現幾次
       （多撈 `_COLLAPSE_OVERFETCH` 倍再折，不是全庫計數）。同一句的向量幾乎相同、名次連號，不折的話一個人貼過幾千次
       的表情描述能把候選池佔滿。
+    - embedding_column：查哪個向量欄（只給評估程式用：重算向量期間拿同一組題對影子欄 embedding_v2 比對）；
+      只接受小寫英數與底線，正式流程一律預設的 embedding。
 
     回傳格式由 return_meta 決定（兩種都先在 Python 端照距離排好：建了 HNSW 之後 iterative_scan 的回傳順序不保證）：
     - return_meta=False（預設，/askai 用）→ list[str]：message_id 由近到遠。
@@ -377,6 +383,8 @@ def search_chat(
     """
     if psycopg2 is None:
         return []
+    if not _EMBEDDING_COLUMN.match(embedding_column or ""):
+        raise ValueError(f"embedding_column 只能是小寫英數與底線：{embedding_column!r}")
 
     embed_model = _get_embed_model(logger)
     if embed_model is None:
@@ -409,9 +417,9 @@ def search_chat(
     # 折疊要看作者與文字、排序要看距離（HNSW 的 iterative_scan 不保證回傳順序），所以一律撈回來；
     # dist 的 %s 出現在 SELECT，必須最先 append（在 WHERE params 之前）
     select_cols = ["metadata_->>'message_id' AS mid", "text", "metadata_->>'author_id' AS author",
-                   "embedding <=> %s::vector AS dist", "metadata_->>'timestamp' AS ts"]
+                   f"{embedding_column} <=> %s::vector AS dist", "metadata_->>'timestamp' AS ts"]
     params: list[Any] = [vector_literal]
-    where = ["metadata_->>'doc_type' = 'discord_chat'", "embedding IS NOT NULL"]
+    where = ["metadata_->>'doc_type' = 'discord_chat'", f"{embedding_column} IS NOT NULL"]
     if min_chars:
         where.append("length(text) >= %s")
         params.append(int(min_chars))
@@ -435,7 +443,7 @@ def search_chat(
         SELECT {', '.join(select_cols)}
         FROM {physical_table}
         WHERE {' AND '.join(where)}
-        ORDER BY embedding <=> %s::vector
+        ORDER BY {embedding_column} <=> %s::vector
         LIMIT %s
     """
 

@@ -369,6 +369,13 @@ class SingleNodeTests(unittest.TestCase):
         self.assertEqual("9", node.node_id)
         self.assertEqual("discord_chat", node.metadata["doc_type"])
 
+    def test_only_the_text_goes_into_the_embedding(self):
+        from llama_index.core.schema import MetadataMode
+
+        node = store_chat._chat_node(self.item("9", "維護到幾點"))
+        self.assertEqual("維護到幾點", node.get_content(metadata_mode=MetadataMode.EMBED))   # 不帶 message_id 那串
+        self.assertEqual("discord_chat", node.metadata["doc_type"])                          # metadata 仍在，查詢過濾要用
+
 
 class ChatIndexTimeoutTests(unittest.TestCase):
     def test_chat_memory_embeds_in_gpu_gate_mode(self):

@@ -374,16 +374,20 @@ def _chat_node(item: dict):
     from llama_index.core.schema import NodeRelationship, RelatedNodeInfo, TextNode
 
     mid = item["message_id"]
+    metadata = {
+        "message_id": mid,
+        "author_id": item["author_id"],
+        "channel_id": item["channel_id"],
+        "timestamp": item["timestamp"],
+        "doc_type": "discord_chat",
+    }
     return TextNode(
         id_=mid,
         text=item["text"],
-        metadata={
-            "message_id": mid,
-            "author_id": item["author_id"],
-            "channel_id": item["channel_id"],
-            "timestamp": item["timestamp"],
-            "doc_type": "discord_chat",
-        },
+        metadata=metadata,
+        # 只嵌內文：LlamaIndex 預設把 metadata 一起算進向量，短句的語意會被「message_id: …」那串稀釋，
+        # 查詢端又只嵌純問句。舊列由 chat_reembed 重算成同一格式
+        excluded_embed_metadata_keys=list(metadata),
         relationships={NodeRelationship.SOURCE: RelatedNodeInfo(node_id=mid)},
     )
 
