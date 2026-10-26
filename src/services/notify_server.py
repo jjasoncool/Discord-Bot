@@ -1,13 +1,15 @@
 """
 輕量 HTTP 通知伺服器
 
-接收 Scraper 的 webhook 通知，觸發 Discord Bot 的對應處理。
+接收 Scraper 的 webhook 通知，觸發 Discord Bot 的對應處理；同一個 port 也掛 Hermes 用的模型端點。
 用 aiohttp.web 在背景執行，預設 port 5000。
 
 endpoint：
 - GET  /health             — 健康檢查
 - POST /notify/{source}    — 通用通知入口（bahamut / ptt / fb / ...）
   有設共用密鑰（環境變數 NOTIFY_SHARED_SECRET）時，要帶 header X-Notify-Secret，不符回 401；沒設就不驗、啟動時警告一次。
+- GET  /v1/models、POST /v1/chat/completions — Hermes 的模型端點（`services.llm_proxy`），只認 Bearer HERMES_API_KEY；
+  沒設金鑰就不掛。兩組端點各驗各的鑰匙，互不通用。
 """
 import asyncio
 import hmac
@@ -19,6 +21,8 @@ from typing import Callable, Coroutine, Dict, Optional
 from utils.logger_config import get_article_monitor_logger
 from utils.utils import ChannelConfig
 from utils.background_tasks import spawn
+from services.llm_proxy import LlmProxy
+from sys_settings.hermes_settings import HermesSettings
 from sys_settings.notify_settings import NotifyServerSettings
 
 logger = get_article_monitor_logger()
@@ -53,11 +57,13 @@ SECRET_HEADER = "X-Notify-Secret"
 class NotifyServer:
     """輕量 HTTP 通知伺服器。"""
 
-    def __init__(self, bot, settings: Optional[NotifyServerSettings] = None):
+    def __init__(self, bot, settings: Optional[NotifyServerSettings] = None, hermes_settings: Optional[HermesSettings] = None):
         self.bot = bot
         self.settings = settings or NotifyServerSettings()
+        self.hermes_settings = hermes_settings or HermesSettings()
         self._runner: Optional[web.AppRunner] = None
-        self._app = web.Application()
+        # 本文上限照模型端點的需要放大（aiohttp 預設 1 MiB，長 context 的對話會超過）；通知的本文本來就很小
+        self._app = web.Application(client_max_size=self.hermes_settings.proxy_max_body_bytes)
         # 來源 → 處理函式 的分派表
         self._handlers: Dict[str, Callable[..., Coroutine]] = {
             "bahamut": self._process_bahamut,
@@ -71,14 +77,21 @@ class NotifyServer:
     def _setup_routes(self):
         self._app.router.add_get("/health", self._handle_health)
         self._app.router.add_post("/notify/{source}", self._handle_notify)
+        # 模型端點只在有金鑰時掛：它會占用顯示卡，不能沒驗證就開
+        self.model_endpoint_enabled = bool(self.hermes_settings.api_key)
+        if self.model_endpoint_enabled:
+            LlmProxy(self.hermes_settings).add_routes(self._app)
 
     async def start(self, port: int = NOTIFY_SERVER_PORT) -> None:
         """啟動 HTTP 伺服器。"""
-        self._runner = web.AppRunner(self._app)
+        # handler_cancellation：對方斷線就取消處理函式。模型端點的請求會拿著 GPU 閘門等後端寫完，
+        # 不取消的話，斷線後那一整段生成還是會跑完、鎖也一直拿著；通知的處理本來就 spawn 到背景，不受影響
+        self._runner = web.AppRunner(self._app, handler_cancellation=True)
         await self._runner.setup()
         site = web.TCPSite(self._runner, "0.0.0.0", port)
         await site.start()
-        logger.info("Notify server 已啟動: port=%s, 支援來源=%s", port, list(self._handlers.keys()))
+        logger.info("Notify server 已啟動: port=%s, 支援來源=%s, 模型端點=%s",
+                    port, list(self._handlers.keys()), "開" if self.model_endpoint_enabled else "關（沒設 HERMES_API_KEY）")
         self._warn_if_unprotected()
 
     def _warn_if_unprotected(self) -> None:

@@ -61,6 +61,7 @@ LAYERS = [
     ("services.notify_server", FEATURE),            # 轉發功能的接收端點：收爬蟲通知再派給 relay
     # ── services/ 裡的服務 ──
     ("services.llm_service", SERVICE),              # 叫模型的門面
+    ("services.llm_proxy", SERVICE),                # Hermes 的模型端點：驗金鑰、擋模型名、排閘門、原樣轉給 Lemonade
     ("services.memory_service", SERVICE),
     ("services.state_db", SERVICE),
     ("services.source_urls", SERVICE),

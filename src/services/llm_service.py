@@ -344,6 +344,10 @@ class LLMService:
                 model, options, exc,
             )
 
+    async def ensure_model_loaded(self, model: str) -> None:
+        """轉發別人的請求（Hermes 的模型端點）前也要把 runtime config 的 ctx 推給 Lemonade，不然它用預設值載入。"""
+        await self._ensure_model_loaded(model)
+
     async def release_model(self, model: str | None = None) -> bool:
         """把 LLM 從後端卸下，讓出 VRAM。回 True＝真的送出了卸載動作。
 

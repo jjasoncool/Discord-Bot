@@ -42,7 +42,7 @@
           "ctx_size": 32768
         },
         "Qwen3.8-27B-GGUF-UD-Q4_K_XL": {
-          "ctx_size": 32768
+          "ctx_size": 65536
         },
         "user.Qwen2.5-7B-Instruct-GGUF-Q4_K_M": {
           "ctx_size": 4096

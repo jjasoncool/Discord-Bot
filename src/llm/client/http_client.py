@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import threading
@@ -235,6 +236,40 @@ class LlmHttpClient:
         if extra_body:
             body.update(extra_body)
         return await self._apost_json("/chat/completions", body, timeout=timeout, retry_on_read_timeout=False)
+
+    async def chat_completion_raw(self, body: dict[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
+        """把別人組好的 /v1/chat/completions 請求原樣送出（非串流），回後端的 JSON；**不重試**。
+
+        給轉發用：對方（Hermes 這類客戶端）自己有重試與退避，這裡再重試會變成同一題佔著顯示卡寫好幾遍。
+        非 2xx 丟 `LlmAPIError`（帶後端原文，讓呼叫端原樣交回去）；連不上、逾時的分類和 `chat_completion` 相同。
+        """
+        try:
+            resp = await self._async.post(self._host + "/v1/chat/completions", json=body, timeout=timeout or self._timeout)
+        except httpx.TimeoutException as exc:
+            raise LlmTimeoutError("POST /chat/completions timed out") from exc
+        except httpx.RequestError as exc:
+            raise LlmConnectionError(f"POST /chat/completions 連線錯誤: {exc}") from exc
+        self._raise_for_status(resp)
+        return resp.json()
+
+    @contextlib.asynccontextmanager
+    async def chat_completion_stream(self, body: dict[str, Any], *, timeout: float | None = None):
+        """原樣送出串流請求，交出後端的 SSE 回應（`httpx.Response`，用 `aiter_lines()` 讀）；**不重試**。
+
+        進入區段前已確認是 2xx：非 2xx 先把本文讀完再丟 `LlmAPIError`，呼叫端才能把狀態碼與原文原樣交回去。
+        離開區段就關掉回應，後端收到客戶端斷線會停止生成。讀取途中的逾時、連線錯誤也轉成同一套例外。
+        """
+        try:
+            async with self._async.stream("POST", self._host + "/v1/chat/completions", json=body,
+                                          timeout=timeout or self._timeout) as resp:
+                if not resp.is_success:
+                    await resp.aread()
+                    self._raise_for_status(resp)
+                yield resp
+        except httpx.TimeoutException as exc:
+            raise LlmTimeoutError("POST /chat/completions (stream) timed out") from exc
+        except httpx.RequestError as exc:
+            raise LlmConnectionError(f"POST /chat/completions (stream) 連線錯誤: {exc}") from exc
 
     # ---------- embedding ----------
 
