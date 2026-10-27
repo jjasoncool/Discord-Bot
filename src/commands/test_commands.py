@@ -339,19 +339,11 @@ class TestCommands(commands.Cog):
 
         await safe_send_interaction_message(interaction, embed=embed, view=view, ephemeral=True)
 
-    # 傳統前綴命令
-    @commands.command(name='ping')
-    async def ping(self, ctx):
-        """回應一個 Pong 訊息，用於測試機器人是否在線"""
-        logger.info(f'收到來自 {ctx.author} 的 ping 前綴命令')
-        await ctx.send('Pong!')
-
-    @commands.command(name='helloworld')
-    async def hello_world(self, ctx):
-        """回應一個 Hello World 訊息"""
-        logger.info(f'收到來自 {ctx.author} 的 helloworld 前綴命令')
-        await ctx.send(f'👋 Hello World! 您好，{ctx.author.mention}！我是一個由 Discord.py 驅動的機器人。')
-
+    @app_commands.command(name="ping", description="測試機器人在不在線")
+    async def ping_cmd(self, interaction: discord.Interaction):
+        """斜線命令：回 Pong，只有本人看得到。指令一律用斜線：前綴指令是一般訊息，會被當聊天存進向量庫。"""
+        logger.info(f'收到來自 {interaction.user} 的 /ping 命令')
+        await safe_send_interaction_message(interaction, 'Pong!', ephemeral=True)
 
     @app_commands.command(name="multi_select_demo", description="示範多選功能的命令")
     async def multi_select_demo_cmd(self, interaction: discord.Interaction):

@@ -925,6 +925,12 @@ RULES = [
         allowed=set(),
     ),
     Rule(
+        name="指令一律用斜線（前綴指令是一般訊息，會被當聊天存進向量庫）",
+        pattern=r"@(?:commands|bot)\.command\(",
+        canonical="@app_commands.command（discord.app_commands）",
+        allowed=set(),
+    ),
+    Rule(
         name="背景任務：結果被丟掉的 create_task（沒人留參照、失敗沒人知道）",
         finder=_find_discarded_create_task,
         canonical="utils.background_tasks.spawn（該一直跑的迴圈用 supervise）",

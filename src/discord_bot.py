@@ -67,7 +67,9 @@ COMMAND_MODULES = [
 # 建立機器人實例
 class MyBot(commands.Bot):
     def __init__(self):
-        super().__init__(command_prefix='!', intents=intents)
+        # 指令一律用斜線（app_commands）：前綴指令是一般訊息，會被當聊天存進向量庫，也和群友的感嘆「!?」撞在一起。
+        # Bot 必填 command_prefix，給一個只有 @bot 才會觸發的；內建的 !help 一起關掉
+        super().__init__(command_prefix=commands.when_mentioned, help_command=None, intents=intents)
         self.echo_tracker = {}
         self.ambient_tracker = {}  # 功能二：per-channel 插話冷卻/計數狀態
         self.telegram_relay_worker = None
@@ -414,8 +416,6 @@ async def on_message(message):
         from llm.preprocess.emoji_autofill import observe as observe_emoji
         spawn(observe_emoji(message), name="看圖補表情字典")
 
-    # 繼續處理命令
-    await bot.process_commands(message)
 
 @bot.event
 async def on_guild_stickers_update(guild, before, after):

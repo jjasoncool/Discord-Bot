@@ -76,6 +76,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 讓模型先用工具查、再回答（每輪都照原本的思考設定、帶同一份工具清單，不查就只呼叫一次；查滿輪數的提醒文字與「要不要改用不帶工具的呼叫」由呼叫端決定） | `LLMService.generate_reply(tool_runner=…, tool_nudge=…, tools_plain_fallback=…)`（工具介面 `llm.client.tool_calls.ToolRunner`；/askai 查情報、插話的查詢都用它，不要再寫一份迴圈）；要給模型今天日期用 `today=`（放 user 段，不動 system 段的快取） |
 | 工具呼叫的訊息格式（模型要呼叫工具的 assistant 訊息、`role: tool` 回覆、取工具名稱與解析參數） | `llm.client.tool_calls`（`assistant_message`／`tool_message`／`call_name_and_arguments`／`parse_arguments`；迴圈、預算、工具怎麼跑留給呼叫端。人格萃取 agent 與 /askai 情報搜尋共用） |
 | 幾組工具一起交給同一個工具輪（例：遊戲情報＋網路搜尋） | `llm.client.tool_calls.combine_runners`（宣告照順序接、使用規則依序接、呼叫依名稱交給宣告它的那組；沒工具的連規則一起略過） |
+| 新的 bot 指令 | 一律斜線 `@app_commands.command`；不用 `!` 前綴的 `@commands.command`（守衛擋：前綴指令是一般訊息，會被當聊天存進向量庫；Bot 的 `command_prefix` 只是必填參數，`process_commands` 已不呼叫） |
 | 按鈕、指令的操作權限 | `utils.utils.check_guild`（`owner_only`／`admin_only`／`required_role`／`permission="manage_messages"` 這類 Discord 權限；不通過時自己回只有本人看得到的訊息） |
 | 功能開關（開／關、off／dry_run／on） | 值寫在 `settings/switches.json`（手改、下一次用到就生效）；名稱、預設、允許的值定義在 `sys_settings.switches.Switches`，讀用 `switches.current()`；新開關只能放這裡（守衛擋，舊的改到再搬） |
 | 專案裡檔案的位置（settings、settings/runtime、prompts、scraper 資料庫、static、config.json、log 與備份） | `sys_settings.paths`（`APP_ROOT`、`LOGS_DIR`、`SETTINGS_DIR`＝你手改、`RUNTIME_DIR`＝bot 寫、`PROMPTS_DIR`、`SCRAPER_DIR`、`STATIC_DIR`、`settings_file()`、`runtime_path()`、`prompt_file()`；config.json 用 `utils.utils.CONFIG_FILE`）；不寫死 `"/app/..."`、`"/logs/..."`、不用 `Path(__file__).parents[n]` 往上數、不用相對路徑（守衛擋；爬蟲容器例外） |
