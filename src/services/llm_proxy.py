@@ -35,8 +35,10 @@ from aiohttp import web
 
 from llm.client.http_client import LlmAPIError, LlmHttpClient, is_unreachable
 from llm.client.gpu_gate import gpu_exclusive, imagegen_busy
+from llm.client.backend_admin import admin_for
 from services.llm_service import LLM_SERVICE_SETTINGS, LLMService, log_llm_usage
 from sys_settings.hermes_settings import HermesSettings
+from sys_settings.llm_settings import load_llm_runtime_config
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +76,14 @@ class LlmProxy:
         self.settings = settings
         self._llm = llm or LLMService()
         self._timeout = float(LLM_SERVICE_SETTINGS.llm_timeout)
-        self._client = client or LlmHttpClient(base_url=LLM_SERVICE_SETTINGS.llm_base_url, timeout=self._timeout)
+        if client is None:
+            try:
+                backend = load_llm_runtime_config(LLM_SERVICE_SETTINGS.llm_runtime_model_path).backend
+            except RuntimeError:   # 缺檔或壞檔：當作沒有管理 API 的後端，照樣能轉送
+                backend = None
+            base_url = LLM_SERVICE_SETTINGS.llm_base_url
+            client = LlmHttpClient(base_url=base_url, timeout=self._timeout, admin=admin_for(backend, base_url))
+        self._client = client
         self._gate = gate
 
     def add_routes(self, app: web.Application) -> None:

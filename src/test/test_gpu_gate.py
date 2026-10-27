@@ -380,11 +380,12 @@ class LeaseTests(_GateTestCase):
 class _FakeClient:
     """只記錄呼叫，不打網路。"""
 
-    def __init__(self) -> None:
+    def __init__(self, admin: bool = False) -> None:
         self.unloaded: list[str] = []
         self.chats: list[tuple[str, dict | None]] = []
+        self.admin = self if admin else None   # 有管理 API 的後端才有 admin
 
-    def unload_lemonade_model(self, *, model: str, **_kw) -> None:
+    def unload(self, *, model: str, **_kw) -> None:
         self.unloaded.append(model)
 
     async def chat_completion(self, *, model: str, messages, extra_body=None, **_kw):
@@ -401,7 +402,7 @@ def _service(backend: str) -> tuple[LLMService, _FakeClient]:
         embed_model="Qwen3-Embedding-0.6B-GGUF",
     )
     svc._load_runtime_config_cached = lambda: config  # type: ignore[method-assign]
-    client = _FakeClient()
+    client = _FakeClient(admin=backend in ("lemonade", "ollama"))   # vLLM 沒有 admin
     svc._client = client
     return svc, client
 
@@ -415,14 +416,16 @@ class ReleaseModelTests(_GateTestCase):
         self.assertEqual(client.unloaded, ["m1"])
         self.assertEqual(client.chats, [], "Lemonade 不該走 chat 路徑")
 
-    async def test_ollama_sends_keep_alive_zero(self):
+    async def test_ollama_unloads_through_its_admin_not_the_chat_path(self):
         svc, client = _service("ollama")
         self.assertTrue(await svc.release_model("m1"))
-        self.assertEqual(client.unloaded, [], "Ollama 沒有 unload admin API")
-        self.assertEqual(len(client.chats), 1)
-        model, extra_body = client.chats[0]
-        self.assertEqual(model, "m1")
-        self.assertEqual(extra_body.get("keep_alive"), 0)
+        self.assertEqual(client.unloaded, ["m1"])
+        self.assertEqual(client.chats, [], "拿著閘門時不能走會回頭要閘門的對話路徑")
+
+    async def test_backend_without_admin_cannot_release(self):
+        svc, client = _service("vllm")
+        self.assertFalse(await svc.release_model("m1"))
+        self.assertEqual((client.unloaded, client.chats), ([], []))
 
     async def test_vllm_is_a_noop(self):
         """一 process 一 model、沒有 swap 概念——做不到就誠實回 False，不要假裝。"""
@@ -440,7 +443,8 @@ class ReleaseModelTests(_GateTestCase):
         svc, client = _service("ollama")
         async with gate.gpu_exclusive("imagegen", lease_seconds=5):
             await asyncio.wait_for(svc.release_model("m1"), timeout=2)
-        self.assertEqual(len(client.chats), 1)
+        self.assertEqual(client.unloaded, ["m1"])
+        self.assertEqual(client.chats, [], "卸載走管理端點，不走會回頭要閘門的對話路徑")
 
 
 if __name__ == "__main__":

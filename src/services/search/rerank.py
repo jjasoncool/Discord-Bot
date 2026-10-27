@@ -4,7 +4,7 @@
 這件事」；也因為每篇都要當場讀一次，只重排前幾十篇。評估顯示正確答案常常已經撈到、只是沒排第一
 （原句模式 Hit@1 36%、Hit@10 67%），這一步就是在補這段差距。
 
-  - 模型：`llm_runtime_config.json` 的 `rerank_model`（Lemonade 載入；和主模型、embedding 各佔一個位置）
+  - 模型：`llm_runtime_config.json` 的 `rerank_model`（後端載入；和主模型、embedding 各佔一個位置）
   - 送什麼：標題＋文件裡和問題最相關的那一段（切段規則同向量；挑和問題重疊的兩字組最多的那段）
   - 問題用哪個：呼叫端給了使用者的原句就用原句（reranker 是拿自然語言問句訓練的），沒給才用查詢字
   - 排 GPU 的隊（`gpu_gate.gpu_exclusive_sync`），最多等這次搜尋剩下的等待額度（`max_wait_seconds`，
@@ -46,7 +46,8 @@ def best_passage(query: str, search_text: str, max_chars: int) -> str:
 
 
 class HttpReranker:
-    """透過 Lemonade 的 /v1/rerank 打 reranker 模型。模型名稱每次用到時重讀設定（bot 長時間不重啟）。"""
+    """透過 /v1/rerank（llama.cpp 格式，Lemonade、llama.cpp server 都有）打 reranker 模型；
+    模型名稱每次用到時重讀設定（bot 長時間不重啟）。"""
 
     def __init__(self, *, client=None, gate: Optional[Callable[..., AbstractContextManager]] = None,
                  max_wait_seconds: Optional[float] = None, model: Optional[str] = None):
@@ -76,12 +77,14 @@ class HttpReranker:
             options = profile.model_load_options.get(model) if profile is not None and model else None
             if self._client is None:
                 from llm.client.http_client import LlmHttpClient
+                from llm.client.backend_admin import admin_for
 
-                self._client = LlmHttpClient(base_url=settings.llm_base_url, timeout=60.0)
+                self._client = LlmHttpClient(base_url=settings.llm_base_url, timeout=60.0,
+                                             admin=admin_for(runtime.backend, settings.llm_base_url))
         if not model:
             raise RuntimeError("沒有設定 rerank_model（llm_runtime_config.json）")
         with self._gate(max_wait_seconds=self.max_wait_seconds if max_wait_seconds is None else max_wait_seconds):
-            if options:
-                # 跟 embedding 一樣：Lemonade 要用對的載入參數（例如固定在哪一張卡）
-                self._client.ensure_lemonade_model(model=model, options=options)
+            if options and self._client.admin is not None:
+                # 跟 embedding 一樣：後端要用對的載入參數（例如固定在哪一張卡）
+                self._client.admin.ensure_loaded(model=model, options=options)
             return self._client.rerank(model=model, query=query, documents=list(passages))

@@ -1,79 +1,46 @@
-"""OpenAI dialect 自寫 wire 薄殼。
+"""OpenAI 相容後端的 HTTP 薄殼：對話、embedding、重排、模型清單；後端專屬的事（管理 API、自癒）交給掛上來的 admin。
 
-不依賴 `openai` SDK 與 `llama-index-embeddings-openai` 等周邊套件，
-只走標準 `/v1/chat/completions`、`/v1/embeddings`、`/v1/models` HTTP 端點。
+架構定位：技術層（llm/client），只依賴 httpx 與標準庫；不認得 Discord、不讀設定檔、不認得任何一家後端的管理 API。
+  上層：服務層的 LLMService（對話）、SafeLLMEmbedding（embedding）、HttpReranker（重排）、LlmProxy（替 Hermes 原樣轉送）。
+  下層：httpx。後端專屬的事由 `admin`（`BackendAdmin`，例：`llm.client.lemonade_admin.LemonadeAdmin`）做，沒掛就不做。
 
-設計動機：
-  - wire 規格從 2023 年定下來後沒有破壞性更動，是 OpenAI-compatible 後端
-    （Ollama / Lemonade / vLLM / LM Studio / llama.cpp server / LocalAI 等）
-    的事實標準；綁協定不綁 SDK 可避免：
-    1. 商業 SDK breaking change（過去 v0→v1 大改、Pydantic v1→v2 等都炸過）
-    2. 周邊套件硬塞驗證（如 LlamaIndex `OpenAIEmbedding` 的 enum 白名單地雷）
-  - sync + async 介面分別給 LlamaIndex BaseEmbedding 的 `_get_*` / `_aget_*`
-    與本專案 async chat 路徑使用。
+介面：
+  - chat_completion／embedding／aembedding／rerank／list_models：標準端點，照 max_retries 重試。
+  - chat_completion_raw／chat_completion_stream：別人組好的請求原樣送出，不重試（對方自己有退避）。
+  - admin_get(path)：任何後端的唯讀觀測端點，給故障快照用；永不 raise。
+  - is_unreachable／is_backend_fault／backend_looks_broken：給呼叫端分類錯誤。
+  - judge_failure／raise_verdict：送出失敗的分類與丟出，admin 的管理 API 也用同一份。
+  - `admin`：建構時掛上的 `BackendAdmin`（`unwrap(data)` 拆後端特有的錯誤信封、`heal(model, reason)` 重載），可為 None。
 
-切後端：只需改 base_url；wire payload 三個後端都解析得了。
+規則：
+  - 送出失敗怎麼辦只有 `judge_failure` 一份：重不重試看錯誤種類與剩幾次；重不重載只看後端是不是卡死或壞了，
+    和還剩幾次重試無關。sync 與 async 各一個只負責送出與等待的薄迴圈（`_send`／`_asend`），都照它。
+  - 要不要重載、怎麼重載是 admin 的事；沒有 admin 的後端（Ollama、vLLM）遇到同樣的錯誤只照一般重試收尾。
+  - 不綁 openai SDK：wire 格式自 2023 年沒有破壞性更動，是各家本機後端（Ollama、Lemonade、vLLM、llama.cpp server）
+    的事實標準；SDK 與周邊套件（LlamaIndex 的 OpenAIEmbedding 模型名稱白名單）反而炸過。切後端只改 base_url 與 admin。
+
+例外與決策：
+  - 不重試的呼叫端（拿著 GPU 閘門算 embedding、替 Hermes 轉送、串流）後端壞了照樣重載，只是重載完不重送、
+    照原錯誤丟出，由它下一輪再做：聊天記憶的寫入就走這條路，不重載就只能等別的路徑碰到同樣的錯順便修好。
+  - 對話請求等回應的逾時不重試：逾時代表模型還在寫，再送只會讓同一題拿著顯示卡寫三遍。
+  - `UpstreamWedge` 繼承 httpx.ConnectError：它是 admin 拆信封時丟出的「後端卡死」，對呼叫端來說就是連不上。
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
-import threading
 import time
-from typing import Any, Callable
+from dataclasses import dataclass
+from typing import Any, Callable, NoReturn, Protocol
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
-# 跨 LlmHttpClient instance 共用：(host, model, options_json) → True
-# Lemonade 的「已載入此 model + 此 options」狀態是 server 端全域屬性，
-# bot 內 LLMService / SafeLLMEmbedding 各有自己的 client 但打的是同一個 Lemonade，
-# 共用 cache 才不會每個 instance 重複 push 一遍 /api/v1/load。
-_LEMONADE_LOADED: dict[tuple[str, str, str], bool] = {}
-_LEMONADE_LOAD_LOCK = threading.Lock()
-
-# 自癒：偵測到「Lemonade admin 活著、但它 CURL 轉發的 downstream backend 卡死」(upstream
-# network_error) 時，重發 /api/v1/load 把那顆 backend respawn。每個 (host, model) 設冷卻，
-# 避免 Lemonade 真的整台掛掉時狂發 load。
-_LEMONADE_HEAL_COOLDOWN_S = 60.0
-_LEMONADE_LAST_HEAL: dict[tuple[str, str], float] = {}
-#: 每個模型一小時內最多自癒幾次：超過代表那顆後端（顯示卡、驅動）真的有問題，再重載只是蓋過去；停下來、記 ERROR、通知管理員
-_LEMONADE_HEAL_MAX_PER_HOUR = 3
-_LEMONADE_HEAL_WINDOW_S = 3600.0
-_LEMONADE_HEAL_HISTORY: dict[tuple[str, str], list[float]] = {}
-_LEMONADE_GAVE_UP_AT: dict[tuple[str, str], float] = {}
-#: 後端自己說它壞了的訊號（5xx 的 body）：顯示卡裝置掉了、解碼失敗。行程還活著、Lemonade 的 health 仍是 ready，
+#: 後端自己說它壞了的訊號（5xx 的 body）：顯示卡裝置掉了、解碼失敗。行程還活著、健康檢查仍是 ready，
 #: 只有重載那顆模型才會好。其他 5xx（可能是這筆請求讓後端出錯）不重載
 _BACKEND_BROKEN_SIGNATURES = ("ErrorDeviceLost", "device lost", "decode() failed", "vk::", "CUDA error", "HIP error")
-#: 自癒事件的回呼（healed／failed／gave_up），介面層接去私訊管理員；可能從任何執行緒被叫，接的人自己排回 event loop
-_HEAL_LISTENER: Callable[[dict[str, Any]], None] | None = None
-
-
-def reset_lemonade_load_cache() -> None:
-    """清掉 Lemonade load cache（測試 / Lemonade 端被外部改動時手動觸發 re-ensure 用）。"""
-    with _LEMONADE_LOAD_LOCK:
-        _LEMONADE_LOADED.clear()
-        _LEMONADE_LAST_HEAL.clear()
-        _LEMONADE_HEAL_HISTORY.clear()
-        _LEMONADE_GAVE_UP_AT.clear()
-
-
-def set_heal_listener(listener: Callable[[dict[str, Any]], None] | None) -> None:
-    """接自癒事件：`{"outcome": "healed"|"failed"|"gave_up", "model", "reason", "heals"}`。介面層用來私訊管理員。"""
-    global _HEAL_LISTENER
-    _HEAL_LISTENER = listener
-
-
-def _emit_heal_event(event: dict[str, Any]) -> None:
-    if _HEAL_LISTENER is None:
-        return
-    try:
-        _HEAL_LISTENER(event)
-    except Exception as exc:  # 邊界：通知只是附帶的，失敗不能影響原本的請求
-        logger.warning("Lemonade 自癒事件通知失敗：%s", exc)
 
 # 連線層 / 暫時性錯誤的指數退避：對齊原 openai SDK max_retries=2
 DEFAULT_MAX_RETRIES = 2
@@ -136,15 +103,24 @@ def backend_looks_broken(exc: BaseException) -> bool:
     return any(signature in detail for signature in _BACKEND_BROKEN_SIGNATURES)
 
 
-class _LemonadeUpstreamWedge(httpx.ConnectError):
-    """Lemonade admin 活著、但它 CURL 轉發的 downstream backend process 卡死/不回應
-    （回 200 + {"error":{"type":"network_error", message 含 "Couldn't connect to server"}}）。
+class UpstreamWedge(httpx.ConnectError):
+    """後端的閘道活著、但它後面那顆推論行程卡死不回應（admin 拆信封時丟出）。
 
-    繼承 httpx.ConnectError → 既有的 `except httpx.RequestError` 仍照常退避重試（向後相容），
-    但低階 retry loop 可特別攔它做「重發 /api/v1/load respawn backend → retry 原請求」的自癒。
-    與「Lemonade 整台掛掉」不同：後者連 admin 都連不上（真正的 httpx.ConnectError），重載
-    也沒用、不會走到這支自癒。
+    繼承 httpx.ConnectError：對呼叫端就是連不上，照常退避重試；薄迴圈認得它，會先叫 admin 重載再送。
+    與「整台掛掉」不同：後者連閘道都連不上（真正的 httpx.ConnectError），重載也沒用。
     """
+
+
+class BackendAdmin(Protocol):
+    """後端專屬的兩件事；掛在 `LlmHttpClient.admin`，沒掛就都不做。"""
+
+    def unwrap(self, data: Any) -> Any:
+        """拆這家後端「200 但內容是錯誤」的信封：卡死丟 `UpstreamWedge`，其他錯誤丟 `LlmAPIError`，不是信封原樣回。"""
+        ...
+
+    def heal(self, model: str, reason: str = "") -> bool:
+        """後端卡死或壞了：重載那顆模型。回 True＝已重載。"""
+        ...
 
 
 def _should_retry_status(status: int | None) -> bool:
@@ -158,38 +134,43 @@ def _backoff_delay(attempt: int) -> float:
     return DEFAULT_BACKOFF_INITIAL_S * (DEFAULT_BACKOFF_FACTOR ** attempt)
 
 
-def _unwrap_response_envelope(data: Any) -> Any:
-    """處理 Lemonade 風格的「200 OK + {"error": {...}}」反 HTTP envelope。
+@dataclass(frozen=True)
+class _Verdict:
+    """一次送出失敗後的處置：丟什麼例外、還要不要重送、要不要先重載那顆模型（None＝不用）。"""
 
-    Lemonade 在內部 CURL 轉發到 downstream backend 失敗時，會把錯誤包成 200 OK
-    回傳，與正常 OpenAI 格式同一 endpoint 但 payload 是 `{"error": {...}}` 而非
-    `{"data": [...]}` / `{"choices": [...]}`。下游若直接 `data["data"]` 會撞
-    KeyError、訊息僅 `'data'` 兩字，無法判斷實際後端狀態。
+    error: BaseException
+    retry: bool
+    heal_reason: str | None
 
-    分流：
-      - `error.type == "network_error"` → `httpx.ConnectError`（連線層暫時錯誤，
-        交給上層退避重試）
-      - 其他 error type → `LlmAPIError(status=None)`（服務端永久錯誤，不重試）
-      - 非 envelope / 無 error key → 原樣回傳
 
-    這層接在 `_post_json` / `_apost_json` 出口，所有 POST 端點（chat / embedding /
-    未來新增）都自動享有相同的錯誤護網，不必每個 endpoint 各寫一份。
+def judge_failure(
+    exc: BaseException, *, label: str, path: str, attempt: int, max_retries: int, retry_on_read_timeout: bool = True,
+) -> _Verdict:
+    """送出失敗的分類只有這一份：連不上、逾時、非 2xx、後端自己說它壞了，各該怎麼辦。
+
+    重不重試看錯誤種類與剩幾次；重不重載只看錯誤是不是「後端卡死或壞了」，不看還剩幾次重試：
+    不重試的呼叫端也要把壞掉的後端救回來，只是重載完不重送、照原錯誤丟出。
     """
-    if not isinstance(data, dict):
-        return data
-    err = data.get("error")
-    if not isinstance(err, dict):
-        return data
-    err_type = str(err.get("type", "")).strip()
-    err_msg = str(err.get("message", "")).strip()
-    if err_type == "network_error":
-        # downstream backend 卡死 → 專屬 wedge 例外，讓低階 retry loop 觸發「重載 backend」自癒
-        raise _LemonadeUpstreamWedge(f"upstream network_error: {err_msg}")
-    raise LlmAPIError(
-        f"upstream error envelope: type={err_type or '<unknown>'} message={err_msg or '<empty>'}",
-        status=None,
-        detail=str(data)[:1000],
-    )
+    more = attempt < max_retries
+    if isinstance(exc, UpstreamWedge):
+        return _Verdict(LlmConnectionError(f"{label} {path} upstream backend 卡死未癒: {exc}"), more, "upstream wedge")
+    if isinstance(exc, httpx.TimeoutException):
+        # 連線階段的逾時（ConnectTimeout）是網路問題照舊重試；等回應的逾時由呼叫端決定要不要
+        waited_for_reply = isinstance(exc, httpx.ReadTimeout)
+        retry = more and (retry_on_read_timeout or not waited_for_reply)
+        return _Verdict(LlmTimeoutError(f"{label} {path} timed out"), retry, None)
+    if isinstance(exc, httpx.RequestError):
+        return _Verdict(LlmConnectionError(f"{label} {path} 連線錯誤: {exc}"), more, None)
+    if isinstance(exc, LlmAPIError):
+        reason = (exc.detail or "")[:160] if backend_looks_broken(exc) else None
+        return _Verdict(exc, more and _should_retry_status(exc.status), reason)
+    return _Verdict(exc, False, None)
+
+
+def raise_verdict(verdict: _Verdict, exc: BaseException) -> NoReturn:
+    if verdict.error is exc:
+        raise exc
+    raise verdict.error from exc
 
 
 def _require_json_key(data: Any, key: str, *, op_label: str) -> Any:
@@ -226,12 +207,14 @@ class LlmHttpClient:
         timeout: float,
         max_retries: int = DEFAULT_MAX_RETRIES,
         api_key: str = "no-auth",
+        admin: BackendAdmin | None = None,
     ) -> None:
-        # 保存 host 而非預組 /v1：因為 Lemonade 的 admin API 在 /api/v1/...，
-        # OpenAI dialect 在 /v1/...，兩條路徑共用同一台 server 不同 prefix
+        # 保存 host 而非預組 /v1：觀測端點（admin_get）在別的 prefix，兩條路徑共用同一台 server
         self._host = base_url.rstrip("/")
         self._timeout = timeout
         self._max_retries = max_retries
+        #: 後端專屬的拆信封與重載；None＝這家後端沒有（或不需要）
+        self.admin = admin
         self._headers = {
             # 本機後端通常不驗 key，但部分客戶端 / proxy 會檢查 header 存在
             "Authorization": f"Bearer {api_key}",
@@ -285,29 +268,23 @@ class LlmHttpClient:
 
         給轉發用：對方（Hermes 這類客戶端）自己有重試與退避，這裡再重試會變成同一題佔著顯示卡寫好幾遍。
         非 2xx 丟 `LlmAPIError`（帶後端原文，讓呼叫端原樣交回去）；連不上、逾時的分類和 `chat_completion` 相同。
-        Lemonade 的「200 OK＋error 信封」也拆：downstream 卡死（network_error）就重載一次（有冷卻）再當連不上丟出去，
-        轉發端才會回 503 讓對方退避；其他信封當 `LlmAPIError`。
+        後端卡死（admin 拆信封認出來）或壞了（5xx 帶裝置掉了的訊號）時，有 admin 就重載一次（有冷卻），
+        但不重送：卡死當連不上丟出去，轉發端才會回 503 讓對方退避。
         """
-        try:
-            resp = await self._async.post(self._host + "/v1/chat/completions", json=body, timeout=timeout or self._timeout)
-        except httpx.TimeoutException as exc:
-            raise LlmTimeoutError("POST /chat/completions timed out") from exc
-        except httpx.RequestError as exc:
-            raise LlmConnectionError(f"POST /chat/completions 連線錯誤: {exc}") from exc
-        self._raise_for_status(resp)
-        try:
-            return _unwrap_response_envelope(resp.json())
-        except _LemonadeUpstreamWedge as exc:
-            await asyncio.to_thread(self._try_heal_lemonade_backend, str(body.get("model") or ""))
-            raise LlmConnectionError(f"POST /chat/completions 後端卡住: {exc}") from exc
+        return await self._asend(
+            lambda: self._async.post(self._host + "/v1/chat/completions", json=body, timeout=timeout or self._timeout),
+            label="POST", path="/chat/completions", model=str(body.get("model") or ""), max_retries=0,
+        )
 
     @contextlib.asynccontextmanager
     async def chat_completion_stream(self, body: dict[str, Any], *, timeout: float | None = None):
         """原樣送出串流請求，交出後端的 SSE 回應（`httpx.Response`，用 `aiter_lines()` 讀）；**不重試**。
 
-        進入區段前已確認是 2xx：非 2xx 先把本文讀完再丟 `LlmAPIError`，呼叫端才能把狀態碼與原文原樣交回去。
-        離開區段就關掉回應，後端收到客戶端斷線會停止生成。讀取途中的逾時、連線錯誤也轉成同一套例外。
+        進入區段前已確認是 2xx：非 2xx 先把本文讀完再丟 `LlmAPIError`，呼叫端才能把狀態碼與原文原樣交回去；
+        後端壞了（5xx 帶裝置掉了的訊號）也重載一次再丟。離開區段就關掉回應，後端收到客戶端斷線會停止生成。
+        讀取途中的逾時、連線錯誤也轉成同一套例外。
         """
+        model = str(body.get("model") or "")
         try:
             async with self._async.stream("POST", self._host + "/v1/chat/completions", json=body,
                                           timeout=timeout or self._timeout) as resp:
@@ -315,10 +292,11 @@ class LlmHttpClient:
                     await resp.aread()
                     self._raise_for_status(resp)
                 yield resp
-        except httpx.TimeoutException as exc:
-            raise LlmTimeoutError("POST /chat/completions (stream) timed out") from exc
-        except httpx.RequestError as exc:
-            raise LlmConnectionError(f"POST /chat/completions (stream) 連線錯誤: {exc}") from exc
+        except (httpx.RequestError, LlmAPIError) as exc:
+            verdict = judge_failure(exc, label="POST", path="/chat/completions (stream)", attempt=0, max_retries=0)
+            if verdict.heal_reason is not None and self.admin is not None:
+                await asyncio.to_thread(self.admin.heal, model, verdict.heal_reason)
+            raise_verdict(verdict, exc)
 
     # ---------- embedding ----------
 
@@ -369,7 +347,7 @@ class LlmHttpClient:
         data = self._get_json("/models")
         return [m.get("id", "") for m in data.get("data", []) if m.get("id")]
 
-    # ---------- Lemonade admin（/api/v1/load, /api/v1/health, ...） ----------
+    # ---------- 觀測端點（故障快照用） ----------
 
     async def admin_get(
         self,
@@ -404,244 +382,61 @@ class LlmHttpClient:
                 return {"status": resp.status_code, "body": resp.text[:500]}
         return {"status": resp.status_code, "body": resp.text[:500]}
 
-    def ensure_lemonade_model(
-        self,
-        *,
-        model: str,
-        options: dict[str, Any] | None,
-        load_timeout: float = 180.0,
-    ) -> None:
-        """確認 Lemonade 已用指定 `recipe_options` 載入 `model`，若沒有就觸發 reload。
+    # ---------- low-level：送出與等待的薄迴圈；失敗怎麼辦交給 _judge ----------
 
-        process 內 cache：同一個 (host, model, options) 組合只會打一次 `/api/v1/load`。
-        Lemonade 端對未變動的 options 通常會 short-circuit 不重載，但避免每次 chat /
-        embed 都打一次 admin API 還是值得 cache。
+    def _send(
+        self, do_request: Callable[[], Any], *, label: str, path: str, model: str, max_retries: int | None = None,
+    ) -> Any:
+        """同步：送出、等回應、交給 admin 拆信封；失敗照 `judge_failure`，要重載就叫 admin（沒有 admin 就不重載）。"""
+        max_retries = self._max_retries if max_retries is None else max_retries
+        for attempt in range(max_retries + 1):
+            try:
+                resp = do_request()
+                self._raise_for_status(resp)
+                return self._unwrap(resp.json())
+            except (httpx.RequestError, LlmAPIError) as exc:
+                verdict = judge_failure(exc, label=label, path=path, attempt=attempt, max_retries=max_retries)
+                healed = (verdict.heal_reason is not None and self.admin is not None
+                          and self.admin.heal(model, verdict.heal_reason))
+                if not verdict.retry:
+                    raise_verdict(verdict, exc)
+                if not healed:
+                    time.sleep(_backoff_delay(attempt))   # 重載過就立刻重送：載入本身已經等過了
+        raise RuntimeError("unreachable")  # pragma: no cover
 
-        本方法是 sync HTTP；async caller 請用 `asyncio.to_thread` 包起來避免阻塞 loop。
+    async def _asend(
+        self, do_request: Callable[[], Any], *, label: str, path: str, model: str,
+        max_retries: int | None = None, retry_on_read_timeout: bool = True,
+    ) -> Any:
+        """非同步版的 `_send`；重載是同步 HTTP，包 to_thread 不擋 event loop。"""
+        max_retries = self._max_retries if max_retries is None else max_retries
+        for attempt in range(max_retries + 1):
+            try:
+                resp = await do_request()
+                self._raise_for_status(resp)
+                return self._unwrap(resp.json())
+            except (httpx.RequestError, LlmAPIError) as exc:
+                verdict = judge_failure(exc, label=label, path=path, attempt=attempt, max_retries=max_retries,
+                                        retry_on_read_timeout=retry_on_read_timeout)
+                healed = (verdict.heal_reason is not None and self.admin is not None
+                          and await asyncio.to_thread(self.admin.heal, model, verdict.heal_reason))
+                if not verdict.retry:
+                    raise_verdict(verdict, exc)
+                if not healed:
+                    await asyncio.sleep(_backoff_delay(attempt))
+        raise RuntimeError("unreachable")  # pragma: no cover
 
-        非 Lemonade 後端不該呼叫這個 method（caller 負責判斷 backend type）。
-        """
-        if not options:
-            return
-        opts_json = json.dumps(options, sort_keys=True)
-        cache_key = (self._host, model, opts_json)
-        with _LEMONADE_LOAD_LOCK:
-            if cache_key in _LEMONADE_LOADED:
-                return
-            self._lemonade_load_model(
-                model_name=model,
-                recipe_options=options,
-                timeout=load_timeout,
-            )
-            _LEMONADE_LOADED[cache_key] = True
-            logger.info(
-                "Lemonade model loaded: model=%s recipe_options=%s",
-                model, options,
-            )
-
-    def _lemonade_load_model(
-        self,
-        *,
-        model_name: str,
-        recipe_options: dict[str, Any],
-        timeout: float,
-        save_options: bool = True,
-    ) -> None:
-        """POST /api/v1/load（Lemonade 原生 admin API）。
-
-        Lemonade 載入大模型可能要 30-60 秒，因此用較長的 timeout（呼叫端傳入）。
-        重試政策跟一般 wire 不同：admin API 失敗多半是 server 設定問題，
-        retry 沒意義，直接拋 `LlmAPIError` / `LlmConnectionError` 出去。
-        """
-        url = self._host + "/api/v1/load"
-        # Lemonade /api/v1/load 用「平鋪」參數（ctx_size 等直接在 top-level，會翻成 llama-server 旗標）。
-        # save_options=True：把 ctx_size 持久化進 Lemonade 的 recipe_options.json
-        #   → 之後每次載入（含 /askai swap 後重載）模型都吃對的 ctx，不會回退預設 4096。
-        #
-        # ⚠️ 鐵則（違反會像 --embeddings 那次把整顆模型載掛、且被 save_options 永久存住）：
-        #   recipe_options（＝ config 的 model_load_options）**只准放非 reserved 的選項**（如 ctx_size）。
-        #   **絕不可放 Lemonade 的 reserved 旗標**（--embeddings / --ctx-size / --device / --gpu-layers …）——
-        #   那些由 Lemonade 依模型「標籤」自動管理；手動帶 + save_options = model_load_error 且永久毒化。
-        body: dict[str, Any] = {
-            "model_name": model_name,
-            **dict(recipe_options),
-            "save_options": save_options,
-        }
-        try:
-            resp = self._sync.post(url, json=body, timeout=timeout)
-        except httpx.TimeoutException as exc:
-            raise LlmTimeoutError(
-                f"Lemonade /api/v1/load timed out after {timeout}s for {model_name}"
-            ) from exc
-        except httpx.RequestError as exc:
-            raise LlmConnectionError(
-                f"Lemonade /api/v1/load 連線錯誤 ({model_name}): {exc}"
-            ) from exc
-        self._raise_for_status(resp)
-
-    def unload_lemonade_model(self, *, model: str, timeout: float = 60.0) -> None:
-        """POST /api/v1/unload——把 model 從 VRAM 卸下（Lemonade 原生 admin API）。
-
-        與 `_lemonade_load_model` 對稱；body 形狀 `{"model_name": ...}` 為 2026-09-02
-        對 Lemonade 11.5.0 實測確認（回 `200 {"status":"success"}`）。
-
-        **卸載後不需要「載回去」**：實測 Lemonade 收到該 model 的 chat 請求會自動
-        重新載入（冷載入約 22 秒），且 server 端持久化的 `recipe_options`
-        （ctx_size / sampling args）不會被洗掉。所以 caller 只要放開閘門即可。
-
-        順手把這顆 model 的 load cache 條目清掉：`_LEMONADE_LOADED` 記的是
-        「本 process 已對這個 (host, model, options) 推過 /api/v1/load」，模型一旦
-        被卸載，那個假設就不成立了。用精準移除而不是 `reset_lemonade_load_cache()`，
-        免得殃及其他 model（例如仍載著的 embedding）。
-
-        非 Lemonade 後端不該呼叫這個 method（caller 負責判斷 backend type）。
-        """
-        url = self._host + "/api/v1/unload"
-        try:
-            resp = self._sync.post(url, json={"model_name": model}, timeout=timeout)
-        except httpx.TimeoutException as exc:
-            raise LlmTimeoutError(
-                f"Lemonade /api/v1/unload timed out after {timeout}s for {model}"
-            ) from exc
-        except httpx.RequestError as exc:
-            raise LlmConnectionError(
-                f"Lemonade /api/v1/unload 連線錯誤 ({model}): {exc}"
-            ) from exc
-        self._raise_for_status(resp)
-
-        with _LEMONADE_LOAD_LOCK:
-            for key in [
-                k for k in _LEMONADE_LOADED
-                if k[0] == self._host and k[1] == model
-            ]:
-                _LEMONADE_LOADED.pop(key, None)
-            _LEMONADE_LAST_HEAL.pop((self._host, model), None)
-        logger.info("Lemonade model unloaded: model=%s", model)
-
-    def _try_heal_lemonade_backend(self, model: str, reason: str = "") -> bool:
-        """偵測到 upstream wedge（downstream backend process 卡死）時，重發 /api/v1/load 把
-        它 respawn。沿用該 model 最後一次載入的 recipe_options（ctx_size / llamacpp_args，從
-        load cache 取），但 save_options=False → 只重生、不覆寫 recipe_options.json（不毒化）。
-
-        回 True＝已送出 reload（值得 retry 原請求）；False＝冷卻中 / 一小時內已重載太多次 / 無 model / reload 失敗。
-        每個 (host, model) 設冷卻，避免 Lemonade 真的整台掛掉時狂發 load；一小時內超過上限就放棄並通知
-        （`reason` 是觸發的錯誤內容，進 log 與通知）。
-        """
-        if not model:
-            return False
-        key = (self._host, model)
-        now = time.monotonic()
-        allowed = False
-        gave_up = False
-        recipe: dict[str, Any] = {}
-        with _LEMONADE_LOAD_LOCK:
-            last = _LEMONADE_LAST_HEAL.get(key)
-            if last is not None and now - last < _LEMONADE_HEAL_COOLDOWN_S:
-                return False  # 冷卻中：別在 Lemonade 真的掛掉時狂發 load
-            history = [t for t in _LEMONADE_HEAL_HISTORY.get(key, []) if now - t < _LEMONADE_HEAL_WINDOW_S]
-            _LEMONADE_HEAL_HISTORY[key] = history
-            if len(history) >= _LEMONADE_HEAL_MAX_PER_HOUR:
-                # 放棄只講一次（一小時內）：之後的請求照一般錯誤收尾，不再每次都吵
-                if now - _LEMONADE_GAVE_UP_AT.get(key, -_LEMONADE_HEAL_WINDOW_S) >= _LEMONADE_HEAL_WINDOW_S:
-                    _LEMONADE_GAVE_UP_AT[key] = now
-                    gave_up = True
-            else:
-                _LEMONADE_LAST_HEAL[key] = now
-                history.append(now)
-                allowed = True
-                # 取這顆 model 最後一次載入用的 recipe_options（最近一筆）。掃 cache 在鎖內、安全；
-                # 找不到就 fallback 裸 reload（{}）。
-                for (cached_host, cached_model, opts_json) in _LEMONADE_LOADED:
-                    if cached_host == self._host and cached_model == model:
-                        try:
-                            parsed = json.loads(opts_json)
-                            if isinstance(parsed, dict):
-                                recipe = parsed
-                        except Exception:
-                            pass
-        if gave_up:
-            logger.error("Lemonade backend 自癒放棄：model=%s 一小時內已重載 %d 次還是壞（%s），不再自動重載，請檢查那張卡或驅動",
-                         model, _LEMONADE_HEAL_MAX_PER_HOUR, reason or "沒有錯誤內容")
-            _emit_heal_event({"outcome": "gave_up", "model": model, "reason": reason, "heals": _LEMONADE_HEAL_MAX_PER_HOUR})
-            return False
-        if not allowed:
-            return False  # 一小時內的名額用完、放棄已經講過：照一般錯誤收尾
-        try:
-            self._lemonade_load_model(
-                model_name=model,
-                recipe_options=recipe,  # 沿用 ctx_size / llamacpp_args
-                timeout=120.0,
-                save_options=False,  # 只重生、不持久化
-            )
-        except Exception as exc:  # reload 也失敗（admin 掛了？）→ 交回原 retry 流程收尾
-            logger.warning("Lemonade backend 自癒重載失敗 model=%s：%s", model, exc)
-            _emit_heal_event({"outcome": "failed", "model": model, "reason": f"{reason} / 重載失敗：{exc}"[:300], "heals": len(_LEMONADE_HEAL_HISTORY.get(key, []))})
-            return False
-        logger.warning(
-            "Lemonade backend 自癒：後端卡死或壞了（%s），已重發 /api/v1/load 重載 model=%s",
-            reason or "upstream wedge", model,
-        )
-        _emit_heal_event({"outcome": "healed", "model": model, "reason": reason or "upstream wedge", "heals": len(_LEMONADE_HEAL_HISTORY.get(key, []))})
-        return True
-
-    # ---------- low-level：retry + error mapping ----------
+    def _unwrap(self, data: Any) -> Any:
+        return self.admin.unwrap(data) if self.admin is not None else data
 
     def _get_json(self, path: str) -> dict[str, Any]:
-        for attempt in range(self._max_retries + 1):
-            try:
-                resp = self._sync.get(self._host + "/v1" + path)
-                self._raise_for_status(resp)
-                return resp.json()
-            except httpx.TimeoutException as exc:
-                if attempt >= self._max_retries:
-                    raise LlmTimeoutError(f"GET {path} timed out") from exc
-                time.sleep(_backoff_delay(attempt))
-            except httpx.RequestError as exc:
-                if attempt >= self._max_retries:
-                    raise LlmConnectionError(f"GET {path} 連線錯誤: {exc}") from exc
-                time.sleep(_backoff_delay(attempt))
-            except LlmAPIError as exc:
-                if not _should_retry_status(exc.status) or attempt >= self._max_retries:
-                    raise
-                time.sleep(_backoff_delay(attempt))
-        raise RuntimeError("unreachable")  # pragma: no cover
+        return self._send(lambda: self._sync.get(self._host + "/v1" + path), label="GET", path=path, model="")
 
     def _post_json(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
-        for attempt in range(self._max_retries + 1):
-            try:
-                resp = self._sync.post(self._host + "/v1" + path, json=body)
-                self._raise_for_status(resp)
-                # envelope unwrap：跟 async path 對稱，所有 POST 端點共用同一層護網
-                return _unwrap_response_envelope(resp.json())
-            except _LemonadeUpstreamWedge as exc:
-                # downstream backend 卡死：重載它再 retry（自癒）。冷卻中/重試用盡則照連線錯誤收尾。
-                if attempt < self._max_retries and self._try_heal_lemonade_backend(
-                    str(body.get("model", ""))
-                ):
-                    continue  # 已 respawn → 立刻重試（reload 本身已耗時，不再 backoff）
-                if attempt >= self._max_retries:
-                    raise LlmConnectionError(
-                        f"POST {path} upstream backend 卡死未癒: {exc}"
-                    ) from exc
-                time.sleep(_backoff_delay(attempt))
-            except httpx.TimeoutException as exc:
-                if attempt >= self._max_retries:
-                    raise LlmTimeoutError(f"POST {path} timed out") from exc
-                time.sleep(_backoff_delay(attempt))
-            except httpx.RequestError as exc:
-                if attempt >= self._max_retries:
-                    raise LlmConnectionError(f"POST {path} 連線錯誤: {exc}") from exc
-                time.sleep(_backoff_delay(attempt))
-            except LlmAPIError as exc:
-                # 後端自己說它壞了（顯示卡裝置掉了）：重載那顆模型再試一次，和卡死走同一條自癒
-                if backend_looks_broken(exc) and attempt < self._max_retries and self._try_heal_lemonade_backend(
-                    str(body.get("model", "")), reason=(exc.detail or "")[:160]
-                ):
-                    continue
-                if not _should_retry_status(exc.status) or attempt >= self._max_retries:
-                    raise
-                time.sleep(_backoff_delay(attempt))
-        raise RuntimeError("unreachable")  # pragma: no cover
+        return self._send(
+            lambda: self._sync.post(self._host + "/v1" + path, json=body),
+            label="POST", path=path, model=str(body.get("model", "")),
+        )
 
     async def _apost_json(
         self,
@@ -652,50 +447,10 @@ class LlmHttpClient:
         retry_on_read_timeout: bool = True,
     ) -> dict[str, Any]:
         eff_timeout = timeout if timeout is not None else self._timeout
-        for attempt in range(self._max_retries + 1):
-            try:
-                resp = await self._async.post(
-                    self._host + "/v1" + path,
-                    json=body,
-                    timeout=eff_timeout,
-                )
-                self._raise_for_status(resp)
-                # envelope unwrap：與 sync path 共用同一層護網（含非 network_error
-                # 類型的 error envelope，避免下游 caller 撞 `KeyError: 'data'`）
-                return _unwrap_response_envelope(resp.json())
-            except _LemonadeUpstreamWedge as exc:
-                # downstream backend 卡死：重載它再 retry（自癒）。load 是 sync → to_thread 不擋 loop。
-                healed = False
-                if attempt < self._max_retries:
-                    healed = await asyncio.to_thread(
-                        self._try_heal_lemonade_backend, str(body.get("model", ""))
-                    )
-                if healed:
-                    continue  # 已 respawn → 立刻重試
-                if attempt >= self._max_retries:
-                    raise LlmConnectionError(
-                        f"POST {path} upstream backend 卡死未癒: {exc}"
-                    ) from exc
-                await asyncio.sleep(_backoff_delay(attempt))
-            except httpx.TimeoutException as exc:
-                # 連線階段的逾時（ConnectTimeout）是網路問題，照舊重試；等回應的逾時由呼叫端決定要不要
-                waited_for_reply = isinstance(exc, httpx.ReadTimeout)
-                if (waited_for_reply and not retry_on_read_timeout) or attempt >= self._max_retries:
-                    raise LlmTimeoutError(f"POST {path} timed out") from exc
-                await asyncio.sleep(_backoff_delay(attempt))
-            except httpx.RequestError as exc:
-                if attempt >= self._max_retries:
-                    raise LlmConnectionError(f"POST {path} 連線錯誤: {exc}") from exc
-                await asyncio.sleep(_backoff_delay(attempt))
-            except LlmAPIError as exc:
-                if backend_looks_broken(exc) and attempt < self._max_retries and await asyncio.to_thread(
-                    self._try_heal_lemonade_backend, str(body.get("model", "")), (exc.detail or "")[:160]
-                ):
-                    continue
-                if not _should_retry_status(exc.status) or attempt >= self._max_retries:
-                    raise
-                await asyncio.sleep(_backoff_delay(attempt))
-        raise RuntimeError("unreachable")  # pragma: no cover
+        return await self._asend(
+            lambda: self._async.post(self._host + "/v1" + path, json=body, timeout=eff_timeout),
+            label="POST", path=path, model=str(body.get("model", "")), retry_on_read_timeout=retry_on_read_timeout,
+        )
 
     @staticmethod
     def _raise_for_status(resp: httpx.Response) -> None:

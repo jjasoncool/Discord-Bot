@@ -51,7 +51,11 @@ class FakeHttp:
     async def aembedding(self, *, model, input):
         return self.embedding(model=model, input=input)
 
-    def ensure_lemonade_model(self, **kwargs):
+    @property
+    def admin(self):
+        return self   # 假的管理 API：只記下載入呼叫
+
+    def ensure_loaded(self, **kwargs):
         self.loads = getattr(self, "loads", []) + [kwargs]
 
 

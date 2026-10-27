@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from llm.client.gpu_gate import stream_exclusive
+from llm.client.backend_admin import admin_for
 from llm.client.tool_calls import ToolRunner, assistant_message, call_name_and_arguments, tool_message
 from llm.preprocess.vision_image import is_universal_image, to_png_first_frame
 from llm.prompt.prompt_builder import build_prompt_bundle
@@ -230,10 +231,13 @@ class LLMService:
         self.model_default = model or self.settings.llm_model
         self.timeout = timeout if timeout is not None else self.settings.llm_timeout
         self.context_safety_rules = load_context_safety_rules(self.settings.llm_context_safety_rules_path)
-        # 自寫薄殼：chat / embedding / models 都走它，retry 由它內部處理
+        # 自寫薄殼：chat / embedding / models 都走它，retry 由它內部處理；後端有管理 API（Lemonade）才掛 admin。
+        # 後端是建構時讀的：換後端連 base_url（環境變數）都要換，本來就要重啟
+        runtime = self._load_runtime_config_cached()
         self._client = LlmHttpClient(
             base_url=self.base_url,
             timeout=float(self.timeout),
+            admin=admin_for(runtime.backend if runtime is not None else None, self.base_url),
         )
 
     def _load_runtime_config_cached(self) -> Optional[LLMRuntimeConfig]:
@@ -320,22 +324,18 @@ class LLMService:
         runtime_config = self._load_runtime_config_cached()
         if runtime_config is None:
             return
-        if runtime_config.backend != "lemonade":
+        admin = self._client.admin
+        if admin is None:   # 這家後端沒有管理 API（Ollama、vLLM）
             return
-        profile = runtime_config.backends.get("lemonade")
+        profile = runtime_config.backends.get(runtime_config.backend)
         if profile is None:
             return
         options = profile.model_load_options.get(model)
         if not options:
             return
-        # admin API 是 sync HTTP，包 to_thread 避免阻塞 event loop
-        # （load 本身可能 30-60 秒；cache 命中時 ~ms 級也包著保險）
+        # 管理 API 是 sync HTTP，包 to_thread 避免阻塞 event loop（載入可能 30～60 秒；快取命中時也包著保險）
         try:
-            await asyncio.to_thread(
-                self._client.ensure_lemonade_model,
-                model=model,
-                options=options,
-            )
+            await asyncio.to_thread(admin.ensure_loaded, model=model, options=options)
         except (LlmAPIError, LlmTimeoutError, LlmConnectionError) as exc:
             # 載入失敗不直接 raise：讓後續 chat_completion 嘗試打舊 ctx；如果真的撞 ctx
             # 由 chat_completion 那層 raise 才有完整 detail。這裡只 log。
@@ -351,47 +351,24 @@ class LLMService:
     async def release_model(self, model: str | None = None) -> bool:
         """把 LLM 從後端卸下，讓出 VRAM。回 True＝真的送出了卸載動作。
 
-        **這是「意圖層」**：caller（產圖排程）只說「我要 GPU」，不必知道後端怎麼做。
-        換後端時只有這裡的分派要改，caller 一行都不用動。與 `keep_alive` 的分工：
+        **這是「意圖層」**：caller（產圖排程）只說「我要 GPU」，不必知道後端怎麼做；怎麼卸載是那家後端的 admin 的事
+        （Lemonade 打 unload、Ollama 送 keep_alive=0），沒有 admin 的後端（vLLM：一行程一模型、沒有 swap 概念）做不到也不需要。
+        與 `keep_alive` 的分工：`keep_alive`＝「閒置 N 分鐘後**可以**放」的軟提示，`release_model()`＝「現在馬上放」的硬動作。
 
-          - `keep_alive`＝「閒置 N 分鐘後**可以**放」——軟提示，後端能做就做
-            （Ollama 原生生效；Lemonade 無 TTL 概念，會忽略）
-          - `release_model()`＝「**現在馬上**放」——硬動作，每個後端一份實作
-
-        ⚠️ **呼叫端必須已經獨佔 GPU**（`gpu_exclusive(...)` 區段內）。否則卸載完會
-        馬上被下一個請求自動載回來——實測 Lemonade 收到 chat 就會自動 load。
-
-        ⚠️ **不可走 `chat_raw`**：`chat_raw` 會再 acquire 一次 `stream_exclusive()`，
-        而呼叫端已經持有閘門 → 死鎖。所以 Ollama 分支直接打 `self._client`。
+        ⚠️ **呼叫端必須已經獨佔 GPU**（`gpu_exclusive(...)` 區段內）。否則卸載完會馬上被下一個請求自動載回來。
+        admin 的卸載都走管理端點、不走對話路徑：對話路徑會再 acquire 一次閘門，呼叫端已經持有就死鎖。
         """
         target = model or self.resolve_request_model()
         runtime_config = self._load_runtime_config_cached()
         backend = runtime_config.backend if runtime_config is not None else "ollama"
-
-        if backend == "lemonade":
-            # admin API 是 sync HTTP，包 to_thread 避免阻塞 event loop
-            await asyncio.to_thread(
-                self._client.unload_lemonade_model, model=target,
-            )
-            logger.info("release_model: 已卸載 backend=lemonade model=%s", target)
-            return True
-
-        if backend == "ollama":
-            # Ollama 的原生卸載語意就是 keep_alive=0；送一個最小請求把它帶下去。
-            # （未在 live Ollama 上實測過——目前後端是 Lemonade。行為若不符，
-            #   要改的只有這五行，仲裁層與 caller 都不受影響。）
-            await self._client.chat_completion(
-                model=target,
-                messages=[{"role": "user", "content": "."}],
-                extra_body={"keep_alive": 0, "max_tokens": 1},
-                timeout=60.0,
-            )
-            logger.info("release_model: 已送出 keep_alive=0 backend=ollama model=%s", target)
-            return True
-
-        # vLLM：一 process 一 model、沒有 swap 概念，做不到也不需要
-        logger.debug("release_model: backend=%s 不支援卸載，略過（model=%s）", backend, target)
-        return False
+        admin = self._client.admin
+        if admin is None:
+            logger.debug("release_model: backend=%s 不支援卸載，略過（model=%s）", backend, target)
+            return False
+        # 管理 API 是 sync HTTP，包 to_thread 避免阻塞 event loop
+        await asyncio.to_thread(admin.unload, model=target)
+        logger.info("release_model: 已卸載 backend=%s model=%s", backend, target)
+        return True
 
     def _build_chat_extra_body(
         self,

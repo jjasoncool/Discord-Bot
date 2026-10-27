@@ -33,7 +33,7 @@ SCAN_ROOTS = ("llm", "services")
 #: 檔案 → 接所有例外的地方有幾個（記錄當下的現況；只准減不准增）
 BASELINE: dict[str, int] = {
     "llm/client/embedding_client.py": 6,
-    "llm/client/http_client.py": 4,
+    "llm/client/http_client.py": 2,
     "llm/persona/member_names.py": 1,
     "llm/persona/preference_extractor.py": 2,
     "llm/persona/signature_tag_extractor.py": 3,

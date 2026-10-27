@@ -27,6 +27,7 @@ from llama_index.core.embeddings import BaseEmbedding
 from pydantic import PrivateAttr
 
 from llm.client.http_client import LlmHttpClient, LlmTimeoutError, is_backend_fault
+from llm.client.backend_admin import admin_for
 
 from sys_settings.llm_settings import LLMRuntimeConfig, LLMServiceSettings
 
@@ -116,7 +117,7 @@ class SafeLLMEmbedding(BaseEmbedding):
     `/api/v1/load` 確保 ctx_size 對齊。其他後端忽略這兩個欄位。
 
     `max_retries`（傳輸層重試，預設照 `LlmHttpClient`）、`slot_timeout`（排隊等全域 embedding 名額最多幾秒，
-    None＝一直等）、`load_timeout`（載入模型最多幾秒，None＝`ensure_lemonade_model` 的預設）：
+    None＝一直等）、`load_timeout`（載入模型最多幾秒，None＝admin 的預設）：
     拿著 GPU 閘門的呼叫端用 `make_safe_llm_embedding(holding_gpu_gate=True)` 一次設好。
     """
 
@@ -144,9 +145,12 @@ class SafeLLMEmbedding(BaseEmbedding):
         super().__init__(model_name=model_name, **kwargs)
         # __init__ 內 super 會凍結 fields；用 PrivateAttr 規避 Pydantic 限制
         retry_kwargs = {"max_retries": max_retries} if max_retries is not None else {}
+        # 後端有管理 API（Lemonade）才掛 admin；自癒重載也照 load_timeout 等，拿著閘門時才不會卡太久
+        admin_kwargs = {"heal_load_timeout": load_timeout} if load_timeout is not None else {}
         self._http_client = LlmHttpClient(
             base_url=base_url,
             timeout=timeout,
+            admin=admin_for(backend, base_url, **admin_kwargs),
             **retry_kwargs,
         )
         self._backend = backend
@@ -168,26 +172,20 @@ class SafeLLMEmbedding(BaseEmbedding):
     def _load_kwargs(self) -> dict[str, Any]:
         return {"load_timeout": self._load_timeout} if self._load_timeout is not None else {}
 
-    def _ensure_lemonade_loaded(self) -> None:
-        """打 embedding 之前先確認 Lemonade 已用對的 ctx_size 載入 model。
+    def _ensure_loaded(self) -> None:
+        """打 embedding 之前先確認後端已用對的載入選項（ctx_size、固定在哪張卡）載入 model。
 
-        Lemonade 以外的 backend 不適用，直接 return。`LlmHttpClient.ensure_lemonade_model`
-        內部對未變動的 (model, options) 組合會 cache 命中 → 第二次以後 ~ms 級。
+        沒有管理 API 的後端（admin 是 None）不做；admin 對沒變的 (model, options) 組合會快取命中，第二次以後是毫秒級。
         """
-        if self._backend != "lemonade":
+        admin = self._http_client.admin
+        if admin is None or not self._load_options:
             return
-        if not self._load_options:
-            return
-        self._http_client.ensure_lemonade_model(
-            model=self.model_name,
-            options=self._load_options,
-            **self._load_kwargs(),
-        )
+        admin.ensure_loaded(model=self.model_name, options=self._load_options, **self._load_kwargs())
 
     # ---------- sync embed（LlamaIndex 內部某些路徑會走 sync）----------
 
     def _embed_one(self, text: str) -> list[float]:
-        self._ensure_lemonade_loaded()
+        self._ensure_loaded()
         return self._http_client.embedding(model=self.model_name, input=text)[0]
 
     def _get_text_embedding(self, text: str) -> list[float]:
@@ -209,7 +207,7 @@ class SafeLLMEmbedding(BaseEmbedding):
         # 避免同一執行緒重入 semaphore（threading.Semaphore 非 reentrant）。
         with self._embed_slot():
             try:
-                self._ensure_lemonade_loaded()
+                self._ensure_loaded()
                 return self._http_client.embedding(model=self.model_name, input=texts)
             except Exception as exc:
                 if is_backend_fault(exc):
@@ -223,14 +221,9 @@ class SafeLLMEmbedding(BaseEmbedding):
     # ---------- async embed ----------
 
     async def _aembed_one(self, text: str) -> list[float]:
-        # ensure_lemonade_model 是 sync HTTP，async path 包 to_thread 避免阻塞 loop
-        if self._backend == "lemonade" and self._load_options:
-            await asyncio.to_thread(
-                self._http_client.ensure_lemonade_model,
-                model=self.model_name,
-                options=self._load_options,
-                **self._load_kwargs(),
-            )
+        # 管理 API 是 sync HTTP，async path 包 to_thread 避免阻塞 loop
+        if self._http_client.admin is not None and self._load_options:
+            await asyncio.to_thread(self._ensure_loaded)
         result = await self._http_client.aembedding(model=self.model_name, input=text)
         return result[0]
 

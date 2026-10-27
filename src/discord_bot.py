@@ -21,7 +21,7 @@ from services.relay.telegram_relay_service import (
 )
 from utils.background_tasks import cancel_other_tasks, periodic, spawn, supervise
 from utils.dm_notifier import notify_owner_lemonade_heal
-from llm.client import http_client as llm_http_client
+from llm.client import lemonade_admin
 
 # 載入環境變數
 load_dotenv()
@@ -84,7 +84,7 @@ class MyBot(commands.Bot):
 
     async def setup_hook(self):
         # 模型後端自癒事件（重載、失敗、放棄）私訊群主：技術層不認 Discord，用回呼接上
-        llm_http_client.set_heal_listener(self._on_lemonade_heal)
+        lemonade_admin.set_heal_listener(self._on_lemonade_heal)
         logger.info("正在載入指令模組...")
 
         # 載入所有指令模組

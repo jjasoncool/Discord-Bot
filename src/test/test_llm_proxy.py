@@ -285,10 +285,12 @@ class RawCompletionEnvelopeTests(unittest.IsolatedAsyncioTestCase):
     def _client(self, payload):
         from llm.client.http_client import LlmHttpClient
 
-        client = LlmHttpClient(base_url="http://backend.test", timeout=1.0)
+        from llm.client.lemonade_admin import LemonadeAdmin
+
+        client = LlmHttpClient(base_url="http://backend.test", timeout=1.0, admin=LemonadeAdmin("http://backend.test"))
         resp = SimpleNamespace(is_success=True, status_code=200, json=lambda: payload, text="")
         client._async = SimpleNamespace(post=mock.AsyncMock(return_value=resp))
-        client._try_heal_lemonade_backend = mock.Mock(return_value=True)
+        client.admin.heal = mock.Mock(return_value=True)
         return client
 
     async def test_network_error_envelope_heals_once_and_counts_as_unreachable(self):
@@ -297,7 +299,8 @@ class RawCompletionEnvelopeTests(unittest.IsolatedAsyncioTestCase):
         client = self._client({"error": {"type": "network_error", "message": "Couldn't connect to server"}})
         with self.assertRaises(LlmConnectionError):
             await client.chat_completion_raw({"model": MODEL, "messages": []})
-        client._try_heal_lemonade_backend.assert_called_once_with(MODEL)
+        client.admin.heal.assert_called_once()
+        self.assertEqual(MODEL, client.admin.heal.call_args.args[0])
 
     async def test_other_envelopes_are_upstream_errors_and_normal_bodies_pass(self):
         client = self._client({"error": {"type": "server_error", "message": "boom"}})
