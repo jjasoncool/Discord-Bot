@@ -9,6 +9,7 @@
   - 影子欄已存在就不下 ALTER；讀完就結束交易，等鎖、睡覺時不持著表
   - 維護時段（04:00～07:30）不跑，等到結束
   - dry-run 不算也不寫；欄位名不合法就拒絕；--column embedding 沒配 --redo-copied 就拒絕
+  - 給了 min_id 就只看 id 大於它的列（count 與每批查詢都帶 `id > %s`）；沒給就不加條件
   - `search_chat` 的評估用 embedding_column 進得了 SQL、不合法會被擋
 
 hermetic：假連線、假 embedding、假閘門、假時鐘與 sleep，不碰模型與資料庫。
@@ -21,7 +22,7 @@ import logging
 import os
 import sys
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime
 from types import SimpleNamespace
 from unittest import mock
 
@@ -50,8 +51,10 @@ class _Cursor:
         elif s.startswith("SELECT 1 FROM information_schema.columns"):
             self._rows = [(1,)] if self.db.column_exists else []
         elif s.startswith("SELECT id, text"):
-            before, size = params
-            self._rows = [(rid, text) for rid, text in sorted(self.db.pending(), reverse=True) if rid < before][:size]
+            before, *rest = params                       # (before, size) 或 (before, min_id, size)
+            size, min_id = rest[-1], (rest[0] if len(rest) == 2 else None)
+            self._rows = [(rid, text) for rid, text in sorted(self.db.pending(), reverse=True)
+                          if rid < before and (min_id is None or rid > min_id)][:size]
         elif "SET embedding_v2 = embedding WHERE id = ANY" in s:
             for rid in params[0]:
                 self.db.vectors[rid] = "copied"
@@ -251,6 +254,26 @@ class ReembedRunTests(unittest.TestCase):
     def test_rejects_unsafe_column_names(self):
         with self.assertRaises(ValueError):
             self._run(column="embedding_v2; drop table x")
+
+    def test_min_id_keeps_the_redo_to_the_newest_rows(self):
+        """切換後補尾巴的比對（值等於 embedding_v1）要讀兩欄的向量，沒有 id 範圍就是掃整張表。"""
+        report = self._run(column="embedding", redo_copied=True, min_id=11)
+        self.assertEqual(report.scanned, 2)
+        self.assertEqual(sorted(self.db.vectors), [12, 13])
+        selects = [(s, params) for s, params in self.db.statements if isinstance(s, str) and s.startswith("SELECT id, text")]
+        self.assertTrue(selects)
+        for sql, params in selects:
+            self.assertIn("id > %s", sql)
+            self.assertEqual(params[1], 11)                          # (before, min_id, size)
+        count = [(s, params) for s, params in self.db.statements if isinstance(s, str) and s.startswith("SELECT count(*)")][0]
+        self.assertIn("id > %s", count[0])
+        self.assertEqual(count[1], (11,))
+
+    def test_without_min_id_the_predicate_has_no_id_floor(self):
+        self._run()
+        sqls = [s for s, _ in self.db.statements if isinstance(s, str) and s.startswith(("SELECT id, text", "SELECT count(*)"))]
+        self.assertTrue(sqls)
+        self.assertFalse(any("id > %s" in s for s in sqls))
 
     def test_rewriting_the_live_column_requires_redo_copied(self):
         with self.assertRaises(ValueError):

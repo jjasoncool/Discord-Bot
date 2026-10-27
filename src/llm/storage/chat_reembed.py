@@ -7,7 +7,7 @@
 `llm.client.http_client.is_unreachable`。
 
 介面：
-- `run(column=, batch=, limit=, pause=, dry_run=, redo_copied=)`：做一輪，回 `Report`（做了幾列、沿用舊向量幾列、為什麼停）。
+- `run(column=, batch=, limit=, pause=, dry_run=, redo_copied=, min_id=)`：做一輪，回 `Report`（做了幾列、沿用舊向量幾列、為什麼停）。
 - `self_check()`：拿最新一則，確認這裡送去算的字串和寫入端（`store_chat._chat_node`）會嵌的字串一字不差。
 - `main(argv)`：命令列（`--dry-run` 只算還剩幾列、`--self-check`、`--limit`、`--batch`、`--pause`、`--column`、`--redo-copied`）。
 
@@ -114,9 +114,18 @@ def _embedder(batch: int):
     return model
 
 
-def _predicate(column: str, redo_copied: bool) -> str:
-    # 切換後補那幾列「沿用舊向量」的：它們的值和 embedding_v1 一模一樣
-    return f"{column} = embedding_v1" if redo_copied else f"{column} IS NULL AND embedding IS NOT NULL"
+def _predicate(column: str, redo_copied: bool, min_id: Optional[int]) -> tuple[str, list[Any]]:
+    """WHERE 的條件與參數。
+
+    切換後補那幾列「沿用舊向量」的：它們的值和 embedding_v1 一模一樣。這個比對要把兩欄的向量都從 TOAST 讀出來逐列比，
+    沒有範圍限制就是掃整張表（每欄 1.8 GB）；抄過來的列都在最新那段，呼叫端給 min_id 就只看 id 大於它的列，走主鍵。
+    """
+    where = f"{column} = embedding_v1" if redo_copied else f"{column} IS NULL AND embedding IS NOT NULL"
+    params: list[Any] = []
+    if min_id is not None:
+        where = f"id > %s AND {where}"
+        params.append(int(min_id))
+    return where, params
 
 
 def ensure_column(conn, column: str) -> None:
@@ -139,20 +148,23 @@ def ensure_column(conn, column: str) -> None:
     conn.commit()
 
 
-def count_remaining(conn, column: str, redo_copied: bool = False) -> int:
+def count_remaining(conn, column: str, redo_copied: bool = False, min_id: Optional[int] = None) -> int:
+    where, params = _predicate(column, redo_copied, min_id)
     with conn.cursor() as cur:
-        cur.execute(f"SELECT count(*) FROM {_table()} WHERE {_predicate(column, redo_copied)}")
+        cur.execute(f"SELECT count(*) FROM {_table()} WHERE {where}", tuple(params))
         count = int(cur.fetchone()[0])
     conn.rollback()
     return count
 
 
-def _fetch_batch(conn, column: str, before_id: int, size: int, redo_copied: bool) -> list[tuple[int, str]]:
+def _fetch_batch(conn, column: str, before_id: int, size: int, redo_copied: bool,
+                 min_id: Optional[int] = None) -> list[tuple[int, str]]:
     """讀完就 rollback 結束讀取的交易：接下來等閘門、睡覺可能很久，不能一直持著表的共享鎖（會擋住切換的 ALTER）。"""
+    where, params = _predicate(column, redo_copied, min_id)
     with conn.cursor() as cur:
         cur.execute(
-            f"SELECT id, text FROM {_table()} WHERE id < %s AND {_predicate(column, redo_copied)} ORDER BY id DESC LIMIT %s",
-            (before_id, size),
+            f"SELECT id, text FROM {_table()} WHERE id < %s AND {where} ORDER BY id DESC LIMIT %s",
+            (before_id, *params, size),
         )
         rows = [(int(row[0]), row[1] or "") for row in cur.fetchall()]
     conn.rollback()
@@ -251,6 +263,7 @@ def run(
     pause: float = 0.5,
     dry_run: bool = False,
     redo_copied: bool = False,
+    min_id: Optional[int] = None,
     gate: Callable[..., Any] = gpu_exclusive_sync,
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], datetime] = lambda: datetime.now(APP_TZ),
@@ -268,7 +281,7 @@ def run(
         if not redo_copied and column != "embedding" and not dry_run:
             ensure_column(conn, column)
         try:
-            report.remaining_at_start = count_remaining(conn, column, redo_copied)
+            report.remaining_at_start = count_remaining(conn, column, redo_copied, min_id)
         except Exception as exc:  # 邊界：欄位還不存在（dry-run 沒建欄）這類情況，只是少一個數字
             logger.info("算不出還剩幾列（%s）", exc)
             conn.rollback()
@@ -283,7 +296,7 @@ def run(
                 logger.info("維護時段（%s～%s）不跑，等一分鐘再看", MAINTENANCE_START, MAINTENANCE_END)
                 sleep(60)
             size = batch if limit is None else min(batch, limit - report.scanned)
-            rows = _fetch_batch(conn, column, before, size, redo_copied)
+            rows = _fetch_batch(conn, column, before, size, redo_copied, min_id)
             if not rows:
                 break
             try:
@@ -360,13 +373,15 @@ def main(argv: Optional[list[str]] = None) -> Report | None:
     parser.add_argument("--pause", type=float, default=0.5, help="每批放鎖後讓一拍幾秒，bot 先用")
     parser.add_argument("--dry-run", action="store_true", help="只算還剩幾列，不算也不寫")
     parser.add_argument("--redo-copied", action="store_true", help="切換後補：只做值和 embedding_v1 一樣（沿用舊向量）的列")
+    parser.add_argument("--min-id", type=int, default=None,
+                        help="只看 id 大於此值的列。配 --redo-copied 用：抄過來的列都在最新那段，不給就要拿兩欄向量逐列比對整張表")
     parser.add_argument("--self-check", action="store_true", help="確認送去算的字串和寫入端一致（用一次 GPU）")
     args = parser.parse_args(argv)
     if args.self_check:
         self_check()
         return None
     return run(column=args.column, batch=args.batch, limit=args.limit, pause=args.pause,
-               dry_run=args.dry_run, redo_copied=args.redo_copied)
+               dry_run=args.dry_run, redo_copied=args.redo_copied, min_id=args.min_id)
 
 
 if __name__ == "__main__":
