@@ -26,7 +26,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Iterable
 
-from utils.media_probe import probe_duration
+from utils.media_probe import probe_duration, run_media_tool
 
 logger = logging.getLogger(__name__)
 
@@ -192,20 +192,11 @@ async def video_key_frames(path: str | Path, max_frames: int = DEFAULT_MAX_FRAME
             "-vf", f"fps={sample_frames}/{duration:.3f}:eof_action=pass,scale='min({max_side},iw)':-2",
             "-frames:v", str(sample_frames), str(tmp / "frame_%03d.png"),
         ]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout)
-        except asyncio.TimeoutError:
-            logger.warning("影片抽幀逾時（%s 秒）：%s", timeout, path)
+        result = await run_media_tool(cmd, timeout=timeout)
+        if result.timed_out:
             return []
-        finally:
-            if proc.returncode is None:
-                proc.kill()
-                await proc.wait()
-        if proc.returncode != 0:
-            logger.warning("影片抽幀失敗（rc=%s）：%s %s", proc.returncode, path, stderr.decode(errors="replace")[-300:])
+        if result.returncode != 0:
+            logger.warning("影片抽幀失敗（rc=%s）：%s %s", result.returncode, path, result.stderr.decode(errors="replace")[-300:])
             return []
         return await asyncio.to_thread(_pick_from_dir, tmp, max_frames)
     finally:

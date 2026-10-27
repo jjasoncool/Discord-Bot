@@ -1,11 +1,19 @@
-"""Telegram 轉發端的設定。目前只有 LLM 過濾（`services.relay.telegram_filter`）。"""
+"""Telegram 轉發端的設定：LLM 過濾（`services.relay.telegram_filter`）與投遞（`services.relay.telegram_relay_service`）。"""
 from __future__ import annotations
 
 from typing import Any, Tuple
 
+from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from sys_settings.paths import prompt_file
+
+
+class TelegramRelaySettings(BaseModel, frozen=True):
+    """投遞端很少改的細項；只吃 class 預設值。"""
+
+    #: 影片壓縮每一道 ffmpeg（two-pass 各一道）最多跑幾秒；超過就砍掉、這則不壓縮。轉發一次只處理一則，不能讓它卡住整條
+    video_compress_timeout_seconds: float = 15 * 60
 
 
 class TelegramFilterSettings(BaseSettings):

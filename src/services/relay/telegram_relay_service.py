@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from sys_settings.paths import APP_ROOT, TELEGRAM_SCRAPER_DIR
+from sys_settings.telegram_relay_settings import TelegramRelaySettings
 from utils import hot_files
 from utils.utils import CONFIG_FILE, ChannelConfig
 from typing import Optional
@@ -34,7 +35,7 @@ from services.relay.telegram_filter import MediaFile, Verdict, media_kind
 from shared.telegram import MEDIA_HOLD_NOTIFY, MEDIA_RETRY_WINDOW, normalize_channel_identifier
 from utils.discord_content import split_message
 from utils.discord_threads import fetch_thread, reopen_thread
-from utils.media_probe import probe_duration
+from utils.media_probe import probe_duration, run_media_tool
 from utils.background_tasks import spawn, supervise
 
 logger = logging.getLogger(__name__)
@@ -1035,14 +1036,11 @@ class DiscordMessagePublisher:
             "-an",
             "-f", "null", "/dev/null",
         ]
-        proc = await asyncio.create_subprocess_exec(
-            *pass1_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            logger.warning("ffmpeg pass 1 失敗 (rc=%s): %s\n%s", proc.returncode, src, stderr.decode()[-500:])
+        # 每一道都有時限：轉發一次只處理一則，ffmpeg 卡住整條轉發就停
+        timeout = TelegramRelaySettings().video_compress_timeout_seconds
+        result = await run_media_tool(pass1_cmd, timeout=timeout)
+        if not result.ok:
+            logger.warning("ffmpeg pass 1 失敗 (rc=%s): %s\n%s", result.returncode, src, result.stderr.decode()[-500:])
             return False
 
         logger.info("影片壓縮 pass 1 完成，開始 pass 2: %s", src)
@@ -1057,12 +1055,7 @@ class DiscordMessagePublisher:
             "-movflags", "+faststart",
             dst,
         ]
-        proc = await asyncio.create_subprocess_exec(
-            *pass2_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await proc.communicate()
+        result = await run_media_tool(pass2_cmd, timeout=timeout)
 
         # 清理 passlog 暫存檔
         for suffix in ("", "-0.log", "-0.log.mbtree"):
@@ -1070,8 +1063,8 @@ class DiscordMessagePublisher:
             if os.path.exists(path):
                 os.remove(path)
 
-        if proc.returncode != 0:
-            logger.warning("ffmpeg pass 2 失敗 (rc=%s): %s\n%s", proc.returncode, src, stderr.decode()[-500:])
+        if not result.ok:
+            logger.warning("ffmpeg pass 2 失敗 (rc=%s): %s\n%s", result.returncode, src, result.stderr.decode()[-500:])
             return False
 
         result_size = os.path.getsize(dst)

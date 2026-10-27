@@ -867,6 +867,12 @@ RULES = [
         allowed={"utils/media_probe.py"},
     ),
     Rule(
+        name="跑子行程（ffmpeg 這類）：每一處都要有逾時、逾時要收掉行程（轉發一次只處理一則，卡住整條就停）",
+        pattern=r"create_subprocess_exec\(|create_subprocess_shell\(|subprocess\.(?:run|Popen|check_output)\(",
+        canonical="utils.media_probe.run_media_tool(cmd, timeout=…)",
+        allowed={"utils/media_probe.py", "scraper/", "telegram_scraper/"},
+    ),
+    Rule(
         name="開 articles.db：路徑與唯讀連線字串只有一份（mode=ro、不用 immutable）",
         finder=_find_sqlite_openers,
         canonical="sys_settings.paths.sqlite_readonly_uri(path)（articles.db 的路徑用 ARTICLES_DB）",

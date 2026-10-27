@@ -31,6 +31,7 @@ import discord
 from discord.ext import commands
 
 logger = logging.getLogger(__name__)
+from utils.media_probe import run_media_tool
 from .queue import MusicQueue
 from .ytdl import YTDLSource
 from .config import MusicConfig, playlist_key, read_state, save_state
@@ -633,15 +634,12 @@ class MusicPlayer:
 
     @staticmethod
     async def _get_peak_db(file_path: str) -> float | None:
-        """用 ffmpeg 掃描檔案的最大峰值（dB）"""
+        """用 ffmpeg 掃描檔案的最大峰值（dB）；掃太久（兩分鐘）就放棄，用預設音量播"""
         try:
-            proc = await asyncio.create_subprocess_exec(
-                'ffmpeg', '-i', file_path, '-af', 'volumedetect', '-f', 'null', '-',
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            result = await run_media_tool(
+                ['ffmpeg', '-i', file_path, '-af', 'volumedetect', '-f', 'null', '-'], timeout=120,
             )
-            _, stderr = await proc.communicate()
-            match = re.search(r'max_volume:\s*([-\d.]+)\s*dB', stderr.decode())
+            match = re.search(r'max_volume:\s*([-\d.]+)\s*dB', result.stderr.decode())
             if match:
                 return float(match.group(1))
         except Exception as e:
