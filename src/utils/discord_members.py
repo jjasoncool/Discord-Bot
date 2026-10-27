@@ -10,8 +10,10 @@
 - `resolve_user(bot, user_id, guild=)`：先當成員找（上面那支），不是成員再查 bot 的使用者快取、最後 `fetch_user`；都沒有回 None。
 - `bot_owner_id()`：群主的使用者 id（環境變數 `OWNER_ID`；沒設是 0，誰都不是）。
 - `check_role(user, required_role)`：使用者有沒有 `config.json` `role_mapping` 裡那個身分組；群主自動通過。
-- `check_guild(interaction, owner_only=, admin_only=, required_role=, permission=)`：指令與按鈕的權限檢查，不通過時自己回
-  只有本人看得到的訊息。全專案的管理員限制都走它（守衛擋 `has_permissions`：它擋下時回英文錯誤還記一筆 ERROR）。
+- `require_access(interaction, owner_only=, admin_only=, required_role=, permission=)`：這個人能不能在這裡做這個操作；
+  不行就自己回一則只有本人看得到的訊息、回 False，呼叫端直接 return。不帶參數＝最低要求：在伺服器裡、不是私訊。
+  全專案的管理員限制都走它（守衛擋 `has_permissions`：它擋下時回英文錯誤還記一筆 ERROR）。
+  `require_` 表示不符合會擋下並告訴對方；`check_` 留給只回是或否的 `check_role`。
 
 規則：
 - 全專案取成員只走這裡（守衛擋自己 `guild.fetch_member`）：快取偶爾拿不到人（接單曾因此失敗），快取沒有不等於不在伺服器，
@@ -111,14 +113,15 @@ async def check_role(user, required_role: str = None) -> bool:
         return False  # 如果配置文件不存在或角色未定義，則拒絕訪問
     return True
 
-# check_guild(permission=...) 不通過時給使用者看的權限名稱
+# require_access(permission=...) 不通過時給使用者看的權限名稱
 _PERMISSION_NAMES = {"manage_messages": "管理訊息"}
 
 
-async def check_guild(interaction: discord.Interaction, owner_only: bool = False, admin_only: bool = False,
-                      required_role: str = None, permission: str = None) -> bool:
+async def require_access(interaction: discord.Interaction, owner_only: bool = False, admin_only: bool = False,
+                         required_role: str = None, permission: str = None) -> bool:
     """
-    檢查命令使用權限
+    這個人能不能在這裡做這個操作：不行就自己回一則只有本人看得到的訊息並回 False。依序看在不在伺服器、群主或管理員、
+    這個頻道的 Discord 權限、config.json 對應的身分組。
 
     Args:
         interaction: Discord 互動物件

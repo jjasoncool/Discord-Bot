@@ -23,7 +23,7 @@ from sys_settings.time_settings import APP_TZ
 from utils.discord_threads import reopen_thread
 from utils.panel_bump import PanelBumper
 from sys_settings.paths import runtime_path
-from utils.discord_members import check_guild
+from utils.discord_members import require_access
 from utils.utils import safe_send_interaction_message
 
 logger = logging.getLogger(__name__)
@@ -205,7 +205,7 @@ class TelegramQuarantineCommands(commands.Cog):
         await self._panel(parent_id).bump(thread)
 
     async def _allowed(self, interaction: discord.Interaction) -> bool:
-        return await check_guild(interaction, permission=_PERMISSION)
+        return await require_access(interaction, permission=_PERMISSION)
 
     async def handle_date(self, interaction: discord.Interaction, day: str) -> None:
         # 選單選過的項目會停在那裡，再選同一天 Discord 不會通知 bot：**不管後面成不成**，先把面板重畫成沒選取。

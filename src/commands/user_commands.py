@@ -7,7 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 from constants import ITEMS
 from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message
-from utils.discord_members import check_guild, resolve_member
+from utils.discord_members import require_access, resolve_member
 from utils.dm_notifier import notify_keyword_hit
 from services.community import item_prices
 from sys_settings.paths import runtime_path
@@ -194,7 +194,7 @@ class UserCommands(commands.Cog):
         """設定監控特定頻道的訊息"""
         logger.info(f'收到來自 {interaction.user} 的 /monitor_channel 斜線命令，參數: keywords="{keywords}", notify={notify}')
 
-        if not await check_guild(interaction):
+        if not await require_access(interaction):
             return
 
         # 獲取使用者有權限查看的文字頻道和論壇頻道
@@ -296,7 +296,7 @@ class UserCommands(commands.Cog):
         """停止監控指定頻道"""
         logger.info(f'收到來自 {interaction.user} 的 /stop_monitoring 斜線命令')
 
-        if not await check_guild(interaction):
+        if not await require_access(interaction):
             return
 
         guild_id = interaction.guild.id
@@ -402,7 +402,7 @@ class UserCommands(commands.Cog):
         """列出目前監控的所有頻道"""
         logger.info(f'收到來自 {interaction.user} 的 /list_monitored 斜線命令')
 
-        if not await check_guild(interaction):
+        if not await require_access(interaction):
             return
 
         # 檢查是否有監控的頻道
@@ -517,7 +517,7 @@ class UserCommands(commands.Cog):
         """斜線命令：設定頻道中的關鍵字監控"""
         logger.info(f'收到來自 {interaction.user} 的 /watch_keywords 斜線命令')
 
-        if not await check_guild(interaction):
+        if not await require_access(interaction):
             return
 
         action_view = WatchKeywordsView(self)
@@ -536,7 +536,7 @@ class UserCommands(commands.Cog):
     async def forget_tag_cmd(self, interaction: discord.Interaction):
         """斜線命令：讓成員 opt-out 自己的招牌梗（只能管理自己的）。"""
         logger.info(f'收到來自 {interaction.user} 的 /forget_tag 斜線命令')
-        if not await check_guild(interaction):
+        if not await require_access(interaction):
             return
         import asyncio
         import functools
@@ -623,8 +623,8 @@ class UserCommands(commands.Cog):
         """斜線命令：查看物品價格"""
         logger.info(f'收到來自 {interaction.user} 的 /list_item_price 斜線命令')
 
-        from utils.discord_members import check_guild
-        if not await check_guild(interaction):
+        from utils.discord_members import require_access
+        if not await require_access(interaction):
             return
 
         prices = item_prices.all_prices()

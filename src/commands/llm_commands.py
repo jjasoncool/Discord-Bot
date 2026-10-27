@@ -39,7 +39,7 @@ from sys_settings.llm_settings import AskAIChatSearchSettings, AskAICommandSetti
 from sys_settings.time_settings import APP_TZ
 from utils.discord_content import send_model_text
 from utils.dm_notifier import send_dm
-from utils.discord_members import check_guild
+from utils.discord_members import require_access
 from utils.utils import safe_send_interaction_message
 from utils.background_tasks import supervise
 
@@ -674,7 +674,7 @@ class LLMCommands(commands.Cog):
         """斜線命令：向 AI 詢問問題"""
         logger.info(f"收到 /askai：user={interaction.user} question={question[:200]}")
 
-        if not await check_guild(interaction):
+        if not await require_access(interaction):
             return
 
         self._ensure_askai_worker()
@@ -1083,7 +1083,6 @@ class PersonalityCommands(commands.Cog):
         model="指定模型（不填則跟夜間批次一樣：personality_model，未設才用主 model）",
         save="是否寫入 persona_agent 版本表（預設否，只看結果不留痕）",
     )
-    @app_commands.checks.has_permissions(administrator=True)
     async def persona_agent_test_cmd(
         self,
         interaction: discord.Interaction,
@@ -1102,10 +1101,7 @@ class PersonalityCommands(commands.Cog):
         預設只回報與寫 log、不碰任何資料表；`save=True` 時跟夜間批次走同一條路徑，
         寫入版本表與 runs 表。模型不指定時也跟夜間批次用同一個，結果才代表 04:00 的行為。
         """
-        if not interaction.guild:
-            await safe_send_interaction_message(
-                interaction, "⚠️ 僅限伺服器內使用。", ephemeral=True
-            )
+        if not await require_access(interaction, admin_only=True):   # 不在伺服器、不是管理員都在這裡擋
             return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -1190,7 +1186,7 @@ class PersonalityCommands(commands.Cog):
 
         **為什麼送出前要再驗一次管理員**：權限檢查在指令入口做過，但那是幾十分鐘前的事。
         中間權限被移除的話，結果就不該再送過去——內容含成員的完整發言證據。
-        縱深防禦：入口擋一次、出口再擋一次，兩處都用同一支 `check_guild`。
+        縱深防禦：入口擋一次、出口再擋一次，兩處都用同一支 `require_access`。
         """
         if error is not None:
             summary = f"❌ persona agent 執行失敗：`{error[:300]}`"
@@ -1239,8 +1235,8 @@ class PersonalityCommands(commands.Cog):
                     filename=f"persona_diff_{target.id}.json",
                 )
 
-        # 出口再驗一次管理員（沿用入口那支 check_guild，不另寫判斷）
-        if not await check_guild(interaction, admin_only=True):
+        # 出口再驗一次管理員（沿用入口那支 require_access，不另寫判斷）
+        if not await require_access(interaction, admin_only=True):
             logger.warning(
                 "persona_agent_test 結果不送出：發起人 %s 已非管理員", interaction.user
             )
@@ -1254,13 +1250,9 @@ class PersonalityCommands(commands.Cog):
     @app_commands.command(
         name="ai_diary", description="立即產生並發布 AI 今日日記（管理員限定）"
     )
-    @app_commands.checks.has_permissions(administrator=True)
     async def ai_diary_cmd(self, interaction: discord.Interaction):
         """手動觸發每日日記（不必等到午夜）；用來測試與臨時補發。"""
-        if not interaction.guild:
-            await safe_send_interaction_message(
-                interaction, "⚠️ 僅限伺服器內使用。", ephemeral=True
-            )
+        if not await require_access(interaction, admin_only=True):   # 不在伺服器、不是管理員都在這裡擋，回只有本人看得到的訊息
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
         from llm.ambient.ambient_diary import run_daily_reflection

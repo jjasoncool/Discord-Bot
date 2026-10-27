@@ -91,7 +91,7 @@ DISCORD_HELPERS_IN_BASE = {
     "utils.utils": "安全回覆 interaction、ChannelConfig 的頻道 getter，講的就是 Discord 的頻道",
     "utils.discord_content": "發文到頻道、把長文切成 Discord 放得下的多段",
     "utils.discord_threads": "取得（含封存的）與解封 thread",
-    "utils.discord_members": "取伺服器成員（快取沒有再問 API）、找能私訊的對象、群主 id、check_guild／check_role 的權限檢查",
+    "utils.discord_members": "取伺服器成員（快取沒有再問 API）、找能私訊的對象、群主 id、require_access（不行就自己回訊息）與 check_role（只回是否）的權限檢查",
     "utils.dm_notifier": "私訊群友",
     "utils.panel_bump": "面板置底",
     "settings.channel_registry": "綁頻道時向 Discord 查頻道、建 thread",

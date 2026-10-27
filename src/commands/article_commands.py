@@ -127,10 +127,10 @@ class ArticleCommands(commands.Cog):
     @app_commands.command(name="article_manager", description="官方文章更新管理中心")
     async def article_manager(self, interaction: discord.Interaction):
         """官方文章更新管理中心 - 統一入口"""
-        from utils.discord_members import check_guild
+        from utils.discord_members import require_access
 
         # 檢查權限
-        if not await check_guild(interaction, admin_only=True):
+        if not await require_access(interaction, admin_only=True):
             return
 
         view = ArticleManagerView(self)
@@ -531,10 +531,10 @@ class ArticleCommands(commands.Cog):
     ])
     async def resend_article(self, interaction: discord.Interaction, id: str, type: str = "article"):
         """根據 ID 重新發送文章或 FB 貼文到監控的頻道，用於測試"""
-        from utils.discord_members import check_guild
+        from utils.discord_members import require_access
 
         # 檢查權限
-        if not await check_guild(interaction, admin_only=True):
+        if not await require_access(interaction, admin_only=True):
             return
 
         await interaction.response.defer(ephemeral=True)
@@ -708,8 +708,8 @@ class ArticleCommands(commands.Cog):
         board_id: str = "74934",
     ):
         """從 Scraper API 取得巴哈討論串並發送到論壇頻道。"""
-        from utils.discord_members import check_guild
-        if not await check_guild(interaction, admin_only=True):
+        from utils.discord_members import require_access
+        if not await require_access(interaction, admin_only=True):
             return
 
         await interaction.response.defer(ephemeral=True)

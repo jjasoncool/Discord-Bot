@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from utils.discord_members import check_guild
+from utils.discord_members import require_access
 from utils.utils import ChannelConfig, ConfigWriteError, ITEMS_PER_PAGE
 from services.community.rollcall_service import (
     RollCallService,
@@ -104,7 +104,7 @@ class RollCallAdminView(discord.ui.View):
         row=0,
     )
     async def enable(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await check_guild(interaction, admin_only=True):
+        if not await require_access(interaction, admin_only=True):
             return
         service = self._get_service(interaction)
         if not service:
@@ -124,7 +124,7 @@ class RollCallAdminView(discord.ui.View):
         row=0,
     )
     async def disable(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await check_guild(interaction, admin_only=True):
+        if not await require_access(interaction, admin_only=True):
             return
         service = self._get_service(interaction)
         if not service:
@@ -144,7 +144,7 @@ class RollCallAdminView(discord.ui.View):
         row=0,
     )
     async def manual_pick(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await check_guild(interaction, admin_only=True):
+        if not await require_access(interaction, admin_only=True):
             return
         service = self._get_service(interaction)
         if not service:
@@ -178,7 +178,7 @@ class RollCallAdminView(discord.ui.View):
         row=1,
     )
     async def show_pending(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await check_guild(interaction, admin_only=True):
+        if not await require_access(interaction, admin_only=True):
             return
         service = self._get_service(interaction)
         if not service:
@@ -218,7 +218,7 @@ class RollCallAdminView(discord.ui.View):
         row=1,
     )
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await check_guild(interaction, admin_only=True):
+        if not await require_access(interaction, admin_only=True):
             return
         service = self._get_service(interaction)
         if not service:
@@ -237,7 +237,7 @@ class RollCallAdminView(discord.ui.View):
         row=2,
     )
     async def set_target_role(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await check_guild(interaction, admin_only=True):
+        if not await require_access(interaction, admin_only=True):
             return
         await _show_role_config_menu(
             interaction,
@@ -253,7 +253,7 @@ class RollCallAdminView(discord.ui.View):
         row=2,
     )
     async def set_exclude_role(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await check_guild(interaction, admin_only=True):
+        if not await require_access(interaction, admin_only=True):
             return
         await _show_role_config_menu(
             interaction,
@@ -269,7 +269,7 @@ class RollCallAdminView(discord.ui.View):
         row=2,
     )
     async def preview_scope(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await check_guild(interaction, admin_only=True):
+        if not await require_access(interaction, admin_only=True):
             return
         service = self._get_service(interaction)
         if not service:
@@ -622,9 +622,10 @@ class RollCallCommands(commands.Cog):
         name="rollcall_panel",
         description="發送幽靈點名管理面板（管理員限定）",
     )
-    @app_commands.checks.has_permissions(administrator=True)
     async def send_admin_panel(self, interaction: discord.Interaction):
         """在當前頻道發送管理面板"""
+        if not await require_access(interaction, admin_only=True):
+            return
         # 刪除舊面板
         old_msg_id = self.service.runtime.admin_panel_message_id
         if old_msg_id:

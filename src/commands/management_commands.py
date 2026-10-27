@@ -10,7 +10,7 @@ from discord.ext import commands
 from typing import Optional
 
 # 注意：需確保 utils 資料夾下的 utils.py 包含 create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, ChannelConfig 等定義
-from utils.discord_members import check_guild
+from utils.discord_members import require_access
 from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, ChannelConfig, ConfigWriteError
 from utils.panel_bump import PanelBumper
 from utils import runtime_file
@@ -74,13 +74,13 @@ class ServerInfoView(discord.ui.View):
 
     @discord.ui.button(label="列出頻道", style=discord.ButtonStyle.primary, custom_id="list_channels")
     async def list_channels_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await check_guild(interaction, owner_only=True):
+        if not await require_access(interaction, owner_only=True):
             return
         await self.cog._list_channels(interaction)
 
     @discord.ui.button(label="列出身份組", style=discord.ButtonStyle.secondary, custom_id="list_roles")
     async def list_roles_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await check_guild(interaction, owner_only=True):
+        if not await require_access(interaction, owner_only=True):
             return
         await self.cog._list_roles(interaction)
 
@@ -692,7 +692,7 @@ class ManagementCommands(commands.Cog):
         """斜線命令：檢視伺服器相關資訊"""
         logger.info(f'收到來自 {interaction.user} 的 /server_info 斜線命令')
 
-        if not await check_guild(interaction, owner_only=True):
+        if not await require_access(interaction, owner_only=True):
             return
 
         action_view = ServerInfoView(self)
@@ -708,7 +708,7 @@ class ManagementCommands(commands.Cog):
         """設定特定功能的頻道"""
         logger.info(f'收到來自 {interaction.user} 的 set_channel 請求')
 
-        if not await check_guild(interaction, owner_only=True):
+        if not await require_access(interaction, owner_only=True):
             return
 
         # 頻道功能定義一律來自 settings/channel_registry.py（單一來源）。
@@ -824,7 +824,7 @@ class ManagementCommands(commands.Cog):
         """設定角色的命令執行權限"""
         logger.info(f'收到來自 {interaction.user} 的 /set_role_permissions 斜線命令')
 
-        if not await check_guild(interaction, owner_only=True):
+        if not await require_access(interaction, owner_only=True):
             return
 
         role_types = {
@@ -937,7 +937,7 @@ class ManagementCommands(commands.Cog):
         """列出角色的命令執行權限設定"""
         logger.info(f'收到來自 {interaction.user} 的 /list_role_permissions 斜線命令')
 
-        if not await check_guild(interaction, owner_only=True):
+        if not await require_access(interaction, owner_only=True):
             return
 
         config = ChannelConfig.load_config(caller="ManagementCommands")
@@ -980,7 +980,7 @@ class ManagementCommands(commands.Cog):
         """移除角色的命令執行權限"""
         logger.info(f'收到來自 {interaction.user} 的 /remove_role_permissions 斜線命令')
 
-        if not await check_guild(interaction, owner_only=True):
+        if not await require_access(interaction, owner_only=True):
             return
 
         config = ChannelConfig.load_config(caller="ManagementCommands")
@@ -1090,7 +1090,7 @@ class ManagementCommands(commands.Cog):
         """管理角色的命令執行權限"""
         logger.info(f'收到來自 {interaction.user} 的 role_manager 請求')
 
-        if not await check_guild(interaction, owner_only=True):
+        if not await require_access(interaction, owner_only=True):
             return
 
         action_view = RoleManagerView(self)
@@ -1107,7 +1107,7 @@ class ManagementCommands(commands.Cog):
         """斜線命令：管理伺服器設定"""
         logger.info(f'收到來自 {interaction.user} 的 /server_manager 斜線命令')
 
-        if not await check_guild(interaction, owner_only=True):
+        if not await require_access(interaction, owner_only=True):
             return
 
         action_view = ServerManagerView(self)
@@ -1123,7 +1123,7 @@ class ManagementCommands(commands.Cog):
         """在設定好的自我介紹頻道發送/更新填寫面板（非斜線指令入口）。"""
         logger.info(f'收到來自 {interaction.user} 的 intro_panel 請求')
 
-        if not await check_guild(interaction, owner_only=True):
+        if not await require_access(interaction, owner_only=True):
             return
 
         from utils.utils import get_intro_channel_id

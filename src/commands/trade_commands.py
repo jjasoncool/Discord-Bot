@@ -199,8 +199,8 @@ class TradeCommands(commands.Cog):
         """斜線命令：提供交易相關資訊"""
         logger.info(f'收到來自 {interaction.user} 的 /trade_info 斜線命令')
 
-        from utils.discord_members import check_guild
-        if not await check_guild(interaction, required_role="Trader"):
+        from utils.discord_members import require_access
+        if not await require_access(interaction, required_role="Trader"):
             return
 
         embed = discord.Embed(
@@ -231,8 +231,8 @@ class TradeCommands(commands.Cog):
         """斜線命令：允許賣家設定物品價格，使用分頁功能"""
         logger.info(f'收到來自 {interaction.user} 的 /set_item_prices 斜線命令')
 
-        from utils.discord_members import check_guild
-        if not await check_guild(interaction, owner_only=False, required_role="Trader"):
+        from utils.discord_members import require_access
+        if not await require_access(interaction, required_role="Trader"):
             return
 
         # 這位賣家現有的價格（讀寫都走 item_prices，別的賣家的那幾組不會被動到）
@@ -356,8 +356,8 @@ class TradeCommands(commands.Cog):
         logger.info(f'收到來自 {interaction.user} 的 /select_item 斜線命令')
 
         # 檢查是否在伺服器中使用並檢查角色權限
-        from utils.discord_members import check_guild
-        if not await check_guild(interaction, owner_only=False):
+        from utils.discord_members import require_access
+        if not await require_access(interaction):
             return
 
         embed = discord.Embed(

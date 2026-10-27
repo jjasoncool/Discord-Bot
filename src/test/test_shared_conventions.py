@@ -879,6 +879,12 @@ RULES = [
         allowed={"sys_settings/paths.py", "scraper/", "telegram_scraper/"},
     ),
     Rule(
+        name="指令的管理員限制：has_permissions 擋下時回英文錯誤還記一筆 ERROR",
+        pattern=r"checks\.has_permissions\(",
+        canonical="utils.discord_members.require_access(interaction, admin_only=True)（或 permission=…）",
+        allowed=set(),
+    ),
+    Rule(
         name="Telegram 轉發送出與寫發送紀錄",
         finder=_find_relay_sends_outside_helper,
         canonical="MessageRelayWorker._send_unit（送出前由呼叫端過濾、決定去向）",
