@@ -14,7 +14,7 @@ from typing import Any, List, Optional
 from dataclasses import dataclass
 from pathlib import Path
 
-from llm.client.lemonade_gate import stream_exclusive
+from llm.client.gpu_gate import stream_exclusive
 from llm.client.tool_calls import ToolRunner, assistant_message, call_name_and_arguments, tool_message
 from llm.preprocess.vision_image import is_universal_image, to_png_first_frame
 from llm.prompt.prompt_builder import build_prompt_bundle
@@ -602,7 +602,7 @@ class LLMService:
 
         try:
             # 對稱 gate：stream 期間擋背景 embedding flush，避免 lemonade
-            # 把進行中的連線 reset（lemonade_gate.py 有詳細說明）。
+            # 把進行中的連線 reset（gpu_gate.py 有詳細說明）。
             async with stream_exclusive():
                 completion = await self._client.chat_completion(
                     model=model,

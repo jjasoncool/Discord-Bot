@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Sequence
 
-from llm.client.lemonade_gate import foreground_recently_active, stream_busy
+from llm.client.gpu_gate import foreground_recently_active, stream_busy
 from llm.client.tool_calls import assistant_message, call_name_and_arguments, tool_message
 from services.llm_service import LLMAPIError
 from llm.persona.agent import tools as agent_tools

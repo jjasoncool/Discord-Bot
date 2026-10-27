@@ -31,7 +31,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from llm.client.lemonade_gate import GpuBusy  # noqa: E402
+from llm.client.gpu_gate import GpuBusy  # noqa: E402
 from llm.storage import chat_reembed as cre  # noqa: E402
 from sys_settings.time_settings import APP_TZ  # noqa: E402
 

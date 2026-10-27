@@ -1,58 +1,39 @@
-"""GPU 單一資源的互斥閘。
+"""GPU 獨佔閘門：同一時間只准一種工作佔顯示卡（對話、embedding、重排、產圖）；行程內用 asyncio.Lock、跨行程與跨容器用鎖檔、
+長工作用租約加心跳。
 
-原本只做一件事：擋 Lemonade 的串流衝突（見下）。2026-09-03 起擴成「同一時間只准
-一種工作佔 GPU」的閘——排程產圖（ComfyUI）會卸載 LLM 並獨佔顯卡數十分鐘，
-它跟 chat / embedding 是同一個資源的競爭者，不該各自開一把鎖。
+架構定位：技術層（llm/client），只依賴標準庫；不認得後端是哪家（鎖的是顯示卡，不是某個推論伺服器）。
+  上層：LLMService（對話）、SafeLLMEmbedding 與聊天寫入（embedding）、HttpReranker（重排）、LlmProxy、產圖排程，
+  插話與記憶靠 `stream_busy`／`foreground_recently_active` 讓路；search-mcp 容器裡的批次算向量用同步版。
+  下層：asyncio、fcntl。
 
-**檔名還叫 `lemonade_gate` 是暫時的**：等 ComfyUI 那條線接完會一起正名成 GPU 閘。
+介面：
+- `gpu_exclusive(owner, lease_seconds)`／`stream_exclusive()`：async 區段，先拿行程內的鎖再拿鎖檔；`lease_seconds` 給長工作（產圖）開 watchdog。
+- `gpu_exclusive_sync(max_wait_seconds)`：沒有 event loop 的同步程式（批次算向量、MCP）用。
+- `stream_busy()`／`current_owner()`／`imagegen_busy()`：有沒有人拿著、誰拿著。
+- `note_foreground_activity()`／`foreground_recently_active(grace_seconds)`：前景（/askai）最近有沒有在用，背景工作據此讓路。
+- `GpuBusy`：等不到的例外；`GpuLease.renew()`：長工作的心跳。
 
-── 原始問題（仍然成立）───────────────────────────────────────────
-  Lemonade 收到 chat / embedding 請求時，透過內部 CURL 轉發到對應的
-  llama.cpp backend port。實測發現：當 chat（port 8002）的回應正在 stream，
-  另一個 embedding 請求（port 8001）打進來，會讓 lemonade 把進行中的 LLM
-  連線 reset 掉，並對 client 回 `200 OK + {"error": {"type": "network_error"}}`，
-  bot 端會被誤判成 `no_choices`。
+規則：
+- 跨容器要排同一隊：compose 把同一個主機資料夾（repo 的 `run/gpu_lock/`）掛成兩邊的 /gpu_lock、用 LEMONADE_GPU_LOCK_PATH
+  指過去；各容器的 /tmp 是分開的，用預設值會各排各的隊。單元測試由 test/__init__.py 換成暫存檔，不跟執行中的 bot 搶。
+- 看時間、睡覺都經過 `_clock`／`_async_sleep`，測試換成假時鐘（`test.fake_clock.FakeClock`），不真的等。
+- 呼叫端拿著閘門時不可再呼叫會回頭要同一把鎖的東西（例：Hermes 會回打 bot 的 /v1）。
 
-  解法：process 內一把 asyncio.Lock。/askai 的 chat_completion 進入時持有；
-  背景 store_chat flush 在跑 batch embedding 前也 await 同一把鎖。
-  兩端對稱 → embedding burst 一定要等 stream 結束，反之亦然。
-
-  RAG 用的 embedding（/askai 內 retriever）不掛這個 gate；因為它在 chat
-  前就完成，本來就是序列的，不會跟同一個 /askai 的 chat 撞。
-
-── 跨行程排隊（2026-10-06）────────────────────────────────────────
-  asyncio.Lock 只管同一個行程。在 discord-bot 容器裡另開的行程（`docker exec` 跑的手動抽查腳本、
-  之後的 MCP server）打模型時不會排隊，會跟插話、/askai 直接搶：10-06 跑 Telegram 過濾的歷史樣本時，
-  插話一次花了 106 秒。使用者：「我希望跑判斷還是要排隊的」。
-  所以拿到行程內的鎖之後，再拿一把**鎖檔**（`fcntl.flock`，同一個容器的行程共用 /tmp）。
-  - 用非阻塞嘗試＋短暫 sleep 輪詢，不丟到執行緒裡等：等的途中被取消（逾時放行、租約到期）時，
-    不會留下一個之後才拿到鎖、卻沒人放的執行緒。
-  - 關檔就放鎖；行程當掉時作業系統也會放，不會有死鎖殘留。
-  - 開不了鎖檔就只在本行程排隊（記 warning），不擋 LLM。
-  - **輪流**：剛放掉鎖的行程，下一次先讓一拍（比別人的輪詢間隔長）再搶。不然同一行程連續的工作交棒是立刻的，
-    另一個行程每 0.1 秒才試一次，幾乎永遠插不進去，只做到「不同時打模型」，沒做到排隊輪流。
-  - **等太久**：等別的行程超過 `_CROSS_PROCESS_WARN_S` 記 warning（之後每 5 分鐘再記），超過
-    `_CROSS_PROCESS_MAX_WAIT_S` 就不等鎖檔、記 error 照常打模型——別的行程卡住時，bot 的 AI 不能整個靜默停擺。
-
-── 租約：為什麼不用固定 timeout、也不用 checker task ──────────────
-  短工作（chat / embedding）持鎖幾秒到幾分鐘，不需要保護。長工作不同：
-  ComfyUI 卡死的話裸 Lock 永遠不放，**bot 的 LLM 功能會全部靜默死掉**
-  （/askai、插話、日記、人格萃取），而且不會有任何錯誤訊息。
-
-  **固定 timeout 解不了，因為它分不出「跑很久」和「卡死」**——設短會誤殺正常的
-  長工作，設長等於 bot 可以死著那麼久。所以改用租約：持有者拿一個**短期**租約，
-  每完成一次可觀測的進展就 `renew()`。產圖的續租點不必另外造：ComfyUI 本來就要
-  輪詢 `/history/{prompt_id}` 才知道圖好了沒，**輪詢成功本身就是心跳**。
-
-  另開一個 checker task 去問「還在跑嗎」則是多一個會自己掛掉的元件，而且它最後
-  還是得問 ComfyUI——那就是輪詢本身。把檢查點放在本來就會發生的動作上，零件更少。
-
-  到期的處理**不是「別人來搶鎖」**（跨 task 搶鎖很髒），而是**持有者自我了斷**：
-  watchdog 直接 cancel 持有它的 task，`async with` 的 finally 自然把鎖釋放。
-  借用 asyncio 自己的取消機制，就不必自己管鎖的所有權。
-
-  `lease_seconds=None`（預設）＝不開 watchdog，行為與擴充前一字不差——現有的
-  `stream_exclusive()` caller 因此完全不用改。
+例外與決策：
+- 為什麼要鎖：推論伺服器一次只算一個請求，對話串流中打進一個 embedding 會讓它把進行中的連線 reset、回「200＋network_error」，
+  bot 端誤判成沒有回答。行程內一把鎖、兩端對稱：embedding 一定等串流結束，反之亦然。/askai 內部檢索用的 embedding 在對話前
+  就做完、本來就序列，不掛這把鎖。
+- 為什麼還要鎖檔：asyncio.Lock 只管同一個行程；同一個容器另開的行程（手動抽查腳本、MCP）打模型時不會排隊，會跟插話、/askai
+  直接搶（跑歷史樣本的腳本曾讓插話等了 106 秒）。拿到行程內的鎖之後再拿 `fcntl.flock` 鎖檔：非阻塞嘗試加短暫輪詢，
+  等的途中被取消不會留下拿著鎖沒人放的執行緒；關檔就放鎖，行程當掉作業系統也會放；開不了鎖檔只在本行程排隊（記 warning）。
+  **輪流**：剛放掉鎖的行程下一次先讓一拍（比別人的輪詢間隔長），不然同一行程連續交棒是立刻的，別的行程永遠插不進去。
+  **等太久**：等別的行程超過 `_CROSS_PROCESS_WARN_S` 記 warning（之後每 5 分鐘再記），超過 `_CROSS_PROCESS_MAX_WAIT_S`
+  就不等、記 error 照常打模型——別的行程卡住時，bot 的 AI 不能整個靜默停擺。
+- 為什麼用租約、不用固定 timeout 也不用 checker task：短工作持鎖幾秒到幾分鐘不需要保護；長工作（產圖）卡死的話裸 Lock
+  永遠不放，bot 的 LLM 功能會全部靜默死掉。固定 timeout 分不出「跑很久」和「卡死」；另開 checker 多一個會自己掛的元件、
+  最後還是得去輪詢。所以持有者拿短期租約、每有可觀測的進展就 `renew()`（產圖本來就要輪詢進度，輪詢成功就是心跳）；
+  到期由 watchdog 直接 cancel 持有它的 task，`async with` 的 finally 自然放鎖，不另外管鎖的所有權。
+  `lease_seconds=None`（預設）不開 watchdog，短工作的呼叫端完全不用改。
 """
 from __future__ import annotations
 

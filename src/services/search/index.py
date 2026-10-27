@@ -27,7 +27,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
-from llm.client.lemonade_gate import GpuBusy
+from llm.client.gpu_gate import GpuBusy
 from services.search.sources import SOURCES, Doc, Source
 from services.search.text import bigram_tokens, normalize, normalizer_id
 from services.search.rerank import Reranker, best_passage
@@ -607,13 +607,13 @@ def default_index() -> SearchIndex:
     """照 `SEARCH_SETTINGS` 建的共用索引（search-mcp 行程裡的 MCP 工具、背景同步、每日維護都用這一個）。"""
     global _default
     if _default is None:
-        from services.search.rerank import LemonadeReranker
+        from services.search.rerank import HttpReranker
         from services.search.vectors import PgVectorStore
         from sys_settings import switches
 
-        # 建立 PgVectorStore、LemonadeReranker 都不會連線；開關關著時一次都不會碰 pgvector、embedding、reranker
+        # 建立 PgVectorStore、HttpReranker 都不會連線；開關關著時一次都不會碰 pgvector、embedding、reranker
         _default = SearchIndex(vector_store=PgVectorStore(),
                                vector_enabled=lambda: switches.current().search_vector_mode == "on",
-                               reranker=LemonadeReranker(),
+                               reranker=HttpReranker(),
                                rerank_enabled=lambda: switches.current().search_rerank_mode == "on")
     return _default

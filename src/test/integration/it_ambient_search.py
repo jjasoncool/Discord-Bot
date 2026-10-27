@@ -2,7 +2,7 @@
 帶圖加工具後端接不接受、查完還守不守 [PASS]／#N 的格式、回覆有沒有網址。只印結果，不送任何東西到 Discord。
 
 記錄模式本來就不出網：工具回給模型的是固定說明，這裡量的是「想不想查、查什麼、多花幾秒」。
-會佔用主模型，不要在 04:00～07:30 維護時段跑；這支腳本是另一個行程，靠 `lemonade_gate` 的跨行程鎖檔跟 bot 排隊。
+會佔用主模型，不要在 04:00～07:30 維護時段跑；這支腳本是另一個行程，靠 `gpu_gate` 的跨行程鎖檔跟 bot 排隊。
 執行（容器內）：
     docker exec -w /app discord-bot python -m test.integration.it_ambient_search            # 全部情境
     docker exec -w /app discord-bot python -m test.integration.it_ambient_search 新梗 帶圖   # 指定情境

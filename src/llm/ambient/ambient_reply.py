@@ -4,7 +4,7 @@
 下層：`services.llm_service.LLMService`（生成）、`ambient_hooks`（鉤子閘）、`ambient_memory`（偏好與招牌梗召回）、
 `ambient_insult`（被罵的應對與記仇名單）、`ambient_search`（判斷時可以先查一次遊戲情報或網路）、
 `llm.preprocess`（聊天行格式、人名錨點、貼文與表情描述）、`llm.storage.ai_interactions_store`（互動紀錄）、
-`llm.client.lemonade_gate`（前景讓位）、`utils.discord_content`（回覆太長時切段）。
+`llm.client.gpu_gate`（前景讓位）、`utils.discord_content`（回覆太長時切段）。
 
 介面：
 - `maybe_ambient_reply(bot, message)`：入口。硬過濾、靜默期合併 burst、判斷被點名／接續，然後交給單次評估。
@@ -67,7 +67,7 @@ from llm.preprocess import person_anchor
 from llm.preprocess.external_emoji import external_emoji_context
 from llm.preprocess.tweet_context import expand_tweets
 from llm.preprocess.emoji_text_utils import is_emoji_or_symbol_only, is_link_only
-from llm.client.lemonade_gate import foreground_recently_active, stream_busy
+from llm.client.gpu_gate import foreground_recently_active, stream_busy
 from sys_settings.time_settings import APP_TZ
 from llm.preprocess.vision_image import DEFAULT_MAX_FRAMES, extract_key_frames, is_vision_image
 from llm.logger_factory import get_or_create_file_logger

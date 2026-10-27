@@ -2,7 +2,7 @@
 
 架構定位：服務層（`llm/retrievers`）的手動工具，不在 bot 行程裡跑。上層：沒有程式呼叫；在 discord-bot 容器裡
 `python -m llm.retrievers.eval.evaluate --label 名稱`。下層：`context_retriever.embed_query`／`search_chat`（和 /askai、
-插話同一條查詢路徑，含索引形狀的開關與 ef_search）、`llm.client.lemonade_gate.gpu_exclusive_sync`（算問句向量時排一次
+插話同一條查詢路徑，含索引形狀的開關與 ef_search）、`llm.client.gpu_gate.gpu_exclusive_sync`（算問句向量時排一次
 GPU 的隊）、`llm.preprocess.tokenization.dedup_key`（口頭禪題比對句子）。
 
 介面：
@@ -33,7 +33,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from llm.client.lemonade_gate import gpu_exclusive_sync
+from llm.client.gpu_gate import gpu_exclusive_sync
 from llm.preprocess.tokenization import dedup_key
 from llm.retrievers import context_retriever
 from sys_settings import switches

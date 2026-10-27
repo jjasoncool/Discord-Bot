@@ -242,9 +242,9 @@ def main(argv: Optional[list[str]] = None) -> Path:
     # 評估不看 switches.json：要比的就是開與關，由參數決定
     reranker = None
     if args.rerank == "on":
-        from services.search.rerank import LemonadeReranker
+        from services.search.rerank import HttpReranker
 
-        reranker = LemonadeReranker()
+        reranker = HttpReranker()
     # 評估要量的是向量、reranker 本身：GPU 等久一點也沒關係，不要因為剛好碰上 bot 在回答就跳過那一步
     # （一次搜尋共用的等待額度放寬到 600 秒）；也不必每題都寫慢查詢 log
     options = dict(reranker=reranker, gpu_wait_seconds=600, slow_search_seconds=float("inf"))

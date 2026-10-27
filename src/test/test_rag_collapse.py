@@ -484,7 +484,7 @@ class CommandWiringTests(unittest.TestCase):
             self.assertIsNone(lc._askai_reranker())
         with mock.patch.object(lc, "_ASKAI_RERANKER", None), \
              mock.patch.object(lc.switches, "current", lambda: SimpleNamespace(askai_rerank_mode="on")), \
-             mock.patch.object(lc, "LemonadeReranker", lambda **kw: made.append(kw) or "reranker"):
+             mock.patch.object(lc, "HttpReranker", lambda **kw: made.append(kw) or "reranker"):
             self.assertEqual(lc._askai_reranker(), "reranker")
             self.assertEqual(lc._askai_reranker(), "reranker")
         self.assertEqual(len(made), 1)   # 只建一次

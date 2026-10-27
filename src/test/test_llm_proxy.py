@@ -32,7 +32,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from llm.client import lemonade_gate  # noqa: E402
+from llm.client import gpu_gate  # noqa: E402
 from llm.client.http_client import LlmAPIError, LlmTimeoutError  # noqa: E402
 from services import llm_proxy, notify_server  # noqa: E402
 from sys_settings.hermes_settings import HermesSettings  # noqa: E402
@@ -338,8 +338,8 @@ class RealGateTests(unittest.IsolatedAsyncioTestCase):
 
         class Upstream(FakeUpstream):
             async def chat_completion_raw(self, body, *, timeout=None):
-                seen["owner"] = lemonade_gate.current_owner()
-                seen["busy"] = lemonade_gate.stream_busy()
+                seen["owner"] = gpu_gate.current_owner()
+                seen["busy"] = gpu_gate.stream_busy()
                 return await super().chat_completion_raw(body, timeout=timeout)
 
         proxy = llm_proxy.LlmProxy(HermesSettings(api_key=KEY), llm=fake_llm(), client=Upstream())
@@ -351,8 +351,8 @@ class RealGateTests(unittest.IsolatedAsyncioTestCase):
         response = await client.post("/v1/chat/completions", json={"model": MODEL, "messages": []}, headers=AUTH)
         self.assertEqual(200, response.status)
         self.assertEqual({"owner": "hermes", "busy": True}, seen)
-        self.assertIsNone(lemonade_gate.current_owner())
-        self.assertFalse(lemonade_gate.stream_busy())
+        self.assertIsNone(gpu_gate.current_owner())
+        self.assertFalse(gpu_gate.stream_busy())
 
 
 if __name__ == "__main__":

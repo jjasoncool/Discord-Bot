@@ -50,7 +50,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:  # 只給型別註解；服務層不認 discord，Discord 物件由指令層傳進來（守衛 test_layering）
     import discord
 
-from llm.client.lemonade_gate import gpu_exclusive
+from llm.client.gpu_gate import gpu_exclusive
 from llm.preprocess.chat_line import format_chat_line
 from llm.preprocess.emoji_text_utils import is_emoji_or_symbol_only, is_link_only
 from llm.preprocess.tokenization import dedup_key, tokenize_for_retrieval, tokens_for_debug
@@ -668,7 +668,7 @@ async def retrieve_discord_context(
 ) -> tuple[list[dict[str, str]], list[dict[str, str]], dict[str, int]]:
     """從 Discord 歷史訊息檢索上下文：近期保底 + Hybrid 關聯檢索。
 
-    `reranker`（有 `rerank(query, passages) -> list[float]` 的物件，例如情報搜尋的 `LemonadeReranker`，建立時要讓它自己不拿鎖）
+    `reranker`（有 `rerank(query, passages) -> list[float]` 的物件，例如情報搜尋的 `HttpReranker`，建立時要讓它自己不拿鎖）
     給了就把融合名次前 `rerank_candidates` 則（None＝和相關名額一樣多）交給它連問題一起讀、重新打分，分數低於
     `rerank_min_score` 的不進 prompt（None＝不設門檻）；GPU 閘門在這裡拿，最多等 `rerank_gpu_wait_seconds`。
     回傳 (chat_context, bot_context, meta)。

@@ -96,7 +96,7 @@ class FilterTestBase(unittest.IsolatedAsyncioTestCase):
             patcher = mock.patch.object(tf, target, value)
             patcher.start()
             self.addCleanup(patcher.stop)
-        busy = mock.patch.object(tf.lemonade_gate, "imagegen_busy", return_value=False)
+        busy = mock.patch.object(tf.gpu_gate, "imagegen_busy", return_value=False)
         self.imagegen_busy = busy.start()
         self.addCleanup(busy.stop)
         down = mock.patch.object(tf, "_model_down", False)

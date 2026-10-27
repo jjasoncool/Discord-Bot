@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
-from llm.client import lemonade_gate
+from llm.client import gpu_gate
 from llm.client.http_client import LlmConnectionError, LlmTimeoutError
 from llm.preprocess.vision_image import extract_key_frames, fit_for_vision, video_key_frames
 from utils import hot_files
@@ -196,9 +196,9 @@ def _passed(reason: str, started: float, images: int = 0, answer: str = "", *, r
 
 async def _wait_for_imagegen(trace_id: str) -> None:
     """產圖佔著 GPU 時等它做完：這時叫模型會把 LLM 載回去搶 VRAM（載入在排 GPU 之前）。"""
-    if lemonade_gate.imagegen_busy():
+    if gpu_gate.imagegen_busy():
         logger.info("Telegram 過濾：產圖中，等它做完再判（%s）", trace_id)
-    while lemonade_gate.imagegen_busy():
+    while gpu_gate.imagegen_busy():
         await asyncio.sleep(_SETTINGS.busy_poll_seconds)
 
 

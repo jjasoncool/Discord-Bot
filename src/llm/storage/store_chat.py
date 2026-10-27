@@ -4,7 +4,7 @@
   - 上層（誰呼叫）：`discord_bot` 的 on_message／on_message_edit（`enqueue_message`、`enqueue_message_edit`，滿門檻就
     `flush_buffer`）與 on_ready（用 `utils.background_tasks.periodic` 定期呼叫 `flush_buffer`）；
     `llm.storage.chat_index_backfill`（從 raw 備份補寫漏掉的，排進同一個 buffer）。
-  - 下層（呼叫誰）：`llm.client.lemonade_gate`（GPU 閘門）、`llm.client.http_client.is_unreachable`、
+  - 下層（呼叫誰）：`llm.client.gpu_gate`（GPU 閘門）、`llm.client.http_client.is_unreachable`、
     `llm.preprocess`（表情描述、貼圖描述）、`llm.retrievers.context_retriever`（共用的已寫入 id 集合）、LlamaIndex 的 pgvector 索引。
 
 介面：`enqueue_message(msg)`、`enqueue_message_edit(after)`、`should_flush_now()`、`flush_buffer()`；
@@ -35,7 +35,7 @@ import discord
 
 from llm.client.http_client import is_backend_fault, is_unreachable
 from llm.preprocess.emoji_text_utils import replace_custom_emoji_with_description
-from llm.client.lemonade_gate import stream_exclusive
+from llm.client.gpu_gate import stream_exclusive
 from llm.preprocess.sticker_cache import get_sticker_text
 
 logger = logging.getLogger(__name__)
@@ -283,7 +283,7 @@ async def flush_buffer() -> int:
 
         # _buffer_lock 已釋放（不卡新訊息入 buffer）；
         # 接下來的 batch embedding 必須等 lemonade 沒人在 stream LLM，否則
-        # 會把對方連線 reset 掉（詳見 lemonade_gate.py）。
+        # 會把對方連線 reset 掉（詳見 gpu_gate.py）。
         loop = asyncio.get_running_loop()
         count = 0
         insert_left: list[dict] = []

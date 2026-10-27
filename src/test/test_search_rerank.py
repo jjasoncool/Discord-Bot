@@ -26,9 +26,9 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from llm.client.http_client import LlmHttpClient  # noqa: E402
-from services.search.rerank import LemonadeReranker, best_passage  # noqa: E402
+from services.search.rerank import HttpReranker, best_passage  # noqa: E402
 from services.search.text import normalize  # noqa: E402
-from llm.client.lemonade_gate import GpuBusy  # noqa: E402
+from llm.client.gpu_gate import GpuBusy  # noqa: E402
 from test.test_search_index import SearchIndexTestBase, StubVectorStore  # noqa: E402
 
 
@@ -176,7 +176,7 @@ class BestPassageTests(unittest.TestCase):
         self.assertIn("卜靈是夢州方士", best_passage("卜靈是什麼身分", text, 200))
 
 
-class LemonadeRerankerTests(unittest.TestCase):
+class HttpRerankerTests(unittest.TestCase):
     def test_goes_through_the_gpu_gate_with_a_wait_limit(self):
         waits, client = [], mock.Mock()
         client.rerank.return_value = [0.9, 0.1]
@@ -191,7 +191,7 @@ class LemonadeRerankerTests(unittest.TestCase):
             def __exit__(self, *exc):
                 return False
 
-        reranker = LemonadeReranker(client=client, gate=Gate, max_wait_seconds=7, model="reranker-x")
+        reranker = HttpReranker(client=client, gate=Gate, max_wait_seconds=7, model="reranker-x")
 
         self.assertEqual(reranker.rerank("問題", ["甲", "乙"]), [0.9, 0.1])
         reranker.rerank("問題", ["甲", "乙"], max_wait_seconds=3)   # 這次搜尋剩下的額度
@@ -201,9 +201,9 @@ class LemonadeRerankerTests(unittest.TestCase):
 
     def test_without_a_model_it_refuses_instead_of_calling_the_backend(self):
         client = mock.Mock()
-        reranker = LemonadeReranker(client=client, gate=mock.MagicMock())
+        reranker = HttpReranker(client=client, gate=mock.MagicMock())
         runtime = mock.Mock(rerank_model=None, backend="lemonade", backends={})
-        with mock.patch.object(LemonadeReranker, "_settings", return_value=(mock.Mock(), runtime)):
+        with mock.patch.object(HttpReranker, "_settings", return_value=(mock.Mock(), runtime)):
             with self.assertRaises(RuntimeError):
                 reranker.rerank("問題", ["甲"])
         client.rerank.assert_not_called()

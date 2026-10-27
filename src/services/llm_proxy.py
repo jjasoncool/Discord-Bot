@@ -2,7 +2,7 @@
 驗金鑰、擋模型名、排 GPU 閘門之後把請求原樣轉給 Lemonade。
 
 架構定位：服務層（`services`），不 import discord。上層：`services.notify_server`（把路由掛到它的 aiohttp app）。
-下層：`services.llm_service`（模型名稱、推 ctx）、`llm.client.http_client`（原樣送出）、`llm.client.lemonade_gate`（閘門）。
+下層：`services.llm_service`（模型名稱、推 ctx）、`llm.client.http_client`（原樣送出）、`llm.client.gpu_gate`（閘門）。
 
 介面：
 - `LlmProxy(settings, llm=, client=, gate=)`：`add_routes(app)` 掛兩條路由；`handle_models`、`handle_chat` 是 aiohttp 處理函式。
@@ -34,7 +34,7 @@ from typing import Any, Callable
 from aiohttp import web
 
 from llm.client.http_client import LlmAPIError, LlmHttpClient, is_unreachable
-from llm.client.lemonade_gate import gpu_exclusive, imagegen_busy
+from llm.client.gpu_gate import gpu_exclusive, imagegen_busy
 from services.llm_service import LLM_SERVICE_SETTINGS, LLMService, log_llm_usage
 from sys_settings.hermes_settings import HermesSettings
 

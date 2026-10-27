@@ -3,7 +3,7 @@
 
 架構定位：功能層（`llm/storage`，和 `store_chat`、`chat_index_backfill` 同層），在 discord-bot 容器另開行程跑：
 `python -m llm.storage.chat_reembed`。上層：使用者手動執行。下層：`LLMServiceSettings.pgvector_connect`、
-`llm.client.embedding_client.make_safe_llm_embedding`、`llm.client.lemonade_gate.gpu_exclusive_sync`、
+`llm.client.embedding_client.make_safe_llm_embedding`、`llm.client.gpu_gate.gpu_exclusive_sync`、
 `llm.client.http_client.is_unreachable`。
 
 介面：
@@ -41,7 +41,7 @@ from datetime import datetime, time as dtime
 from typing import Any, Callable, Optional
 
 from llm.client.http_client import is_unreachable
-from llm.client.lemonade_gate import GpuBusy, gpu_exclusive_sync
+from llm.client.gpu_gate import GpuBusy, gpu_exclusive_sync
 from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
 from sys_settings.time_settings import APP_TZ
 

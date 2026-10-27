@@ -7,7 +7,7 @@
   - 模型：`llm_runtime_config.json` 的 `rerank_model`（Lemonade 載入；和主模型、embedding 各佔一個位置）
   - 送什麼：標題＋文件裡和問題最相關的那一段（切段規則同向量；挑和問題重疊的兩字組最多的那段）
   - 問題用哪個：呼叫端給了使用者的原句就用原句（reranker 是拿自然語言問句訓練的），沒給才用查詢字
-  - 排 GPU 的隊（`lemonade_gate.gpu_exclusive_sync`），最多等這次搜尋剩下的等待額度（`max_wait_seconds`，
+  - 排 GPU 的隊（`gpu_gate.gpu_exclusive_sync`），最多等這次搜尋剩下的等待額度（`max_wait_seconds`，
     沒給就用 `query_gpu_wait_seconds`）；等不到或出錯就丟例外，搜尋照原本的名次（見 `index.SearchIndex._rerank`）
 """
 from __future__ import annotations
@@ -45,14 +45,14 @@ def best_passage(query: str, search_text: str, max_chars: int) -> str:
     return max(pieces, key=lambda piece: len(wanted & set(bigram_tokens(piece))))
 
 
-class LemonadeReranker:
+class HttpReranker:
     """透過 Lemonade 的 /v1/rerank 打 reranker 模型。模型名稱每次用到時重讀設定（bot 長時間不重啟）。"""
 
     def __init__(self, *, client=None, gate: Optional[Callable[..., AbstractContextManager]] = None,
                  max_wait_seconds: Optional[float] = None, model: Optional[str] = None):
         self._client = client
         if gate is None:
-            from llm.client.lemonade_gate import gpu_exclusive_sync
+            from llm.client.gpu_gate import gpu_exclusive_sync
 
             gate = gpu_exclusive_sync
         self._gate = gate

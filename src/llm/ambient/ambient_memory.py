@@ -3,7 +3,7 @@
 架構定位：功能層（`llm/ambient`）。記憶本身走 `services.memory_service` 門面，這裡只管訊息來源的緩衝、排程 flush 與召回的格式。
   - 上層（誰呼叫）：`llm.ambient.ambient_reply`——插話頻道每則真人訊息進來時 `enqueue_for_memory`，生成前
     `recall_lines`、`recall_signature_tags`；`discord_bot` 的 on_ready 用 `utils.background_tasks.periodic` 定期呼叫 `maybe_flush`。
-  - 下層（呼叫誰）：`services.memory_service`、`services.llm_service`（抽取用的模型）、`llm.client.lemonade_gate`（前景忙不忙）、
+  - 下層（呼叫誰）：`services.memory_service`、`services.llm_service`（抽取用的模型）、`llm.client.gpu_gate`（前景忙不忙）、
     `llm.storage.member_profile_store`、`llm.preprocess.person_anchor`。
 
 介面：`enqueue_for_memory(message)`、`maybe_flush(force=)`、`recall_lines(guild_id, user_id)`、
@@ -26,7 +26,7 @@ import discord
 
 from llm.preprocess import person_anchor
 from llm.storage.member_profile_store import get_member_profile_store
-from llm.client.lemonade_gate import foreground_recently_active, stream_busy
+from llm.client.gpu_gate import foreground_recently_active, stream_busy
 from services.llm_service import LLMService
 from services.memory_service import get_memory_service
 from sys_settings.llm_settings import AmbientChatSettings

@@ -7,7 +7,7 @@ E＝兩邊都算對、不計分：罵人但圖有遊戲資訊（照「任一邊�
 **樣本原文不能放進 prompt 當例句**，否則這裡的分數會虛高、看不出新訊息準不準。
 樣本與期望值見 AI_HANDOFF_AND_TODO.md 的 telegram-llm-filter-quarantine 區塊。
 
-會佔用主模型，不要在 04:00～07:30 維護時段跑。這支腳本是另一個行程，靠 `lemonade_gate` 的跨行程鎖檔跟 bot
+會佔用主模型，不要在 04:00～07:30 維護時段跑。這支腳本是另一個行程，靠 `gpu_gate` 的跨行程鎖檔跟 bot
 的插話、/askai 一起排隊；判斷本身也是排到為止、不設時限（10-08 起），這裡只量準不準，速度要在 bot 裡量。
 執行（容器內）：
     docker exec -w /app discord-bot python -m test.integration.it_telegram_filter            # 全部樣本

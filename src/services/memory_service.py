@@ -84,7 +84,7 @@ class MemoryService:
         # 招牌梗抽取又是一段 26B 生成：偏好段跑完後再判一次前景閘，若 /askai 此刻已來就讓位
         # （本批 tag 延後，靠後續 flush 補；避免多排一段背景生成擋在前景前面）。
         try:
-            from llm.client.lemonade_gate import foreground_recently_active, stream_busy
+            from llm.client.gpu_gate import foreground_recently_active, stream_busy
             from sys_settings.llm_settings import AmbientChatSettings
             if stream_busy() or foreground_recently_active(AmbientChatSettings().askai_grace_seconds):
                 logger.info("signature_tag 抽取讓位前景（stream 忙或 /askai 近期活躍），本批延後")

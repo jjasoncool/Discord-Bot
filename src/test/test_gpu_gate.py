@@ -27,7 +27,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from llm.client import lemonade_gate as gate  # noqa: E402
+from llm.client import gpu_gate as gate  # noqa: E402
 from test import timing_sensitive  # noqa: E402
 from test.fake_clock import FakeClock  # noqa: E402
 from services.llm_service import LLMService  # noqa: E402
@@ -153,7 +153,7 @@ class CrossProcessQueueTests(_GateTestCase):
             with mock.patch.object(gate, "_clock", clock.now), mock.patch.object(gate, "_async_sleep", clock.sleep), \
                  mock.patch.object(gate, "_CROSS_PROCESS_WARN_S", 0.2), \
                  mock.patch.object(gate, "_CROSS_PROCESS_MAX_WAIT_S", 0.5):
-                with self.assertLogs("llm.client.lemonade_gate", "WARNING") as logs:
+                with self.assertLogs("llm.client.gpu_gate", "WARNING") as logs:
                     async with gate.stream_exclusive():
                         pass
                 self.assertTrue(any("已等" in line for line in logs.output), logs.output)
@@ -168,7 +168,7 @@ class CrossProcessQueueTests(_GateTestCase):
 
     async def test_unopenable_lock_file_still_queues_in_process(self):
         with mock.patch.object(gate, "CROSS_PROCESS_LOCK_PATH", "/proc/nope/gpu.lock"):
-            with self.assertLogs("llm.client.lemonade_gate", "WARNING"):
+            with self.assertLogs("llm.client.gpu_gate", "WARNING"):
                 async with gate.stream_exclusive():
                     self.assertTrue(gate.stream_busy())
 
@@ -255,8 +255,8 @@ class UnittestLockPathTests(unittest.TestCase):
         result = subprocess.run(
             [sys.executable, "-c",
              "import unittest, test\n"
-             "from llm.client import lemonade_gate\n"
-             "print(lemonade_gate.CROSS_PROCESS_LOCK_PATH)\n"],
+             "from llm.client import gpu_gate\n"
+             "print(gpu_gate.CROSS_PROCESS_LOCK_PATH)\n"],
             cwd=SRC_DIR, env={**os.environ, "LEMONADE_GPU_LOCK_PATH": shared},
             capture_output=True, text=True, timeout=60,
         )

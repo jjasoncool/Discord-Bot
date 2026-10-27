@@ -1,6 +1,6 @@
 """測試用的假時鐘：程式問時間、睡覺都問它，測試不用真的等，機器再忙結果也一樣。
 
-用法：被測模組把「看時間」與「睡覺」做成可換的名字（例：`lemonade_gate._clock`／`_async_sleep`、
+用法：被測模組把「看時間」與「睡覺」做成可換的名字（例：`gpu_gate._clock`／`_async_sleep`、
 轉發 worker 的 `_clock`／`_sleep`），測試裡換成 `clock.now`／`clock.sleep`。
 
 機制：`sleep(秒)` 登記一個醒來時刻、等一個 future。等事件迴圈把手上能跑的都跑完（兩輪 `call_soon`），
