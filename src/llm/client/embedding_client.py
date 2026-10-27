@@ -26,7 +26,7 @@ from typing import Any, Callable, TypeVar
 from llama_index.core.embeddings import BaseEmbedding
 from pydantic import PrivateAttr
 
-from llm.client.http_client import LlmHttpClient, LlmTimeoutError, is_unreachable
+from llm.client.http_client import LlmHttpClient, LlmTimeoutError, is_backend_fault
 
 from sys_settings.llm_settings import LLMRuntimeConfig, LLMServiceSettings
 
@@ -71,13 +71,13 @@ def embed_with_perturbation_retry(
       - re-embed script 裡直接打後端 HTTP 的 fallback
     兩邊邏輯一致，避免 drift。
 
-    連不上或逾時（`is_unreachable`）直接往外丟、不重試：那不是文字的問題。
+    後端本身的問題（`is_backend_fault`：連不上、逾時、回 5xx）直接往外丟、不重試：那不是文字的問題。
     """
     use_log = log or logger
     try:
         return embed_fn(text)
     except Exception as first_exc:
-        if is_unreachable(first_exc):
+        if is_backend_fault(first_exc):
             raise
         for suffix in _PERTURBATION_SUFFIXES:
             variant = text + suffix
@@ -212,8 +212,8 @@ class SafeLLMEmbedding(BaseEmbedding):
                 self._ensure_lemonade_loaded()
                 return self._http_client.embedding(model=self.model_name, input=texts)
             except Exception as exc:
-                if is_unreachable(exc):
-                    raise       # 後端整個卡住：逐筆再試只會每筆各等一次逾時
+                if is_backend_fault(exc):
+                    raise       # 後端整個卡住或壞了：逐筆再試只會每筆各等一次逾時、各吃一次 5xx
                 logger.warning(
                     "SafeLLMEmbedding: batch 失敗（size=%d），改逐筆 + perturbation: %s",
                     len(texts), exc,
@@ -238,7 +238,7 @@ class SafeLLMEmbedding(BaseEmbedding):
         try:
             return await self._aembed_one(text)
         except Exception as exc:
-            if is_unreachable(exc):
+            if is_backend_fault(exc):
                 raise
             # async 失敗時走 sync helper（取得 semaphore 限流 + perturbation retry）。
             # 切 sync 比重複實作 async perturbation 還簡單，且 embedding crash 場景
@@ -249,7 +249,7 @@ class SafeLLMEmbedding(BaseEmbedding):
         try:
             return await self._aembed_one(query)
         except Exception as exc:
-            if is_unreachable(exc):
+            if is_backend_fault(exc):
                 raise
             return self._get_query_embedding(query)
 

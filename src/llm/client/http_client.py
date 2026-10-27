@@ -22,7 +22,7 @@ import json
 import logging
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -40,6 +40,16 @@ _LEMONADE_LOAD_LOCK = threading.Lock()
 # 避免 Lemonade 真的整台掛掉時狂發 load。
 _LEMONADE_HEAL_COOLDOWN_S = 60.0
 _LEMONADE_LAST_HEAL: dict[tuple[str, str], float] = {}
+#: 每個模型一小時內最多自癒幾次：超過代表那顆後端（顯示卡、驅動）真的有問題，再重載只是蓋過去；停下來、記 ERROR、通知管理員
+_LEMONADE_HEAL_MAX_PER_HOUR = 3
+_LEMONADE_HEAL_WINDOW_S = 3600.0
+_LEMONADE_HEAL_HISTORY: dict[tuple[str, str], list[float]] = {}
+_LEMONADE_GAVE_UP_AT: dict[tuple[str, str], float] = {}
+#: 後端自己說它壞了的訊號（5xx 的 body）：顯示卡裝置掉了、解碼失敗。行程還活著、Lemonade 的 health 仍是 ready，
+#: 只有重載那顆模型才會好。其他 5xx（可能是這筆請求讓後端出錯）不重載
+_BACKEND_BROKEN_SIGNATURES = ("ErrorDeviceLost", "device lost", "decode() failed", "vk::", "CUDA error", "HIP error")
+#: 自癒事件的回呼（healed／failed／gave_up），介面層接去私訊管理員；可能從任何執行緒被叫，接的人自己排回 event loop
+_HEAL_LISTENER: Callable[[dict[str, Any]], None] | None = None
 
 
 def reset_lemonade_load_cache() -> None:
@@ -47,6 +57,23 @@ def reset_lemonade_load_cache() -> None:
     with _LEMONADE_LOAD_LOCK:
         _LEMONADE_LOADED.clear()
         _LEMONADE_LAST_HEAL.clear()
+        _LEMONADE_HEAL_HISTORY.clear()
+        _LEMONADE_GAVE_UP_AT.clear()
+
+
+def set_heal_listener(listener: Callable[[dict[str, Any]], None] | None) -> None:
+    """接自癒事件：`{"outcome": "healed"|"failed"|"gave_up", "model", "reason", "heals"}`。介面層用來私訊管理員。"""
+    global _HEAL_LISTENER
+    _HEAL_LISTENER = listener
+
+
+def _emit_heal_event(event: dict[str, Any]) -> None:
+    if _HEAL_LISTENER is None:
+        return
+    try:
+        _HEAL_LISTENER(event)
+    except Exception as exc:  # 邊界：通知只是附帶的，失敗不能影響原本的請求
+        logger.warning("Lemonade 自癒事件通知失敗：%s", exc)
 
 # 連線層 / 暫時性錯誤的指數退避：對齊原 openai SDK max_retries=2
 DEFAULT_MAX_RETRIES = 2
@@ -91,6 +118,22 @@ def is_unreachable(exc: BaseException) -> bool:
     和「某個請求本身有問題」（`LlmAPIError`，例如某段文字讓後端出錯）分開：後者換個寫法或略過那筆就好。
     """
     return isinstance(exc, (LlmConnectionError, LlmTimeoutError))
+
+
+def is_backend_fault(exc: BaseException) -> bool:
+    """後端本身的問題：連不上、逾時，或回 5xx——跟這筆請求的內容無關，換個寫法重送也不會好，呼叫端該停手、晚點再試。
+
+    和 `is_unreachable` 的差別只在 5xx：後端有回應但它自己壞了（例如顯示卡裝置掉了，行程還活著）。以前 5xx 被當成
+    「這筆文字的問題」逐則略過，後端壞四小時就丟四小時的訊息。"""
+    return is_unreachable(exc) or (isinstance(exc, LlmAPIError) and exc.status is not None and exc.status >= 500)
+
+
+def backend_looks_broken(exc: BaseException) -> bool:
+    """5xx 而且 body 帶後端壞掉的訊號（`_BACKEND_BROKEN_SIGNATURES`）：值得重載那顆模型再試。"""
+    if not (isinstance(exc, LlmAPIError) and exc.status is not None and exc.status >= 500):
+        return False
+    detail = exc.detail or ""
+    return any(signature in detail for signature in _BACKEND_BROKEN_SIGNATURES)
 
 
 class _LemonadeUpstreamWedge(httpx.ConnectError):
@@ -475,34 +518,54 @@ class LlmHttpClient:
             _LEMONADE_LAST_HEAL.pop((self._host, model), None)
         logger.info("Lemonade model unloaded: model=%s", model)
 
-    def _try_heal_lemonade_backend(self, model: str) -> bool:
+    def _try_heal_lemonade_backend(self, model: str, reason: str = "") -> bool:
         """偵測到 upstream wedge（downstream backend process 卡死）時，重發 /api/v1/load 把
         它 respawn。沿用該 model 最後一次載入的 recipe_options（ctx_size / llamacpp_args，從
         load cache 取），但 save_options=False → 只重生、不覆寫 recipe_options.json（不毒化）。
 
-        回 True＝已送出 reload（值得 retry 原請求）；False＝冷卻中 / 無 model / reload 失敗。
-        每個 (host, model) 設冷卻，避免 Lemonade 真的整台掛掉時狂發 load。
+        回 True＝已送出 reload（值得 retry 原請求）；False＝冷卻中 / 一小時內已重載太多次 / 無 model / reload 失敗。
+        每個 (host, model) 設冷卻，避免 Lemonade 真的整台掛掉時狂發 load；一小時內超過上限就放棄並通知
+        （`reason` 是觸發的錯誤內容，進 log 與通知）。
         """
         if not model:
             return False
         key = (self._host, model)
         now = time.monotonic()
+        allowed = False
+        gave_up = False
+        recipe: dict[str, Any] = {}
         with _LEMONADE_LOAD_LOCK:
             last = _LEMONADE_LAST_HEAL.get(key)
             if last is not None and now - last < _LEMONADE_HEAL_COOLDOWN_S:
                 return False  # 冷卻中：別在 Lemonade 真的掛掉時狂發 load
-            _LEMONADE_LAST_HEAL[key] = now
-            # 取這顆 model 最後一次載入用的 recipe_options（最近一筆）。掃 cache 在鎖內、安全；
-            # 找不到就 fallback 裸 reload（{}）。
-            recipe: dict[str, Any] = {}
-            for (cached_host, cached_model, opts_json) in _LEMONADE_LOADED:
-                if cached_host == self._host and cached_model == model:
-                    try:
-                        parsed = json.loads(opts_json)
-                        if isinstance(parsed, dict):
-                            recipe = parsed
-                    except Exception:
-                        pass
+            history = [t for t in _LEMONADE_HEAL_HISTORY.get(key, []) if now - t < _LEMONADE_HEAL_WINDOW_S]
+            _LEMONADE_HEAL_HISTORY[key] = history
+            if len(history) >= _LEMONADE_HEAL_MAX_PER_HOUR:
+                # 放棄只講一次（一小時內）：之後的請求照一般錯誤收尾，不再每次都吵
+                if now - _LEMONADE_GAVE_UP_AT.get(key, -_LEMONADE_HEAL_WINDOW_S) >= _LEMONADE_HEAL_WINDOW_S:
+                    _LEMONADE_GAVE_UP_AT[key] = now
+                    gave_up = True
+            else:
+                _LEMONADE_LAST_HEAL[key] = now
+                history.append(now)
+                allowed = True
+                # 取這顆 model 最後一次載入用的 recipe_options（最近一筆）。掃 cache 在鎖內、安全；
+                # 找不到就 fallback 裸 reload（{}）。
+                for (cached_host, cached_model, opts_json) in _LEMONADE_LOADED:
+                    if cached_host == self._host and cached_model == model:
+                        try:
+                            parsed = json.loads(opts_json)
+                            if isinstance(parsed, dict):
+                                recipe = parsed
+                        except Exception:
+                            pass
+        if gave_up:
+            logger.error("Lemonade backend 自癒放棄：model=%s 一小時內已重載 %d 次還是壞（%s），不再自動重載，請檢查那張卡或驅動",
+                         model, _LEMONADE_HEAL_MAX_PER_HOUR, reason or "沒有錯誤內容")
+            _emit_heal_event({"outcome": "gave_up", "model": model, "reason": reason, "heals": _LEMONADE_HEAL_MAX_PER_HOUR})
+            return False
+        if not allowed:
+            return False  # 一小時內的名額用完、放棄已經講過：照一般錯誤收尾
         try:
             self._lemonade_load_model(
                 model_name=model,
@@ -512,11 +575,13 @@ class LlmHttpClient:
             )
         except Exception as exc:  # reload 也失敗（admin 掛了？）→ 交回原 retry 流程收尾
             logger.warning("Lemonade backend 自癒重載失敗 model=%s：%s", model, exc)
+            _emit_heal_event({"outcome": "failed", "model": model, "reason": f"{reason} / 重載失敗：{exc}"[:300], "heals": len(_LEMONADE_HEAL_HISTORY.get(key, []))})
             return False
         logger.warning(
-            "Lemonade backend 自癒：偵測到 upstream wedge，已重發 /api/v1/load 重載 model=%s",
-            model,
+            "Lemonade backend 自癒：後端卡死或壞了（%s），已重發 /api/v1/load 重載 model=%s",
+            reason or "upstream wedge", model,
         )
+        _emit_heal_event({"outcome": "healed", "model": model, "reason": reason or "upstream wedge", "heals": len(_LEMONADE_HEAL_HISTORY.get(key, []))})
         return True
 
     # ---------- low-level：retry + error mapping ----------
@@ -568,6 +633,11 @@ class LlmHttpClient:
                     raise LlmConnectionError(f"POST {path} 連線錯誤: {exc}") from exc
                 time.sleep(_backoff_delay(attempt))
             except LlmAPIError as exc:
+                # 後端自己說它壞了（顯示卡裝置掉了）：重載那顆模型再試一次，和卡死走同一條自癒
+                if backend_looks_broken(exc) and attempt < self._max_retries and self._try_heal_lemonade_backend(
+                    str(body.get("model", "")), reason=(exc.detail or "")[:160]
+                ):
+                    continue
                 if not _should_retry_status(exc.status) or attempt >= self._max_retries:
                     raise
                 time.sleep(_backoff_delay(attempt))
@@ -618,6 +688,10 @@ class LlmHttpClient:
                     raise LlmConnectionError(f"POST {path} 連線錯誤: {exc}") from exc
                 await asyncio.sleep(_backoff_delay(attempt))
             except LlmAPIError as exc:
+                if backend_looks_broken(exc) and attempt < self._max_retries and await asyncio.to_thread(
+                    self._try_heal_lemonade_backend, str(body.get("model", "")), (exc.detail or "")[:160]
+                ):
+                    continue
                 if not _should_retry_status(exc.status) or attempt >= self._max_retries:
                     raise
                 await asyncio.sleep(_backoff_delay(attempt))

@@ -2,7 +2,7 @@
 DM 通知共用模組：封裝向指定使用者發送私訊的共通邏輯。
 
 - 底層：resolve_user + send_dm
-- 高階情境封裝：notify_keyword_hit, notify_song_liked
+- 高階情境封裝：notify_keyword_hit, notify_song_liked, notify_owner_lemonade_heal（模型後端自癒事件私訊群主）
 """
 import logging
 import discord
@@ -135,3 +135,29 @@ async def notify_song_liked(user, song, *, voice_channel: discord.VoiceChannel =
         embed.add_field(name="語音頻道", value=voice_channel.name, inline=True)
 
     return await send_dm(user, embed=embed)
+
+
+def lemonade_heal_notice(event: dict) -> str:
+    """自癒事件（`llm.client.http_client.set_heal_listener` 送來的）→ 給群主看的一行。管理員訊息可以帶技術原因。"""
+    model = str(event.get("model") or "?")
+    reason = str(event.get("reason") or "").strip() or "沒有錯誤內容"
+    heals = event.get("heals")
+    outcome = event.get("outcome")
+    if outcome == "healed":
+        return f"🔧 Lemonade 自癒：{model} 回錯（{reason}），已重載一次恢復；這一小時第 {heals} 次。常發生代表那張卡或驅動有問題。"
+    if outcome == "failed":
+        return f"⚠️ Lemonade 自癒失敗：{model} 重載沒成功（{reason}），bot 會晚點再試；請看看 Lemonade。"
+    if outcome == "gave_up":
+        return f"🛑 Lemonade 自癒放棄：{model} 一小時內已重載 {heals} 次還是壞（{reason}），不再自動重載，請檢查那張顯示卡或驅動。"
+    return f"Lemonade 自癒事件：{outcome} {model}（{reason}）"
+
+
+async def notify_owner_lemonade_heal(bot, event: dict) -> bool:
+    """模型後端自癒（重載、失敗、放棄）時私訊群主一行；`OWNER_ID` 沒設就不送。True＝送達。"""
+    from utils.utils import bot_owner_id
+
+    owner_id = bot_owner_id()
+    if not owner_id:
+        return False
+    user = await resolve_user(bot, owner_id)
+    return await send_dm(user, content=lemonade_heal_notice(event)[:1900])

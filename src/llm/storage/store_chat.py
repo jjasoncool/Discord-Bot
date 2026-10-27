@@ -33,7 +33,7 @@ from typing import Optional
 
 import discord
 
-from llm.client.http_client import is_unreachable
+from llm.client.http_client import is_backend_fault, is_unreachable
 from llm.preprocess.emoji_text_utils import replace_custom_emoji_with_description
 from llm.client.lemonade_gate import stream_exclusive
 from llm.preprocess.sticker_cache import get_sticker_text
@@ -223,18 +223,23 @@ def _trim_oldest(buf: list[dict]) -> None:
 
 
 def _is_backend_unreachable(exc: BaseException) -> bool:
-    """embedding 後端或 pgvector 暫時連不上——跟訊息內容無關，下一輪重試就會好。
+    """embedding 後端連不上、逾時或回 5xx，或 pgvector 連不上——跟訊息內容無關，剩下的放回 buffer 下一輪再寫。
 
-    其他錯誤（例如後端回 4xx／5xx）可能是那則訊息本身的問題，重試也不會好；
-    照舊略過該則，避免一則壞訊息永遠卡在 buffer。
+    4xx 這類可能是那則訊息本身的問題，重試也不會好；照舊略過該則，避免一則壞訊息永遠卡在 buffer。
+    5xx 以前也被當單則問題略過：embedding 後端的顯示卡裝置掉了四小時，就丟了四小時的訊息。
     """
-    if is_unreachable(exc):
+    if is_backend_fault(exc):
         return True
     try:
         from sqlalchemy.exc import InterfaceError, OperationalError
     except Exception:
         return False
     return isinstance(exc, (OperationalError, InterfaceError))
+
+
+def _fault_level(exc: BaseException) -> int:
+    """後端回 5xx 記 ERROR：它活著但壞了（例如顯示卡裝置掉了），不會自己好、要有人看到；連不上照舊 WARNING。"""
+    return logging.WARNING if is_unreachable(exc) else logging.ERROR
 
 
 def should_flush_now() -> bool:
@@ -431,8 +436,9 @@ def _sync_write_batch(batch: list[dict], deadline: Optional[float] = None) -> tu
                 persisted_ids.add(mid)
                 skipped += 1
             elif _is_backend_unreachable(exc):
-                logger.warning(
-                    "on_message 批次寫入 pgvector 中止（後端連不上，已寫 %d 則）: %s",
+                logger.log(
+                    _fault_level(exc),
+                    "on_message 批次寫入 pgvector 中止（後端連不上或壞了，已寫 %d 則，剩下的放回下一輪）: %s",
                     written, exc,
                 )
                 return written, batch[pos:]
@@ -473,7 +479,8 @@ def _sync_update_batch(batch: list[dict], deadline: Optional[float] = None) -> t
             updated += 1
         except Exception as exc:
             if _is_backend_unreachable(exc):
-                logger.warning(
+                logger.log(
+                    _fault_level(exc),
                     "on_message_edit 批次更新 pgvector 中止（後端連不上，已更新 %d 則）: %s",
                     updated, exc,
                 )

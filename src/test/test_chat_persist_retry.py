@@ -15,6 +15,8 @@
      放回 buffer 下一輪寫，不會丟；embedding 用「拿著閘門」模式（短逾時、不重試、等名額也有上限）。
      2026-10-09 Lemonade 卡住時，這裡拿著閘門一個多小時，插話與 /askai 全卡。
   7. 新寫的節點 metadata 帶 guild_id（沒給的寫空白；舊列不回填，空白＝目前唯一的伺服器），且不進向量。
+  8. embedding 後端回 5xx（它活著但壞了，例如顯示卡裝置掉了）：和連不上一樣放回 buffer、停這一輪、記 ERROR，
+     不略過任何一則（2026-10-27 這樣丟了四小時共 639 則）。
 """
 
 import asyncio
@@ -119,6 +121,23 @@ class ChatPersistRetryTests(unittest.IsolatedAsyncioTestCase):
         return [item["message_id"] for item in store_chat._buffer]
 
     # ---- 1. 連不上：放回、維持順序、恢復後補寫 ----
+
+    async def test_backend_5xx_keeps_messages_and_logs_an_error(self):
+        from llm.client.http_client import LlmAPIError
+
+        for mid in range(1, 6):
+            store_chat.enqueue_message(_msg(mid))
+        self.index.fail = {"3": LlmAPIError("HTTP 500", status=500, detail="decode() failed: vk::Queue::submit: ErrorDeviceLost")}
+        with self.assertLogs(store_chat.logger, "ERROR") as logs:
+            written = await store_chat.flush_buffer()
+        self.assertEqual(written, 2)
+        self.assertEqual(self.buffer_ids(), ["3", "4", "5"], "5xx 不是那則訊息的問題：放回、不略過")
+        self.assertEqual(self.index.insert_calls, 3, "停在第一則 5xx，沒有逐則硬試")
+        self.assertEqual(len([l for l in logs.output if "ERROR" in l]), 1)
+        self.index.fail = {}
+        await store_chat.flush_buffer()
+        self.assertEqual(self.index.ids(), ["1", "2", "3", "4", "5"])
+
 
     async def test_unreachable_backend_keeps_messages_until_it_recovers(self):
         for exc in (
