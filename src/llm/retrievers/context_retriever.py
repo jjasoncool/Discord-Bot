@@ -13,6 +13,7 @@
   （三路 SQL：本人、在場的人、提到的人與別名；一路語意 `_vector_profile_route`）→ `_dedup_profile_docs`
   → `_profile_cards_context`（每人一張卡、裁到額度）；回 (context, meta)，meta 是各段的計數。
 - `search_chat(...)`：聊天向量庫的語意搜尋（/askai 的窗內重排與插話回憶的全庫搜尋都走這支），同一人同一句只回一則。
+- `embed_query(question, logger)`：問句算向量（`search_chat` 內部也用它；評估程式先一次算完再逐題查）。
 
 規則：
 - 同步、會碰 DB：呼叫端放到執行緒（`asyncio.to_thread`／executor）。`retrieve_discord_context` 是 async，BM25、向量、
@@ -346,6 +347,19 @@ def _collapse_repeats(rows: list[dict[str, Any]], limit: int) -> list[dict[str, 
     return [groups[key] for key in order][:limit]
 
 
+def embed_query(question: str, logger: logging.Logger) -> list[float] | None:
+    """問句算向量（和聊天向量庫同一個 embedding 模型）。模型沒就緒、算失敗回 None 並記 WARNING，呼叫端自己決定降級。"""
+    embed_model = _get_embed_model(logger)
+    if embed_model is None:
+        return None
+    try:
+        query_embedding = embed_model.get_query_embedding(question)
+    except Exception as exc:
+        logger.warning("pgvector chat 搜尋嵌入失敗（降級）: %s", exc)
+        return None
+    return query_embedding or None
+
+
 def search_chat(
     *,
     question: str,
@@ -359,6 +373,7 @@ def search_chat(
     min_chars: int | None = None,
     collapse: bool = True,
     embedding_column: str = "embedding",
+    query_embedding: list[float] | None = None,
 ):
     """對 discord_chat 向量庫做語意搜尋。
 
@@ -379,10 +394,13 @@ def search_chat(
       的表情描述能把候選池佔滿。
     - embedding_column：查哪個向量欄（只給評估程式用：重算向量期間拿同一組題對影子欄 embedding_v2 比對）；
       只接受小寫英數與底線，正式流程一律預設的 embedding。
+    - query_embedding：問句向量已經算好時直接給（評估程式把整份考卷一次算完、只排一次 GPU 的隊，再逐題查）；
+      沒給就在這裡用 `embed_query` 算。
 
     回傳格式由 return_meta 決定（兩種都先在 Python 端照距離排好：建了 HNSW 之後 iterative_scan 的回傳順序不保證）：
     - return_meta=False（預設，/askai 用）→ list[str]：message_id 由近到遠。
-    - return_meta=True（callback 用）→ list[dict]：{message_id, text, distance, timestamp, author_id, repeat_count}，由近到遠。
+    - return_meta=True（callback 用）→ list[dict]：{message_id, text, distance, timestamp, author_id, channel_id, repeat_count}，
+      由近到遠。
 
     回空 list 代表無結果或降級（psycopg2 缺、embedding/連線失敗等），caller 自行決定 fallback。
     """
@@ -391,20 +409,12 @@ def search_chat(
     if not _EMBEDDING_COLUMN.match(embedding_column or ""):
         raise ValueError(f"embedding_column 只能是小寫英數與底線：{embedding_column!r}")
 
-    embed_model = _get_embed_model(logger)
-    if embed_model is None:
-        return []
-
     # 指定了候選集卻是空的 → 無可搜（與舊行為一致：訊息全空時回空）
     if candidate_ids is not None and not candidate_ids:
         return []
 
-    try:
-        query_embedding = embed_model.get_query_embedding(question)
-    except Exception as exc:
-        logger.warning("pgvector chat 搜尋嵌入失敗（降級）: %s", exc)
-        return []
-
+    if query_embedding is None:
+        query_embedding = embed_query(question, logger)
     if not query_embedding:
         return []
 
@@ -424,7 +434,7 @@ def search_chat(
     # 折疊要看作者與文字、排序要看距離（HNSW 的 iterative_scan 不保證回傳順序），所以一律撈回來；
     # dist 的 %s 出現在 SELECT，必須最先 append（在 WHERE params 之前）
     select_cols = ["metadata_->>'message_id' AS mid", "text", "metadata_->>'author_id' AS author",
-                   f"{distance_expr} AS dist", "metadata_->>'timestamp' AS ts"]
+                   f"{distance_expr} AS dist", "metadata_->>'timestamp' AS ts", "metadata_->>'channel_id' AS channel"]
     params: list[Any] = [vector_literal]
     where = [f"{embedding_column} IS NOT NULL"]
     if HYBRID_RETRIEVAL_SETTINGS.chat_table_is_shared():
@@ -476,12 +486,13 @@ def search_chat(
         return []
 
     found: list[dict[str, Any]] = []
-    for mid, text, author, dist, ts in rows:
+    for mid, text, author, dist, ts, channel in rows:
         if not mid:
             continue
         found.append({
             "message_id": str(mid), "text": text or "", "author_id": str(author) if author else "", "repeat_count": 1,
             "distance": float(dist) if dist is not None else None, "timestamp": ts,
+            "channel_id": str(channel) if channel else "",
         })
     found.sort(key=lambda item: (item["distance"] is None, item["distance"] or 0.0))   # 近 → 遠；沒距離的排最後
     found = _collapse_repeats(found, max(1, limit)) if collapse else found[: max(1, limit)]

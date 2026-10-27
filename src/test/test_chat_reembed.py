@@ -339,7 +339,8 @@ class SearchChatColumnTests(unittest.TestCase):
         embed = SimpleNamespace(get_query_embedding=lambda q: [0.1])
         with mock.patch.object(cr, "psycopg2", cr.psycopg2 or object()), \
              mock.patch.object(cr, "_get_embed_model", lambda logger: embed), \
-             mock.patch.object(cr, "_pgvector_connect", lambda: _Conn()):
+             mock.patch.object(cr, "_pgvector_connect", lambda: _Conn()), \
+             mock.patch.object(cr.switches, "current", lambda: SimpleNamespace(chat_vector_index="full")):
             cr.search_chat(question="x", limit=3, logger=LOG, embedding_column="embedding_v2")
             select = [s for s in statements if s.lstrip().startswith("SELECT")][0]
             self.assertIn("embedding_v2 <=> %s::vector", select)

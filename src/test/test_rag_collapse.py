@@ -12,6 +12,7 @@
   - 專用的聊天表不帶 doc_type 篩選（沒統計的 JSON 欄位會讓規劃器放著 HNSW 走全表掃描）；只有和別的來源共用一張表時才篩
   - 距離表達式與查詢向量照開關 `chat_vector_index` 的索引形狀（full＝整欄；halfvec512＝前 512 維正規化、16 位元），和建索引的表達式同一份
   - 插話回憶把 min_chars 交給 search_chat，注入行尾標「同一人說過 N 次」
+  - 問句向量可以由呼叫端先算好交進來（評估程式一次算完再逐題查，不再找 embedding 模型）；回傳的列帶 channel_id
 
 hermetic：假的連線、假的 embedding、假的 reranker，不碰模型與資料庫。
 
@@ -113,11 +114,11 @@ class _Conn:
 
 class SearchChatCollapseTests(unittest.TestCase):
     ROWS = [
-        ("1", ":吃瓜看戲:", "A", 0.01, "t1"),
-        ("2", ":吃瓜看戲:", "A", 0.02, "t2"),
-        ("3", "吃瓜看戲！", "A", 0.03, "t3"),
-        ("4", ":吃瓜看戲:", "B", 0.05, "t4"),
-        ("5", "維護到幾點", "A", 0.20, "t5"),
+        ("1", ":吃瓜看戲:", "A", 0.01, "t1", "c1"),
+        ("2", ":吃瓜看戲:", "A", 0.02, "t2", "c1"),
+        ("3", "吃瓜看戲！", "A", 0.03, "t3", "c1"),
+        ("4", ":吃瓜看戲:", "B", 0.05, "t4", "c1"),
+        ("5", "維護到幾點", "A", 0.20, "t5", "c1"),
     ]
 
     def _run(self, **kwargs):
@@ -154,6 +155,22 @@ class SearchChatCollapseTests(unittest.TestCase):
         ddl = CHAT_INDEX_PROFILES["halfvec512"].index_ddl("data_discord_messages_index")
         self.assertIn(f"(({expr}) halfvec_cosine_ops)", ddl)                 # 建索引用的是同一個表達式
         self.assertEqual(CHAT_INDEX_PROFILES["full"].expression("embedding_v2"), "embedding_v2")
+
+    def test_a_given_query_embedding_skips_the_embed_model_and_rows_carry_channel_id(self):
+        """評估程式把整份考卷的向量一次算完（只排一次 GPU 的隊）再逐題查；回傳帶頻道 id，聊天搜尋工具要標頻道。"""
+        cursor = _Cursor(list(self.ROWS))
+
+        def _no_model(logger):
+            raise AssertionError("給了向量就不該再找 embedding 模型")
+
+        with mock.patch.object(cr, "psycopg2", cr.psycopg2 or object()), \
+             mock.patch.object(cr, "_get_embed_model", _no_model), \
+             mock.patch.object(cr, "_pgvector_connect", lambda: _Conn(cursor)), \
+             mock.patch.object(cr.switches, "current", lambda: SimpleNamespace(chat_vector_index="full")):
+            rows = cr.search_chat(question="吃瓜", limit=2, logger=LOG, return_meta=True, query_embedding=[0.1, 0.2])
+        self.assertIn("0.2", cursor.params[0])                        # 用的是交進來的向量
+        self.assertIn("metadata_->>'channel_id' AS channel", cursor.sql)
+        self.assertEqual(rows[0]["channel_id"], "c1")
 
     def test_full_corpus_search_opens_ef_search_to_the_pgvector_limit(self):
         """同一句話重複幾十次的向量一模一樣，ef_search 太窄會把整團繞過（實測 200 一列都沒回來、1000 才回來）。"""
@@ -224,7 +241,7 @@ class SearchChatCollapseTests(unittest.TestCase):
         self.assertLessEqual(max(cursor.ef_values), 1000)
 
     def test_rows_are_ordered_by_distance_before_collapse_and_cut(self):
-        rows = [("5", "維護到幾點", "A", 0.20, "t5"), ("4", ":吃瓜看戲:", "B", 0.05, "t4"), ("1", ":吃瓜看戲:", "A", 0.01, "t1")]
+        rows = [("5", "維護到幾點", "A", 0.20, "t5", "c1"), ("4", ":吃瓜看戲:", "B", 0.05, "t4", "c1"), ("1", ":吃瓜看戲:", "A", 0.01, "t1", "c1")]
         cursor = _Cursor(rows)
         embed = SimpleNamespace(get_query_embedding=lambda q: [0.1, 0.2])
         with mock.patch.object(cr, "psycopg2", cr.psycopg2 or object()), \

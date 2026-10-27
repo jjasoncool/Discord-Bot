@@ -27,3 +27,6 @@ src/services/sent_articles.db-wal
 # bot 執行時寫的資料（透過 Discord 設的值＋它自己的紀錄：面板、點名、音樂、價格表、關鍵字監控）：整個資料夾不進版控
 src/settings/runtime/
 src/services/search/eval/private/
+# 聊天檢索評估：考卷是群友的聊天內容與習慣（口頭禪、作者 id），報告含同樣內容，兩個資料夾都不進版控
+src/llm/retrievers/eval/private/
+src/llm/retrievers/eval/reports/

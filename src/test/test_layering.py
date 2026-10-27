@@ -47,6 +47,7 @@ LAYERS = [
     ("llm.storage.member_profile_store", SERVICE),  # 成員檔案（自介、印象、AI 觀察、偏好）的存取
     ("llm.storage.ai_interactions_store", SERVICE), # 插話互動紀錄的存取
     ("llm.retrievers.context_retriever", SERVICE),  # 聊天脈絡檢索：/askai、插話、寫入都用
+    ("llm.retrievers.eval", SERVICE),               # 聊天檢索的評估（手動工具，考 search_chat）
     ("llm.persona.member_names", SERVICE),          # 群友名字查詢（讀成員檔案）
     ("llm.persona.preference_extractor", SERVICE),  # 記憶服務的零件：抽偏好事實
     ("llm.persona.signature_tag_extractor", SERVICE),  # 記憶服務的零件：抽招牌梗
