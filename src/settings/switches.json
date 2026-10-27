@@ -47,5 +47,10 @@
     "off：插話不查、不給工具；提示詞只多了 user 段開頭的今天日期",
     "dry_run：記錄模式——琇紫判斷要不要插話時可以想查一次遊戲情報或網路，但只記下她想查什麼（名字檢查的判定一起記進 discord_bot.log），不上網、不給她結果；每天最多記 30 次。全開要等記錄週看過紀錄再加"
   ],
-  "ambient_search_mode": "dry_run"
+  "ambient_search_mode": "dry_run",
+  "_chat_vector_index 可以填": [
+    "full：聊天向量用整欄 1024 維、32 位元的索引（discord_messages_idx_hnsw，約 2.2 GB）",
+    "halfvec512：用前 512 維、16 位元的索引（discord_messages_idx_hnsw_h512，約 0.5 GB）；要先把那個索引建好再切，對不上只會變慢、不會錯"
+  ],
+  "chat_vector_index": "full"
 }

@@ -183,7 +183,7 @@ def _acquire_steps(fd: int, max_wait: float | None = None):
                 # 給了上限的呼叫端（互動式查詢、批次重算）只會等到上限然後丟 GpuBusy，永遠不硬闖；
                 # 「等滿上限照常打模型」只給 bot 自己（沒給上限）用——它的 AI 不能因為別的行程卡住而整個停擺
                 if waited >= max_wait:
-                    raise GpuBusy(f"GPU 被別的工作佔著，等了 {waited:.0f} 秒還沒輪到")
+                    raise GpuBusy(f"GPU 被別的工作佔著，等了 {waited:.0f} 秒還沒輪到") from None   # 鎖檔的 BlockingIOError 不是原因，只是現象
             elif waited >= _CROSS_PROCESS_MAX_WAIT_S:
                 logger.error("等別的行程放 GPU 鎖檔超過 %d 秒，不等了、照常打模型（接下來 %d 秒都不等）（%s）",
                              _CROSS_PROCESS_MAX_WAIT_S, _CROSS_PROCESS_MAX_WAIT_S, CROSS_PROCESS_LOCK_PATH)

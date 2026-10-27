@@ -2,10 +2,64 @@
 
 from __future__ import annotations
 
+import math
 import re
-from typing import Literal
+from typing import Literal, Sequence
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ChatIndexProfile(BaseModel):
+    """聊天向量索引的一種形狀：ORDER BY 的表達式、查詢向量怎麼轉、索引怎麼建。三者要一字不差規劃器才認得是同一個索引，
+    所以只寫在這裡。資料表存的永遠是完整向量，profile 是表達式索引在建索引時現算；換 profile 只要建對應的索引、
+    改開關 `chat_vector_index`、丟掉另一個，不重算。
+
+    - `full`：整欄 1024 維、32 位元（索引約 2.2 GB）。
+    - `halfvec512`：取前 512 維重新正規化、16 位元（索引約 0.5 GB）。embedding 模型支援用前 N 維當低維向量；
+      60 題精確掃描 Hit@1／5／25 為 38／48／51，對整欄的 38／49／50；256 維就開始掉（34／47／51）。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    key: str
+    #: 取前幾維（None＝整欄原樣，不轉型、不正規化）
+    dims: int | None
+    element: Literal["vector", "halfvec"]
+    index_name: str
+
+    def expression(self, column: str) -> str:
+        """索引與 ORDER BY 共用的表達式。"""
+        if self.dims is None and self.element == "vector":
+            return column
+        inner = column if self.dims is None else f"l2_normalize(subvector({column}, 1, {self.dims}))"
+        return f"{inner}::{self.element}({self.dims})" if self.dims else f"{inner}::{self.element}"
+
+    def param_cast(self) -> str:
+        """查詢向量參數要 cast 成的型別（和表達式同型，距離運算子才對得上索引）。"""
+        return f"::{self.element}({self.dims})" if self.dims else f"::{self.element}"
+
+    def query_literal(self, embedding: Sequence[float]) -> str:
+        """查詢向量的字面（pgvector 要 '[v1,v2,...]' 再 cast）；低維 profile 取前 N 維並重新正規化，和索引那邊同一個算法。"""
+        values = [float(v) for v in embedding]
+        if self.dims:
+            values = values[: self.dims]
+            norm = math.sqrt(sum(v * v for v in values)) or 1.0
+            values = [v / norm for v in values]
+        return "[" + ",".join(f"{v:.6f}" for v in values) + "]"
+
+    def opclass(self) -> str:
+        return f"{self.element}_cosine_ops"
+
+    def index_ddl(self, table: str, column: str = "embedding") -> str:
+        """建索引的語法（CONCURRENTLY、序列建；交接檔「重算向量計畫」⑤有前後要下的 SET）。"""
+        return (f"CREATE INDEX CONCURRENTLY {self.index_name} ON {table} USING hnsw "
+                f"(({self.expression(column)}) {self.opclass()})")
+
+
+CHAT_INDEX_PROFILES: dict[str, ChatIndexProfile] = {
+    "full": ChatIndexProfile(key="full", dims=None, element="vector", index_name="discord_messages_idx_hnsw"),
+    "halfvec512": ChatIndexProfile(key="halfvec512", dims=512, element="halfvec", index_name="discord_messages_idx_hnsw_h512"),
+}
 
 
 class RetrievalSourceConfig(BaseModel):

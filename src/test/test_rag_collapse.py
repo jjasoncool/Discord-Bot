@@ -10,6 +10,7 @@
   - 品質閘認得寫進向量庫的格式（`:描述:`、`[貼圖：…]`）
   - 查詢前設 HNSW 的 ef_search 與 iterative_scan（索引建好才有作用，沒索引時無害）；全庫搜尋把 ef_search 開到上限 1000，窗內重排不用
   - 專用的聊天表不帶 doc_type 篩選（沒統計的 JSON 欄位會讓規劃器放著 HNSW 走全表掃描）；只有和別的來源共用一張表時才篩
+  - 距離表達式與查詢向量照開關 `chat_vector_index` 的索引形狀（full＝整欄；halfvec512＝前 512 維正規化、16 位元），和建索引的表達式同一份
   - 插話回憶把 min_chars 交給 search_chat，注入行尾標「同一人說過 N 次」
 
 hermetic：假的連線、假的 embedding、假的 reranker，不碰模型與資料庫。
@@ -127,6 +128,32 @@ class SearchChatCollapseTests(unittest.TestCase):
              mock.patch.object(cr, "_pgvector_connect", lambda: _Conn(cursor)):
             result = cr.search_chat(question="吃瓜", limit=2, logger=LOG, **kwargs)
         return result, cursor
+
+    def test_full_profile_keeps_the_plain_column_expression(self):
+        with mock.patch.object(cr.switches, "current", lambda: SimpleNamespace(chat_vector_index="full")):
+            _, cursor = self._run(return_meta=True)
+        self.assertIn("ORDER BY embedding <=> %s::vector", " ".join(cursor.sql.split()))
+
+    def test_halfvec512_profile_uses_the_index_expression_and_a_normalised_512_dim_query(self):
+        """表達式索引只認一字不差的表達式；查詢向量也要取前 512 維、重新正規化，和索引那邊同一個算法。"""
+        from sys_settings.pgvector_settings import CHAT_INDEX_PROFILES
+        cursor = _Cursor(list(self.ROWS))
+        embed = SimpleNamespace(get_query_embedding=lambda q: [3.0] * 512 + [9.0] * 512)
+        with mock.patch.object(cr, "psycopg2", cr.psycopg2 or object()), \
+             mock.patch.object(cr, "_get_embed_model", lambda logger: embed), \
+             mock.patch.object(cr, "_pgvector_connect", lambda: _Conn(cursor)), \
+             mock.patch.object(cr.switches, "current", lambda: SimpleNamespace(chat_vector_index="halfvec512")):
+            cr.search_chat(question="吃瓜", limit=2, logger=LOG, return_meta=True)
+        sql = " ".join(cursor.sql.split())
+        expr = "l2_normalize(subvector(embedding, 1, 512))::halfvec(512)"
+        self.assertIn(f"ORDER BY {expr} <=> %s::halfvec(512)", sql)
+        self.assertIn(f"{expr} <=> %s::halfvec(512) AS dist", sql)
+        values = [float(x) for x in cursor.params[0].strip("[]").split(",")]
+        self.assertEqual(len(values), 512)                                    # 後半段沒進查詢
+        self.assertAlmostEqual(sum(v * v for v in values), 1.0, places=3)     # 重新正規化
+        ddl = CHAT_INDEX_PROFILES["halfvec512"].index_ddl("data_discord_messages_index")
+        self.assertIn(f"(({expr}) halfvec_cosine_ops)", ddl)                 # 建索引用的是同一個表達式
+        self.assertEqual(CHAT_INDEX_PROFILES["full"].expression("embedding_v2"), "embedding_v2")
 
     def test_full_corpus_search_opens_ef_search_to_the_pgvector_limit(self):
         """同一句話重複幾十次的向量一模一樣，ef_search 太窄會把整團繞過（實測 200 一列都沒回來、1000 才回來）。"""

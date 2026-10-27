@@ -93,6 +93,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 每天最多做幾次的計數（換日歸零） | `utils.daily_quota.DailyQuota`（看圖補字典、插話查詢都用它；守衛擋自己用 `["", 0]` 記） |
 | 網路搜尋（SearXNG；哪類題目用哪組引擎、窄路由結果太少換通用引擎補查） | `llm.retrievers.web.search_web`（路由用 `intent.classify_route`；直接呼叫 `fetch_web_results` 守衛擋）；給模型當工具用 `WebSearchTools`（/askai 開關 `askai_web_search_mode`：keyword 先查好塞進 prompt、tool 由模型和遊戲情報一起決定；工具模式的題目類型由模型選 `kind`，每種類型的引擎寫在 `tools._KINDS`）；SearXNG 的直接答案（匯率、天氣）在 `WebRetrievalOutcome.answers`；被擋的引擎自動暫避 |
 | 官方公告、巴哈單一樓層的原文網址 | `services.source_urls`（`official_article_url`、`bahamut_floor_url`） |
+| 聊天向量索引的形狀（查詢的距離表達式、查詢向量怎麼轉、建索引語法；整欄或前 512 維＋16 位元） | `sys_settings.pgvector_settings.CHAT_INDEX_PROFILES`（`expression`／`param_cast`／`query_literal`／`index_ddl`；用哪個由開關 `chat_vector_index` 決定，`search_chat` 照它組 SQL；三者要一字不差規劃器才會用索引，不要在別處自己拼 `<=>`） |
 | 合併多份排名（關鍵字＋向量的混合檢索） | `utils.rank_fusion`（`rrf_score`／`fuse_rankings`；只看名次、不看各自的分數） |
 | prompt 裡認人的錨點（名字#尾碼） | `llm.preprocess.person_anchor.label()`／`suffix()`（撞號自動加長；`refresh()` 由 `discord_bot` 在啟動與成員進出時呼叫） |
 | 群友的名字（Discord 顯示名稱、伺服器暱稱、全域名稱＋自介／印象暱稱） | `llm.persona.member_names`（`member_names_from_guild`、`merge_names`、`names_member`、`name_map_lines`） |

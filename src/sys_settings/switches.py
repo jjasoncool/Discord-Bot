@@ -66,6 +66,10 @@ class Switches(BaseModel):
     #: 群友名字送出去，再決定全開）；off＝不給工具，system 段跟原本一樣（user 段照樣帶今天日期）。全開（on）等記錄週
     #: 看過紀錄再加
     ambient_search_mode: Literal["off", "dry_run"] = "off"
+    #: 聊天向量索引用哪種形狀（sys_settings.pgvector_settings.CHAT_INDEX_PROFILES；查詢的排序表達式要和資料庫裡的索引一致）：
+    #: full＝整欄 1024 維、32 位元（索引約 2.2 GB）；halfvec512＝前 512 維、16 位元（約 0.5 GB，8 GB 主機才放得進快取）。
+    #: 切之前先把對應的索引建好（建法在交接檔）；對不上只是退回全表掃描變慢，不會錯
+    chat_vector_index: Literal["full", "halfvec512"] = "full"
 
 
 def _parse(raw: str) -> Switches:

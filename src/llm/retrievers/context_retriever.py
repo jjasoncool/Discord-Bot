@@ -63,7 +63,8 @@ from llm.persona.persona_card_builder import (
     format_persona_cards_for_context,
     normalize_alias_text,
 )
-from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
+from sys_settings import switches
+from sys_settings.pgvector_settings import CHAT_INDEX_PROFILES, HYBRID_RETRIEVAL_SETTINGS
 from utils.rank_fusion import rrf_score
 from sys_settings.llm_settings import (
     LLMServiceSettings,
@@ -414,14 +415,16 @@ def search_chat(
         return []
 
     physical_table = HYBRID_RETRIEVAL_SETTINGS.physical_table(table_name)
-    # pgvector 的向量 literal 需以 '[v1,v2,...]' 字串形式帶入再 cast 成 vector。
-    vector_literal = "[" + ",".join(f"{float(v):.6f}" for v in query_embedding) + "]"
+    # 距離的表達式、查詢向量的轉換照開關選的索引形狀（整欄，或前 512 維＋16 位元）；表達式要和資料庫裡的索引一字不差
+    profile = CHAT_INDEX_PROFILES[switches.current().chat_vector_index]
+    distance_expr = f"{profile.expression(embedding_column)} <=> %s{profile.param_cast()}"
+    vector_literal = profile.query_literal(query_embedding)
 
     # 動態組 SELECT/WHERE；params 嚴格按 SQL 內 %s 出現順序（SELECT → WHERE → ORDER BY → LIMIT）。
     # 折疊要看作者與文字、排序要看距離（HNSW 的 iterative_scan 不保證回傳順序），所以一律撈回來；
     # dist 的 %s 出現在 SELECT，必須最先 append（在 WHERE params 之前）
     select_cols = ["metadata_->>'message_id' AS mid", "text", "metadata_->>'author_id' AS author",
-                   f"{embedding_column} <=> %s::vector AS dist", "metadata_->>'timestamp' AS ts"]
+                   f"{distance_expr} AS dist", "metadata_->>'timestamp' AS ts"]
     params: list[Any] = [vector_literal]
     where = [f"{embedding_column} IS NOT NULL"]
     if HYBRID_RETRIEVAL_SETTINGS.chat_table_is_shared():
@@ -444,7 +447,7 @@ def search_chat(
     if author_id is not None:
         where.append("metadata_->>'author_id' = %s")
         params.append(author_id)
-    params.append(vector_literal)      # ORDER BY embedding <=> %s::vector
+    params.append(vector_literal)      # ORDER BY 的距離表達式
     fetch_limit = max(1, limit) * (_COLLAPSE_OVERFETCH if collapse else 1)
     params.append(fetch_limit)         # LIMIT %s
 
@@ -452,7 +455,7 @@ def search_chat(
         SELECT {', '.join(select_cols)}
         FROM {physical_table}
         WHERE {' AND '.join(where)}
-        ORDER BY {embedding_column} <=> %s::vector
+        ORDER BY {distance_expr}
         LIMIT %s
     """
 
