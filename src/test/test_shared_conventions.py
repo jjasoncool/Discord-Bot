@@ -715,6 +715,27 @@ RULES = [
         allowed={"sys_settings/llm_settings.py"},
     ),
     Rule(
+        name="取 thread：快取沒有就 fetch、封存的也要拿得到、「不存在」與「暫時失敗」要分開（曾把一次 5xx 當成串被刪而清紀錄重開）",
+        pattern=r"\.fetch_channel\(",
+        canonical="utils.discord_threads.fetch_thread(client, thread_id, raise_errors=…)",
+        allowed={
+            "utils/discord_threads.py",
+            # 取的是文字頻道不是 thread：Telegram 轉發的主頻道、搬隔離區的一次性腳本
+            "services/relay/telegram_relay_service.py",
+            "scripts/telegram_move_to_quarantine.py",
+        },
+    ),
+    Rule(
+        name="取伺服器成員：先查快取、沒有再向 API 查（快取偶爾漏人，接單曾因此失敗）",
+        pattern=r"\bguild\.fetch_member\(",
+        canonical="utils.dm_notifier.resolve_member(guild, user_id)",
+        allowed={
+            "utils/dm_notifier.py",
+            # 點名刻意只用 API：快取漏人會把還在的人誤判成離開而踢掉
+            "services/community/rollcall_service.py",
+        },
+    ),
+    Rule(
         name="實體表名（沒消毒會有 identifier 注入風險）",
         pattern=r'f"data_\{',
         canonical="HybridRetrievalSettings.physical_table() / chat_table() / source_table()",

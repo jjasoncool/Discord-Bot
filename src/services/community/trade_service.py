@@ -45,7 +45,8 @@ from discord.utils import snowflake_time
 from sys_settings.time_settings import APP_TZ
 from sys_settings.trade_settings import TradeSettings
 from utils.discord_content import get_forum_tags, post_to_channel
-from utils.dm_notifier import send_dm
+from utils.discord_threads import fetch_thread
+from utils.dm_notifier import resolve_member, send_dm
 from utils.utils import ChannelConfig, check_role, safe_send_interaction_message
 
 logger = logging.getLogger(__name__)
@@ -855,35 +856,12 @@ class TradeService:
         return self.bot.get_channel(channel_id) if channel_id is not None else None
 
     async def get_thread(self, thread_id: int) -> Optional[discord.Thread]:
-        channel = self.bot.get_channel(thread_id)
-        if channel is not None:
-            return channel
-        try:
-            # 已封存的貼文不在快取裡
-            return await self.bot.fetch_channel(thread_id)
-        except discord.HTTPException:
-            return None
+        """交易或商品的 thread（已封存的也拿得到）；不存在或不是 thread 回 None。"""
+        return await fetch_thread(self.bot, thread_id)
 
     async def member(self, guild: Optional[discord.Guild], user_id: int) -> Optional[discord.Member]:
-        """取伺服器成員；要顯示的名字一律用它的 display_name（伺服器暱稱）。
-
-        沿用 2025-07 `b456d91` 的做法：成員快取有時候拿不到人（當時接單就因此失敗），
-        所以先查快取、沒有再向 Discord API 查；API 也查不到才當作不在伺服器。"""
-        if guild is None:
-            return None
-        member = guild.get_member(user_id)
-        if member is not None:
-            return member
-        logger.debug("交易：快取中沒有成員 %s，改向 API 查", user_id)
-        try:
-            member = await guild.fetch_member(user_id)
-            logger.info("交易：從 API 取得成員 %s", user_id)
-            return member
-        except discord.NotFound:
-            logger.warning("交易：成員 %s 不在伺服器中，可能已離開伺服器", user_id)
-        except discord.HTTPException:
-            logger.warning("交易：向 API 查成員 %s 失敗，可能是權限或 Discord 狀態問題", user_id, exc_info=True)
-        return None
+        """取伺服器成員；要顯示的名字一律用它的 display_name（伺服器暱稱）。"""
+        return await resolve_member(guild, user_id)
 
     async def display_names(self, guild: Optional[discord.Guild], user_ids) -> dict[int, str]:
         """一批使用者的伺服器暱稱（每人只查一次）；查不到的不在結果裡，由呼叫端決定怎麼顯示。"""

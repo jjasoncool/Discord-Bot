@@ -5,6 +5,7 @@ import traceback
 from datetime import datetime, timezone
 from discord import app_commands
 from discord.ext import commands
+from utils.dm_notifier import resolve_member
 from utils.utils import safe_send_interaction_message
 
 # 獲取 logger
@@ -302,15 +303,8 @@ class TestCommands(commands.Cog):
                 for i, thread in enumerate(threads[:20], 1):
                     owner_mention = "未知使用者"
                     if thread.owner_id:
-                        try:
-                            owner = thread.owner or interaction.guild.get_member(thread.owner_id)
-                            if owner is None:
-                                owner = await interaction.guild.fetch_member(thread.owner_id)
-                            owner_mention = owner.mention if owner else "未知使用者 (已離開群組)"
-                        except discord.NotFound:
-                            owner_mention = "未知使用者 (已離開群組)"
-                        except Exception as e:
-                            logger.error(f"獲取貼文擁有者失敗: {str(e)}")
+                        owner = thread.owner or await resolve_member(interaction.guild, thread.owner_id)
+                        owner_mention = owner.mention if owner else "未知使用者 (已離開群組)"
                     tags = ", ".join(tag.name for tag in thread.applied_tags) if thread.applied_tags else "無標籤"
                     created_at_text = thread.created_at.strftime('%Y-%m-%d %H:%M:%S') if thread.created_at else "未知時間"
                     embed.add_field(

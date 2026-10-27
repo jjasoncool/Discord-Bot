@@ -10,34 +10,44 @@ import discord
 logger = logging.getLogger(__name__)
 
 
-async def resolve_user(bot, user_id: int, *, guild: discord.Guild = None):
-    """解析 user_id 為 User/Member。順序：guild.fetch_member → bot.fetch_user → bot.get_user → guild.get_member"""
-    user = None
-    if guild is not None:
-        try:
-            user = await guild.fetch_member(user_id)
-        except discord.NotFound:
-            logger.warning(f"fetch_member 找不到使用者，ID: {user_id}")
-        except discord.Forbidden:
-            logger.warning(f"fetch_member 權限不足，ID: {user_id}")
-        except Exception as e:
-            logger.warning(f"fetch_member 錯誤，ID: {user_id}，{type(e).__name__}: {e}")
+async def resolve_member(guild, user_id) -> discord.Member | None:
+    """伺服器成員：先查快取、沒有再向 API 查。全專案取成員只走這裡（守衛擋自己 guild.fetch_member）。
 
+    成員快取偶爾拿不到人（接單曾因此失敗），所以快取沒有不等於不在伺服器，要再問一次 API；
+    API 說不存在（已離開）、沒權限回 None，其他 HTTP 錯誤記 warning 後也回 None。
+    點名刻意只用 API（快取漏人會把還在的人誤判成離開而踢掉），是合理例外。
+    """
+    if guild is None or not user_id:
+        return None
+    member = guild.get_member(int(user_id))
+    if member is not None:
+        return member
+    try:
+        return await guild.fetch_member(int(user_id))
+    except discord.NotFound:
+        logger.warning("成員 %s 不在伺服器（可能已離開）", user_id)
+    except discord.Forbidden:
+        logger.warning("沒有權限查成員 %s", user_id)
+    except discord.HTTPException as exc:
+        logger.warning("向 API 查成員 %s 失敗：%s", user_id, exc)
+    return None
+
+
+async def resolve_user(bot, user_id: int, *, guild: discord.Guild = None):
+    """解析 user_id 為 Member／User（給私訊用）：先當伺服器成員找（快取→API），不是成員才退到 bot 的使用者快取與 API。"""
+    user = await resolve_member(guild, user_id)
+    if user is None:
+        user = bot.get_user(user_id)
     if user is None:
         try:
             user = await bot.fetch_user(user_id)
         except (discord.NotFound, discord.Forbidden):
             pass
-        except Exception as e:
-            logger.warning(f"fetch_user 錯誤，ID: {user_id}，{type(e).__name__}: {e}")
+        except discord.HTTPException as exc:
+            logger.warning("fetch_user 錯誤，ID: %s：%s", user_id, exc)
 
     if user is None:
-        user = bot.get_user(user_id)
-    if user is None and guild is not None:
-        user = guild.get_member(user_id)
-
-    if user is None:
-        logger.warning(f"所有方法均無法取得使用者，ID: {user_id}")
+        logger.warning("所有方法均無法取得使用者，ID: %s", user_id)
     return user
 
 
@@ -138,7 +148,7 @@ async def notify_song_liked(user, song, *, voice_channel: discord.VoiceChannel =
 
 
 def lemonade_heal_notice(event: dict) -> str:
-    """自癒事件（`llm.client.http_client.set_heal_listener` 送來的）→ 給群主看的一行。管理員訊息可以帶技術原因。"""
+    """自癒事件（`llm.client.lemonade_admin.set_heal_listener` 送來的）→ 給群主看的一行。管理員訊息可以帶技術原因。"""
     model = str(event.get("model") or "?")
     reason = str(event.get("reason") or "").strip() or "沒有錯誤內容"
     heals = event.get("heals")

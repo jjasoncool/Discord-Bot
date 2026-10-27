@@ -17,6 +17,7 @@ import discord
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 
+from utils.discord_threads import fetch_thread
 from utils.logger_config import get_article_monitor_logger
 from utils.discord_content import (
     IMAGE_EXTENSIONS,
@@ -597,13 +598,9 @@ class BahamutMonitor(BaseContentMonitor):
                 logger.error("增量更新失敗：找不到頻道 %s", forum_channel_id)
                 return None
 
-            thread = channel.get_thread(thread_id)
-            if not thread:
-                # thread 可能被歸檔，嘗試 fetch
-                try:
-                    thread = await self.bot.fetch_channel(thread_id)
-                except Exception:
-                    thread = None
+            # 封存的串不在快取裡要 fetch；只有真的不存在才當被刪，Discord 暫時出錯（5xx）往外丟、這輪略過，
+            # 不然一次 5xx 就把紀錄清掉重開一串
+            thread = channel.get_thread(thread_id) or await fetch_thread(self.bot, thread_id, raise_errors=True)
 
             if not thread:
                 # thread 已被刪除 → 清除舊 state，直接重建

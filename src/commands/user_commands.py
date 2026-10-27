@@ -7,7 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 from constants import ITEMS
 from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, check_guild
-from utils.dm_notifier import notify_keyword_hit
+from utils.dm_notifier import notify_keyword_hit, resolve_member
 from services.community import item_prices
 from sys_settings.paths import runtime_path
 from utils import runtime_file
@@ -424,23 +424,8 @@ class UserCommands(commands.Cog):
 
             for idx, settings in enumerate(settings_list):
                 keywords = ", ".join(f"`{kw}`" for kw in settings['keywords'])
-                user = self.bot.get_user(settings['user_id'])
-                if user:
-                    user_name = user.mention
-                else:
-                    # 嘗試從伺服器成員中查找使用者，使用 fetch_member
-                    try:
-                        member = await interaction.guild.fetch_member(settings['user_id'])
-                        user_name = member.mention
-                    except discord.NotFound:
-                        user_name = f"無法獲取使用者資訊"
-                        logger.warning(f"無法獲取使用者資訊，ID: {settings['user_id']}，可能已離開伺服器")
-                    except discord.Forbidden:
-                        user_name = f"無法獲取使用者資訊"
-                        logger.warning(f"無法獲取使用者資訊，ID: {settings['user_id']}，機器人無權限")
-                    except Exception as e:
-                        user_name = f"無法獲取使用者資訊"
-                        logger.warning(f"無法獲取使用者資訊，ID: {settings['user_id']}，錯誤: {str(e)}")
+                member = await resolve_member(interaction.guild, settings['user_id'])
+                user_name = member.mention if member else "無法獲取使用者資訊"
 
                 embed.add_field(
                     name=f"📝 {channel_name} - 設定 {idx + 1}",
@@ -648,15 +633,8 @@ class UserCommands(commands.Cog):
 
         seller_options = []
         for user_id in prices.keys():
-            member = interaction.guild.get_member(int(user_id))
-            if member:
-                user_name = member.display_name if hasattr(member, 'display_name') else member.name if hasattr(member, 'name') else f"使用者ID: {user_id}"
-            else:
-                try:
-                    member = await interaction.guild.fetch_member(int(user_id))
-                    user_name = member.display_name if hasattr(member, 'display_name') else member.name if hasattr(member, 'name') else f"使用者ID: {user_id}"
-                except (discord.NotFound, discord.HTTPException):
-                    user_name = f"使用者ID: {user_id}"
+            member = await resolve_member(interaction.guild, int(user_id))
+            user_name = member.display_name if member else f"使用者ID: {user_id}"
             seller_options.append(discord.SelectOption(label=user_name, value=user_id))
 
         if not seller_options:
@@ -671,15 +649,8 @@ class UserCommands(commands.Cog):
 
         async def seller_select_callback(interaction: discord.Interaction):
             selected_seller_id = seller_select.values[0]
-            selected_seller = interaction.guild.get_member(int(selected_seller_id))
-            if not selected_seller:
-                try:
-                    selected_seller = await interaction.guild.fetch_member(int(selected_seller_id))
-                    seller_name = selected_seller.display_name if hasattr(selected_seller, 'display_name') else selected_seller.name if hasattr(selected_seller, 'name') else f"使用者ID: {selected_seller_id}"
-                except (discord.NotFound, discord.HTTPException):
-                    seller_name = f"使用者ID: {selected_seller_id}"
-            else:
-                seller_name = selected_seller.display_name if hasattr(selected_seller, 'display_name') else selected_seller.name if hasattr(selected_seller, 'name') else f"使用者ID: {selected_seller_id}"
+            selected_seller = await resolve_member(interaction.guild, int(selected_seller_id))
+            seller_name = selected_seller.display_name if selected_seller else f"使用者ID: {selected_seller_id}"
 
             embed = discord.Embed(
                 title=f"{seller_name} 的物品價格",

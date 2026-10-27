@@ -14,6 +14,7 @@ from typing import List, Dict, Optional
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 
+from utils.discord_threads import fetch_thread
 from utils.logger_config import get_article_monitor_logger
 from utils.discord_content import (
     sanitize_forum_thread_title,
@@ -367,8 +368,9 @@ class PTTMonitor(BaseContentMonitor):
                     if not thread_id:
                         continue
 
-                    thread = self.bot.get_channel(thread_id)
-                    if not isinstance(thread, discord.Thread):
+                    # 封存的串不在快取裡，要 fetch 才拿得到；以前只查快取，封存串的新推文會被記成已同步、永遠不送
+                    thread = await fetch_thread(self.bot, thread_id)
+                    if thread is None:
                         continue
 
                     delta_messages = self._format_ptt_comments_messages(delta_comments)

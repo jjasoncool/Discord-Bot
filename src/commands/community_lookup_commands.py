@@ -38,6 +38,7 @@ from services.community.community_lookup_service import (
 )
 from services.source_urls import bahamut_floor_url
 from services.state_db import StateDB
+from utils.discord_threads import fetch_thread
 from utils.panel_bump import PanelBumper
 from sys_settings.paths import runtime_path
 from utils.user_dates import parse_user_date
@@ -1166,12 +1167,9 @@ class CommunityLookupFlow:
         created_thread = False
         if thread is None:
             if state and state.get("thread_id"):
-                try:
-                    ch = interaction.client.get_channel(state["thread_id"]) or await interaction.client.fetch_channel(state["thread_id"])
-                    if isinstance(ch, discord.Thread):
-                        thread = ch
-                except discord.NotFound:
-                    # 舊 thread 被刪了，清狀態
+                # 只有真的不存在才清狀態重開；Discord 暫時出錯（5xx）往外丟，這次查詢失敗就好
+                thread = await fetch_thread(interaction.client, state["thread_id"], raise_errors=True)
+                if thread is None:
                     await self.cog.state_db.delete_community_lookup_thread(guild_id, source, lookup_id)
                     state = None
 
