@@ -1,4 +1,4 @@
-"""取 thread 與取成員只有一份：utils.discord_threads.fetch_thread、utils.dm_notifier.resolve_member。
+"""取 thread 與取成員只有一份：utils.discord_threads.fetch_thread、utils.discord_members.resolve_member。
 
 守的底線：
   1. fetch_thread：快取有就不打 API；封存的（不在快取）用 fetch 拿得到；不存在回 None；不是 thread 回 None。
@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 
 import discord  # noqa: E402
 
-from utils import dm_notifier  # noqa: E402
+from utils import discord_members  # noqa: E402
 from utils.discord_threads import fetch_thread  # noqa: E402
 
 SRC = os.path.dirname(HERE)
@@ -89,26 +89,26 @@ class ResolveMemberTests(unittest.TestCase):
     def test_cached_member_does_not_hit_the_api(self):
         member = SimpleNamespace(id=5)
         guild = self._guild(cached=member)
-        self.assertIs(member, asyncio.run(dm_notifier.resolve_member(guild, 5)))
+        self.assertIs(member, asyncio.run(discord_members.resolve_member(guild, 5)))
         guild.fetch_member.assert_not_awaited()
 
     def test_cache_miss_asks_the_api(self):
         member = SimpleNamespace(id=5)
         guild = self._guild(fetched=member)
-        self.assertIs(member, asyncio.run(dm_notifier.resolve_member(guild, "5")))
+        self.assertIs(member, asyncio.run(discord_members.resolve_member(guild, "5")))
         guild.fetch_member.assert_awaited_once_with(5)
 
     def test_api_failures_mean_no_member_and_never_raise(self):
         for exc in (_not_found(), _forbidden(), _server_error()):
             with self.subTest(exc=type(exc).__name__):
-                self.assertIsNone(asyncio.run(dm_notifier.resolve_member(self._guild(fetched=exc), 5)))
-        self.assertIsNone(asyncio.run(dm_notifier.resolve_member(None, 5)))
+                self.assertIsNone(asyncio.run(discord_members.resolve_member(self._guild(fetched=exc), 5)))
+        self.assertIsNone(asyncio.run(discord_members.resolve_member(None, 5)))
 
     def test_resolve_user_prefers_the_member_cache(self):
         member = SimpleNamespace(id=5)
         guild = self._guild(cached=member)
         bot = SimpleNamespace(get_user=lambda uid: None, fetch_user=mock.AsyncMock())
-        self.assertIs(member, asyncio.run(dm_notifier.resolve_user(bot, 5, guild=guild)))
+        self.assertIs(member, asyncio.run(discord_members.resolve_user(bot, 5, guild=guild)))
         guild.fetch_member.assert_not_awaited()
         bot.fetch_user.assert_not_awaited()
 

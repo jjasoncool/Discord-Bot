@@ -5,7 +5,7 @@ import traceback
 from datetime import datetime, timezone
 from discord import app_commands
 from discord.ext import commands
-from utils.dm_notifier import resolve_member
+from utils.discord_members import resolve_member
 from utils.utils import safe_send_interaction_message
 
 # 獲取 logger

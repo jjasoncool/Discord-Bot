@@ -1,54 +1,15 @@
 """
 DM 通知共用模組：封裝向指定使用者發送私訊的共通邏輯。
 
-- 底層：resolve_user + send_dm
+- 底層：send_dm（找對象用 `utils.discord_members.resolve_user`）
 - 高階情境封裝：notify_keyword_hit, notify_song_liked, notify_owner_lemonade_heal（模型後端自癒事件私訊群主）
 """
 import logging
 import discord
 
+from utils.discord_members import resolve_user
+
 logger = logging.getLogger(__name__)
-
-
-async def resolve_member(guild, user_id) -> discord.Member | None:
-    """伺服器成員：先查快取、沒有再向 API 查。全專案取成員只走這裡（守衛擋自己 guild.fetch_member）。
-
-    成員快取偶爾拿不到人（接單曾因此失敗），所以快取沒有不等於不在伺服器，要再問一次 API；
-    API 說不存在（已離開）、沒權限回 None，其他 HTTP 錯誤記 warning 後也回 None。
-    點名刻意只用 API（快取漏人會把還在的人誤判成離開而踢掉），是合理例外。
-    """
-    if guild is None or not user_id:
-        return None
-    member = guild.get_member(int(user_id))
-    if member is not None:
-        return member
-    try:
-        return await guild.fetch_member(int(user_id))
-    except discord.NotFound:
-        logger.warning("成員 %s 不在伺服器（可能已離開）", user_id)
-    except discord.Forbidden:
-        logger.warning("沒有權限查成員 %s", user_id)
-    except discord.HTTPException as exc:
-        logger.warning("向 API 查成員 %s 失敗：%s", user_id, exc)
-    return None
-
-
-async def resolve_user(bot, user_id: int, *, guild: discord.Guild = None):
-    """解析 user_id 為 Member／User（給私訊用）：先當伺服器成員找（快取→API），不是成員才退到 bot 的使用者快取與 API。"""
-    user = await resolve_member(guild, user_id)
-    if user is None:
-        user = bot.get_user(user_id)
-    if user is None:
-        try:
-            user = await bot.fetch_user(user_id)
-        except (discord.NotFound, discord.Forbidden):
-            pass
-        except discord.HTTPException as exc:
-            logger.warning("fetch_user 錯誤，ID: %s：%s", user_id, exc)
-
-    if user is None:
-        logger.warning("所有方法均無法取得使用者，ID: %s", user_id)
-    return user
 
 
 async def send_dm(user, *, embed=None, content=None, file=None) -> bool:

@@ -7,7 +7,8 @@ from discord import app_commands
 from discord.ext import commands
 from constants import ITEMS
 from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, check_guild
-from utils.dm_notifier import notify_keyword_hit, resolve_member
+from utils.discord_members import resolve_member
+from utils.dm_notifier import notify_keyword_hit
 from services.community import item_prices
 from sys_settings.paths import runtime_path
 from utils import runtime_file

@@ -728,9 +728,9 @@ RULES = [
     Rule(
         name="取伺服器成員：先查快取、沒有再向 API 查（快取偶爾漏人，接單曾因此失敗）",
         pattern=r"\bguild\.fetch_member\(",
-        canonical="utils.dm_notifier.resolve_member(guild, user_id)",
+        canonical="utils.discord_members.resolve_member(guild, user_id)",
         allowed={
-            "utils/dm_notifier.py",
+            "utils/discord_members.py",
             # 點名刻意只用 API：快取漏人會把還在的人誤判成離開而踢掉
             "services/community/rollcall_service.py",
         },

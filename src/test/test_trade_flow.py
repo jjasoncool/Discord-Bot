@@ -905,7 +905,7 @@ class ServerNicknameTests(TradeFlowTestCase):
         self.world.cached = set()
         del self.world.members[REQUESTER.id]
 
-        with self.assertLogs("utils.dm_notifier", level="WARNING"):   # 取成員收成一份，log 在那裡
+        with self.assertLogs("utils.discord_members", level="WARNING"):   # 取成員收成一份，log 在那裡
             self.assertIsNone(self.react(post, SUPPLIER))
         self.assertEqual(self.world.cart.all_threads, [])
 

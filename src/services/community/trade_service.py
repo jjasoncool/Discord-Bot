@@ -46,7 +46,8 @@ from sys_settings.time_settings import APP_TZ
 from sys_settings.trade_settings import TradeSettings
 from utils.discord_content import get_forum_tags, post_to_channel
 from utils.discord_threads import fetch_thread
-from utils.dm_notifier import resolve_member, send_dm
+from utils.discord_members import resolve_member
+from utils.dm_notifier import send_dm
 from utils.utils import ChannelConfig, check_role, safe_send_interaction_message
 
 logger = logging.getLogger(__name__)
