@@ -378,6 +378,8 @@ def _chat_node(item: dict):
         "message_id": mid,
         "author_id": item["author_id"],
         "channel_id": item["channel_id"],
+        # 舊列沒有這個鍵（空白＝目前唯一的伺服器）；之後有第二個伺服器時用「等於它或空白」就分得開，不回填舊列
+        "guild_id": item.get("guild_id") or "",
         "timestamp": item["timestamp"],
         "doc_type": "discord_chat",
     }

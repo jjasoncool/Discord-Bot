@@ -14,6 +14,7 @@
   6. 拿著 GPU 閘門的時間有上限：一次 flush 寫超過 FLUSH_GPU_BUDGET_SECONDS 就停、放鎖，剩下的（新增與編輯）
      放回 buffer 下一輪寫，不會丟；embedding 用「拿著閘門」模式（短逾時、不重試、等名額也有上限）。
      2026-10-09 Lemonade 卡住時，這裡拿著閘門一個多小時，插話與 /askai 全卡。
+  7. 新寫的節點 metadata 帶 guild_id（沒給的寫空白；舊列不回填，空白＝目前唯一的伺服器），且不進向量。
 """
 
 import asyncio
@@ -375,6 +376,15 @@ class SingleNodeTests(unittest.TestCase):
         node = store_chat._chat_node(self.item("9", "維護到幾點"))
         self.assertEqual("維護到幾點", node.get_content(metadata_mode=MetadataMode.EMBED))   # 不帶 message_id 那串
         self.assertEqual("discord_chat", node.metadata["doc_type"])                          # metadata 仍在，查詢過濾要用
+
+    def test_new_nodes_carry_guild_id_but_it_stays_out_of_the_embedding(self):
+        """之後有第二個伺服器時靠它分；舊列沒有這個鍵、不回填，所以沒給的也要能寫（空白＝目前唯一的伺服器）。"""
+        from llama_index.core.schema import MetadataMode
+
+        node = store_chat._chat_node({**self.item("9", "維護到幾點"), "guild_id": "g1"})
+        self.assertEqual("g1", node.metadata["guild_id"])
+        self.assertEqual("維護到幾點", node.get_content(metadata_mode=MetadataMode.EMBED))
+        self.assertEqual("", store_chat._chat_node(self.item("10", "hi")).metadata["guild_id"])
 
 
 class ChatIndexTimeoutTests(unittest.TestCase):
