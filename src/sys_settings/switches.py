@@ -57,6 +57,9 @@ class Switches(BaseModel):
     #: /askai 挑「相關」聊天訊息時的重排（和情報搜尋同一個 reranker）：on＝融合名次前 30 則連問題一起讀、重新打分，
     #: 每題多等一次 GPU（約 1～2 秒）；off＝照關鍵字＋向量融合的名次。reranker 壞掉、GPU 等太久時自動照原本的名次
     askai_rerank_mode: Literal["off", "on"] = "off"
+    #: /askai 的聊天紀錄搜尋工具（llm.retrievers.chat_search）：on＝模型問到「誰說過／誰常說／之前有人提過」時自己決定查
+    #: 全部頻道、所有時間的聊天紀錄（字面計數或語意），結果標頻道、名字、時間；off＝不給這個工具（只看頻道最近 100 則）
+    askai_chat_search_mode: Literal["off", "on"] = "off"
     #: 聊天向量庫補寫（llm.storage.chat_index_backfill）：raw 備份有、聊天向量庫沒有的訊息（多半是停機前還在記憶體裡、
     #: 沒來得及寫的）定期補寫。off＝不查；dry_run＝查、記 log（幾則、會排幾則），不寫；on＝排進聊天記憶的寫入佇列。
     #: 預設 dry_run：只讀不寫，跟 off 一樣安全，又能先從 log 看到要補多少再決定切到 on

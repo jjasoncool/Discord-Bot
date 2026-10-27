@@ -37,6 +37,11 @@
     "on：融合名次前幾十則再讓 reranker 連問題一起讀、重新排序（則數在設定 rerank_candidates；每題多約 1 秒；顯示卡被佔著時等不到就照原本的名次）"
   ],
   "askai_rerank_mode": "on",
+  "_askai_chat_search_mode 可以填": [
+    "off：/askai 不搜聊天紀錄（只看這個頻道最近 100 則）",
+    "on：多一個「聊天紀錄搜尋」工具，問到誰說過／誰常說／之前有人提過時由模型自己決定查（全部頻道、所有時間；字面計數或照意思找，結果標頻道、名字、時間）"
+  ],
+  "askai_chat_search_mode": "on",
   "_chat_index_backfill_mode 可以填": [
     "off：不查",
     "dry_run：查、記 log 說會補幾則，不寫（試跑用）",
@@ -52,5 +57,5 @@
     "full：聊天向量用整欄 1024 維、32 位元的索引（discord_messages_idx_hnsw，約 2.2 GB）",
     "halfvec512：用前 512 維、16 位元的索引（discord_messages_idx_hnsw_h512，約 0.5 GB）；要先把那個索引建好再切，對不上只會變慢、不會錯"
   ],
-  "chat_vector_index": "full"
+  "chat_vector_index": "halfvec512"
 }

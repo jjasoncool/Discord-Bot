@@ -577,6 +577,40 @@ class AmbientChatSettings(BaseSettings):
         return (init_settings,)
 
 
+class AskAIChatSearchSettings(BaseSettings):
+    """/askai 的聊天紀錄搜尋工具（`llm.retrievers.chat_search`）的細項；開關在 settings/switches.json 的
+    `askai_chat_search_mode`。只吃 class 預設值。"""
+
+    #: 怎麼用這個工具的規則：只在真的有工具時接在系統提示詞後面（改檔即生效）
+    rules_path: str = prompt_file("askai_chat_search_rules.txt")
+    #: 字面模式最多列幾個人、每個人最多列幾個頻道、附幾則原文；原文從最近幾則命中裡挑（整張表照時間排很貴，只排命中的）
+    phrase_speakers: int = 5
+    phrase_channels: int = 3
+    phrase_examples: int = 2
+    phrase_scan_rows: int = 300
+    #: 語意模式回幾則、太短的不算（反應詞撐不起一個印象）
+    topic_limit: int = 8
+    topic_min_chars: int = 6
+    #: 每則原文最多給模型幾個字（工具結果也佔 context）
+    text_max_chars: int = 160
+    #: 字面模式的查詢最多跑幾秒（沒有 trigram 索引時是全表掃描；逾時回錯誤給模型，別讓整個回答卡住）
+    statement_timeout_seconds: float = 20.0
+
+    model_config = SettingsConfigDict(extra="forbid", frozen=True)
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: Any,
+        env_settings: Any,
+        dotenv_settings: Any,
+        file_secret_settings: Any,
+    ) -> Tuple[Any, ...]:
+        """停用 env/dotenv，僅接受初始化參數與 class 預設值。"""
+        return (init_settings,)
+
+
 class AmbientSearchSettings(BaseSettings):
     """插話上網查（`llm.ambient.ambient_search`）的細項；開關在 settings/switches.json 的 `ambient_search_mode`。
     只吃 class 預設值。"""

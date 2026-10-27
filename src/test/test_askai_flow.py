@@ -111,7 +111,7 @@ NAME_MAP = ["【名字對照】", "- 乙#2222 也叫：小乙"]
 class _Harness:
     """把 /askai 流程周邊全換成假的，留下紀錄給測試看。"""
 
-    def __init__(self, *, web_mode="off", intel_mode="off", web_triggered=False):
+    def __init__(self, *, web_mode="off", intel_mode="off", web_triggered=False, chat_mode="off"):
         self.llm = _FakeLLM()
         self.cog = lc.LLMCommands.__new__(lc.LLMCommands)
         self.cog.bot = None
@@ -127,7 +127,8 @@ class _Harness:
         self.debug_kwargs = None
         self.image_payload = ["B64"]
         self.switch = SimpleNamespace(askai_web_search_mode=web_mode, askai_intel_search_mode=intel_mode,
-                                      askai_rerank_mode="off")
+                                      askai_rerank_mode="off", askai_chat_search_mode=chat_mode)
+        self.chat_tool_kwargs = None
         self.intent = SimpleNamespace(triggered=web_triggered, reason="r", trigger_keyword="天氣" if web_triggered else None,
                                       cleaned_query="台北 天氣" if web_triggered else None,
                                       categories=["general"], time_range="day", language="zh-TW")
@@ -151,6 +152,10 @@ class _Harness:
         self.intel_calls.append({"question": question, "enabled": enabled, "also": list(also)})
         meta["connected"] = False
         return await generate(None)
+
+    def _chat_tools(self, **kwargs):
+        self.chat_tool_kwargs = kwargs
+        return SimpleNamespace(calls=[{"mode": "phrase", "query": "好了啦", "result_count": 3}])
 
     def _file_logger(self, *, name, **kwargs):
         return self.file_logs.setdefault(name, mock.Mock())
@@ -177,6 +182,7 @@ class _Harness:
             mock.patch.object(lc, "search_web", self._search_web),
             mock.patch.object(lc, "format_web_context_lines", lambda results, answers: [f"[網] {r.title} {r.url}" for r in results]),
             mock.patch.object(lc, "WebSearchTools", lambda settings: SimpleNamespace(calls=[{"kind": "general", "query": "q"}])),
+            mock.patch.object(lc, "ChatSearchTools", self._chat_tools),
             mock.patch.object(lc, "get_or_create_file_logger", self._file_logger),
             mock.patch.object(lc, "build_askai_prompt_log", self._debug_log),
             mock.patch.object(lc, "append_askai_response_log", lambda **kwargs: self.history.append(kwargs)),
@@ -290,6 +296,20 @@ class AskaiFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((web_meta["mode"], web_meta["triggered"], web_meta["engines"]), ("keyword", True, ["bing"]))
         self.assertEqual(web_meta["results_preview"][0]["url"], "https://w/1")
         self.assertEqual(h.intel_calls[0]["also"], [], "keyword 模式不把網搜當工具")
+
+    async def test_chat_search_tool_joins_the_tool_round_when_its_switch_is_on(self):
+        """聊天紀錄搜尋是第三個工具：和網搜一起交給工具輪；成員名字、頻道、bot 自己的 id 由指令層交進去；經過進回應紀錄。"""
+        h = await self._harness(web_mode="tool", intel_mode="on", chat_mode="on").run()
+        self.assertEqual(len(h.intel_calls[0]["also"]), 2, "網搜與聊天搜尋都交給工具輪")
+        self.assertEqual(h.chat_tool_kwargs["self_id"], "5555")
+        self.assertEqual(h.chat_tool_kwargs["member_names"], {"1111": ["甲"], "2222": ["乙", "小乙"]})
+        self.assertEqual(h.history[0]["chat_search_meta"]["calls"], [{"mode": "phrase", "query": "好了啦", "result_count": 3}])
+
+    async def test_chat_search_tool_stays_out_when_its_switch_is_off(self):
+        h = await self._harness(web_mode="tool", intel_mode="on").run()
+        self.assertEqual(len(h.intel_calls[0]["also"]), 1)
+        self.assertIsNone(h.chat_tool_kwargs)
+        self.assertIsNone(h.history[0]["chat_search_meta"])
 
     async def test_tool_mode_hands_web_tools_to_the_tool_round(self):
         h = await self._harness(web_mode="tool", intel_mode="on", web_triggered=True).run()

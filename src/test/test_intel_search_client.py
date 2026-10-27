@@ -277,7 +277,7 @@ class AskaiWiringTests(unittest.TestCase):
         self.assertIn("web_mode = switches.current().askai_web_search_mode", self.askai)
         self.assertIn('run_web = web_mode == "keyword" and intent.triggered', self.askai)
         self.assertIn('WebSearchTools(settings=WEB_SETTINGS) if web_mode == "tool" else None', self.askai)
-        self.assertIn("also=[web_tools] if web_tools else ()", self.askai)
+        self.assertIn("also=[tools for tools in (web_tools, chat_tools) if tools is not None]", self.askai)
         self.assertIn('web_meta["calls"] = web_tools.calls', self.askai)
         # 關鍵字模式：只有直接答案（匯率、天氣）沒有網頁時，也要給模型
         self.assertIn("if outcome.results or outcome.answers:", self.askai)

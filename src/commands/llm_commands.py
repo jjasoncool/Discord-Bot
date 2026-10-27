@@ -19,6 +19,7 @@ from llm.persona.persona_card_builder import extract_mentioned_user_ids
 from llm.retrievers.context_retriever import retrieve_discord_context, retrieve_rag_context_sync
 from services.search.rerank import LemonadeReranker
 from llm.retrievers.intel import run_with_intel
+from llm.retrievers.chat_search import ChatSearchTools
 from llm.retrievers.web import WebSearchTools, format_web_context_lines, search_web, should_search
 from llm.client.lemonade_gate import imagegen_busy, note_foreground_activity
 from llm.persona.member_names import member_names_from_guild, name_map_lines
@@ -34,7 +35,7 @@ from llm.preprocess.vision_image import (
 )
 from services.llm_service import LLMService
 from sys_settings import switches
-from sys_settings.llm_settings import AskAICommandSettings, AskAIIntelSettings, AskAIWebSettings
+from sys_settings.llm_settings import AskAIChatSearchSettings, AskAICommandSettings, AskAIIntelSettings, AskAIWebSettings
 from sys_settings.time_settings import APP_TZ
 from utils.discord_content import DISCORD_MESSAGE_LIMIT, split_message
 from utils.dm_notifier import send_dm
@@ -46,6 +47,7 @@ logger = logging.getLogger(__name__)
 ASKAI_SETTINGS = AskAICommandSettings()
 WEB_SETTINGS = AskAIWebSettings()
 INTEL_SETTINGS = AskAIIntelSettings()
+CHAT_SEARCH_SETTINGS = AskAIChatSearchSettings()
 PROMPT_FILE_PATH = Path(ASKAI_SETTINGS.prompt_file_path)
 IDENTITY_FILE_PATH = Path(ASKAI_SETTINGS.identity_file_path)
 GUARDRAILS_FILE_PATH = Path(ASKAI_SETTINGS.guardrails_file_path)
@@ -204,6 +206,7 @@ def append_askai_response_log(
     messages_sent: list[dict[str, object]] | None = None,
     error_kind: str | None = None,
     intel_meta: dict[str, object] | None = None,
+    chat_search_meta: dict[str, object] | None = None,
 ) -> None:
     """將每次 askai 的輸入/輸出與必要統計 append 到 jsonl，供後續觀察改善。
 
@@ -212,6 +215,7 @@ def append_askai_response_log(
     已記錄同源 prompt_record_log，重複落盤一份完整 messages 會讓 jsonl 體積膨脹過快。
     `error_kind` 在失敗時標記類型（no_choices / empty_content / http_error / timeout / connection / unknown）。
     `intel_meta` 是查遊戲情報的經過：開關、有沒有連上 search-mcp、呼叫了哪些工具（參數、花多久、結果 id 或錯誤）。
+    `chat_search_meta` 是搜聊天紀錄的經過（模式、查詢字、對到的人與頻道、幾筆或錯誤）；工具沒開時是 None。
     """
     guild_id = interaction.guild.id if interaction.guild else None
     channel_id = interaction.channel.id if interaction.channel else None
@@ -239,6 +243,7 @@ def append_askai_response_log(
         "rag_context_meta": rag_meta,
         "web_context_meta": web_meta,
         "intel_meta": intel_meta,
+        "chat_search_meta": chat_search_meta,
     }
 
     response_logger = get_or_create_file_logger(
@@ -334,6 +339,7 @@ class _AskaiInputs:
     interaction: Any = None       # 記錄回應歷史要 guild／channel／user
     model: str | None = None      # 第 2 段決定後填回，第 3 段記錄用
     think: bool | None = None
+    chat_search_meta: dict[str, object] | None = None   # 第 2 段填：聊天紀錄搜尋工具查了什麼
 
 
 _ASKAI_RERANKER = None
@@ -388,6 +394,12 @@ def _resolve_mentions(question: str, guild) -> tuple[str, list[str]]:
                     f"<@!{uid_str}>", name_with_id
                 )
     return resolved_question, mentioned_user_ids
+
+
+def _channel_names(guild) -> dict[str, str]:
+    """頻道與 thread 的 id → 名稱，給聊天搜尋工具標出處、解析模型給的頻道名。thread 只有快取裡的（封存的標成未知頻道）。"""
+    channels = [*(getattr(guild, "channels", None) or []), *(getattr(guild, "threads", None) or [])]
+    return {str(c.id): c.name for c in channels if getattr(c, "name", None)}
 
 
 def _start_web_search(resolved_question: str):
@@ -591,6 +603,7 @@ def _askai_record(inputs: "_AskaiInputs", result, *, intel_meta: dict[str, objec
             messages_sent=result.messages_sent,
             error_kind=result.error_kind,
             intel_meta=intel_meta,
+            chat_search_meta=inputs.chat_search_meta,
         )
     except Exception as exc:
         logger.warning("寫入 askai response history 失敗 trace=%s: %s", trace_id, exc)
@@ -931,11 +944,20 @@ class LLMCommands(commands.Cog):
         # 網路搜尋的工具模式：和情報工具合成一組交給模型（輪數兩邊共用 INTEL_SETTINGS 的值）
         web_mode = inputs.web_mode
         web_tools = WebSearchTools(settings=WEB_SETTINGS) if web_mode == "tool" else None
+        # 聊天紀錄搜尋（開關 askai_chat_search_mode）：成員名字、頻道名稱由這裡查好交進去（檢索層不認 discord）
+        chat_tools = None
+        if switches.current().askai_chat_search_mode == "on" and interaction.guild:
+            client_user = getattr(getattr(interaction, "client", None), "user", None)
+            chat_tools = ChatSearchTools(
+                settings=CHAT_SEARCH_SETTINGS,
+                member_names=member_names_from_guild(interaction.guild), channel_names=_channel_names(interaction.guild),
+                self_id=str(client_user.id) if client_user else None,
+            )
 
         # 用 asyncio.Task 包裝，取消時可中斷 LLM 的 HTTP 請求；查情報、查網路都在同一個 task 裡，按取消時一起中斷
         llm_task = asyncio.create_task(run_with_intel(
             _generate, question=inputs.resolved_question, enabled=intel_mode == "on", meta=intel_meta,
-            settings=INTEL_SETTINGS, also=[web_tools] if web_tools else (),
+            settings=INTEL_SETTINGS, also=[tools for tools in (web_tools, chat_tools) if tools is not None],
         ))
 
         # 同時等 LLM 回覆和取消事件
@@ -976,6 +998,11 @@ class LLMCommands(commands.Cog):
                         [(c.get("kind"), c.get("query"), c.get("elapsed_ms"),
                           c.get("error") or f"{c.get('result_count')} 筆＋答案 {c.get('answer_count', 0)}")
                          for c in web_tools.calls])
+        if chat_tools is not None:
+            inputs.chat_search_meta = {"mode": "on", "calls": chat_tools.calls}
+            logger.info("askai 聊天搜尋 trace=%s 呼叫=%s", inputs.trace_id,
+                        [(c.get("mode"), c.get("query"), c.get("elapsed_ms"), c.get("error") or c.get("result_count"))
+                         for c in chat_tools.calls])
         return llm_result, intel_meta, web_tools
 
     async def _prepare_image_payload(
