@@ -588,9 +588,12 @@ class AskAIChatSearchSettings(BaseSettings):
     phrase_channels: int = 3
     phrase_examples: int = 2
     phrase_scan_rows: int = 300
-    #: 語意模式回幾則、太短的不算（反應詞撐不起一個印象）
+    #: 語意模式回幾則例句、太短的不算（反應詞撐不起一個印象）
     topic_limit: int = 8
     topic_min_chars: int = 6
+    #: 語意模式的統計（「最像的句子裡誰說了幾句」）最多看幾句、距離超過多少就不算像（每則訊息最近的鄰居約 0.2、前十名約 0.25～0.36）
+    topic_tally_limit: int = 100
+    topic_max_distance: float = 0.5
     #: 每則原文最多給模型幾個字（工具結果也佔 context）
     text_max_chars: int = 160
     #: 字面模式的查詢最多跑幾秒（沒有 trigram 索引時是全表掃描；逾時回錯誤給模型，別讓整個回答卡住）

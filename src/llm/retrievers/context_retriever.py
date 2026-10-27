@@ -14,6 +14,7 @@
   → `_profile_cards_context`（每人一張卡、裁到額度）；回 (context, meta)，meta 是各段的計數。
 - `search_chat(...)`：聊天向量庫的語意搜尋（/askai 的窗內重排與插話回憶的全庫搜尋都走這支），同一人同一句只回一則。
 - `embed_query(question, logger)`：問句算向量（`search_chat` 內部也用它；評估程式先一次算完再逐題查）。
+- `ilike_pattern(fragment)`：`text ILIKE … ESCAPE '\\'` 用的子字串樣式（% 與 _ 跳脫）；聊天搜尋工具的字面模式也用它。
 
 規則：
 - 同步、會碰 DB：呼叫端放到執行緒（`asyncio.to_thread`／executor）。`retrieve_discord_context` 是 async，BM25、向量、
@@ -319,6 +320,13 @@ _COLLAPSE_OVERFETCH = 4
 _FULL_CORPUS_EF_SEARCH = 1000
 #: 向量欄名只能長這樣（直接拼進 SQL）
 _EMBEDDING_COLUMN = re.compile(r"^[a-z_][a-z0-9_]*$")
+#: `text ILIKE %s ESCAPE '\\'` 的樣式：% 與 _ 是萬用字元，要跳脫；前後加 % 找子字串
+_LIKE_SPECIAL = re.compile(r"([\\%_])")
+
+
+def ilike_pattern(fragment: str) -> str:
+    """子字串比對的 ILIKE 樣式（配 `ESCAPE '\\'`）。"""
+    return "%" + _LIKE_SPECIAL.sub(r"\\\1", fragment) + "%"
 
 
 def _collapse_repeats(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
@@ -369,6 +377,7 @@ def search_chat(
     channel_id: str | None = None,
     before_timestamp: str | None = None,
     author_id: str | None = None,
+    text_contains: str | None = None,
     return_meta: bool = False,
     min_chars: int | None = None,
     collapse: bool = True,
@@ -387,6 +396,7 @@ def search_chat(
     - before_timestamp（ISO 字串）：只取早於此時刻的訊息，用來排除近窗（chat metadata 的
       timestamp 為 msg.created_at.isoformat()，帶 +00:00，字串 `<` 即時序比較）。
     - author_id：只取該作者說的訊息（callback target 模式用——撈「目標本人」原話）。
+    - text_contains：只取內文含這段字的（ILIKE 子字串；聊天搜尋工具把語意搜尋鎖在「提到某個詞」的句子）。
     - min_chars：只取 `length(text) >= min_chars` 的。插話回憶把太短的擋在 SQL 裡，候選池才不會被反應詞佔掉
       （全表 42.6% 不到 8 字，以前撈 25 筆有 45% 在 Python 端才被丟）。
     - collapse（預設開）：同一作者、`dedup_key` 相同的文字只留距離最近的一則，`repeat_count` 記這批候選裡它出現幾次
@@ -457,6 +467,9 @@ def search_chat(
     if author_id is not None:
         where.append("metadata_->>'author_id' = %s")
         params.append(author_id)
+    if text_contains:
+        where.append("text ILIKE %s ESCAPE '\\'")
+        params.append(ilike_pattern(text_contains))
     params.append(vector_literal)      # ORDER BY 的距離表達式
     fetch_limit = max(1, limit) * (_COLLAPSE_OVERFETCH if collapse else 1)
     params.append(fetch_limit)         # LIMIT %s

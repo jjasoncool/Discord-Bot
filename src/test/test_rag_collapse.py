@@ -13,6 +13,7 @@
   - 距離表達式與查詢向量照開關 `chat_vector_index` 的索引形狀（full＝整欄；halfvec512＝前 512 維正規化、16 位元），和建索引的表達式同一份
   - 插話回憶把 min_chars 交給 search_chat，注入行尾標「同一人說過 N 次」
   - 問句向量可以由呼叫端先算好交進來（評估程式一次算完再逐題查，不再找 embedding 模型）；回傳的列帶 channel_id
+  - text_contains 把語意搜尋鎖在內文含某段字的列（ILIKE、% 與 _ 跳脫）
 
 hermetic：假的連線、假的 embedding、假的 reranker，不碰模型與資料庫。
 
@@ -171,6 +172,11 @@ class SearchChatCollapseTests(unittest.TestCase):
         self.assertIn("0.2", cursor.params[0])                        # 用的是交進來的向量
         self.assertIn("metadata_->>'channel_id' AS channel", cursor.sql)
         self.assertEqual(rows[0]["channel_id"], "c1")
+
+    def test_text_contains_filter_goes_into_the_sql_with_wildcards_escaped(self):
+        _, cursor = self._run(return_meta=True, text_contains="100%_x")
+        self.assertIn("text ILIKE %s ESCAPE '\\'", cursor.sql)
+        self.assertIn("%100\\%\\_x%", cursor.params)
 
     def test_full_corpus_search_opens_ef_search_to_the_pgvector_limit(self):
         """同一句話重複幾十次的向量一模一樣，ef_search 太窄會把整團繞過（實測 200 一列都沒回來、1000 才回來）。"""

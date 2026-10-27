@@ -14,14 +14,16 @@
 
 規則：
 - 兩種模式由模型選：phrase＝照字面找（ILIKE 子字串）、按人與頻道計數＋每人最近幾則原文，給「誰常說、誰說過」這類要數
-  的問題；topic＝照意思找（`search_chat` 全庫、同一人同一句折成一則），回最近幾則含誰、哪個頻道、何時，給印象與話題。
-  phrase 一筆都沒有時自動改走 topic，回傳裡註明「不是一字不差」。
+  的問題；topic＝照意思找（`search_chat` 全庫、同一人同一句折成一則），回最像的幾則例句，加上「最像的 N 句裡誰說了幾句」
+  的統計（距離在上限內才算、同一句重複講的算次數），給印象、話題與「誰最常欺負／嘲笑／稱讚…」這類沒有字面關鍵字的題目。
+  phrase 一筆都沒有時自動改走 topic，回傳裡註明「不是一字不差」。`contains` 把兩種模式的範圍都鎖在含某個詞的句子。
 - 結果一律標「頻道、名字#尾碼、時間」：/askai 本來只看一個頻道的視窗，全庫搜回來的東西不標出處會混在一起。
 - 聊天表沒存 guild_id（只有 channel_id），bot 目前只在一個伺服器，所以不分伺服器；之後多伺服器要用指令層交進來的頻道
   名單當白名單。bot 自己的訊息不算（`self_id`）。
 - 任何失敗（參數錯、名字對不到、DB 壞）都回 `{"error": ...}` 給模型，不往外丟。DB 是同步的，`execute` 丟到執行緒。
 
-例外與決策：字面比對用 ILIKE 子字串而不是 `dedup_key` 的正規化——資料庫端沒有同一份正規化；句子中間夾標點或空白
+例外與決策：topic 的統計只數最像的 N 句、不是全庫，向量抓的是主題不是態度，含蓄的欺負會漏；要判態度得再加一層 reranker，
+等看過效果再說。字面比對用 ILIKE 子字串而不是 `dedup_key` 的正規化——資料庫端沒有同一份正規化；句子中間夾標點或空白
 （「好 了 啦」）會漏，模型可以換寫法再查。字面模式一次掃描就把計數與最近幾則一起算出來（CTE 引用兩次會物化一次），
 熱快取約 0.3 秒、冷快取讀整個 heap（約 660 MB）要幾秒到十幾秒，所以設 statement_timeout 讓它逾時就回錯誤給模型；
 要再快得建 pg_trgm 的 GIN 索引（三個字以上的句子走索引，兩個字的照樣掃描），建不建記在交接檔。
@@ -59,7 +61,8 @@ CHAT_SEARCH_TOOL: dict[str, Any] = {
         "description": (
             "搜尋這個伺服器的聊天紀錄（全部頻道、所有時間）。問「誰說過／誰常說某句話」「之前有人提過某件事嗎」"
             "「某人講過什麼」時用。phrase＝照字面找那句話、按人與頻道計數，附每人最近幾則原文（口頭禪、名言、要數次數的問題）；"
-            "topic＝照意思找（印象、話題），回最近幾則含誰、哪個頻道、何時。結果裡的 name 是「名字#尾碼」。"
+            "topic＝照意思找（印象、話題、誰最常欺負／嘲笑／稱讚某人這類沒有固定字眼的行為），回最像的幾則含誰、哪個頻道、何時，"
+            "加上最像的句子裡誰說了幾句的統計。結果裡的 name 是「名字#尾碼」。"
         ),
         "parameters": {
             "type": "object",
@@ -70,6 +73,8 @@ CHAT_SEARCH_TOOL: dict[str, Any] = {
                          "description": "phrase＝字面、計數；topic＝語意。沒給就是 topic"},
                 "author": {"type": "string", "description": "只找這個人說的：用對話或名字對照裡看到的名字，可含 #尾碼"},
                 "channel": {"type": "string", "description": "只找這個頻道（頻道名稱）"},
+                "contains": {"type": "string",
+                             "description": "句子裡要含的詞，把範圍鎖在提到它的句子（例：找對阿喵說的話就填 阿喵）"},
             },
             "required": ["query"],
         },
@@ -214,29 +219,33 @@ class ChatSearchTools:
         channel_id, error = self.resolve_channel(args.get("channel"))
         if error:
             return {"error": error}
-        record.update(query=query, mode=mode, author_id=author_id, channel_id=channel_id)
+        contains = str(args.get("contains") or "").strip() or None
+        record.update(query=query, mode=mode, author_id=author_id, channel_id=channel_id, contains=contains)
+        scope = {"author_id": author_id, "channel_id": channel_id, "contains": contains}
 
         if mode == "phrase":
-            payload = await asyncio.to_thread(self.phrase_search, query, author_id=author_id, channel_id=channel_id)
+            payload = await asyncio.to_thread(self.phrase_search, query, **scope)
             if payload["total"]:
                 record["result_count"] = payload["total"]
                 return payload
             record["fallback"] = "topic"
-            payload = await asyncio.to_thread(self.topic_search, query, author_id=author_id, channel_id=channel_id)
-            payload["note"] = f"照字面找不到「{query}」，改照意思找：下面是意思相近的句子，不是一字不差"
+            payload = await asyncio.to_thread(self.topic_search, query, **scope)
+            payload["note"] = f"照字面找不到「{query}」，改照意思找。" + payload["note"]
         else:
-            payload = await asyncio.to_thread(self.topic_search, query, author_id=author_id, channel_id=channel_id)
-        record["result_count"] = len(payload["results"])
+            payload = await asyncio.to_thread(self.topic_search, query, **scope)
+        record["result_count"] = payload["counted"]
         return payload
 
     # ── 兩種模式的後端（同步、碰 DB） ─────────────────────────────────────
     def phrase_search(self, query: str, *, author_id: Optional[str] = None,
-                      channel_id: Optional[str] = None) -> dict[str, Any]:
+                      channel_id: Optional[str] = None, contains: Optional[str] = None) -> dict[str, Any]:
         """照字面找：按人與頻道計數，每人附最近幾則原文。一次掃描：計數與最近幾則都從同一個 CTE 來。"""
         s = self.settings
-        pattern = "%" + re.sub(r"([\\%_])", r"\\\1", query) + "%"
         where = ["text ILIKE %s ESCAPE '\\'"]
-        params: list[Any] = [pattern]
+        params: list[Any] = [context_retriever.ilike_pattern(query)]
+        if contains:
+            where.append("text ILIKE %s ESCAPE '\\'")
+            params.append(context_retriever.ilike_pattern(contains))
         if author_id:
             where.append("metadata_->>'author_id' = %s")
             params.append(author_id)
@@ -288,28 +297,52 @@ class ChatSearchTools:
                 "latest": _when(latest[author])[:10], "examples": examples.get(author, []),
             })
         payload: dict[str, Any] = {"mode": "phrase", "query": query, "total": sum(counts.values()), "speakers": speakers}
+        if contains:
+            payload["contains"] = contains
         if len(counts) > len(speakers):
             payload["note"] = f"還有 {len(counts) - len(speakers)} 個人說過，只列說最多次的 {len(speakers)} 個"
         return payload
 
     def topic_search(self, query: str, *, author_id: Optional[str] = None,
-                     channel_id: Optional[str] = None) -> dict[str, Any]:
-        """照意思找：全庫語意搜尋，回最近幾則含誰、哪個頻道、何時。"""
+                     channel_id: Optional[str] = None, contains: Optional[str] = None) -> dict[str, Any]:
+        """照意思找：全庫語意搜尋。回最像的幾則例句，加上「最像的 N 句裡誰說了幾句」的統計——距離在上限內才算像，
+        同一人同一句重複講的算進次數。這樣「誰最常欺負某人」答的是「像欺負的句子裡誰最多」，不是誰最常提到名字。"""
         s = self.settings
         rows = context_retriever.search_chat(
-            question=query, limit=s.topic_limit * 2, logger=logger, candidate_ids=None,
-            channel_id=channel_id, author_id=author_id, return_meta=True, min_chars=s.topic_min_chars, collapse=True,
+            question=query, limit=s.topic_tally_limit, logger=logger, candidate_ids=None,
+            channel_id=channel_id, author_id=author_id, text_contains=contains,
+            return_meta=True, min_chars=s.topic_min_chars, collapse=True,
         )
-        results = []
+        kept: list[tuple[dict[str, Any], str]] = []
         for row in rows:
             text = (row.get("text") or "").strip()
+            distance = row.get("distance")
             if str(row.get("author_id") or "") == self.self_id or is_emoji_or_symbol_only(text) or is_link_only(text):
                 continue
+            if distance is None or distance > s.topic_max_distance:
+                continue
+            kept.append((row, text))
+        results = []
+        for row, text in kept[: s.topic_limit]:
             item = {"when": _when(row.get("timestamp")), "channel": self.channel_label(row.get("channel_id")),
                     "name": self.label(row.get("author_id")), "text": _clip(text, s.text_max_chars)}
             if (row.get("repeat_count") or 1) > 1:
                 item["repeats"] = row["repeat_count"]
             results.append(item)
-            if len(results) >= s.topic_limit:
-                break
-        return {"mode": "topic", "query": query, "results": results}
+        counts: dict[str, int] = defaultdict(int)
+        examples: dict[str, list[str]] = defaultdict(list)
+        for row, text in kept:
+            author = str(row.get("author_id") or "")
+            counts[author] += int(row.get("repeat_count") or 1)
+            if len(examples[author]) < s.phrase_examples:
+                examples[author].append(
+                    f"[{_when(row.get('timestamp'))} #{self.channel_label(row.get('channel_id'))}] {_clip(text, s.text_max_chars)}")
+        speakers = [{"name": self.label(author), "count": counts[author], "examples": examples[author]}
+                    for author in sorted(counts, key=lambda a: (-counts[a], a))[: s.phrase_speakers]]
+        payload: dict[str, Any] = {
+            "mode": "topic", "query": query, "counted": sum(counts.values()), "speakers": speakers, "results": results,
+            "note": f"統計只數最像的 {len(kept)} 句（同一句重複講的算次數），不是全庫；這些句子是意思相近、不是一字不差",
+        }
+        if contains:
+            payload["contains"] = contains
+        return payload

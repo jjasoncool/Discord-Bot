@@ -5,7 +5,9 @@
     （正式環境的預設路徑讀得到）
   - phrase：ILIKE 子字串（% 與 _ 會跳脫）、一次掃描同時算計數與最近幾則、有逾時上限、按人與頻道計數、每人附最近幾則原文；人標「名字#尾碼」、頻道標名稱、
     時間換成本地時間；bot 自己的訊息不算；一筆都沒有就改走 topic 並註明不是一字不差
-  - topic：走 `search_chat` 全庫（不限頻道、折疊、過品質閘），回誰、哪個頻道、何時、說過幾次
+  - topic：走 `search_chat` 全庫（不限頻道、折疊、過品質閘），回最像的幾則例句，加上「最像的 N 句裡誰說了幾句」的統計：
+    距離超過上限的不算、同一句重複講的算次數、bot 自己的不算
+  - contains 把兩種模式的範圍鎖在含某個詞的句子（phrase 多一個 ILIKE、topic 交給 search_chat 的 text_contains）
   - author／channel 用模型看到的名字對：對到一個就過濾；對不到或對到好幾個回錯誤（列出候選）
   - 任何失敗（參數錯、不認得的工具、DB 壞）都回 `{"error": ...}`，不往外丟；經過記在 `calls`
 
@@ -86,7 +88,8 @@ class ChatSearchToolsTests(unittest.TestCase):
         self.cursor = _Cursor(combined(GROUPS, RECENT))
         self.search_calls = []
         self.topic_rows = [topic_row("1", ":吃瓜看戲:", MING), topic_row("2", "我幾乎不喝水的", BOT),
-                           topic_row("3", "我一天喝不到一杯水", HUA, channel="88", repeat=3), topic_row("4", "水喝太少會頭痛", MING)]
+                           topic_row("3", "我一天喝不到一杯水", HUA, channel="88", repeat=3), topic_row("4", "水喝太少會頭痛", MING),
+                           topic_row("5", "水費又漲價了", GE, dist=0.9)]   # 太遠：不算像
 
         def fake_search(**kwargs):
             self.search_calls.append(kwargs)
@@ -112,6 +115,7 @@ class ChatSearchToolsTests(unittest.TestCase):
         self.assertEqual(params["properties"]["mode"]["enum"], ["phrase", "topic"])
         self.assertIn("author", params["properties"])
         self.assertIn("channel", params["properties"])
+        self.assertIn("contains", params["properties"])
 
     def test_rules_file_is_readable_from_the_default_path(self):
         runner = cs.ChatSearchTools(member_names=MEMBERS, channel_names=CHANNELS)
@@ -168,6 +172,7 @@ class ChatSearchToolsTests(unittest.TestCase):
         runner = self.tools()
         payload = self.run_tool(runner, {"query": "不喝水", "mode": "phrase"})
         self.assertEqual(payload["mode"], "topic")
+        self.assertIn("照字面找不到", payload["note"])
         self.assertIn("不是一字不差", payload["note"])
         self.assertEqual(len(self.search_calls), 1)
         self.assertEqual(runner.calls[0]["fallback"], "topic")
@@ -180,14 +185,30 @@ class ChatSearchToolsTests(unittest.TestCase):
         self.assertEqual(call["author_id"], HUA)
         self.assertIsNone(call["channel_id"])
         self.assertTrue(call["collapse"] and call["return_meta"])
-        self.assertEqual(call["limit"], cs.AskAIChatSearchSettings().topic_limit * 2)
+        self.assertEqual(call["limit"], cs.AskAIChatSearchSettings().topic_tally_limit)
+        self.assertIsNone(call["text_contains"])
         texts = [r["text"] for r in payload["results"]]
-        self.assertEqual(texts, ["我一天喝不到一杯水", "水喝太少會頭痛"], "純表情與 bot 自己的不回")
+        self.assertEqual(texts, ["我一天喝不到一杯水", "水喝太少會頭痛"], "純表情、bot 自己的、太遠的都不回")
         hit = payload["results"][0]
         self.assertEqual((hit["when"], hit["channel"], hit["repeats"]), ("2026-10-20 21:03", "鳴潮", 3))
         self.assertTrue(hit["name"].startswith("小華#"))
         self.assertNotIn("repeats", payload["results"][1])
-        self.assertEqual(runner.calls[0]["result_count"], 2)
+        # 統計：同一句重複講的算次數（小華 3）、太遠的不算（明哥 0）、bot 不算
+        self.assertEqual([(s["name"][:2], s["count"]) for s in payload["speakers"]], [("小華", 3), ("小明", 1)])
+        self.assertEqual(payload["speakers"][0]["examples"], ["[2026-10-20 21:03 #鳴潮] 我一天喝不到一杯水"])
+        self.assertEqual(payload["counted"], 4)
+        self.assertIn("最像的 2 句", payload["note"])
+        self.assertEqual(runner.calls[0]["result_count"], 4)
+
+    def test_contains_narrows_both_modes_to_sentences_with_that_word(self):
+        runner = self.tools()
+        self.run_tool(runner, {"query": "嘲笑阿喵 阿喵好廢", "mode": "topic", "contains": "阿喵"})
+        self.assertEqual(self.search_calls[0]["text_contains"], "阿喵")
+        self.assertEqual(runner.calls[0]["contains"], "阿喵")
+        self.run_tool(runner, {"query": "好了啦", "mode": "phrase", "contains": "50%_"})
+        sql, params = self.cursor.executed[1]
+        self.assertEqual(sql.count("text ILIKE %s ESCAPE"), 2)
+        self.assertEqual(params[:2], ("%好了啦%", "%50\\%\\_%"))
 
     def test_failures_become_error_payloads(self):
         runner = self.tools()
