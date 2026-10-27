@@ -10,7 +10,8 @@ from discord.ext import commands
 from typing import Optional
 
 # 注意：需確保 utils 資料夾下的 utils.py 包含 create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, ChannelConfig 等定義
-from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, ChannelConfig, ConfigWriteError, check_guild
+from utils.discord_members import check_guild
+from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, ChannelConfig, ConfigWriteError
 from utils.panel_bump import PanelBumper
 from utils import runtime_file
 from sys_settings.paths import runtime_path

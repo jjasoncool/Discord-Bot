@@ -28,7 +28,7 @@ from llm.storage.ai_interactions_store import mark_insulted, recent_insults, rec
 from sys_settings import switches
 from sys_settings.llm_settings import AmbientChatSettings
 from sys_settings.time_settings import APP_TZ
-from utils.utils import bot_owner_id
+from utils.discord_members import bot_owner_id
 
 logger = logging.getLogger(__name__)
 

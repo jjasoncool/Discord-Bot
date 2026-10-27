@@ -7,7 +7,7 @@ DM 通知共用模組：封裝向指定使用者發送私訊的共通邏輯。
 import logging
 import discord
 
-from utils.discord_members import resolve_user
+from utils.discord_members import bot_owner_id, resolve_user
 
 logger = logging.getLogger(__name__)
 
@@ -125,8 +125,6 @@ def lemonade_heal_notice(event: dict) -> str:
 
 async def notify_owner_lemonade_heal(bot, event: dict) -> bool:
     """模型後端自癒（重載、失敗、放棄）時私訊群主一行；`OWNER_ID` 沒設就不送。True＝送達。"""
-    from utils.utils import bot_owner_id
-
     owner_id = bot_owner_id()
     if not owner_id:
         return False

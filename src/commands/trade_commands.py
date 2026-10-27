@@ -199,7 +199,7 @@ class TradeCommands(commands.Cog):
         """斜線命令：提供交易相關資訊"""
         logger.info(f'收到來自 {interaction.user} 的 /trade_info 斜線命令')
 
-        from utils.utils import check_guild
+        from utils.discord_members import check_guild
         if not await check_guild(interaction, required_role="Trader"):
             return
 
@@ -231,7 +231,7 @@ class TradeCommands(commands.Cog):
         """斜線命令：允許賣家設定物品價格，使用分頁功能"""
         logger.info(f'收到來自 {interaction.user} 的 /set_item_prices 斜線命令')
 
-        from utils.utils import check_guild
+        from utils.discord_members import check_guild
         if not await check_guild(interaction, owner_only=False, required_role="Trader"):
             return
 
@@ -356,7 +356,7 @@ class TradeCommands(commands.Cog):
         logger.info(f'收到來自 {interaction.user} 的 /select_item 斜線命令')
 
         # 檢查是否在伺服器中使用並檢查角色權限
-        from utils.utils import check_guild
+        from utils.discord_members import check_guild
         if not await check_guild(interaction, owner_only=False):
             return
 

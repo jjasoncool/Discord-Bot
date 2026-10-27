@@ -88,10 +88,10 @@ DISCORD_FREE_LAYERS = {TECH, SERVICE}
 #: 基礎層裡刻意認得 Discord 的共用元件：給介面層與功能層用的 Discord 工具，照名字就看得出是在講 Discord。
 #: 新增一個要寫理由；不再 import discord 的要從這裡拿掉（下面有測試擋殭屍）。
 DISCORD_HELPERS_IN_BASE = {
-    "utils.utils": "check_guild／check_role 的權限檢查、ChannelConfig 的頻道 getter，講的就是 Discord 的身分組與頻道",
+    "utils.utils": "安全回覆 interaction、ChannelConfig 的頻道 getter，講的就是 Discord 的頻道",
     "utils.discord_content": "發文到頻道、把長文切成 Discord 放得下的多段",
     "utils.discord_threads": "取得（含封存的）與解封 thread",
-    "utils.discord_members": "取伺服器成員（快取沒有再問 API）、找能私訊的對象",
+    "utils.discord_members": "取伺服器成員（快取沒有再問 API）、找能私訊的對象、群主 id、check_guild／check_role 的權限檢查",
     "utils.dm_notifier": "私訊群友",
     "utils.panel_bump": "面板置底",
     "settings.channel_registry": "綁頻道時向 Discord 查頻道、建 thread",

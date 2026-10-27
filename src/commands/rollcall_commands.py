@@ -9,7 +9,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from utils.utils import ChannelConfig, ConfigWriteError, ITEMS_PER_PAGE, check_guild
+from utils.discord_members import check_guild
+from utils.utils import ChannelConfig, ConfigWriteError, ITEMS_PER_PAGE
 from services.community.rollcall_service import (
     RollCallService,
     RESPONSE_DEADLINE_DAYS,

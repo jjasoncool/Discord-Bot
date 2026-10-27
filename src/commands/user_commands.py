@@ -6,8 +6,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from constants import ITEMS
-from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, check_guild
-from utils.discord_members import resolve_member
+from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message
+from utils.discord_members import check_guild, resolve_member
 from utils.dm_notifier import notify_keyword_hit
 from services.community import item_prices
 from sys_settings.paths import runtime_path
@@ -623,7 +623,7 @@ class UserCommands(commands.Cog):
         """斜線命令：查看物品價格"""
         logger.info(f'收到來自 {interaction.user} 的 /list_item_price 斜線命令')
 
-        from utils.utils import check_guild
+        from utils.discord_members import check_guild
         if not await check_guild(interaction):
             return
 

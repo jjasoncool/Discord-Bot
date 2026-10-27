@@ -39,7 +39,8 @@ from sys_settings.llm_settings import AskAIChatSearchSettings, AskAICommandSetti
 from sys_settings.time_settings import APP_TZ
 from utils.discord_content import send_model_text
 from utils.dm_notifier import send_dm
-from utils.utils import safe_send_interaction_message, check_guild
+from utils.discord_members import check_guild
+from utils.utils import safe_send_interaction_message
 from utils.background_tasks import supervise
 
 logger = logging.getLogger(__name__)

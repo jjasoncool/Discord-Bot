@@ -23,7 +23,8 @@ from sys_settings.time_settings import APP_TZ
 from utils.discord_threads import reopen_thread
 from utils.panel_bump import PanelBumper
 from sys_settings.paths import runtime_path
-from utils.utils import check_guild, safe_send_interaction_message
+from utils.discord_members import check_guild
+from utils.utils import safe_send_interaction_message
 
 logger = logging.getLogger(__name__)
 

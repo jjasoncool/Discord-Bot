@@ -48,7 +48,8 @@ from services.community.trade_service import OpenedTrade, TradeNote, TradeRef, T
 from sys_settings.shop_settings import ShopSettings
 from sys_settings.time_settings import APP_TZ
 from utils.discord_content import post_to_channel
-from utils.utils import ChannelConfig, check_role
+from utils.discord_members import check_role
+from utils.utils import ChannelConfig
 from sys_settings.paths import APP_ROOT
 
 logger = logging.getLogger(__name__)
