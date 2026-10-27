@@ -271,7 +271,7 @@ class AskaiWiringTests(unittest.TestCase):
         self.assertIn("switches.current().askai_intel_search_mode", self.askai)
         self.assertIn('enabled=intel_mode == "on"', self.askai)
         self.assertIn("tool_runner=tool_runner,", self.askai)
-        self.assertIn("await send_followup_in_parts(interaction, response_text)", self.askai)
+        self.assertIn("await send_followup_in_parts(interaction, response_text, mention_users=mention_users)", self.askai)
 
     def test_web_search_mode_picks_keyword_or_tool_never_both(self):
         self.assertIn("web_mode = switches.current().askai_web_search_mode", self.askai)
@@ -288,8 +288,8 @@ class AskaiWiringTests(unittest.TestCase):
 
         sent = []
 
-        async def send(**kwargs):
-            sent.append(kwargs)
+        async def send(content, **kwargs):
+            sent.append({"content": content, **kwargs})
 
         user = SimpleNamespace(id=7)
         interaction = SimpleNamespace(user=user, followup=SimpleNamespace(send=send))

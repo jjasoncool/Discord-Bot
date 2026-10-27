@@ -7,7 +7,7 @@ import asyncio
 import hashlib
 import logging
 import re
-from typing import List, Optional
+from typing import Any, Awaitable, Callable, List, Optional, Sequence
 
 import discord
 
@@ -86,6 +86,29 @@ def split_message(text: str, limit: int = DISCORD_MESSAGE_LIMIT) -> list[str]:
             carry_open = False
         balanced.append(chunk)
     return balanced
+
+
+async def send_model_text(
+    send: Callable[..., Awaitable[Any]],
+    text: str,
+    *,
+    mention_users: Sequence[discord.abc.Snowflake] = (),
+    limit: int = DISCORD_MESSAGE_LIMIT - 10,
+) -> list[Any]:
+    """把模型寫的文字送到 Discord：切成放得下的幾段，預設不提及任何人。
+
+    模型的輸出不可信：被聊天內容誘導寫出 @everyone、身分組或 <@某人> 時，送出去也不能真的通知到；
+    要 @ 的人（例：/askai 的發問者）由呼叫端用 mention_users 指定，只放在第一段。reply 也不 @ 被回的人。
+    send 是呼叫端的送出函式（channel.send、message.reply、interaction.followup.send），回到哪裡由它決定；
+    切段預設留 10 字餘裕，給暴雷標記跨切點時補 ||。回傳各段送出的訊息（照 send 的回傳值）。
+    /askai、插話、日記都走這裡，新的送出路徑也一樣，擋提及的規則只有這一份。
+    """
+    sent: list[Any] = []
+    for index, part in enumerate(split_message(text, limit)):
+        users: Any = list(mention_users) if index == 0 and mention_users else False
+        mentions = discord.AllowedMentions(everyone=False, roles=False, users=users, replied_user=False)
+        sent.append(await send(part, allowed_mentions=mentions))
+    return sent
 
 
 def content_hash(text: str) -> str:

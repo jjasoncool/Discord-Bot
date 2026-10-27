@@ -34,6 +34,7 @@ from llm.preprocess.chat_line import fetch_recent_lines
 from llm.logger_factory import get_or_create_file_logger
 from sys_settings.llm_settings import DiaryReflectionSettings
 from sys_settings.time_settings import APP_TZ
+from utils.discord_content import send_model_text
 from utils.due_loop import run_due_loop
 from utils.utils import ChannelConfig
 
@@ -227,7 +228,7 @@ async def run_daily_reflection(bot) -> Optional[str]:
 
     diary = diary[: _SETTINGS.max_diary_chars]
     try:
-        await diary_channel.send(diary)
+        await send_model_text(diary_channel.send, diary)
     except discord.HTTPException as exc:
         logger.warning("日記發布失敗 trace=%s：%s", trace_id, exc)
         return None

@@ -5,7 +5,7 @@ import contextlib
 import functools
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, NamedTuple
 import base64
@@ -37,7 +37,7 @@ from services.llm_service import LLMService
 from sys_settings import switches
 from sys_settings.llm_settings import AskAIChatSearchSettings, AskAICommandSettings, AskAIIntelSettings, AskAIWebSettings
 from sys_settings.time_settings import APP_TZ
-from utils.discord_content import DISCORD_MESSAGE_LIMIT, split_message
+from utils.discord_content import send_model_text
 from utils.dm_notifier import send_dm
 from utils.utils import safe_send_interaction_message, check_guild
 from utils.background_tasks import supervise
@@ -256,18 +256,13 @@ def append_askai_response_log(
     response_logger.info(json.dumps(record, ensure_ascii=False))
 
 
-async def send_followup_in_parts(interaction: discord.Interaction, text: str) -> None:
-    """把 /askai 的回覆送出去；超過 Discord 一則 2000 字就切成多則，只有第一則 @ 發問者。
+async def send_followup_in_parts(interaction: discord.Interaction, text: str, *, mention_users=None) -> None:
+    """把 /askai 的回覆送出去；超過 Discord 一則 2000 字就切成多則，只有第一則 @ 人：發問者，加上他在問題裡點名的人
+    （`mention_users`，沒給就只 @ 發問者）。
 
     問題（斜線指令可以打到 6000 字）＋回答＋引用網址很容易超過（2026-05-04 出過錯，使用者只看到「執行命令時
-    發生錯誤」）。split_message 平衡暴雷標記時每段最多多 4 個字，所以留點餘裕。"""
-    chunks = split_message(text, DISCORD_MESSAGE_LIMIT - 10)
-    await interaction.followup.send(
-        content=chunks[0],
-        allowed_mentions=discord.AllowedMentions(users=[interaction.user]),
-    )
-    for chunk in chunks[1:]:
-        await interaction.followup.send(content=chunk, allowed_mentions=discord.AllowedMentions.none())
+    發生錯誤」）。切段與不提及的規則在 send_model_text。"""
+    await send_model_text(interaction.followup.send, text, mention_users=mention_users or [interaction.user])
 
 
 class _AskaiCancelButton(discord.ui.View):
@@ -339,6 +334,7 @@ class _AskaiInputs:
     interaction: Any = None       # 記錄回應歷史要 guild／channel／user
     model: str | None = None      # 第 2 段決定後填回，第 3 段記錄用
     think: bool | None = None
+    mention_anchors: dict[str, str] = field(default_factory=dict)   # 問題裡被 @ 的人：id → 「名字#尾碼」，送出時換回 @
     chat_search_meta: dict[str, object] | None = None   # 第 2 段填：聊天紀錄搜尋工具查了什麼
 
 
@@ -377,23 +373,33 @@ def _context_limits(*, has_image: bool) -> dict[str, int]:
     return limits
 
 
-def _resolve_mentions(question: str, guild) -> tuple[str, list[str]]:
+def _resolve_mentions(question: str, guild) -> tuple[str, list[str], dict[str, str]]:
     """把問題裡的 <@id> 換成「顯示名稱#尾碼」，跟 chat_history / persona card 的錨點對齊。
 
     否則 LLM 看到問題裡的「二口氣上吧」對不上卡標題「NNN#7489」（display_name vs alias 不同字串）。
-    回傳 (換過的問題, 被提到的 user_id 字串清單)。
+    回傳 (換過的問題, 被提到的 user_id 字串清單, id → 錨點)；錨點送出回答時用來換回真的 @。
     """
     mentioned_user_ids = extract_mentioned_user_ids(question)
     resolved_question = question
+    anchors: dict[str, str] = {}
     if mentioned_user_ids and guild:
         for uid_str in mentioned_user_ids:
             member = guild.get_member(int(uid_str))
             if member:
                 name_with_id = person_anchor.label(member.display_name, uid_str)
+                anchors[uid_str] = name_with_id
                 resolved_question = resolved_question.replace(f"<@{uid_str}>", name_with_id).replace(
                     f"<@!{uid_str}>", name_with_id
                 )
-    return resolved_question, mentioned_user_ids
+    return resolved_question, mentioned_user_ids, anchors
+
+
+def _anchors_to_mentions(reply: str, anchors: dict[str, str]) -> str:
+    """回答裡提到發問者點名的人（模型寫的是「名字#尾碼」）換回 <@id>，送出時真的 @ 到他；只認帶尾碼的錨點，光是名字不換。"""
+    for uid, label in sorted(anchors.items(), key=lambda item: -len(item[1])):
+        if "#" in label:
+            reply = reply.replace(label, f"<@{uid}>")
+    return reply
 
 
 def _channel_names(guild) -> dict[str, str]:
@@ -611,17 +617,22 @@ def _askai_record(inputs: "_AskaiInputs", result, *, intel_meta: dict[str, objec
 
 # ── 第 4 段：送出 ───────────────────────────────────────────────────────
 async def _askai_send(interaction: discord.Interaction, inputs: "_AskaiInputs", reply: str, image, cancel_view, thinking_msg) -> None:
-    """用 followup 回覆（避免互動超時）：@ 發問者、問題、回答、附圖網址；完成後把取消按鈕改成「已完成」。"""
+    """用 followup 回覆（避免互動超時）：@ 發問者、問題、回答、附圖網址；完成後把取消按鈕改成「已完成」。
+
+    准 @ 的人只有發問者和他在問題裡點名的人（原樣貼出的問題、回答裡換回的 <@id> 都會真的通知到）；
+    這些人發問者本來就能自己 @，沒有新的被濫用面。模型寫的其他 @ 一律不通知。"""
+    anchors = getattr(inputs, "mention_anchors", None) or {}
     response_lines = [
         f"{interaction.user.mention}",
         f"❓ **問題：** {inputs.question}",
-        f"💬 **回答：** {reply}",
+        f"💬 **回答：** {_anchors_to_mentions(reply, anchors)}",
     ]
     if image and image.url:
         response_lines.append(f"🖼️ **圖片：** {image.url}")
     response_text = "\n".join(response_lines)
 
-    await send_followup_in_parts(interaction, response_text)
+    mention_users = [interaction.user, *(discord.Object(id=int(uid)) for uid in anchors)]
+    await send_followup_in_parts(interaction, response_text, mention_users=mention_users)
 
     if cancel_view and thinking_msg:
         for item in cancel_view.children:
@@ -775,7 +786,7 @@ class LLMCommands(commands.Cog):
         """
         system_prompt = load_system_prompt()
         guild = interaction.guild
-        resolved_question, mentioned_user_ids = _resolve_mentions(question, guild)
+        resolved_question, mentioned_user_ids, mention_anchors = _resolve_mentions(question, guild)
         web_mode, intent, run_web, web_task = _start_web_search(resolved_question)
 
         limits = _context_limits(has_image=image is not None)
@@ -883,7 +894,7 @@ class LLMCommands(commands.Cog):
             web_mode=web_mode, web_context=web_context, web_meta=web_meta,
             image_payload=image_payload, image_meta=image_meta,
             discord_context=discord_context, discord_meta=discord_meta, rag_context=rag_context, rag_meta=rag_meta,
-            interaction=interaction,
+            interaction=interaction, mention_anchors=mention_anchors,
         )
 
     # ── 第 2 段：生成 ───────────────────────────────────────────────────────

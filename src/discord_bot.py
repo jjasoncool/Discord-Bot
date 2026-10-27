@@ -70,8 +70,13 @@ COMMAND_MODULES = [
 class MyBot(commands.Bot):
     def __init__(self):
         # 指令一律用斜線（app_commands）：前綴指令是一般訊息，會被當聊天存進向量庫，也和群友的感嘆「!?」撞在一起。
-        # Bot 必填 command_prefix，給一個只有 @bot 才會觸發的；內建的 !help 一起關掉
-        super().__init__(command_prefix=commands.when_mentioned, help_command=None, intents=intents)
+        # Bot 必填 command_prefix，給一個只有 @bot 才會觸發的；內建的 !help 一起關掉。
+        # 提及的全域預設：沒指定的送出一律不 @everyone、不 @身分組（轉貼的外站內容、模型寫的字都可能夾帶），
+        # @ 人照舊放行（交易、點名、自介的通知靠它）；要 @ 身分組的地方（週期提醒）自己明確指定。
+        super().__init__(
+            command_prefix=commands.when_mentioned, help_command=None, intents=intents,
+            allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True),
+        )
         self.echo_tracker = {}
         self.ambient_tracker = {}  # 功能二：per-channel 插話冷卻/計數狀態
         self.telegram_relay_worker = None

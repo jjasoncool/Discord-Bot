@@ -9,7 +9,8 @@
   - 取消：模型呼叫前已取消就不叫模型、不送回覆；生成途中取消就中斷、不送；不是使用者按的取消（底層連帶取消）
     回「這次沒有順利回答」而且不往外丟
   - 記錄：回應歷史帶 trace_id、模型、think、三種 meta、錯誤類型；prompt 紀錄與 debug 紀錄各寫一筆
-  - 送出：回覆經 send_followup_in_parts（@ 發問者、問題、回答），完成後把「思考中」改成「已回覆」
+  - 送出：回覆經 send_followup_in_parts（@ 發問者、問題、回答），完成後把「思考中」改成「已回覆」；
+    准 @ 的只有發問者和他在問題裡點名的人，回答裡那些人的「名字#尾碼」換回真的 @，其他人不通知
 
 hermetic：Discord 互動、檢索、網搜、情報、模型服務全換成假的；不碰網路與資料庫。
 
@@ -160,7 +161,7 @@ class _Harness:
     def _file_logger(self, *, name, **kwargs):
         return self.file_logs.setdefault(name, mock.Mock())
 
-    async def _send(self, interaction, text):
+    async def _send(self, interaction, text, **kwargs):
         self.sent.append(text)
 
     async def _prepare_image(self, interaction, image):
@@ -367,3 +368,36 @@ class AskaiFlowTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AskaiMentionTests(unittest.IsolatedAsyncioTestCase):
+    """送出時只 @ 發問者與他在問題裡點名的人；回答裡那些人的錨點換回真的 @。"""
+
+    async def test_named_people_are_pinged_and_their_anchor_becomes_a_mention(self):
+        sent = []
+
+        async def send(content, **kwargs):
+            sent.append((content, kwargs["allowed_mentions"]))
+
+        asker = SimpleNamespace(id=1111, mention="<@1111>")
+        interaction = SimpleNamespace(user=asker, followup=SimpleNamespace(send=send))
+        inputs = SimpleNamespace(question="問 <@2222> 晚餐吃什麼", mention_anchors={"2222": "乙#2222"})
+        await lc._askai_send(interaction, inputs, "乙#2222 說吃滷肉飯；甲#1111 沒說。<@3333> 也沒說", None, None, None)
+
+        content, mentions = sent[0]
+        self.assertIn("<@2222> 說吃滷肉飯", content, "點名的人換回真的 @")
+        self.assertIn("甲#1111 沒說", content, "沒點名的人照原樣")
+        self.assertEqual({1111, 2222}, {u.id for u in mentions.users}, "只 @ 發問者與他點名的人")
+        self.assertFalse(mentions.everyone or mentions.roles)
+
+    async def test_without_named_people_only_the_asker_is_pinged(self):
+        sent = []
+
+        async def send(content, **kwargs):
+            sent.append(kwargs["allowed_mentions"])
+
+        asker = SimpleNamespace(id=1111, mention="<@1111>")
+        interaction = SimpleNamespace(user=asker, followup=SimpleNamespace(send=send))
+        await lc._askai_send(interaction, SimpleNamespace(question="嗨", mention_anchors={}), "<@3333> 嗨", None, None, None)
+        self.assertEqual([1111], [u.id for u in sent[0].users])
+

@@ -75,7 +75,7 @@ from services.llm_service import LLMService, TRUNCATED_NOTE
 from sys_settings.llm_settings import AmbientChatSettings
 from utils.utils import ChannelConfig
 from utils.background_tasks import spawn
-from utils.discord_content import DISCORD_MESSAGE_LIMIT, split_message
+from utils.discord_content import DISCORD_MESSAGE_LIMIT, send_model_text, split_message
 
 logger = logging.getLogger(__name__)
 
@@ -1553,30 +1553,32 @@ async def _deliver(
         # 超過上限整則會被 Discord 拒絕，等於沒回；插話本來就該一兩句，只送第一段、記下來
         logger.warning("ambient 回覆 %d 字超過 %d 字上限，只送第一段 trace=%s", len(reply), DISCORD_MESSAGE_LIMIT, trace_id)
         reply = split_message(reply, DISCORD_MESSAGE_LIMIT - 10)[0]   # 留餘裕：暴雷標記跨切點時切段會補 ||
-    # 回覆也不 @ 任何人：模型萬一寫出 @everyone 或 @某人，不能真的通知到
-    no_pings = discord.AllowedMentions.none()
+    # 送出走 send_model_text（不 @ 任何人）；上面已截成一段，所以整則放得下、只會送一則
+    async def _send(send) -> discord.Message:
+        return (await send_model_text(send, reply, limit=DISCORD_MESSAGE_LIMIT))[0]
+
     sent_msg = None
     try:
         if directed:
             try:
-                sent_msg = await message.reply(reply, mention_author=False, allowed_mentions=no_pings)
+                sent_msg = await _send(functools.partial(message.reply, mention_author=False))
             except discord.HTTPException as reply_exc:
                 # 原訊息被刪（reply reference 失效，50035）就直接發到頻道，照樣回得到、只是沒有 reply 串接；
                 # 其他原因一樣退回頻道，但分開記，才看得出不是訊息被刪
                 why = "原訊息已刪" if getattr(reply_exc, "code", None) == 50035 else f"送出失敗 {reply_exc}"
                 logger.info("ambient reply 失敗（%s）trace=%s → 改直接發頻道", why, trace_id)
-                sent_msg = await message.channel.send(reply, allowed_mentions=no_pings)
+                sent_msg = await _send(message.channel.send)
         else:
             if anchor is not None:
                 try:
-                    sent_msg = await anchor.reply(reply, mention_author=False, allowed_mentions=no_pings)
+                    sent_msg = await _send(functools.partial(anchor.reply, mention_author=False))
                 except discord.HTTPException as anchor_exc:
                     logger.info(
                         "ambient 錨定 #%s 失敗（原訊息可能已刪？）trace=%s：%s → 改直接發頻道",
                         line_choice, trace_id, anchor_exc,
                     )
             if sent_msg is None:
-                sent_msg = await message.channel.send(reply, allowed_mentions=no_pings)
+                sent_msg = await _send(message.channel.send)
     except discord.HTTPException as exc:
         logger.warning("ambient 送出回覆失敗 trace=%s：%s", trace_id, exc)
         return None
