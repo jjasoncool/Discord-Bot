@@ -10,12 +10,12 @@ from typing import Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from sys_settings.paths import SCRAPER_DIR
+from sys_settings.paths import ARTICLES_DB
 
 
 class SearchSettings(BaseSettings):
-    #: scraper 的資料庫；只用唯讀方式開（`mode=ro`，見 `services.search.index`）
-    articles_db_path: Path = SCRAPER_DIR / "articles.db"
+    #: scraper 的資料庫；只用唯讀方式開（`sys_settings.paths.sqlite_readonly_uri`）
+    articles_db_path: Path = ARTICLES_DB
     #: 搜尋索引：從 articles.db 建出來的衍生資料，刪掉會自動重建，不算使用者資料。
     #: 容器內固定在 `/search_data`（主機端是 repo 的 `cache/search-mcp/`，docker-compose 只掛給 search-mcp），不放 src/：
     #: 幾百 MB 的衍生資料不該跟程式碼混在一起。路徑放在根目錄那一層，沒掛這個資料夾的容器用到時會直接失敗，不會悄悄另建一份

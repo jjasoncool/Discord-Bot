@@ -38,8 +38,22 @@ class DataFileLocationTests(unittest.TestCase):
         self.assertLocation(rollcall_service.RUNTIME_FILE, "settings", "runtime", "rollcall.json")
 
     def test_scraper_articles_db(self):
+        import inspect
+        from services.community import community_lookup_service
         from services.events import event_scheduler
-        self.assertLocation(event_scheduler._ARTICLES_DB, "scraper", "articles.db")
+        from sys_settings import paths
+        from sys_settings.search_settings import SearchSettings
+
+        self.assertLocation(paths.ARTICLES_DB, "scraper", "articles.db")
+        # 三個讀它的地方都用同一個常數，不自己拼
+        resolver_default = inspect.signature(event_scheduler.VersionDateResolver.__init__).parameters["db_path"].default
+        for actual in (resolver_default, community_lookup_service.DEFAULT_SCRAPER_DB_PATH, SearchSettings().articles_db_path):
+            self.assertEqual(Path(actual), paths.ARTICLES_DB)
+        # 唯讀開：mode=ro、不用 immutable（WAL 裡還沒寫回的新公告也要看得到）
+        uri = paths.sqlite_readonly_uri(paths.ARTICLES_DB)
+        self.assertEqual(uri, f"file:{paths.ARTICLES_DB}?mode=ro")
+        self.assertNotIn("immutable", uri)
+        self.assertEqual(paths.sqlite_readonly_uri("/tmp/x.db"), "file:/tmp/x.db?mode=ro")
 
     def test_logging_config(self):
         from utils import logger_config

@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from sys_settings.paths import SCRAPER_DIR
+from sys_settings.paths import ARTICLES_DB, sqlite_readonly_uri
 from typing import List, Optional
 
 # 注意：discord / ChannelConfig / StateDB 等相依只在 maybe_schedule_events 內 lazy import，
@@ -66,8 +66,6 @@ def is_umbrella_title(name: str) -> bool:
     """是否為當期多卡池的總表公告標題。"""
     return bool(_UMBRELLA_TITLE.search(name or ""))
 
-# articles.db 路徑（discord-bot 容器掛 ./src → /app；版本日回填用，RO）
-_ARTICLES_DB = SCRAPER_DIR / "articles.db"
 
 
 # ── 版本更新日回填（相對起點「X版本更新後」→ 版本真實上線時間） ──
@@ -89,14 +87,12 @@ class VersionDateResolver:
         r'(\d{4})\s*[/年]\s*(\d{1,2})\s*[/月]\s*(\d{1,2})\s*日?\s*(\d{1,2})\s*[:：]\s*(\d{2})'
     )
 
-    def __init__(self, db_path: Path = _ARTICLES_DB):
+    def __init__(self, db_path: Path = ARTICLES_DB):
         self.db_path = db_path
         self._map: Optional[dict] = None
 
     def _connect(self) -> sqlite3.Connection:
-        # 一般唯讀、**不用 immutable**：articles.db 是 WAL 模式、爬蟲一直在寫。immutable 會讓 SQLite
-        # 忽略還沒合併回主檔的 WAL（看不到剛發的公告），爬蟲合併時還可能讀到錯誤結果
-        return sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        return sqlite3.connect(sqlite_readonly_uri(self.db_path), uri=True)
 
     def _load(self) -> Optional[dict]:
         """讀一次 DB；讀取失敗回 None（呼叫端保留上一次的結果）。"""

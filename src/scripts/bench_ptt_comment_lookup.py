@@ -9,18 +9,18 @@ Phase 0 Step 1 of 社群 ID 查詢：
 
 此 script 只做讀取，不建 index、不改 schema，重跑多次安全無副作用。
 
-怎麼跑（bot 容器內才是實際查詢環境，其他跑法的 p95 不代表 prod）：
-    docker exec discord-bot python /app/scripts/bench_ptt_comment_lookup.py
+怎麼跑（bot 容器內才是實際查詢環境，其他跑法的 p95 不代表 prod；用模組方式執行，專案的套件才找得到）：
+    docker exec -w /app discord-bot python -m scripts.bench_ptt_comment_lookup
 
 輸出看最後的「判斷」區塊。若所有 p95 都通過（<500ms）即可進 Phase 0 Step 2。
 """
 import sqlite3
 import time
 import statistics
-from pathlib import Path
 
+from sys_settings.paths import ARTICLES_DB, sqlite_readonly_uri
 
-DB_PATH = Path(__file__).resolve().parents[1] / "scraper" / "articles.db"
+DB_PATH = ARTICLES_DB
 BENCH_TIMES = 10
 LIMIT_IN_RANGE = 1000
 LIMIT_FALLBACK = 100
@@ -68,8 +68,7 @@ def main():
         return
 
     size_mb = DB_PATH.stat().st_size / 1024 / 1024
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn = sqlite3.connect(sqlite_readonly_uri(DB_PATH), uri=True)   # 唯讀：爬蟲正在寫這個檔
 
     print("=" * 70)
     print(f"DB: {DB_PATH}")

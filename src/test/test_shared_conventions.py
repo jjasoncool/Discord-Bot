@@ -484,6 +484,29 @@ def _find_ffprobe_calls(path: Path) -> list[int]:
     })
 
 
+def _find_sqlite_openers(path: Path) -> list[int]:
+    """自己拼 articles.db 的路徑，或自己寫 SQLite 的唯讀／immutable 連線參數的字串。
+
+    articles.db 是 WAL 模式、爬蟲一直在寫：要用 `mode=ro`、不能用 `immutable=1`（會看不到還在 WAL 裡的新公告，
+    活動排程出過這個錯）。規則寫在註解守不住：改用 immutable 或漏掉 mode=ro 都不會紅。路徑與連線字串只有
+    `sys_settings.paths` 一份。只看程式裡的字串常數，docstring 與 log 文案提到檔名不算。"""
+    tree = _parse(path)
+    docstrings: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
+            first = node.body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+                docstrings.add(id(first.value))
+    hits = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)) or id(node) in docstrings:
+            continue
+        text = node.value
+        if (text.endswith("articles.db") and not text.endswith("sent_articles.db")) or "mode=ro" in text or "immutable=" in text:
+            hits.add(node.lineno)
+    return sorted(hits)
+
+
 def _find_user_date_parsing(path: Path) -> list[int]:
     """指令層（接使用者輸入的地方）自己用 strptime／fromisoformat 解析日期。使用者在視窗打的日期一律走
     `utils.user_dates`，全形、各種分隔符號、只寫日期這些寬鬆規則才只有一份（2026-10-04 社群稽查與預購截止合併）。
@@ -842,6 +865,12 @@ RULES = [
         finder=_find_ffprobe_calls,
         canonical="utils.media_probe.probe_duration",
         allowed={"utils/media_probe.py"},
+    ),
+    Rule(
+        name="開 articles.db：路徑與唯讀連線字串只有一份（mode=ro、不用 immutable）",
+        finder=_find_sqlite_openers,
+        canonical="sys_settings.paths.sqlite_readonly_uri(path)（articles.db 的路徑用 ARTICLES_DB）",
+        allowed={"sys_settings/paths.py", "scraper/", "telegram_scraper/"},
     ),
     Rule(
         name="Telegram 轉發送出與寫發送紀錄",

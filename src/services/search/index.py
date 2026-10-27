@@ -32,6 +32,7 @@ from services.search.sources import SOURCES, Doc, Source
 from services.search.text import bigram_tokens, normalize, normalizer_id
 from services.search.rerank import Reranker, best_passage
 from services.search.vectors import VectorSearcher
+from sys_settings.paths import sqlite_readonly_uri
 from sys_settings.search_settings import SEARCH_SETTINGS
 from utils.rank_fusion import fuse_rankings
 from utils.user_dates import parse_user_date
@@ -211,10 +212,10 @@ class SearchIndex:
     # ---------- 連線 ----------
 
     def _open_source(self) -> sqlite3.Connection:
-        """scraper 的資料庫只能唯讀開。用 mode=ro 而不是 immutable=1：WAL 裡還沒寫回的新資料也要看得到。"""
+        """scraper 的資料庫只能唯讀開（連線字串與理由在 `sys_settings.paths`）。"""
         if not self.articles_db_path.exists():
             raise FileNotFoundError(f"找不到 scraper 的資料庫：{self.articles_db_path}")
-        con = sqlite3.connect(f"file:{self.articles_db_path}?mode=ro", uri=True, timeout=30)
+        con = sqlite3.connect(sqlite_readonly_uri(self.articles_db_path), uri=True, timeout=30)
         con.row_factory = sqlite3.Row
         return con
 

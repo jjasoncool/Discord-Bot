@@ -24,6 +24,7 @@ from typing import Optional, Sequence
 
 from services.search.chunking import Chunk, chunk_document
 from services.search.index import SearchIndex
+from sys_settings.paths import sqlite_readonly_uri
 from sys_settings.search_settings import SEARCH_SETTINGS
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,7 @@ def plan(index_path, *, since: str, categories: Sequence[str] = SEARCH_SETTINGS.
          max_chars: int = SEARCH_SETTINGS.chunk_max_chars, overlap: int = SEARCH_SETTINGS.chunk_overlap_chars,
          limit: Optional[int] = None) -> list[PlannedDoc]:
     planned: list[PlannedDoc] = []
-    with closing(sqlite3.connect(f"file:{index_path}?mode=ro", uri=True)) as con:
+    with closing(sqlite3.connect(sqlite_readonly_uri(index_path), uri=True)) as con:
         rows = con.execute("SELECT doc_id, source, published_at, search_text FROM docs WHERE published_at >= ?"
                            " ORDER BY published_at DESC, id DESC", (since,))
         for doc_id, source, published_at, search_text in rows:

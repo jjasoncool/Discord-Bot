@@ -11,9 +11,12 @@
   `SYS_SETTINGS_DIR`、`SCRAPER_DIR`、`TELEGRAM_SCRAPER_DIR`、`STATIC_DIR`：根目錄下的固定子目錄（`Path`）。
 - `settings_file(name)`、`runtime_path(name)`、`prompt_file(name)`：`settings/`、`settings/runtime/`、`settings/prompts/` 下某個檔的
   路徑字串，給型別是 `str` 的設定欄位當預設值。
+- `ARTICLES_DB`、`sqlite_readonly_uri(path)`：scraper 資料庫的位置，與 SQLite 檔的唯讀連線字串（bot 這邊只能唯讀開 articles.db）。
 
 規則：
 - 程式裡不再寫死 `"/app/..."`、`"/logs/..."`（守衛 `test_shared_conventions` 擋）；要路徑就從這裡拿。
+- 開 articles.db 一律 `sqlite_readonly_uri(ARTICLES_DB)`，不自己拼 `mode=ro`、不用 `immutable=1`（守衛擋）：它是 WAL 模式、爬蟲一直在寫，
+  immutable 會讓 SQLite 忽略還沒合併回主檔的 WAL（看不到剛發的公告，活動排程出過這個錯），爬蟲合併時還可能讀到錯的結果。
 - 在容器裡不用設環境變數，行為和寫死 `/app`、`/logs` 完全相同；在主機跑腳本或測試時設 `APP_ROOT=./src`、`LOGS_DIR=./logs` 即可。
 - 爬蟲容器（`scraper/`、`telegram_scraper/`）各自掛子目錄到 `/app`，看不到這個模組，不在此規則內。
 
@@ -53,5 +56,14 @@ def runtime_path(name: str) -> str:
 
 
 def prompt_file(name: str) -> str:
-    """`settings/prompts/<name>` 的路徯字串。"""
+    """`settings/prompts/<name>` 的路徑字串。"""
     return str(PROMPTS_DIR / name)
+
+
+#: scraper 的資料庫（原始資料，不能刪）；bot 這邊只能唯讀開：`sqlite_readonly_uri(ARTICLES_DB)`
+ARTICLES_DB = SCRAPER_DIR / "articles.db"
+
+
+def sqlite_readonly_uri(path: os.PathLike | str) -> str:
+    """SQLite 唯讀連線字串（給 `sqlite3.connect(uri, uri=True)` 或 aiosqlite）：`mode=ro`，不用 `immutable=1`，理由見模組說明。"""
+    return f"file:{path}?mode=ro"

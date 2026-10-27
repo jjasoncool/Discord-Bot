@@ -19,11 +19,11 @@ import aiosqlite
 
 from services.source_urls import bahamut_floor_url
 from services.state_db import StateDB
-from sys_settings.paths import SCRAPER_DIR
+from sys_settings.paths import ARTICLES_DB, sqlite_readonly_uri
 
 
 # ── 預設常數 ──
-DEFAULT_SCRAPER_DB_PATH = SCRAPER_DIR / "articles.db"
+DEFAULT_SCRAPER_DB_PATH = ARTICLES_DB
 PTT_POST_MIN = 20
 PTT_COMMENT_MIN = 100
 BAHAMUT_POST_MIN = 20
@@ -93,9 +93,8 @@ class CommunityLookupService:
         self.state_db = state_db
 
     def _connect_scraper_ro(self):
-        """scraper DB 用 read-only 連線（避免誤寫 + 避免與 scraper 寫入衝突）。"""
-        uri = f"file:{self.scraper_db_path}?mode=ro"
-        return aiosqlite.connect(uri, uri=True)
+        """scraper DB 用唯讀連線（避免誤寫、避免與 scraper 寫入衝突）。"""
+        return aiosqlite.connect(sqlite_readonly_uri(self.scraper_db_path), uri=True)
 
     # ══════════════════════════════════════════════════
     # PTT
