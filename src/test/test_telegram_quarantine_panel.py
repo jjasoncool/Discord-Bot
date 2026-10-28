@@ -58,6 +58,8 @@ class QuarantineTestBase(unittest.IsolatedAsyncioTestCase):
             content_filter=self.filter, quarantine=True, bot=self.bot, runtime_path=self.runtime,
         )
         self.worker._running = True
+        # 測試資料用固定的十月日期（日期選單的標籤要比對），不能被「發文太久不送」擋掉
+        self.worker._max_message_age = timedelta(days=36500)
         self.changes = []
 
         async def on_change(parent_id, thread):

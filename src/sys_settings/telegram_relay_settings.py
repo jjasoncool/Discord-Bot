@@ -14,6 +14,9 @@ class TelegramRelaySettings(BaseModel, frozen=True):
 
     #: 影片壓縮每一道 ffmpeg（two-pass 各一道）最多跑幾秒；超過就砍掉、這則不壓縮。轉發一次只處理一則，不能讓它卡住整條
     video_compress_timeout_seconds: float = 15 * 60
+    #: 發文超過幾天就不送進頻道：情報會隨版本更新過期。爬蟲補掃往回找洞時，發文少的頻道會補進幾個月前的訊息，
+    #: 重啟的補償也會撿回沒有發送紀錄的舊訊息，所以擋在送出這一步，不管從哪條路進資料庫都一樣
+    max_message_age_days: float = 7
 
 
 class TelegramFilterSettings(BaseSettings):

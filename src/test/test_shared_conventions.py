@@ -524,6 +524,7 @@ def _find_user_date_parsing(path: Path) -> list[int]:
 _RELAY_SENDERS = {
     "publish_to_channel": {"_send_unit", "resend_telegram_by_id"},
     "mark_message_published": {"_send_unit"},
+    "mark_not_tracked": {"_skip_if_stale"},
     "moving_deliveries": {"_move_unit", "_record_after_deleted"},
 }
 
@@ -533,7 +534,8 @@ def _find_relay_sends_outside_helper(path: Path) -> list[int]:
     （主頻道或隔離 thread），各寫一份就會有一條路繞過過濾，或把隔離的記成主頻道（2026-10-06 接上 LLM 過濾）。
     - `resend_telegram_by_id` 是 /resend_article：使用者定案不過濾、也不寫紀錄，所以只准它送、不准寫紀錄。
     - 搬移（把已在主頻道的移進隔離區）經 `_send_unit` 送；改紀錄（`moving_deliveries`）只准 `_move_unit` 與
-      原貼文全刪後重試的 `_record_after_deleted`。"""
+      原貼文全刪後重試的 `_record_after_deleted`。
+    - 頻道 0（停止追蹤、不算送出）只准發文太久不送的 `_skip_if_stale` 記。"""
     if Path(path).relative_to(SRC_DIR).as_posix() != "services/relay/telegram_relay_service.py":
         return []
     found = []

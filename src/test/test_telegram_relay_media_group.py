@@ -3,6 +3,9 @@
 背景：scraper 逐則寫入相簿組員（先寫訊息列、下載完才寫媒體列），舊版 relay 只要 0.5 秒
 數量沒變就合併送出，晚到的組員被當成「交由首則處理」丟掉 → 相簿只發出前 1~2 張。
 
+也守「發文太久的不送」：爬蟲補掃替發文少的頻道補進幾個月前的訊息時，單則、相簿都不送進頻道，
+記成頻道 0 讓重啟的補償不再撿回來；人指定的重送照送。
+
 執行：
     cd src && python -m unittest test.test_telegram_relay_media_group -v
 """
@@ -19,6 +22,7 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from services.relay.telegram_relay_service import MessageRelayWorker
+from sys_settings.telegram_relay_settings import TelegramRelaySettings
 from telegram_scraper.media_download import MEDIA_RETRY_WINDOW
 from test import timing_sensitive
 from test.fake_clock import FakeClock
@@ -201,6 +205,59 @@ class SingleMessageTests(unittest.IsolatedAsyncioTestCase):
         await worker._process_one(9)
         worker._processed_set.clear()
         await worker._process_one(9)  # 已有 delivery 記錄 → 不重送
+
+        self.assertEqual(len(publisher.plans), 1)
+        self.assertIn((9, CHANNEL), repo.delivered)
+
+
+class StaleMessageTests(unittest.IsolatedAsyncioTestCase):
+    """發文超過 `max_message_age_days` 的不送；期限內的、重送模式的照送。"""
+
+    def _days_ago(self, days: float) -> datetime:
+        return datetime.now(timezone.utc) - timedelta(days=days)
+
+    def _limit(self) -> float:
+        return TelegramRelaySettings().max_message_age_days
+
+    async def test_old_single_message_is_not_sent_and_stops_tracking(self):
+        worker, repo, _, publisher = make_worker()
+        repo.add_ready(9, 200, grouped_id=None, text="三月的爆料", date=self._days_ago(self._limit() + 1))
+
+        await worker._process_one(9)
+
+        self.assertEqual(publisher.plans, [])
+        # 頻道 0＝停止追蹤：重啟補償只撈完全沒紀錄的，有這列就不會再撿回來
+        self.assertEqual(repo.channels_of(9), {0})
+
+    async def test_old_album_is_not_sent(self):
+        worker, repo, _, publisher = make_worker()
+        old = self._days_ago(self._limit() + 1)
+        repo.add_ready(1, 100, date=old)
+        repo.add_ready(2, 101, date=old)
+
+        await worker._process_one(1)
+        await worker._process_one(2)
+
+        self.assertEqual(publisher.plans, [])
+        self.assertEqual(repo.channels_of(1), {0})
+        self.assertEqual(repo.channels_of(2), {0})
+
+    async def test_message_within_limit_is_sent(self):
+        worker, repo, _, publisher = make_worker()
+        repo.add_ready(9, 200, grouped_id=None, text="上週的爆料", date=self._days_ago(self._limit() - 1))
+
+        await worker._process_one(9)
+
+        self.assertEqual(len(publisher.plans), 1)
+        self.assertEqual(repo.channels_of(9), {CHANNEL})
+
+    async def test_force_replay_sends_old_message(self):
+        worker, repo, routes, publisher = make_worker()
+        routes.replay_msg_id = 200
+        repo.replay_pk = 9
+        repo.add_ready(9, 200, grouped_id=None, text="指定重送", date=self._days_ago(self._limit() + 30))
+
+        await worker._process_one(9)
 
         self.assertEqual(len(publisher.plans), 1)
         self.assertIn((9, CHANNEL), repo.delivered)

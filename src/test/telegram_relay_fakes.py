@@ -114,6 +114,9 @@ class FakeRepository:
         self.delivered[(pk, discord_channel_id)] = datetime.now(timezone.utc)
         (self.needs_recheck.add if needs_recheck else self.needs_recheck.discard)((pk, discord_channel_id))
 
+    async def mark_not_tracked(self, pk):
+        self.delivered.setdefault((pk, 0), datetime.now(timezone.utc))
+
     async def list_needs_recheck(self, limit=20):
         rows = sorted(((pk, ch, self.delivered[(pk, ch)]) for pk, ch in self.needs_recheck), key=lambda r: (r[2], r[0]))
         return rows[:limit]

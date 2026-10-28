@@ -438,6 +438,20 @@ class TelegramMessageRepository:
                 bool(needs_recheck),
             )
 
+    async def mark_not_tracked(self, message_pk: int) -> None:
+        """記成頻道 0（停止追蹤、不算送出）：重啟時的補償只撈完全沒有發送紀錄的，有這列就不再撿回來。"""
+        if self.pool is None:
+            raise RuntimeError("TelegramMessageRepository 尚未 connect")
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO telegram_relay_delivery_state (message_pk, discord_channel_id, delivered_at, needs_recheck)
+                VALUES ($1, 0, NOW(), FALSE)
+                ON CONFLICT (message_pk, discord_channel_id) DO NOTHING;
+                """,
+                int(message_pk),
+            )
+
     async def list_needs_recheck(self, limit: int = 20) -> list[tuple[int, int, datetime]]:
         """要補判的（pk, 頻道, 送出時間），舊的先。"""
         if self.pool is None:
@@ -1463,6 +1477,8 @@ class MessageRelayWorker:
         #: 相簿到齊判斷看時間、睡覺都經過這兩個：正式就是 time.monotonic 與 asyncio.sleep，測試換成假時鐘
         self._clock = time.monotonic
         self._sleep = asyncio.sleep
+        #: 發文超過這麼久的不送（`_skip_if_stale`）；測試資料用固定日期時換成更長的
+        self._max_message_age = timedelta(days=TelegramRelaySettings().max_message_age_days)
         self._emoji_resolver = CustomEmojiResolver(bot, repository, render_adapter.app_root)
         #: 有 `mode`（off／dry_run／on）與 `judge(text, media, trace_id=)` 的物件；None＝不過濾（測試預設）
         self._filter = content_filter
@@ -1886,6 +1902,25 @@ class MessageRelayWorker:
         if posted.tzinfo is None:
             posted = posted.replace(tzinfo=timezone.utc)
         return datetime.now(timezone.utc) - posted
+
+    async def _skip_if_stale(self, message: TelegramMessageRecord) -> bool:
+        """發文超過 `_max_message_age` 的不送：記成頻道 0（停止追蹤）、當成處理過，回 True。
+
+        頻道 0 不算送出，之後要送照樣送得出去。重送模式涵蓋的照送：那是人指定要重送的。沒有發文時間的當成新的。
+        """
+        age = self._message_age(message)
+        if age is None or age <= self._max_message_age:
+            return False
+        if await self._is_force_replay(message.telegram_chat_id, message.message_pk):
+            return False
+        logger.info(
+            "Telegram relay 發文超過 %g 天，不送: message_pk=%s telegram_chat_id=%s telegram_message_id=%s 發文 %s 前",
+            self._max_message_age.total_seconds() / 86400, message.message_pk, message.telegram_chat_id,
+            message.telegram_message_id, str(age).split(".")[0],
+        )
+        await self.repository.mark_not_tracked(message.message_pk)
+        self._mark_processed(message.message_pk)
+        return True
 
     async def _advance_cursor(self, message_pk: int) -> None:
         self._last_polled_pk = max(self._last_polled_pk, message_pk)
@@ -2571,6 +2606,10 @@ class MessageRelayWorker:
         message = await self.repository.get_message_by_pk(message_pk)
         if message is None:
             logger.warning("Telegram relay 查無訊息: message_pk=%s", message_pk)
+            return
+
+        # 排在相簿之前：相簿組員的發文時間相同，逐則擋掉就不會有整組等圖、補圖的動作
+        if await self._skip_if_stale(message):
             return
 
         # media group 整組處理；要排在「空訊息」判斷之前——組員的圖可能還在下載，
