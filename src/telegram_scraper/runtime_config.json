@@ -2,7 +2,8 @@
     "source_channel": "Seele_WW_leak",
     "source_channels": [
         "Seele_WW_leak",
-        "Gamedataleak"
+        "Gamedataleak",
+        "Sleep_Leaks"
     ],
     "history_limit": 0,
     "history_hours": 168,
