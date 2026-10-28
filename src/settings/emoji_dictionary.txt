@@ -377,3 +377,5 @@ _HsinCheersies = 暈眩、頭暈 | negative
 ChatGPTroger8686 = 拜託、求求 | neutral
 wuwa_frog12 = 無語、震驚 | think
 apoliwhirl_no = 震驚、無言 | think
+roger989898 = 無感、沒反應 | neutral
+1157676125280010313 = 震驚、呆住 | think
