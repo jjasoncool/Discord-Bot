@@ -375,3 +375,5 @@ a_pic_frog23 = 懷疑、不屑 | negative
 moon5 = 開心、期待 | agree
 _HsinCheersies = 暈眩、頭暈 | negative
 ChatGPTroger8686 = 拜託、求求 | neutral
+wuwa_frog12 = 無語、震驚 | think
+apoliwhirl_no = 震驚、無言 | think
