@@ -484,27 +484,54 @@ def _find_ffprobe_calls(path: Path) -> list[int]:
     })
 
 
-def _find_sqlite_openers(path: Path) -> list[int]:
-    """自己拼 articles.db 的路徑，或自己寫 SQLite 的唯讀／immutable 連線參數的字串。
-
-    articles.db 是 WAL 模式、爬蟲一直在寫：要用 `mode=ro`、不能用 `immutable=1`（會看不到還在 WAL 裡的新公告，
-    活動排程出過這個錯）。規則寫在註解守不住：改用 immutable 或漏掉 mode=ro 都不會紅。路徑與連線字串只有
-    `sys_settings.paths` 一份。只看程式裡的字串常數，docstring 與 log 文案提到檔名不算。"""
-    tree = _parse(path)
+def _code_strings_in_tree(tree: ast.Module):
+    """程式裡的字串常數（含 f-string 的固定部分）→ (行號, 內容)；docstring 不算。SQL、連線字串寫在字串裡，
+    逐行比對會被遮掉，要看字串本身就走這裡。"""
     docstrings: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
             first = node.body[0]
             if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
                 docstrings.add(id(first.value))
-    hits = set()
     for node in ast.walk(tree):
-        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)) or id(node) in docstrings:
-            continue
-        text = node.value
-        if (text.endswith("articles.db") and not text.endswith("sent_articles.db")) or "mode=ro" in text or "immutable=" in text:
-            hits.add(node.lineno)
-    return sorted(hits)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
+            yield node.lineno, node.value
+
+
+def _find_sqlite_openers(path: Path) -> list[int]:
+    """自己拼 articles.db 的路徑，或自己寫 SQLite 的唯讀／immutable 連線參數的字串。
+
+    articles.db 是 WAL 模式、爬蟲一直在寫：要用 `mode=ro`、不能用 `immutable=1`（會看不到還在 WAL 裡的新公告，
+    活動排程出過這個錯）。規則寫在註解守不住：改用 immutable 或漏掉 mode=ro 都不會紅。路徑與連線字串只有
+    `sys_settings.paths` 一份。只看程式裡的字串常數，docstring 與 log 文案提到檔名不算。"""
+    return sorted({
+        lineno for lineno, text in _code_strings_in_tree(_parse(path))
+        if (text.endswith("articles.db") and not text.endswith("sent_articles.db")) or "mode=ro" in text or "immutable=" in text
+    })
+
+
+#: 保存點的 SQL 語句：SAVEPOINT 名稱、RELEASE [SAVEPOINT] 名稱、ROLLBACK TO [SAVEPOINT] 名稱（f-string 只剩關鍵字也算）。
+#: 只認整句長這樣的字串：log 文案、例外訊息裡提到 savepoint 不算，免得誤判擋住啟動 gate
+_IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
+_SAVEPOINT_STATEMENT = re.compile(
+    rf"^(SAVEPOINT(\s+{_IDENT})?|RELEASE\s+SAVEPOINT(\s+{_IDENT})?|RELEASE\s+{_IDENT}"
+    rf"|ROLLBACK\s+TO\s+SAVEPOINT(\s+{_IDENT})?|ROLLBACK\s+TO\s+{_IDENT})$",
+    re.IGNORECASE,
+)
+
+
+def _find_handwritten_savepoints_in_tree(tree: ast.Module) -> list[int]:
+    """自己寫保存點 SQL（SAVEPOINT／RELEASE／ROLLBACK TO）的字串，一句一句看（以分號切開）。保存點的機制只有一份
+    （`pg_savepoint`）：失敗要撤回那一段、失敗後也要 RELEASE（不然每壞一筆就多疊一層子交易）、rowcount 要在 RELEASE 之前讀，
+    三件各自寫一定有一處漏；在它開的區段裡自己撤回或釋放，它收尾時也會失敗。"""
+    return sorted({
+        lineno for lineno, text in _code_strings_in_tree(tree)
+        if any(_SAVEPOINT_STATEMENT.match(part.strip()) for part in text.split(";"))
+    })
+
+
+def _find_handwritten_savepoints(path: Path) -> list[int]:
+    return _find_handwritten_savepoints_in_tree(_parse(path))
 
 
 def _find_user_date_parsing(path: Path) -> list[int]:
@@ -881,6 +908,12 @@ RULES = [
         allowed={"sys_settings/paths.py", "scraper/", "telegram_scraper/"},
     ),
     Rule(
+        name="交易裡的保存點：撤回失敗的那段、失敗後也收掉保存點，機制只有一份",
+        finder=_find_handwritten_savepoints,
+        canonical="sys_settings.llm_settings.pg_savepoint(cur, name)",
+        allowed={"sys_settings/llm_settings.py", "scraper/", "telegram_scraper/"},
+    ),
+    Rule(
         name="指令的管理員限制：has_permissions 擋下時回英文錯誤還記一筆 ERROR",
         pattern=r"checks\.has_permissions\(",
         canonical="utils.discord_members.require_access(interaction, admin_only=True)（或 permission=…）",
@@ -1122,6 +1155,39 @@ class LinkOnlyFinderTests(unittest.TestCase):
 
     def test_ignores_plain_url_validation(self):
         src = "def ok(url):\n    return url.startswith('https://') and 'x' in url\n"
+        self.assertEqual(self._scan(src), [])
+
+
+class SavepointFinderTests(unittest.TestCase):
+    """「保存點只有一份」規則的偵測器本身：抓 SQL 字串（含 f-string、小寫）裡的 SAVEPOINT，不抓 docstring 與註解。"""
+
+    def _scan(self, src):
+        return _find_handwritten_savepoints_in_tree(ast.parse(src))
+
+    def test_catches_plain_lowercase_short_and_f_strings(self):
+        src = (
+            "def a(cur, n):\n"
+            "    cur.execute('SAVEPOINT s1')\n"
+            "    cur.execute(f'rollback to savepoint {n}')\n"
+            "    cur.execute(\"RELEASE SAVEPOINT s1\")\n"
+            "    cur.execute('ROLLBACK TO raw_row')\n"
+            "    cur.execute('RELEASE raw_row')\n"
+            "    cur.execute('SELECT 1; SAVEPOINT s2')\n"
+        )
+        self.assertEqual(self._scan(src), [2, 3, 4, 5, 6, 7])
+
+    def test_ignores_docstrings_comments_and_prose(self):
+        src = (
+            '"""這個模組用 SAVEPOINT 隔開每一筆。"""\n'
+            "def a(cur, log):\n"
+            '    """失敗時 ROLLBACK TO SAVEPOINT。"""\n'
+            "    log.warning('savepoint 失敗：%s', 1)\n"
+            "    x = 1\n"
+            "    '''這裡用 SAVEPOINT 隔開'''\n"
+            "    topics = ('版本', 'release', '前瞻')\n"
+            "    log.info('release_model: 已卸載 model=%s', x)\n"
+            "    raise RuntimeError('SAVEPOINT name invalid')  # SAVEPOINT 在共用元件裡\n"
+        )
         self.assertEqual(self._scan(src), [])
 
 

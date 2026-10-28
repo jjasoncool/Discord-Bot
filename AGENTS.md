@@ -59,6 +59,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 本機時區 | `sys_settings.time_settings.APP_TZ` |
 | 遊戲公告的時間 | `services.events.event_time_parser.SERVER_TZ`（值同為 UTC+8，但語意不同，兩者不可合併） |
 | 連 pgvector；LlamaIndex 向量庫 | `LLMServiceSettings().pgvector_connect()`／`pgvector_cursor()`；向量庫（聊天、成員資料、檢索）用 `pgvector_vector_store(table_name=…, embed_dim=…)`（借出連線前先確認活著，守衛擋直接 `from_params`） |
+| 交易裡逐筆寫一批、壞的那筆只撤回那筆（保存點） | `sys_settings.llm_settings.pg_savepoint(cur, name)`（失敗只撤回這一段、例外照樣往外丟，略過或整批放棄由呼叫端決定；失敗後也 RELEASE；`rowcount` 要在區段裡讀；raw 備份的逐筆寫入、插話反應計數的名單查詢用它；守衛擋自己寫 SAVEPOINT） |
 | 轉發來源同一篇內容的送出鎖（推送與輪詢、手動指令與排程撞在一起只送一份） | `services.relay.base_monitor.content_send_lock(content_type, content_id)`（鎖內再查一次已送紀錄才送；巴哈、公告、FB、IT 都用它） |
 | 實體表名 | `HYBRID_RETRIEVAL_SETTINGS.chat_table()`／`.source_table(key)`／`.physical_table(name)`（含 identifier 消毒） |
 | 讀會被手改、改了就要生效的檔案（prompt、字典、開關、config.json、LLM runtime 設定） | 機制只有一份：`utils.hot_files.read_text()`／`read_json()`／`read_parsed(path, parse=…)`（mtime 快取、壞檔沿用上次）。各檔的解析、驗證、寫入在呼叫端：config.json 走 `ChannelConfig.load_config`／`update_config`、開關走 `switches.current()`、LLM runtime 設定走 `sys_settings.llm_settings.load_llm_runtime_config`（已接熱讀檔，LLMService 也用它）、字典走 `emoji_dictionary`／`sticker_dictionary`；不要在 `hot_files` 加認得特定檔案的函式 |

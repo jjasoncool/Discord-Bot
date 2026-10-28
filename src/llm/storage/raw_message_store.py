@@ -3,18 +3,25 @@
 架構定位：功能層（`llm/storage`），吃 Discord 訊息物件、寫資料庫。和 `store_chat`（篩選後的語意索引）並列、互不依賴；
 raw 表是備份層，也是互動（反應）的真相來源。
   - 上層（誰呼叫）：`discord_bot` 的 on_message／on_message_edit／on_raw_message_delete／on_raw_reaction_add／remove
-    （各自的 `enqueue_*`，滿門檻就 `flush_raw_buffer`）、on_ready（用 `utils.background_tasks.periodic` 定期呼叫 `flush_raw_buffer`）
-    與停機收尾（`MyBot.close` 呼叫 `flush_raw_buffer`）；要看一則訊息被按了多少反應的功能查 `get_reaction_salience`。
-    `llm.storage.chat_index_backfill` 直接讀 discord_messages_raw 表，從這裡補寫聊天向量庫漏掉的訊息。
-  - 下層（呼叫誰）：psycopg2 連線池（獨立 pool，不和 pgvector 的 LlamaIndex 共用）、`llm.preprocess.sticker_cache`。
+    （各自的 `enqueue_*`；on_message 另外在滿門檻時 `flush_raw_buffer`）、on_ready（用 `utils.background_tasks.periodic`
+    定期呼叫 `flush_raw_buffer`）與停機收尾（`MyBot.close` 呼叫 `flush_raw_buffer`）；要看一則訊息被按了多少反應的功能查
+    `get_reaction_salience`。`llm.storage.chat_index_backfill` 直接讀 discord_messages_raw 表，從這裡補寫聊天向量庫漏掉的訊息。
+  - 下層（呼叫誰）：psycopg2 連線池（獨立 pool，不和 pgvector 的 LlamaIndex 共用）、`sys_settings.llm_settings.pg_savepoint`、
+    `llm.preprocess.sticker_cache`。
 
 介面：`enqueue_raw_message`、`enqueue_raw_edit`、`enqueue_raw_delete`、`enqueue_reaction_change`、`should_trigger_flush`、
   `flush_raw_buffer`、`get_reaction_salience`、`buffer_sizes`／`total_buffer_size`。
 
-規則：四種事件各自一個緩衝，任一滿 50 則或每 60 秒寫一批（反應要夠即時），單次 flush 合併處理；
+規則：四種事件各自一個緩衝；新訊息進來時任一緩衝滿 50 則就寫一批，另外每 60 秒定期寫（反應要夠即時），單次 flush 合併處理；
   純 SQL、不算 embedding；刪除是軟刪（is_deleted=TRUE）。
+  一批在同一個交易裡逐筆寫，每筆各自一個保存點：這筆自己的資料寫不進去（內容不合法、違反限制）只略過這筆、記 WARNING
+  （只記錯誤的第一行，PostgreSQL 的 DETAIL／CONTEXT 會帶出訊息內容）；連線斷掉換一條連線整批重寫一次；
+  權限、表不見這類每筆都會失敗的錯誤整批往外丟。統計是 commit 之後真的寫進去的筆數，另記略過幾筆。
   聊天向量庫的補寫照 channel_id／thread_id 的拆法與 stickers、tenor_gifs 的內容組文字：改這些欄位的語意時，
   要一起改 `chat_index_backfill.build_items`，不然補寫的文字會和即時寫入的不一樣。
+
+例外與決策：連不上（換連線也失敗）時這批就丟了，不放回緩衝。放回要同時有緩衝上限、同時只跑一個 flush、失敗後暫停滿門檻
+  觸發，少了這三件，資料庫停著時每則新訊息都會開一個 flush、各佔一條執行緒，放回的反應與編輯還可能被舊的蓋回去。
 """
 
 from __future__ import annotations
@@ -28,12 +35,20 @@ from typing import Any, Literal, Optional
 
 import discord
 import psycopg2
+from psycopg2.errors import ProgramLimitExceeded
 from psycopg2.pool import ThreadedConnectionPool
 
 from llm.preprocess.sticker_cache import get_sticker_text
-from sys_settings.llm_settings import LLMServiceSettings
+from sys_settings.llm_settings import LLMServiceSettings, pg_savepoint
 
 logger = logging.getLogger(__name__)
+
+#: 這一筆自己的資料寫不進去：內容不合法（22 類，例如 jsonb 裡的 \u0000）、違反限制（23 類）、超過上限（54000；psycopg2
+#: 把它歸在 OperationalError，要單獨列出來）。只略過這筆；其他資料庫錯誤（連線、權限、表不見）每一筆都會一樣失敗，
+#: 整批往外丟交給 `_sync_flush`
+_ROW_DATA_ERRORS = (psycopg2.DataError, psycopg2.IntegrityError, ProgramLimitExceeded)
+
+_EMPTY_STATS = {"inserted": 0, "updated": 0, "deleted": 0, "reactions_applied": 0, "failed": 0}
 
 # ========== 設定 ==========
 
@@ -292,8 +307,8 @@ def should_trigger_flush() -> bool:
 
 
 async def flush_raw_buffer() -> dict[str, int]:
-    """批次處理所有 buffer；回傳 {inserted, updated, deleted, reactions_applied}。"""
-    empty_stats = {"inserted": 0, "updated": 0, "deleted": 0, "reactions_applied": 0}
+    """批次處理所有 buffer；回傳 {inserted, updated, deleted, reactions_applied, failed}（failed＝資料壞掉、略過的筆數）。"""
+    empty_stats = dict(_EMPTY_STATS)
     if total_buffer_size() == 0:
         return empty_stats
 
@@ -322,9 +337,9 @@ async def flush_raw_buffer() -> dict[str, int]:
 
     if any(stats.values()):
         logger.info(
-            "raw_message_store flush: inserted=%d updated=%d deleted=%d reactions=%d",
+            "raw_message_store flush: inserted=%d updated=%d deleted=%d reactions=%d failed=%d",
             stats["inserted"], stats["updated"],
-            stats["deleted"], stats["reactions_applied"],
+            stats["deleted"], stats["reactions_applied"], stats["failed"],
         )
     return stats
 
@@ -394,23 +409,26 @@ def _sync_flush(
             raise
         finally:
             pool.putconn(conn, close=broken)   # 壞掉的連線不放回池子，下一個拿到的人才不會再踩到
-    return {"inserted": 0, "updated": 0, "deleted": 0, "reactions_applied": 0}   # 迴圈一定 return 或 raise；給型別檢查看
+    return dict(_EMPTY_STATS)   # 迴圈一定 return 或 raise；給型別檢查看
 
 
 def _write_all(conn, insert_batch: list[dict], edit_batch: list[dict], delete_batch: list[str],
                reaction_batch: list[dict]) -> dict[str, int]:
-    stats = {"inserted": 0, "updated": 0, "deleted": 0, "reactions_applied": 0}
+    """整批在同一個交易裡寫；每筆各自包保存點（`_write_row`），壞的那筆只撤回那筆，交易不會進入失敗狀態，
+    所以 commit 之後的統計就是真的寫進去的筆數。"""
+    stats = dict(_EMPTY_STATS)
     try:
         conn.autocommit = False
         with conn.cursor() as cur:
-            if insert_batch:
-                stats["inserted"] = _write_inserts(cur, insert_batch)
-            if edit_batch:
-                stats["updated"] = _write_edits(cur, edit_batch)
-            if delete_batch:
-                stats["deleted"] = _write_deletes(cur, delete_batch)
-            if reaction_batch:
-                stats["reactions_applied"] = _apply_reactions(cur, reaction_batch)
+            for key, batch, write in (
+                ("inserted", insert_batch, _write_inserts),
+                ("updated", edit_batch, _write_edits),
+                ("deleted", delete_batch, _write_deletes),
+                ("reactions_applied", reaction_batch, _apply_reactions),
+            ):
+                if batch:
+                    stats[key], failed = write(cur, batch)
+                    stats["failed"] += failed
         conn.commit()
     except Exception:
         try:
@@ -428,7 +446,30 @@ def _json_or_none(value: Any) -> str | None:
     return json.dumps(value, ensure_ascii=False)
 
 
-def _write_inserts(cur, batch: list[dict]) -> int:
+def _first_line(exc: BaseException) -> str:
+    """錯誤訊息只留第一行：PostgreSQL 的 DETAIL／CONTEXT 會帶出原始值（貼圖、Tenor 的標題），不寫進 log。"""
+    text = str(exc).strip()
+    return text.splitlines()[0] if text else type(exc).__name__
+
+
+def _write_row(cur, kind: str, mid: Any, write):
+    """包一個保存點寫一筆（或一則訊息的一組反應），回傳 `write()` 的結果。
+
+    這筆自己的資料寫不進去（`_ROW_DATA_ERRORS`，或送出前就失敗的 Python 錯誤，例如內文有 NUL）：撤回這筆、記 WARNING、
+    回 None，交易照常往下寫。其他資料庫錯誤往外丟：每一筆都會一樣失敗，交給 `_sync_flush`。
+    """
+    try:
+        with pg_savepoint(cur, "raw_row"):
+            return write()
+    except Exception as exc:  # 邊界：一筆訊息；這筆的資料寫不進去只略過這筆，其餘照常提交
+        if isinstance(exc, psycopg2.Error) and not isinstance(exc, _ROW_DATA_ERRORS):
+            raise
+        logger.warning("raw_message_store %s 失敗、略過 mid=%s：%s: %s", kind, mid, type(exc).__name__, _first_line(exc))
+        return None
+
+
+def _write_inserts(cur, batch: list[dict]) -> tuple[int, int]:
+    """回 (新寫進去的筆數, 略過的筆數)；已經在表裡的（ON CONFLICT）兩邊都不算。"""
     sql = """
         INSERT INTO discord_messages_raw (
             message_id, guild_id, channel_id, thread_id, author_id,
@@ -444,25 +485,26 @@ def _write_inserts(cur, batch: list[dict]) -> int:
         )
         ON CONFLICT (message_id) DO NOTHING
     """
-    count = 0
+    inserted = failed = 0
     for row in batch:
-        params = {**row}
-        params["stickers"] = _json_or_none(row["stickers"])
-        params["tenor_gifs"] = _json_or_none(row["tenor_gifs"])
-        params["mentioned_users"] = _json_or_none(row["mentioned_users"])
-        try:
+        def write(row=row):
+            params = {**row}
+            params["stickers"] = _json_or_none(row["stickers"])
+            params["tenor_gifs"] = _json_or_none(row["tenor_gifs"])
+            params["mentioned_users"] = _json_or_none(row["mentioned_users"])
             cur.execute(sql, params)
-            if cur.rowcount > 0:
-                count += 1
-        except Exception as exc:
-            logger.warning(
-                "raw_message_store insert 失敗 mid=%s: %s",
-                row["message_id"], exc,
-            )
-    return count
+            return cur.rowcount   # 要在保存點收掉之前讀：RELEASE 之後 rowcount 會變成 -1
+
+        written = _write_row(cur, "新增", row.get("message_id"), write)
+        if written is None:
+            failed += 1
+        elif written > 0:
+            inserted += 1
+    return inserted, failed
 
 
-def _write_edits(cur, batch: list[dict]) -> int:
+def _write_edits(cur, batch: list[dict]) -> tuple[int, int]:
+    """回 (改到的筆數, 略過的筆數)；訊息不在表裡（bot 啟動前的舊訊息）時改到 0 筆、不算略過。"""
     sql = """
         UPDATE discord_messages_raw SET
             content = %(content)s,
@@ -473,39 +515,45 @@ def _write_edits(cur, batch: list[dict]) -> int:
             edited_at = %(edited_at)s
         WHERE message_id = %(message_id)s
     """
-    count = 0
+    updated = failed = 0
     for row in batch:
-        params = {
-            "message_id": row["message_id"],
-            "content": row["content"],
-            "stickers": _json_or_none(row["stickers"]),
-            "tenor_gifs": _json_or_none(row["tenor_gifs"]),
-            "has_attachment": row["has_attachment"],
-            "has_embed": row["has_embed"],
-            "edited_at": row["edited_at"],
-        }
-        try:
+        def write(row=row):
+            params = {
+                "message_id": row["message_id"],
+                "content": row["content"],
+                "stickers": _json_or_none(row["stickers"]),
+                "tenor_gifs": _json_or_none(row["tenor_gifs"]),
+                "has_attachment": row["has_attachment"],
+                "has_embed": row["has_embed"],
+                "edited_at": row["edited_at"],
+            }
             cur.execute(sql, params)
-            count += cur.rowcount
-        except Exception as exc:
-            logger.warning(
-                "raw_message_store edit 失敗 mid=%s: %s",
-                row["message_id"], exc,
-            )
-    return count
+            return cur.rowcount
+
+        changed = _write_row(cur, "編輯", row.get("message_id"), write)
+        if changed is None:
+            failed += 1
+        else:
+            updated += changed
+    return updated, failed
 
 
-def _write_deletes(cur, batch: list[str]) -> int:
-    # 軟刪；若 message_id 不存在（事件先於 insert），ANY 匹配不到自然 0
-    cur.execute(
-        """
-        UPDATE discord_messages_raw
-        SET is_deleted = TRUE, deleted_at = NOW()
-        WHERE message_id = ANY(%s)
-        """,
-        (batch,),
-    )
-    return cur.rowcount
+def _write_deletes(cur, batch: list[str]) -> tuple[int, int]:
+    """軟刪；message_id 不存在（事件先於 insert）時 ANY 匹配不到、自然是 0。回 (標記的筆數, 略過的筆數)。"""
+    def write():
+        cur.execute(
+            """
+            UPDATE discord_messages_raw
+            SET is_deleted = TRUE, deleted_at = NOW()
+            WHERE message_id = ANY(%s)
+            """,
+            (batch,),
+        )
+        return cur.rowcount
+
+    shown = "、".join(str(mid) for mid in batch[:3]) + ("…" if len(batch) > 3 else "")
+    marked = _write_row(cur, "刪除", f"{len(batch)} 則（{shown}）", write)
+    return (0, len(batch)) if marked is None else (marked, 0)
 
 
 # ========== Reaction 合併邏輯 ==========
@@ -565,32 +613,33 @@ def _recompute_derived(reactors: dict[str, list[str]]) -> dict[str, Any]:
     }
 
 
-def _apply_reactions(cur, batch: list[dict]) -> int:
-    """套用 reaction 增減事件到 raw 表。
+def _apply_reactions(cur, batch: list[dict]) -> tuple[int, int]:
+    """套用 reaction 增減事件到 raw 表；回 (套用的訊息數, 略過的訊息數)。
 
     策略：
     1. 先按 message_id 分組，每組是同一訊息的多筆事件
-    2. 對每則訊息：讀當前 reaction_breakdown → 套 delta → 寫回
+    2. 對每則訊息：鎖住那一列讀當前 reaction_breakdown → 套 delta → 寫回（讀與寫包在同一個保存點）
     3. 若訊息還沒進 raw 表（事件比 insert 先到），直接 skip 並記 log
+
+    讀那句鎖列（FOR UPDATE）：定期 flush 和滿門檻的 flush 可能同時在兩條執行緒寫，都讀到同一個舊值的話，
+    後提交的會把先提交那批的反應蓋掉。照 message_id 排序處理，兩批同時鎖到同幾列時順序一致、不會互相卡死。
     """
     # 按 message_id 分組
     by_msg: dict[str, list[dict]] = {}
     for ev in batch:
         by_msg.setdefault(ev["message_id"], []).append(ev)
 
-    applied = 0
-    skipped_missing = 0
-    for mid, events in by_msg.items():
-        try:
+    applied = failed = skipped_missing = 0
+    for mid, events in sorted(by_msg.items()):
+        def write(mid=mid, events=events) -> bool:
             cur.execute(
-                "SELECT reaction_breakdown FROM discord_messages_raw WHERE message_id = %s",
+                "SELECT reaction_breakdown FROM discord_messages_raw WHERE message_id = %s FOR UPDATE",
                 (mid,),
             )
             row = cur.fetchone()
             if row is None:
                 # 訊息不在 raw 表：可能是 bot 啟動前的舊訊息，或事件順序問題
-                skipped_missing += 1
-                continue
+                return False
 
             breakdown = row[0] or {"reactors": {}, "by_emoji": {}, "by_category": {}}
             reactors: dict[str, list[str]] = dict(breakdown.get("reactors") or {})
@@ -636,16 +685,19 @@ def _apply_reactions(cur, batch: list[dict]) -> int:
                     mid,
                 ),
             )
+            return True
+
+        done = _write_row(cur, "反應", mid, write)
+        if done is None:
+            failed += 1
+        elif done:
             applied += 1
-        except Exception as exc:
-            logger.warning(
-                "raw_message_store apply_reactions 失敗 mid=%s: %s",
-                mid, exc,
-            )
+        else:
+            skipped_missing += 1
 
     if skipped_missing > 0:
         logger.debug(
             "raw_message_store: %d 筆 reaction 事件對應的訊息尚未入庫，先 skip",
             skipped_missing,
         )
-    return applied
+    return applied, failed

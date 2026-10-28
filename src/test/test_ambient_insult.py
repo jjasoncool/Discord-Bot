@@ -454,6 +454,17 @@ class ReactionTests(unittest.TestCase):
     def test_list_lookup_failure_still_counts_the_like(self):
         self.assertEqual(1, self._positive_delta(insulter_found=True, fail_select=True))
 
+    def test_list_lookup_failure_rolls_back_to_the_savepoint_before_counting(self):
+        """查名單那句失敗後要先撤回到保存點：真的資料庫裡交易已經進入失敗狀態，不撤回的話下面的 UPDATE 會被拒。"""
+        log = []
+        with mock.patch.object(ai_interactions_store, "_get_conn", lambda: _FakeConn(log, None, True)), \
+                self.assertLogs(ai_interactions_store.logger, "WARNING"):
+            ai_interactions_store.note_reaction("555", "😂", None, "add", INSULTER)
+        sqls = [sql for sql, _ in log]
+        update_at = next(i for i, sql in enumerate(sqls) if sql.startswith("UPDATE"))
+        self.assertLess(sqls.index("ROLLBACK TO SAVEPOINT insulter_check"), update_at)
+        self.assertLess(sqls.index("RELEASE SAVEPOINT insulter_check"), update_at, "失敗後也收掉保存點")
+
 
 class InsultedInteractionSqlTests(unittest.TestCase):
     """被罵的插話在資料庫的樣子（SQL 本身的正確性另見 integration/it_ai_insults_sql.py，用暫存表實跑）。"""

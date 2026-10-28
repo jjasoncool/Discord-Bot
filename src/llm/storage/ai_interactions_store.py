@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 
 from sys_settings import switches
-from sys_settings.llm_settings import AmbientChatSettings, LLMServiceSettings
+from sys_settings.llm_settings import AmbientChatSettings, LLMServiceSettings, pg_savepoint
 
 logger = logging.getLogger(__name__)
 
@@ -442,19 +442,17 @@ def note_reaction(
                 with conn.cursor() as cur:
                     if pos and user_id is not None and switches.current().ambient_insult_mode == "on":
                         try:
-                            cur.execute("SAVEPOINT insulter_check")
-                            cur.execute(
-                                f"""SELECT 1 FROM {_INSULT_TABLE}
-                                    WHERE author_id = %s AND ts > now() - make_interval(days => %s)
-                                    LIMIT 1""",
-                                (str(user_id), AmbientChatSettings().insult_cold_days),
-                            )
-                            if cur.fetchone() is not None:
-                                pos = 0
-                            cur.execute("RELEASE SAVEPOINT insulter_check")
+                            with pg_savepoint(cur, "insulter_check"):
+                                cur.execute(
+                                    f"""SELECT 1 FROM {_INSULT_TABLE}
+                                        WHERE author_id = %s AND ts > now() - make_interval(days => %s)
+                                        LIMIT 1""",
+                                    (str(user_id), AmbientChatSettings().insult_cold_days),
+                                )
+                                if cur.fetchone() is not None:
+                                    pos = 0
                         except Exception as exc:
-                            # 查不到名單就照常計入（反應計數比名單重要）；savepoint 讓下面的 UPDATE 還能跑
-                            cur.execute("ROLLBACK TO SAVEPOINT insulter_check")
+                            # 查不到名單就照常計入（反應計數比名單重要）；保存點讓下面的 UPDATE 還能跑
                             logger.warning("ai_insults 名單查詢失敗，照常計入 msg=%s：%s", message_id, exc)
                     cur.execute(
                         f"""UPDATE {_TABLE}

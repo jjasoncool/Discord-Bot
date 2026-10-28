@@ -164,6 +164,30 @@ class LLMServiceSettings(BaseSettings):
             f"@{self.pgvector_host}:{self.pgvector_port}/{self.pgvector_db}"
         )
 
+
+@contextmanager
+def pg_savepoint(cur, name: str = "item"):
+    """在交易裡開一個保存點包住一段寫入：這段失敗就只撤回這一段，交易回到可用狀態，可以接著寫下一段。
+
+    PostgreSQL 的交易裡一句在伺服器端出錯，之後每一句都會被拒（current transaction is aborted），連 commit 都只會回滾；
+    逐筆寫一批、想略過壞的那筆，就要每筆一個保存點。例外照樣往外丟：略過、記 log 還是整批放棄由呼叫端決定
+    （連線斷了的話撤回那句也會失敗，丟出來的就是連線錯誤）。失敗後也 RELEASE，不然每壞一筆就多疊一層子交易。
+    SAVEPOINT／RELEASE 之後 `cur.rowcount` 會變成 -1，要用筆數就在區段裡、資料語句之後馬上讀。
+    交易本身（開、commit、rollback）照舊由呼叫端或 `pgvector_cursor(commit=True)` 管。
+    """
+    if not name.isidentifier():
+        raise ValueError(f"保存點名稱只能是識別字：{name!r}")
+    cur.execute(f"SAVEPOINT {name}")
+    done = False
+    try:
+        yield
+        done = True
+    finally:
+        if not done:
+            cur.execute(f"ROLLBACK TO SAVEPOINT {name}")
+        cur.execute(f"RELEASE SAVEPOINT {name}")
+
+
 class LLMContextSafetyRules(BaseModel):
     """LLM 對於不可信上下文的安全規則。"""
 
