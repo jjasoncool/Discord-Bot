@@ -1,14 +1,39 @@
-"""member_profile 向量庫存取層（技術介接層）。
+"""成員資料（自介、印象、精簡版人格卡、偏好、招牌梗）在 pgvector 的讀寫。
 
-職責：定義「如何把 member_profile 各類資料（intro_profile / impression /
-auto_personality / preference_fact / signature_tag）讀寫進 pgvector」的介面與實作。
-不放業務流程判斷。
-（原名 intro_rag_port，因已長成通用的 member_profile store 而更名。）
+架構定位：服務層（`llm/storage`），不認得 Discord；依賴 `sys_settings`（連線、交易、向量庫建構）、技術層的 embedding 客戶端
+  與 llama_index 的資料結構。
+  上層：自介與印象（`IntroProfileService`）、persona agent 發布精簡版（`run_publish`）、偏好與招牌梗抽取
+  （`preference_extractor`、`signature_tag_extractor`，經 `MemoryService` 與插話記憶）、`/forget_tag`、每日維護的招牌梗衰減；
+  讀取端是 `context_retriever` 的人物卡檢索與名字對照。
+  下層：pgvector（psycopg2 交易；LlamaIndex 的 PGVectorStore 只用來建表）、embedding 後端。
+
+介面：
+- `index_intro_profile`／`index_impression`／`index_auto_personality`／`index_preference_fact`／`index_signature_tag`：
+  寫入一份資料；同一份（同 doc_id）重送＝取代。失敗都記 ERROR、不往外丟；回傳值各自不同：auto_personality 回是否寫進去，
+  preference_fact 與 signature_tag 回 doc_id（失敗回 None），intro_profile 與 impression 不回傳（成敗都是 None）。
+- `list_preference_facts`／`list_signature_tags`：讀；`delete_preference_fact`／`delete_signature_tag`：刪一份。
+- `sweep_signature_tags`：招牌梗衰減；`set_signature_tag_flags`：本人退出（`/forget_tag`）。
+- `find_user_ids_by_alias`／`aliases_for_users`：用名字找人、找人的名字。
+- `get_member_profile_store()`：單例。
+
+規則：
+- 寫入一律先算好新向量，再在同一個交易裡刪舊寫新（`_insert`）：任何一步失敗都往外丟、舊資料不動。
+- 一份資料一個節點、不切段：同一個 ref_doc_id 有唯一索引，切成兩段會讓整筆寫不進去。
+- 別的路徑在管的欄位（招牌梗的 suppressed／blacklisted：本人用 `/forget_tag` 設）寫回時沿用資料庫裡現在的值：
+  在同一個交易裡先鎖住舊列再讀，呼叫端讀到的那份可能在算向量的期間就被改了。
+- 同步的資料庫與 embedding I/O 都在執行緒裡跑（`_ainsert`）。
+
+例外與決策：
+- 寫入用手寫 SQL，不用 LlamaIndex 的 `index.insert`：它的刪除與寫入是兩條連線、兩個交易，向量又在刪除之後才算，
+  後端一出錯就變成舊的已刪、新的沒寫，偏好的累積次數跟著歸零。列格式用 LlamaIndex 公開的 `node_to_metadata_dict`，
+  和它自己寫的列、讀取端看的欄位一字不差；向量輸入維持 metadata 加內文。
+- 寫入失敗只保住舊資料；這次的新內容沒寫進去，要不要重送由呼叫端決定。
 """
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import re
 import threading
@@ -20,15 +45,28 @@ from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS
 
 
 try:
-    from llama_index.core import Document, VectorStoreIndex
+    from llama_index.core.schema import MetadataMode, NodeRelationship, RelatedNodeInfo, TextNode
+    from llama_index.core.vector_stores.utils import node_to_metadata_dict
     from llama_index.vector_stores.postgres import PGVectorStore
     from llm.client.embedding_client import SafeLLMEmbedding, make_safe_llm_embedding
 except Exception:  # pragma: no cover - 依賴可能在部份環境尚未安裝
-    Document = None
-    VectorStoreIndex = None
+    MetadataMode = None
+    NodeRelationship = None
+    RelatedNodeInfo = None
+    TextNode = None
+    node_to_metadata_dict = None
     SafeLLMEmbedding = None
     make_safe_llm_embedding = None
     PGVectorStore = None
+
+
+#: 同一份資料（同 doc_id）的舊列。LlamaIndex 把 doc_id 寫在 metadata 的三個鍵，三個都比，哪一版寫的列都找得到
+_DOC_WHERE = "metadata_->>'ref_doc_id' = %s OR metadata_->>'doc_id' = %s OR metadata_->>'document_id' = %s"
+_DELETE_DOC_SQL = "DELETE FROM {table} WHERE " + _DOC_WHERE
+#: 寫回前鎖住舊列再讀：改旗標的 UPDATE 會等這個交易結束，不會在讀完之後、刪掉之前插進來
+_LOCK_DOC_SQL = "SELECT metadata_ FROM {table} WHERE " + _DOC_WHERE + " ORDER BY id DESC FOR UPDATE"
+#: 表格是 LlamaIndex 建的；text_search_tsv 由資料庫從 text 自動產生，id 由序列給
+_INSERT_ROW_SQL = "INSERT INTO {table} (text, metadata_, node_id, embedding) VALUES (%s, %s::json, %s, %s::vector)"
 
 
 logger = logging.getLogger(__name__)
@@ -148,10 +186,9 @@ class PgVectorMemberProfileStore:
         self.embed_dim = HYBRID_RETRIEVAL_SETTINGS.pgvector_embed_dim
         self._embed_model = None
         self._embed_model_name: str | None = None
-        self._index = None
+        self._vector_store = None
         self._schema_ready = False
-        # 保護 _get_index / _get_embed_model 的 lazy init 與熱切換，避免多 thread race。
-        # 用 RLock 允許 _get_index 持有 lock 時呼叫 _get_embed_model（後者也會 acquire 同一把）。
+        # 保護 _get_vector_store / _get_embed_model 的 lazy init 與熱切換，避免多 thread race。
         self._index_lock = threading.RLock()
 
     def _get_physical_table_name(self) -> str:
@@ -233,25 +270,17 @@ class PgVectorMemberProfileStore:
             logger.error("建立 Intro RAG schema constraints 失敗: %s", exc, exc_info=True)
 
     def _delete_existing_doc(self, *, doc_id: str) -> None:
-        """應用層 replace：寫入前刪除相同 ref_doc_id/doc_id 舊資料。"""
+        """刪掉一份資料（管理用的 delete_*）；寫入的取代在 `_insert` 的交易裡做，不走這裡。"""
         table = self._get_physical_table_name()
         try:
             with self._get_db_conn() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(
-                        f"""
-                        DELETE FROM {table}
-                        WHERE metadata_->>'ref_doc_id' = %s
-                           OR metadata_->>'doc_id' = %s
-                           OR metadata_->>'document_id' = %s;
-                        """,
-                        (doc_id, doc_id, doc_id),
-                    )
+                    cur.execute(_DELETE_DOC_SQL.format(table=table), (doc_id, doc_id, doc_id))
         except Exception as exc:
             logger.error("刪除舊 Intro RAG 文件失敗: doc_id=%s err=%s", doc_id, exc, exc_info=True)
 
     def _dependencies_ready(self) -> bool:
-        if any(dep is None for dep in (Document, VectorStoreIndex, SafeLLMEmbedding, PGVectorStore)):
+        if any(dep is None for dep in (TextNode, node_to_metadata_dict, SafeLLMEmbedding, PGVectorStore)):
             logger.warning("Intro RAG 依賴未就緒，略過 pgvector 寫入。")
             return False
         return True
@@ -263,8 +292,7 @@ class PgVectorMemberProfileStore:
         if self._embed_model is not None and self._embed_model_name == embed_model_name:
             return self._embed_model
 
-        # 首次 init 或 runtime 熱切換 → 進 lock 保護 mutation
-        # （self._embed_model / self._embed_model_name / self._index 三個欄位）
+        # 首次 init 或 runtime 熱切換 → 進 lock 保護 mutation（self._embed_model / self._embed_model_name）
         with self._index_lock:
             if self._embed_model is not None and self._embed_model_name == embed_model_name:
                 return self._embed_model
@@ -273,52 +301,90 @@ class PgVectorMemberProfileStore:
                 runtime_config=runtime_config,
             )
             self._embed_model_name = embed_model_name
-            self._index = None
             return self._embed_model
 
-    def _get_index(self):
+    def _get_vector_store(self):
+        """LlamaIndex 的 PGVectorStore：只用來建表與決定 metadata 的寫法，寫入走 `_insert` 自己的交易。
+
+        第一次呼叫時建表（沒有才建）、補唯一索引與查詢索引。兩者失敗都只記 log、不往外丟（LlamaIndex 建表失敗只記
+        WARNING，`_ensure_schema_constraints` 記 ERROR），這個行程也不會再試：新環境第一次寫入時資料庫要是正常的，
+        不然之後的寫入都會因為表不存在而失敗，要重啟才會再建。
+        """
         # Fast path：已 init 過直接返回，不進 lock
-        if self._index is not None:
-            return self._index
+        if self._vector_store is not None:
+            return self._vector_store
 
         # 首次 init 由 lock 保護；double-checked 避免 lock 釋放後重複建立
         with self._index_lock:
-            if self._index is not None:
-                return self._index
-
-            embed_model = self._get_embed_model()
+            if self._vector_store is not None:
+                return self._vector_store
             vector_store = self.settings.pgvector_vector_store(
                 table_name=self.table_name,
                 embed_dim=self.embed_dim,
             )
-            self._index = VectorStoreIndex.from_vector_store(
-                vector_store=vector_store,
-                embed_model=embed_model,
-            )
+            # 空的 add：只觸發 LlamaIndex 建表、不寫任何列。寫入走手寫 SQL，新環境第一次寫入前表要先存在
+            vector_store.add([])
             self._ensure_schema_constraints()
-            return self._index
+            self._vector_store = vector_store
+            return vector_store
 
-    def _insert(self, *, doc_id: str, text: str, metadata: dict[str, str]) -> None:
-        index = self._get_index()
-        # 應用層 replace：同 business key 重送時更新為新版本
-        self._delete_existing_doc(doc_id=doc_id)
-        doc = Document(
+    @staticmethod
+    def _profile_node(*, doc_id: str, text: str, metadata: dict[str, str]):
+        """一份資料一個節點（不切段）。SOURCE 關係給出 ref_doc_id；沒設的話 LlamaIndex 會把它寫成字串 "None"。"""
+        return TextNode(
             text=text,
-            doc_id=doc_id,
-            metadata=metadata,
+            metadata=dict(metadata),
+            relationships={NodeRelationship.SOURCE: RelatedNodeInfo(node_id=doc_id)},
         )
-        index.insert(doc)
 
-    async def _ainsert(self, *, doc_id: str, text: str, metadata: dict[str, str]) -> None:
+    def _insert(
+        self, *, doc_id: str, text: str, metadata: dict[str, str], keep_current: tuple[str, ...] = (),
+    ) -> None:
+        """先算好新向量，再在同一個交易裡刪舊寫新；任何一步失敗都往外丟，舊資料不動。
+
+        `keep_current`：這些 metadata 欄位寫回時沿用資料庫裡現在的值（別的路徑在管，例如 `/forget_tag` 設的旗標），
+        沒有舊列就用呼叫端給的。
+        """
+        vector_store = self._get_vector_store()
+        node = self._profile_node(doc_id=doc_id, text=text, metadata=metadata)
+        # 先算向量：後端連不上、逾時、5xx 都在這裡丟出，這時資料庫還沒碰
+        [embedding] = self._get_embed_model().get_text_embedding_batch(
+            [node.get_content(metadata_mode=MetadataMode.EMBED)]
+        )
+        table = self._get_physical_table_name()
+        # 刪舊與寫新在同一條連線、同一個交易：寫入失敗或行程中斷時資料庫整段回滾，舊列還在
+        with self.settings.pgvector_cursor(commit=True) as cur:
+            if keep_current:
+                cur.execute(_LOCK_DOC_SQL.format(table=table), (doc_id, doc_id, doc_id))
+                current = cur.fetchone()
+                if current is not None:
+                    stored = json.loads(current[0]) if isinstance(current[0], str) else (current[0] or {})
+                    # 向量是用呼叫端給的值算的；這幾個旗標只是 metadata 裡的幾行，對向量的影響可以忽略
+                    node.metadata.update({key: stored[key] for key in keep_current if key in stored})
+            row_metadata = node_to_metadata_dict(node, remove_text=True, flat_metadata=vector_store.flat_metadata)
+            cur.execute(_DELETE_DOC_SQL.format(table=table), (doc_id, doc_id, doc_id))
+            cur.execute(
+                _INSERT_ROW_SQL.format(table=table),
+                (
+                    node.get_content(metadata_mode=MetadataMode.NONE),
+                    json.dumps(row_metadata),
+                    node.node_id,
+                    list(embedding),   # psycopg2 送成陣列，資料庫轉成 vector；維度不對會在交易內被拒
+                ),
+            )
+
+    async def _ainsert(
+        self, *, doc_id: str, text: str, metadata: dict[str, str], keep_current: tuple[str, ...] = (),
+    ) -> None:
         """把同步 _insert 丟到 executor thread，避免阻塞 event loop。
 
-        _insert 內含 embedding HTTP + pgvector DELETE/INSERT 皆為同步 IO，
+        _insert 內含 embedding HTTP 與 pgvector 的刪舊寫新，皆為同步 IO，
         直接 await 會讓整個 event loop 停住（影響語音 heartbeat / 其他 callback）。
         """
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             None,
-            lambda: self._insert(doc_id=doc_id, text=text, metadata=metadata),
+            lambda: self._insert(doc_id=doc_id, text=text, metadata=metadata, keep_current=keep_current),
         )
 
     async def index_intro_profile(
@@ -355,7 +421,7 @@ class PgVectorMemberProfileStore:
             doc_id = f"intro_profile:{guild_id}:{author_id}"
             await self._ainsert(doc_id=doc_id, text=text, metadata=metadata)
         except Exception as exc:
-            logger.error("寫入 intro profile 至 pgvector 失敗: %s", exc, exc_info=True)
+            logger.error("寫入 intro profile 至 pgvector 失敗（沒寫進去，舊資料保留）: %s", exc, exc_info=True)
 
     async def index_impression(
         self,
@@ -397,7 +463,7 @@ class PgVectorMemberProfileStore:
             doc_id = f"impression:{guild_id}:{author_id}:{target_user_id}"
             await self._ainsert(doc_id=doc_id, text=text, metadata=metadata)
         except Exception as exc:
-            logger.error("寫入 member impression 至 pgvector 失敗: %s", exc, exc_info=True)
+            logger.error("寫入 member impression 至 pgvector 失敗（沒寫進去，舊資料保留）: %s", exc, exc_info=True)
 
     async def index_auto_personality(
         self,
@@ -408,7 +474,7 @@ class PgVectorMemberProfileStore:
         personality: str,
         extra_metadata: dict[str, str] | None = None,
     ) -> bool:
-        """寫入（同 doc_id 先刪後寫）。成功回 True；依賴未就緒或寫入失敗回 False（不丟例外）。"""
+        """寫入（同 doc_id 取代舊的）。成功回 True；依賴未就緒或寫入失敗回 False（不丟例外，舊的那張保留）。"""
         if not self._dependencies_ready():
             return False
 
@@ -433,7 +499,7 @@ class PgVectorMemberProfileStore:
             await self._ainsert(doc_id=doc_id, text=text, metadata=metadata)
             return True
         except Exception as exc:
-            logger.error("寫入 auto personality 至 pgvector 失敗: %s", exc, exc_info=True)
+            logger.error("寫入 auto personality 至 pgvector 失敗（沒寫進去，舊資料保留）: %s", exc, exc_info=True)
             return False
 
     # ── 功能二記憶：使用者偏好事實 preference_fact（Phase C-1 儲存層）─────────
@@ -497,7 +563,7 @@ class PgVectorMemberProfileStore:
             await self._ainsert(doc_id=doc_id, text=text, metadata=metadata)
             return doc_id
         except Exception as exc:
-            logger.error("寫入 preference_fact 至 pgvector 失敗: %s", exc, exc_info=True)
+            logger.error("寫入 preference_fact 至 pgvector 失敗（沒寫進去，舊資料保留）: %s", exc, exc_info=True)
             return None
 
     def list_preference_facts(
@@ -717,10 +783,12 @@ class PgVectorMemberProfileStore:
                 "last_seen": last_seen or "",
                 "last_corroborated_day": last_corroborated_day or "",
             }
-            await self._ainsert(doc_id=doc_id, text=text, metadata=metadata)
+            # 本人用 /forget_tag 設的旗標：呼叫端讀完到寫回之間可能剛被改過，寫回時沿用資料庫裡現在的值
+            await self._ainsert(doc_id=doc_id, text=text, metadata=metadata,
+                                keep_current=("suppressed", "blacklisted"))
             return doc_id
         except Exception as exc:
-            logger.error("寫入 signature_tag 至 pgvector 失敗: %s", exc, exc_info=True)
+            logger.error("寫入 signature_tag 至 pgvector 失敗（沒寫進去，舊資料保留）: %s", exc, exc_info=True)
             return None
 
     def list_signature_tags(
@@ -888,11 +956,8 @@ class PgVectorMemberProfileStore:
 
 
 # --- module-level singleton ---
-# 為什麼：原本每個呼叫端 (`personality_extractor`, `management_commands`)
-# 都 new 一個 PgVectorMemberProfileStore，每個 instance 有自己的 _index / embed_model，
-# 每次呼叫 index.insert 都會開新的 HTTP 連線打 Ollama；
-# 大量請求下會塞爆 Windows ephemeral port 池（TIME_WAIT socket 累積）。
-# 改為全 process 共用單一 instance，內部 index 物件被 LlamaIndex 的 HTTP client 重用。
+# 全行程共用一個 instance：embedding 客戶端（底下的 HTTP 連線池）與建表用的 PGVectorStore 都只建一次。
+# 每個呼叫端各建一個的話，每次寫入都開新的 HTTP 連線，大量請求下會把 Windows 主機的暫時連接埠用光（TIME_WAIT 累積）。
 _member_profile_store_singleton: PgVectorMemberProfileStore | None = None
 _singleton_lock = threading.Lock()
 
