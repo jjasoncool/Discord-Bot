@@ -1037,6 +1037,12 @@ RULES = [
             "telegram_scraper/",
         },
     ),
+    Rule(
+        name="限時拿 GPU 閘門：只限制等的時間（整段包進 timeout 會在做到一半時放掉閘門，執行緒裡的工作卻還在跑）",
+        pattern=r"enter_async_context\(\s*(self\.)?_?(gate|gpu_exclusive|stream_exclusive)\(",
+        canonical="llm.client.gpu_gate.wait_at_most(gate, seconds)（等不到丟 GpuBusy）",
+        allowed={"llm/client/gpu_gate.py"},
+    ),
 ]
 
 

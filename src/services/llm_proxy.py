@@ -23,7 +23,6 @@
 """
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import hmac
 import json
@@ -34,7 +33,7 @@ from typing import Any, Callable
 from aiohttp import web
 
 from llm.client.http_client import LlmAPIError, LlmHttpClient, is_unreachable
-from llm.client.gpu_gate import gpu_exclusive, imagegen_busy
+from llm.client.gpu_gate import GpuBusy, gpu_exclusive, imagegen_busy, wait_at_most
 from llm.client.backend_admin import admin_for
 from services.llm_service import LLM_SERVICE_SETTINGS, LLMService, log_llm_usage
 from sys_settings.hermes_settings import HermesSettings
@@ -146,9 +145,9 @@ class LlmProxy:
         try:
             async with contextlib.AsyncExitStack() as stack:
                 try:
-                    async with asyncio.timeout(self.settings.proxy_max_wait_seconds):
-                        lease = await stack.enter_async_context(self._gate("hermes", lease_seconds=lease_seconds))
-                except TimeoutError:
+                    lease = await stack.enter_async_context(
+                        wait_at_most(self._gate("hermes", lease_seconds=lease_seconds), self.settings.proxy_max_wait_seconds))
+                except GpuBusy:
                     logger.warning("模型請求等 GPU 閘門超過 %.0f 秒，回 503 trace=%s", self.settings.proxy_max_wait_seconds, trace)
                     return _error(503, "顯示卡忙碌，請稍後重試", code="gpu_busy",
                                   retry_after=self.settings.proxy_retry_after_seconds)

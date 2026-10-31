@@ -9,6 +9,7 @@
 介面：
 - `gpu_exclusive(owner, lease_seconds)`／`stream_exclusive()`：async 區段，先拿行程內的鎖再拿鎖檔；`lease_seconds` 給長工作（產圖）開 watchdog。
 - `gpu_exclusive_sync(max_wait_seconds)`：沒有 event loop 的同步程式（批次算向量、MCP）用。
+- `wait_at_most(gate, seconds)`：限時進入 async 閘門區段：等超過 `seconds` 丟 `GpuBusy`，進去之後跑多久不限。
 - `stream_busy()`／`current_owner()`／`imagegen_busy()`：有沒有人拿著、誰拿著。
 - `note_foreground_activity()`／`foreground_recently_active(grace_seconds)`：前景（/askai）最近有沒有在用，背景工作據此讓路。
 - `GpuBusy`：等不到的例外；`GpuLease.renew()`：長工作的心跳。
@@ -132,7 +133,7 @@ def _open_lock_file() -> int | None:
 
 
 class GpuBusy(TimeoutError):
-    """等 GPU 鎖檔超過呼叫端給的上限（`gpu_exclusive_sync(max_wait_seconds=…)`）。
+    """等 GPU 閘門超過呼叫端給的上限（`gpu_exclusive_sync(max_wait_seconds=…)`、`wait_at_most`）。
 
     給「等不起」的呼叫用：互動式搜尋算一個問句向量只要零點幾秒，卻可能要等 bot 整段長回答（一兩分鐘）；
     等不到就放棄這一步、退回不用 GPU 的做法，比讓使用者乾等好。"""
@@ -254,6 +255,22 @@ async def gpu_exclusive(owner: str = "llm", lease_seconds: float | None = None):
                 # CancelledError，反而跳過後面的 _holder 清理。
                 watchdog.cancel()
             _holder = None
+
+
+@contextlib.asynccontextmanager
+async def wait_at_most(gate: contextlib.AbstractAsyncContextManager, seconds: float):
+    """限時進入閘門區段：`gate` 是還沒進入的區段（`gpu_exclusive(...)`、`stream_exclusive()`，或測試換的假閘門），
+    等超過 `seconds` 秒丟 `GpuBusy`；進去之後區段跑多久不限。
+
+    只限制「等」：把整段包進 timeout 的話，時間到會在做到一半時取消——閘門先放掉、執行緒裡的同步 HTTP 卻還在跑
+    （重開模型做到一半就讓別的工作上顯示卡）。"""
+    async with contextlib.AsyncExitStack() as stack:
+        try:
+            async with asyncio.timeout(seconds):
+                entered = await stack.enter_async_context(gate)
+        except TimeoutError as exc:
+            raise GpuBusy(f"等 GPU 閘門超過 {seconds:g} 秒") from exc
+        yield entered
 
 
 @contextlib.asynccontextmanager

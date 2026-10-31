@@ -35,7 +35,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import functools
 import logging
 import json
@@ -50,7 +49,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:  # 只給型別註解；服務層不認 discord，Discord 物件由指令層傳進來（守衛 test_layering）
     import discord
 
-from llm.client.gpu_gate import gpu_exclusive
+from llm.client.gpu_gate import gpu_exclusive, wait_at_most
 from llm.preprocess.chat_line import format_chat_line
 from llm.preprocess.emoji_text_utils import is_emoji_or_symbol_only, is_link_only
 from llm.preprocess.tokenization import dedup_key, tokenize_for_retrieval, tokens_for_debug
@@ -611,9 +610,7 @@ async def _rerank_relevant(
     gate = gate or gpu_exclusive   # 呼叫時才解析，測試換成假閘門
 
     async def _gated_rerank() -> list[float]:
-        async with contextlib.AsyncExitStack() as stack:
-            async with asyncio.timeout(gpu_wait_seconds):
-                await stack.enter_async_context(gate("askai-rerank", lease_seconds=lease_seconds))
+        async with wait_at_most(gate("askai-rerank", lease_seconds=lease_seconds), gpu_wait_seconds):
             return await loop.run_in_executor(None, functools.partial(reranker.rerank, question, passages))
 
     task = asyncio.create_task(_gated_rerank(), name="askai-rerank")
