@@ -2393,6 +2393,10 @@ class MessageRelayWorker:
     _RECHECK_INTERVAL = timedelta(minutes=10)
     _RECHECK_BATCH = 20
 
+    def wake_recheck(self) -> None:
+        """現在就補判一次（群主確認模型後端修好了之後叫）；平常是模型回應了自己叫醒、或每隔一段時間補一次。"""
+        self._recheck_wake.set()
+
     async def _recheck_loop(self) -> None:
         """模型恢復回應時（`_judge_unit` 叫醒）或每 `_RECHECK_INTERVAL` 補判一次；出錯不中斷。"""
         while self._running:

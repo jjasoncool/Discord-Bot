@@ -9,13 +9,15 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import time
 from typing import Any, List, Optional
 
 from dataclasses import dataclass
 from pathlib import Path
 
-from llm.client.gpu_gate import stream_exclusive
+from llm.client.gpu_gate import GpuBusy, gpu_exclusive, stream_exclusive, wait_at_most
 from llm.client.backend_admin import admin_for
+from llm.client.embedding_client import make_safe_llm_embedding
 from llm.client.tool_calls import ToolRunner, assistant_message, call_name_and_arguments, tool_message
 from llm.preprocess.vision_image import is_universal_image, to_png_first_frame
 from llm.prompt.prompt_builder import build_prompt_bundle
@@ -24,6 +26,8 @@ from llm.client.http_client import (
     LlmConnectionError,
     LlmHttpClient,
     LlmTimeoutError,
+    backend_looks_broken,
+    backend_message,
 )
 
 from sys_settings.llm_settings import (
@@ -37,6 +41,9 @@ logger = logging.getLogger(__name__)
 anomaly_logger = logging.getLogger("llm_anomaly")
 
 LLM_SERVICE_SETTINGS = LLMServiceSettings()
+
+#: 探測等 GPU 閘門的時限：探測的時限再多這幾秒（別的工作佔著時回報「忙」，不乾等）
+_PROBE_GATE_GRACE = 30.0
 
 
 # 失敗路徑快照：各 backend 該打哪些 read-only admin / 觀測端點。
@@ -217,6 +224,17 @@ class GenerateReplyResult:
 LLMAPIError = LlmAPIError
 
 
+@dataclass(frozen=True)
+class ProbeResult:
+    """`LLMService.probe` 的結果：真的算了一次之後後端活不活、花了幾秒、失敗原因。
+    `busy`＝顯示卡被別的工作佔著、這次根本沒測到（不是後端壞了）。"""
+    ok: bool
+    model: str
+    seconds: float
+    detail: str = ""
+    busy: bool = False
+
+
 class LLMService:
     """LLM 服務封裝（透過自寫 LlmHttpClient 走 OpenAI dialect wire）。"""
 
@@ -369,6 +387,112 @@ class LLMService:
         await asyncio.to_thread(admin.unload, model=target)
         logger.info("release_model: 已卸載 backend=%s model=%s", backend, target)
         return True
+
+    def replaced_backends(self) -> list[str]:
+        """自癒放棄中的模型裡，行程已經換掉的（群主重啟了後端、手動重載）：介面層拿來自動重新偵測。
+        後端的 admin 沒有這個能力（不會放棄、或沒有行程可比）回空。同步 HTTP，async 呼叫端包 to_thread。"""
+        check = getattr(self._client.admin, "replaced_since_give_up", None)
+        return check() if check is not None else []
+
+    async def probe(self, *, embedding: bool, model: Optional[str] = None,
+                    timeout: Optional[float] = None) -> ProbeResult:
+        """真的算一次，看後端活不活：embedding 模型送一個短字串、聊天模型只要 1 個 token。拿 GPU 閘門、不重試、
+        短逾時（預設 `gated_embed_timeout`），失敗不往外丟、回報原因。
+
+        只看 `/api/v1/health` 不夠：顯示卡裝置掉了之後 health 照樣 ready，每次算都 5xx。後端壞掉的 5xx 會照一般路徑
+        叫 admin 重開那顆模型（自癒紀錄由呼叫端先清）；探測不重試、重開完不會自動重送，所以這裡再探一次，還是壞就是真的壞。
+        失敗原因帶後端自己講的那句話（`backend_message`）。
+
+        時限只管等閘門（`limit`＋`_PROBE_GATE_GRACE`，等不到回 busy，不算壞）；拿到之後每個請求、重開的每一步各有自己的時限。
+        不把整段包進 timeout：時間到會在重開做到一半時取消，閘門先放掉、執行緒裡的重開卻還在跑。
+        """
+        runtime = self._load_runtime_config_cached()
+        limit = float(timeout if timeout is not None else self.settings.gated_embed_timeout)
+        if model:
+            target = model
+        elif embedding and runtime is not None:
+            target = runtime.embed_model
+        else:
+            target = self.resolve_request_model()
+
+        async def attempt() -> None:
+            # 兩次都在同一段閘門裡：中間放掉的話，重開期間排進來的工作會先上，再探可能等不到閘門，
+            # 救回來了卻報「沒測到」
+            async with wait_at_most(gpu_exclusive("probe"), limit + _PROBE_GATE_GRACE):
+                try:
+                    await self._probe_once(target, embedding=embedding, runtime=runtime, limit=limit)
+                except (LlmAPIError, LlmConnectionError) as exc:
+                    # 後端壞掉的 5xx、卡死（拆信封認出來的，當連不上丟出）：薄迴圈叫過 admin 重開但不重送（探測沒有
+                    # 重試額度），再探一次才知道有沒有救回來；有沒有真的重開（冷卻中、已放棄就不會）看 lemonade_admin 的 log。
+                    # 整台連不上時再探也是馬上失敗
+                    if not (backend_looks_broken(exc) or isinstance(exc, LlmConnectionError)):
+                        raise
+                    logger.info("探測 %s 碰到後端壞掉或卡死，再探一次：%s", target, backend_message(exc) or exc)
+                    await self._probe_once(target, embedding=embedding, runtime=runtime, limit=limit)
+
+        return await self._run_probe(target, attempt)
+
+    async def probe_backend(self, model: str, *, timeout: Optional[float] = None) -> ProbeResult:
+        """單獨驗一顆模型（重新偵測時，向量、聊天兩顆主模型以外的，例如 reranker）：拿 GPU 閘門，請後端的 admin 照那顆模型的
+        類型送一個最小請求，不重開。admin 沒有這個能力回失敗（說明測不了）。"""
+        check = getattr(self._client.admin, "check", None)
+        limit = float(timeout if timeout is not None else self.settings.gated_embed_timeout)
+
+        async def attempt() -> None:
+            if check is None:
+                raise LLMAPIError("這個後端沒辦法單獨測一顆模型", kind="unsupported")
+            async with wait_at_most(gpu_exclusive("probe"), limit + _PROBE_GATE_GRACE):
+                await asyncio.to_thread(check, model)
+
+        return await self._run_probe(model, attempt)
+
+    @staticmethod
+    async def _run_probe(target: str, attempt) -> ProbeResult:
+        started = time.monotonic()
+        try:
+            await attempt()
+        except GpuBusy as exc:
+            return ProbeResult(False, target, time.monotonic() - started, f"顯示卡被別的工作佔著，這次沒測到（{exc}）",
+                               busy=True)
+        except Exception as exc:  # 邊界：探測就是要把任何失敗變成回報，不往外丟
+            said = backend_message(exc)
+            reason = f"{type(exc).__name__}: {exc}" + (f"：{said}" if said else "")
+            return ProbeResult(False, target, time.monotonic() - started, reason[:300])
+        return ProbeResult(True, target, time.monotonic() - started, "")
+
+    async def _probe_once(self, target: str, *, embedding: bool, runtime: Optional[LLMRuntimeConfig], limit: float) -> None:
+        """真的算一次（呼叫端拿著 GPU 閘門）。"""
+        if embedding:
+            if runtime is None:
+                raise LLMAPIError("沒有 runtime 設定，不知道 embedding 模型", kind="config")
+            embed = make_safe_llm_embedding(settings=self.settings, runtime_config=runtime, holding_gpu_gate=True)
+            try:
+                vector = await asyncio.to_thread(embed.get_text_embedding, "ping")
+            finally:
+                embed.close()    # 用完就丟，不留連線池
+            if not vector:
+                raise LLMAPIError("embedding 回空向量", kind="empty")
+            return
+        await self._ensure_model_loaded(target)
+        # 不重試、短逾時：探測要的是「現在答不答得出來」，不是等它慢慢好。admin 自己建一個，關的時候才不會關到正式 client 的
+        backend = runtime.backend if runtime is not None else None
+        client = LlmHttpClient(base_url=self.base_url, timeout=limit, max_retries=0,
+                               admin=admin_for(backend, self.base_url, heal_load_timeout=limit))
+        try:
+            extra_body = self._build_chat_extra_body(think=False, repeat_penalty=None, num_ctx=None, keep_alive=None)
+            extra_body["max_tokens"] = 1
+            completion = await client.chat_completion(
+                model=target, messages=[{"role": "user", "content": "ping"}],
+                temperature=0.0, timeout=limit, extra_body=extra_body,
+            )
+        finally:
+            client.close()
+            await client.aclose()
+            closer = getattr(client.admin, "close", None)
+            if closer is not None:
+                closer()
+        if not completion.get("choices"):
+            raise LLMAPIError("回應沒有 choices", kind="no_choices")
 
     def _build_chat_extra_body(
         self,

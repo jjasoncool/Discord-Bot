@@ -188,6 +188,13 @@ class SafeLLMEmbedding(BaseEmbedding):
         self._ensure_loaded()
         return self._http_client.embedding(model=self.model_name, input=text)[0]
 
+    def close(self) -> None:
+        """關掉底下的 HTTP 連線池與管理 API（探測這種用完就丟的呼叫端用；長期持有的實例不必關）。"""
+        self._http_client.close()
+        closer = getattr(self._http_client.admin, "close", None)
+        if closer is not None:
+            closer()
+
     def _get_text_embedding(self, text: str) -> list[float]:
         with self._embed_slot():
             return embed_with_perturbation_retry(

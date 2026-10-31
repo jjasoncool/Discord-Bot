@@ -55,6 +55,7 @@ COMMAND_MODULES = [
     'commands.llm_commands',
     'commands.management_commands',
     'commands.music_commands',
+    'commands.owner_alert_commands',
     'commands.periodic_reminder_commands',
     'commands.rollcall_commands',
     'commands.shop_commands',
@@ -330,6 +331,11 @@ async def on_app_command_error(interaction: discord.Interaction, error):
 async def on_message(message):
     # 避免機器人回應自己的訊息
     if message.author == bot.user:
+        return
+
+    # 私訊不是聊天：不存記憶、不插話、不算 echo（私訊頻道也沒有名稱，下面記 log 那行會出錯）。
+    # 群主的私訊是管理主控台的入口，由 owner_alert_commands 的 listener 接
+    if message.guild is None:
         return
 
     # 偵測 x.com / twitter.com 貼文連結，只在「影片貼文」時貼出 fixupx 可預覽版本。
