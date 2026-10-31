@@ -10,8 +10,10 @@
 - `resolve_user(bot, user_id, guild=)`：先當成員找（上面那支），不是成員再查 bot 的使用者快取、最後 `fetch_user`；都沒有回 None。
 - `bot_owner_id()`：群主的使用者 id（環境變數 `OWNER_ID`；沒設是 0，誰都不是）。
 - `check_role(user, required_role)`：使用者有沒有 `config.json` `role_mapping` 裡那個身分組；群主自動通過。
-- `require_access(interaction, owner_only=, admin_only=, required_role=, permission=)`：這個人能不能在這裡做這個操作；
+- `require_access(interaction, owner_only=, admin_only=, required_role=, permission=, allow_dm=)`：這個人能不能在這裡做這個操作；
   不行就自己回一則只有本人看得到的訊息、回 False，呼叫端直接 return。不帶參數＝最低要求：在伺服器裡、不是私訊。
+  `allow_dm=True` 只放行私訊裡的群主（`owner_only`）：管理主控台的按鈕與指令在私訊裡用；其他條件要看身分組與頻道權限，私訊裡沒有這些。
+- `home_guild(interaction)`：這次操作指的是哪個伺服器：在伺服器裡就是那個；私訊裡用 bot 所在的唯一伺服器，bot 在好幾個伺服器就回 None。
   全專案的管理員限制都走它（守衛擋 `has_permissions`：它擋下時回英文錯誤還記一筆 ERROR）。
   `require_` 表示不符合會擋下並告訴對方；`check_` 留給只回是或否的 `check_role`。
 
@@ -117,8 +119,16 @@ async def check_role(user, required_role: str = None) -> bool:
 _PERMISSION_NAMES = {"manage_messages": "管理訊息"}
 
 
+def home_guild(interaction: discord.Interaction) -> discord.Guild | None:
+    """這次操作指的是哪個伺服器：在伺服器裡就是那個；私訊裡用 bot 所在的唯一伺服器，不只一個就回 None（請對方到伺服器裡操作）。"""
+    if interaction.guild is not None:
+        return interaction.guild
+    guilds = list(getattr(interaction.client, "guilds", None) or [])
+    return guilds[0] if len(guilds) == 1 else None
+
+
 async def require_access(interaction: discord.Interaction, owner_only: bool = False, admin_only: bool = False,
-                         required_role: str = None, permission: str = None) -> bool:
+                         required_role: str = None, permission: str = None, allow_dm: bool = False) -> bool:
     """
     這個人能不能在這裡做這個操作：不行就自己回一則只有本人看得到的訊息並回 False。依序看在不在伺服器、群主或管理員、
     這個頻道的 Discord 權限、config.json 對應的身分組。
@@ -130,12 +140,20 @@ async def require_access(interaction: discord.Interaction, owner_only: bool = Fa
         required_role: 所需的角色名稱（例如 'Trader' 或 'Moderator'）
         permission: 所需的 Discord 權限（例如 'manage_messages'）。看的是**這個頻道**解析過覆寫的權限
             （`interaction.permissions`，thread 繼承母頻道）；`OWNER_ID` 自動通過，跟 check_role 一致
+        allow_dm: 私訊裡也放行，但只放群主（`owner_only`）：私訊裡沒有身分組與頻道權限可看
 
     Returns:
         bool: 是否通過權限檢查
     """
     # 檢查是否在伺服器中使用
     if not interaction.guild:
+        if allow_dm and owner_only:
+            owner_id = bot_owner_id()
+            if owner_id and interaction.user.id == owner_id:
+                return True
+            await safe_send_interaction_message(interaction, "❌ 此命令僅限指定擁有者使用！", ephemeral=True)
+            logger.info(f'使用者 {interaction.user} 在私人訊息裡嘗試使用僅限擁有者的命令，已被拒絕')
+            return False
         await safe_send_interaction_message(interaction, "此命令只能在伺服器中使用，無法在私人訊息中使用。", ephemeral=True)
         logger.info(f'使用者 {interaction.user} 嘗試在私人訊息中使用命令，已被拒絕')
         return False

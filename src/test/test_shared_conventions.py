@@ -37,6 +37,7 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from sys_settings.pgvector_settings import HYBRID_RETRIEVAL_SETTINGS as H  # noqa: E402
+from settings import channel_registry as _channel_registry  # noqa: E402
 
 
 class Rule:
@@ -72,6 +73,33 @@ class Rule:
         return rel in self.allowed or any(
             a.endswith("/") and rel.startswith(a) for a in self.allowed
         )
+
+
+def _channel_binding_keys() -> set[str]:
+    """config.json 裡頻道綁定的 key：登記表上的每一個，加 Telegram 路由那張表。"""
+    keys = {s.config_key for s in _channel_registry.all_settings() if s.config_key}
+    return keys | {"telegram_channel_routes"}
+
+
+def _find_channel_binding_writes(path: Path) -> list[int]:
+    """直接改 config.json 裡頻道綁定的地方：`cfg["x_channel_id"] = …`、`cfg.pop("x_channel_id")`、
+    `cfg.__setitem__("x_channel_id", …)`。寫入點只有 `channel_registry.apply`／`unbind`（面板與 /server_manager 都走它），
+    別處自己寫會繞過綁定後動作（自動發面板、建身分組）。"""
+    keys = _channel_binding_keys()
+
+    def is_key(node) -> bool:
+        return isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in keys
+
+    hits: list[int] = []
+    for node in ast.walk(_parse(path)):
+        if isinstance(node, (ast.Assign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(t, ast.Subscript) and is_key(t.slice) for t in targets):
+                hits.append(node.lineno)
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+              and node.func.attr in ("pop", "__setitem__", "setdefault") and node.args and is_key(node.args[0])):
+            hits.append(node.lineno)
+    return hits
 
 
 def _find_discarded_create_task(path: Path) -> list[int]:
@@ -1026,6 +1054,12 @@ RULES = [
         pattern=r"@(?:commands|bot)\.command\(",
         canonical="@app_commands.command（discord.app_commands）",
         allowed=set(),
+    ),
+    Rule(
+        name="把頻道綁定寫進 config.json（會繞過綁定後動作）",
+        finder=_find_channel_binding_writes,
+        canonical="settings.channel_registry.apply(setting, bot=, guild=, channel=)／unbind(setting)",
+        allowed={"settings/channel_registry.py"},
     ),
     Rule(
         name="背景任務：結果被丟掉的 create_task（沒人留參照、失敗沒人知道）",

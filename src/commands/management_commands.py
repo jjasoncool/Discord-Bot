@@ -24,7 +24,7 @@ from services.community.intro_profile_service import (
 )
 from services.community.impression_moderation_service import ImpressionModerationService
 from llm.storage.member_profile_store import get_member_profile_store
-from settings.channel_registry import all_settings, get_setting, ChannelSetContext
+from commands import channel_panel
 
 # 獲取 logger
 logger = logging.getLogger(__name__)
@@ -119,6 +119,14 @@ class ServerManagerView(discord.ui.View):
     @discord.ui.button(label="頻道設定", style=discord.ButtonStyle.secondary, custom_id="set_channel")
     async def set_channel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.set_channel_cmd(interaction)
+
+    @discord.ui.button(label="機器人狀態", style=discord.ButtonStyle.secondary, custom_id="bot_status")
+    async def bot_status_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog = interaction.client.get_cog("OwnerAlertCommands")
+        if cog is None:
+            await safe_send_interaction_message(interaction, "狀態功能目前沒有在運作，請看 log。", ephemeral=True)
+            return
+        await cog.show_status(interaction)
 
 class IntroProfileModal(discord.ui.Modal):
     """自我介紹 Modal - 已修正初始化與 defer"""
@@ -522,6 +530,7 @@ class ManagementCommands(commands.Cog):
         self.bot.add_view(RoleManagerView(self))
         self.bot.add_view(ServerManagerView(self))
         self.bot.add_view(IntroPanelView(self.intro_profile_service, self))
+        self.bot.add_dynamic_items(*channel_panel.DYNAMIC_ITEMS)
         logger.info("已註冊 ManagementCommands persistent views")
 
     async def _delete_previous_submission_messages(
@@ -705,120 +714,9 @@ class ManagementCommands(commands.Cog):
         await safe_send_interaction_message(interaction, embed=embed, view=action_view, ephemeral=True)
 
     async def set_channel_cmd(self, interaction: discord.Interaction):
-        """設定特定功能的頻道"""
+        """頻道設定：開頻道綁定面板（每一項綁哪裡、選一項改綁、解除綁定；私訊裡也能用）。"""
         logger.info(f'收到來自 {interaction.user} 的 set_channel 請求')
-
-        if not await require_access(interaction, owner_only=True):
-            return
-
-        # 頻道功能定義一律來自 settings/channel_registry.py（單一來源）。
-        # 加功能 = 在 registry 加一筆；這裡只負責共用的「選單 → 選頻道 → 套用」流程。
-        type_select = discord.ui.Select(
-            placeholder="選擇要設定的頻道類型...",
-            custom_id="management_set_channel_type_select",
-            options=[
-                discord.SelectOption(label=s.label, value=s.label, description=s.desc)
-                for s in all_settings()
-            ]
-        )
-
-        async def type_select_callback(interaction: discord.Interaction):
-            selected_type = type_select.values[0]
-            setting = get_setting(selected_type)
-            if setting is None:
-                await safe_send_interaction_message(interaction, f"無效的頻道類型：{selected_type}。請重試。", ephemeral=True)
-                return
-
-            # 特殊輸入流程（例如 Telegram 路由用 modal），由 handler 自行接管互動
-            if setting.custom_handler is not None:
-                await setting.custom_handler(interaction)
-                return
-
-            channels = [channel for channel in interaction.guild.channels if channel.type == setting.channel_type]
-            if not channels:
-                await safe_send_interaction_message(interaction, f"此伺服器中沒有找到{selected_type}頻道！", ephemeral=True)
-                return
-
-            # 創建頻道選單，實現分頁功能（針對文字頻道）
-            channel_options = [
-                discord.SelectOption(
-                    label=channel.name,
-                    value=str(channel.id),
-                    description=f"ID: {channel.id}",
-                    emoji="📝" if setting.channel_type == discord.ChannelType.text else ("🔊" if setting.channel_type == discord.ChannelType.voice else "📌")
-                )
-                for channel in channels
-            ]
-
-            if not channel_options:
-                await safe_send_interaction_message(interaction, f"沒有可供選擇的{selected_type}頻道！", ephemeral=True)
-                return
-
-            async def on_select_callback(interaction, selected_value):
-                selected_channel_id = int(selected_value)
-                channel = interaction.guild.get_channel(selected_channel_id)
-                if channel and channel.type == setting.channel_type:
-                    # 先寫進設定檔（只改這個 key），後續動作（例如部署面板）才讀得到新頻道
-                    try:
-                        config = await ChannelConfig.update_config(
-                            lambda c: c.__setitem__(setting.config_key, selected_channel_id),
-                            caller="ManagementCommands",
-                        )
-                    except ConfigWriteError as e:
-                        logger.error(f"綁定頻道寫入設定檔失敗: {e}")
-                        await safe_send_interaction_message(interaction, "❌ 設定檔讀取失敗，這次沒有寫入，請通知管理員檢查 config.json。", ephemeral=True)
-                        return
-
-                    auto_panel_note = ""
-                    if setting.on_set is not None:
-                        # 設定後動作（行為定義在 channel_registry.py 各功能旁）
-                        ctx = ChannelSetContext(
-                            guild=interaction.guild,
-                            channel=channel,
-                            config=config,
-                            bot=self.bot,
-                        )
-                        note = await setting.on_set(ctx)
-                        if note:
-                            auto_panel_note = note
-
-                    await interaction.response.edit_message(view=None)
-                    await safe_send_interaction_message(
-                        interaction,
-                        f"✅ 已將{selected_type}頻道設定為 **{channel.name}** (ID: {selected_channel_id})！{auto_panel_note}",
-                        ephemeral=True
-                    )
-                    logger.info(f"{selected_type}頻道已設定為 {channel.name} (ID: {selected_channel_id})")
-                else:
-                    await safe_send_interaction_message(interaction, f"選擇的頻道無效或不是{selected_type}頻道，請重試。", ephemeral=True)
-
-            current_page, channel_view = create_paginated_view(
-                channel_options,
-                lambda page: f"選擇一個{selected_type}頻道... (第 {page + 1} 頁)" if len(channel_options) > ITEMS_PER_PAGE else f"選擇一個{selected_type}頻道...",
-                f"選擇{selected_type}頻道",
-                lambda page: f"請從以下選項中選擇一個{selected_type}頻道作為{setting.desc}。(第 {page + 1} 頁)" if len(channel_options) > ITEMS_PER_PAGE else f"請從以下選項中選擇一個{selected_type}頻道作為{setting.desc}",
-                setting.color,
-                on_select_callback,
-                custom_id_prefix=f"management_set_channel_{setting.config_key}"
-            )
-
-            embed = discord.Embed(
-                title=f"選擇{selected_type}頻道",
-                description=f"請從以下選項中選擇一個{selected_type}頻道作為{setting.desc}。" + (f" (第 {current_page + 1} 頁)" if len(channel_options) > ITEMS_PER_PAGE else ""),
-                color=setting.color
-            )
-            await interaction.response.edit_message(embed=embed, view=channel_view)
-
-        type_select.callback = type_select_callback
-        type_view = discord.ui.View()
-        type_view.add_item(type_select)
-
-        embed = discord.Embed(
-            title="選擇頻道類型",
-            description="請選擇您要設定的頻道類型。",
-            color=discord.Color.greyple()
-        )
-        await safe_send_interaction_message(interaction, embed=embed, view=type_view, ephemeral=True)
+        await channel_panel.send_panel(interaction)
 
     async def set_role_permissions_cmd(self, interaction: discord.Interaction):
         """設定角色的命令執行權限"""
@@ -1102,22 +1000,25 @@ class ManagementCommands(commands.Cog):
         )
         await safe_send_interaction_message(interaction, embed=embed, view=action_view, ephemeral=True)
 
-    @app_commands.command(name="server_manager", description="管理伺服器設定")
-    async def server_manager_cmd(self, interaction: discord.Interaction):
-        """斜線命令：管理伺服器設定"""
-        logger.info(f'收到來自 {interaction.user} 的 /server_manager 斜線命令')
-
-        if not await require_access(interaction, owner_only=True):
-            return
-
-        action_view = ServerManagerView(self)
-
+    def manager_menu(self) -> tuple[discord.Embed, discord.ui.View]:
+        """管理選單（/server_manager 與私訊主控台同一份）。"""
         embed = discord.Embed(
             title="伺服器管理",
-            description="請選擇您要管理的項目。",
+            description="請選擇您要管理的項目。頻道設定與機器人狀態在私訊裡也能用；角色管理要在伺服器裡。",
             color=discord.Color.greyple()
         )
-        await safe_send_interaction_message(interaction, embed=embed, view=action_view, ephemeral=True)
+        return embed, ServerManagerView(self)
+
+    @app_commands.command(name="server_manager", description="管理伺服器設定")
+    async def server_manager_cmd(self, interaction: discord.Interaction):
+        """斜線命令：管理伺服器設定（私訊裡也能用，只有群主）"""
+        logger.info(f'收到來自 {interaction.user} 的 /server_manager 斜線命令')
+
+        if not await require_access(interaction, owner_only=True, allow_dm=True):
+            return
+
+        embed, action_view = self.manager_menu()
+        await safe_send_interaction_message(interaction, embed=embed, view=action_view, ephemeral=interaction.guild is not None)
 
     async def send_intro_panel_cmd(self, interaction: discord.Interaction):
         """在設定好的自我介紹頻道發送/更新填寫面板（非斜線指令入口）。"""
