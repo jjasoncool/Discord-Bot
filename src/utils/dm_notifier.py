@@ -1,38 +1,49 @@
-"""
-DM 通知共用模組：封裝向指定使用者發送私訊的共通邏輯。
+"""私訊：對一個人發私訊，以及幾種固定情境的私訊內容（關鍵字命中、收藏歌曲）。
 
-- 底層：send_dm（找對象用 `utils.discord_members.resolve_user`）
-- 高階情境封裝：notify_keyword_hit, notify_song_liked, notify_owner_lemonade_heal（模型後端自癒事件私訊群主）
+架構定位：基礎層（utils）裡的 Discord 工具（登記在 `test_layering.DISCORD_HELPERS_IN_BASE`），只依賴 discord.py 與
+  `utils.discord_members`（找人、群主 id）。
+  上層：關鍵字監看、音樂面板、點名、交易、/askai 的結果附件、群主通知（`commands.owner_alert_commands`）。
+  下層：discord.py 的 `User.send`。
+
+介面：
+- `send_dm(user, *, embed=, content=, file=, view=)`：對已解析的 User／Member 發私訊，回送出的訊息；失敗回 None（已記 log），永不 raise。
+- `notify_keyword_hit(bot, user_id, message, found_keywords, *, guild=)`／`notify_song_liked(user, song, *, voice_channel=)`。
+
+規則：
+- 要群主介入的狀況不在這裡拼：走 `utils.owner_alerts.emit`，由介面層變成私訊＋「重新偵測」按鈕。
 """
 import logging
+from typing import Optional
+
 import discord
 
-from utils.discord_members import bot_owner_id, resolve_user
+from utils.discord_members import resolve_user
 
 logger = logging.getLogger(__name__)
 
 
-async def send_dm(user, *, embed=None, content=None, file=None) -> bool:
-    """對已解析的 User/Member 發送 DM。True = 送達；False = 失敗（已 log），永不 raise。
+async def send_dm(user, *, embed=None, content=None, file=None, view=None) -> Optional[discord.Message]:
+    """對已解析的 User/Member 發送 DM。回送出的訊息（呼叫端要回寫時用）；失敗回 None（已 log），永不 raise。
 
-    `file`：附件（例如太長塞不進訊息的 JSON 結果）。discord.py 的 `send` 對
-    `file` 用 MISSING 哨兵而非 None，傳 None 會炸 → 這裡條件帶入。
+    `file`、`view`：discord.py 的 `send` 對它們用 MISSING 哨兵而非 None，傳 None 會炸 → 有給才帶。
     """
     if user is None:
-        return False
+        return None
     try:
         kwargs = {"content": content, "embed": embed}
         if file is not None:
             kwargs["file"] = file
-        await user.send(**kwargs)
+        if view is not None:
+            kwargs["view"] = view
+        message = await user.send(**kwargs)
         logger.info(f"已發送 DM 給 {user.name}（ID: {user.id}）")
-        return True
+        return message
     except discord.Forbidden:
         logger.warning(f"無法發送 DM 給 {user.name}（ID: {user.id}），可能已關閉私人訊息")
-        return False
+        return None
     except Exception as e:
         logger.error(f"發送 DM 錯誤：{type(e).__name__}: {e}")
-        return False
+        return None
 
 
 async def notify_keyword_hit(bot, user_id: int, message: discord.Message, found_keywords, *, guild: discord.Guild = None) -> bool:
@@ -75,7 +86,7 @@ async def notify_keyword_hit(bot, user_id: int, message: discord.Message, found_
         name=message.author.display_name,
         icon_url=message.author.display_avatar.url,
     )
-    return await send_dm(user, embed=embed)
+    return await send_dm(user, embed=embed) is not None
 
 
 async def notify_song_liked(user, song, *, voice_channel: discord.VoiceChannel = None) -> bool:
@@ -105,28 +116,4 @@ async def notify_song_liked(user, song, *, voice_channel: discord.VoiceChannel =
     if voice_channel is not None:
         embed.add_field(name="語音頻道", value=voice_channel.name, inline=True)
 
-    return await send_dm(user, embed=embed)
-
-
-def lemonade_heal_notice(event: dict) -> str:
-    """自癒事件（`llm.client.lemonade_admin.set_heal_listener` 送來的）→ 給群主看的一行。管理員訊息可以帶技術原因。"""
-    model = str(event.get("model") or "?")
-    reason = str(event.get("reason") or "").strip() or "沒有錯誤內容"
-    heals = event.get("heals")
-    outcome = event.get("outcome")
-    if outcome == "healed":
-        return f"🔧 Lemonade 自癒：{model} 回錯（{reason}），已重載一次恢復；這一小時第 {heals} 次。常發生代表那張卡或驅動有問題。"
-    if outcome == "failed":
-        return f"⚠️ Lemonade 自癒失敗：{model} 重載沒成功（{reason}），bot 會晚點再試；請看看 Lemonade。"
-    if outcome == "gave_up":
-        return f"🛑 Lemonade 自癒放棄：{model} 一小時內已重載 {heals} 次還是壞（{reason}），不再自動重載，請檢查那張顯示卡或驅動。"
-    return f"Lemonade 自癒事件：{outcome} {model}（{reason}）"
-
-
-async def notify_owner_lemonade_heal(bot, event: dict) -> bool:
-    """模型後端自癒（重載、失敗、放棄）時私訊群主一行；`OWNER_ID` 沒設就不送。True＝送達。"""
-    owner_id = bot_owner_id()
-    if not owner_id:
-        return False
-    user = await resolve_user(bot, owner_id)
-    return await send_dm(user, content=lemonade_heal_notice(event)[:1900])
+    return await send_dm(user, embed=embed) is not None

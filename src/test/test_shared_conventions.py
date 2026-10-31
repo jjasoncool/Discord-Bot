@@ -1056,6 +1056,12 @@ RULES = [
         allowed=set(),
     ),
     Rule(
+        name="通知群主要人介入（私訊＋「重新偵測」按鈕、機器人狀態）",
+        pattern=r"def\s+notify_owner_\w+\s*\(",
+        canonical="utils.owner_alerts.emit(kind, key, text)（一行通知用 inform；重測與狀態在 owner_alert_commands 登記）",
+        allowed=set(),
+    ),
+    Rule(
         name="把頻道綁定寫進 config.json（會繞過綁定後動作）",
         finder=_find_channel_binding_writes,
         canonical="settings.channel_registry.apply(setting, bot=, guild=, channel=)／unbind(setting)",

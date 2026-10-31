@@ -20,8 +20,6 @@ from services.relay.telegram_relay_service import (
     build_telegram_pg_dsn_from_env,
 )
 from utils.background_tasks import cancel_other_tasks, periodic, spawn, supervise
-from utils.dm_notifier import notify_owner_lemonade_heal
-from llm.client import lemonade_admin
 
 # 載入環境變數
 load_dotenv()
@@ -83,8 +81,6 @@ class MyBot(commands.Bot):
         self._shutdown_started = False
 
     async def setup_hook(self):
-        # 模型後端自癒事件（重載、失敗、放棄）私訊群主：技術層不認 Discord，用回呼接上
-        lemonade_admin.set_heal_listener(self._on_lemonade_heal)
         logger.info("正在載入指令模組...")
 
         # 載入所有指令模組
@@ -104,12 +100,6 @@ class MyBot(commands.Bot):
 
         except Exception as e:
             logger.error(f"斜線命令同步失敗: {str(e)}", exc_info=True)
-
-    def _on_lemonade_heal(self, event: dict) -> None:
-        """自癒回呼：可能在算 embedding 的執行緒被叫，排回 event loop 再送私訊。"""
-        self.loop.call_soon_threadsafe(
-            lambda: spawn(notify_owner_lemonade_heal(self, event), name="Lemonade 自癒通知")
-        )
 
     async def close(self):
         """停機收尾：docker stop 送 SIGINT 後由 discord.py 呼叫。

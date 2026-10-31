@@ -47,8 +47,9 @@ FLUSH_INTERVAL_SECONDS = 300  # 5 分鐘
 # 10～20 則估，約可撐 4～5 小時；超過時丟最舊的，因為插話與 RAG 比較需要最近的對話。
 MAX_BUFFER_SIZE = 1000
 # 一次 flush 拿著 GPU 閘門最多寫幾秒；到了就停，剩下的放回 buffer 下一輪再寫（不會丟）。每則寫入前檢查，
-# 所以最壞再多一則的時間：排隊等 embedding 名額＋請求本身（各最多 LLMServiceSettings.gated_embed_timeout，
-# 模型要重新載入時再加一次）。後端卡住時第一則就逾時、立刻停，通常只佔一次逾時
+# 所以最壞再多一則的時間：排隊等 embedding 名額＋請求本身（各最多 LLMServiceSettings.gated_embed_timeout）；
+# 後端壞了要自癒時，重開的卸載、載入、驗證三步各再最多一次（一小時最多三次，放棄後不再做）。
+# 後端卡住時第一則就逾時、立刻停，通常只佔一次逾時
 FLUSH_GPU_BUDGET_SECONDS = 120
 
 # 訊息過濾：太短的純噪音

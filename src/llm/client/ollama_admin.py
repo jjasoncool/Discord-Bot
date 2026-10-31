@@ -35,7 +35,7 @@ class OllamaAdmin:
     def unwrap(self, data: Any) -> Any:
         return data
 
-    def heal(self, model: str, reason: str = "") -> bool:
+    def heal(self, model: str, reason: str = "", kind: str | None = None) -> bool:
         logger.debug("Ollama 沒有重載 API，model=%s 的錯誤照一般流程收尾（%s）", model, reason)
         return False
 

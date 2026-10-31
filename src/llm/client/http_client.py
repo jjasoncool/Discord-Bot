@@ -9,6 +9,7 @@
   - chat_completion_raw／chat_completion_stream：別人組好的請求原樣送出，不重試（對方自己有退避）。
   - admin_get(path)：任何後端的唯讀觀測端點，給故障快照用；永不 raise。
   - is_unreachable／is_backend_fault／backend_looks_broken：給呼叫端分類錯誤。
+  - backend_message(exc)：錯誤裡後端自己講的那句話（給人看的原因：自癒通知、探測結果）。
   - judge_failure／raise_verdict：送出失敗的分類與丟出，admin 的管理 API 也用同一份。
   - `admin`：建構時掛上的 `BackendAdmin`（`unwrap(data)` 拆後端特有的錯誤信封、`heal(model, reason)` 重載），可為 None。
 
@@ -20,8 +21,8 @@
     的事實標準；SDK 與周邊套件（LlamaIndex 的 OpenAIEmbedding 模型名稱白名單）反而炸過。切後端只改 base_url 與 admin。
 
 例外與決策：
-  - 不重試的呼叫端（拿著 GPU 閘門算 embedding、替 Hermes 轉送、串流）後端壞了照樣重載，只是重載完不重送、
-    照原錯誤丟出，由它下一輪再做：聊天記憶的寫入就走這條路，不重載就只能等別的路徑碰到同樣的錯順便修好。
+  - 不重試的呼叫端（拿著 GPU 閘門算 embedding、替 Hermes 轉送、串流）後端壞了照樣叫 admin 重開那顆模型，只是重開完不重送、
+    照原錯誤丟出，由它下一輪再做：聊天記憶的寫入就走這條路，不重開就只能等別的路徑碰到同樣的錯順便修好。
   - 對話請求等回應的逾時不重試：逾時代表模型還在寫，再送只會讓同一題拿著顯示卡寫三遍。
   - `UpstreamWedge` 繼承 httpx.ConnectError：它是 admin 拆信封時丟出的「後端卡死」，對呼叫端來說就是連不上。
 """
@@ -29,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -103,6 +105,34 @@ def backend_looks_broken(exc: BaseException) -> bool:
     return any(signature in detail for signature in _BACKEND_BROKEN_SIGNATURES)
 
 
+def backend_message(exc: BaseException, limit: int = 160) -> str:
+    """錯誤裡後端自己講的那句話：Lemonade 把 llama-server 的錯誤包了好幾層 JSON，取最裡層的 message；
+    不是 JSON 就回原文前段；不是 `LlmAPIError` 或沒有內容回空字串。`str(exc)` 只有「HTTP 500」，給人看的原因要用這個。"""
+    if not isinstance(exc, LlmAPIError) or not exc.detail:
+        return ""
+    try:
+        data = json.loads(exc.detail)
+    except ValueError:
+        return exc.detail[:limit]
+    _, message = _deepest_message(data, 0)
+    return (message or exc.detail)[:limit]
+
+
+def _deepest_message(data: Any, depth: int) -> tuple[int, str]:
+    best = (-1, "")
+    items = data.items() if isinstance(data, dict) else enumerate(data) if isinstance(data, list) else ()
+    for key, value in items:
+        if key == "message" and isinstance(value, str) and value.strip():
+            found = (depth, value.strip())
+        elif isinstance(value, (dict, list)):
+            found = _deepest_message(value, depth + 1)
+        else:
+            continue
+        if found[0] > best[0]:
+            best = found
+    return best
+
+
 class UpstreamWedge(httpx.ConnectError):
     """後端的閘道活著、但它後面那顆推論行程卡死不回應（admin 拆信封時丟出）。
 
@@ -118,9 +148,18 @@ class BackendAdmin(Protocol):
         """拆這家後端「200 但內容是錯誤」的信封：卡死丟 `UpstreamWedge`，其他錯誤丟 `LlmAPIError`，不是信封原樣回。"""
         ...
 
-    def heal(self, model: str, reason: str = "") -> bool:
-        """後端卡死或壞了：重載那顆模型。回 True＝已重載。"""
+    def heal(self, model: str, reason: str = "", kind: str | None = None) -> bool:
+        """後端卡死或壞了：重開那顆模型。回 True＝已重開而且確認能算（呼叫端可以重送）。`kind` 是失敗那個請求的種類
+        （embedding／llm／reranking，`_heal_kind` 依端點給），admin 驗證時用。"""
         ...
+
+
+#: 端點 → 那個請求的模型種類（交給 admin 重開後驗證用）
+_PATH_KINDS = {"/embeddings": "embedding", "/chat/completions": "llm", "/rerank": "reranking"}
+
+
+def _heal_kind(path: str) -> str | None:
+    return _PATH_KINDS.get(path)
 
 
 def _should_retry_status(status: int | None) -> bool:
@@ -162,7 +201,7 @@ def judge_failure(
     if isinstance(exc, httpx.RequestError):
         return _Verdict(LlmConnectionError(f"{label} {path} 連線錯誤: {exc}"), more, None)
     if isinstance(exc, LlmAPIError):
-        reason = (exc.detail or "")[:160] if backend_looks_broken(exc) else None
+        reason = backend_message(exc) if backend_looks_broken(exc) else None
         return _Verdict(exc, more and _should_retry_status(exc.status), reason)
     return _Verdict(exc, False, None)
 
@@ -295,7 +334,7 @@ class LlmHttpClient:
         except (httpx.RequestError, LlmAPIError) as exc:
             verdict = judge_failure(exc, label="POST", path="/chat/completions (stream)", attempt=0, max_retries=0)
             if verdict.heal_reason is not None and self.admin is not None:
-                await asyncio.to_thread(self.admin.heal, model, verdict.heal_reason)
+                await asyncio.to_thread(self.admin.heal, model, verdict.heal_reason, _heal_kind("/chat/completions"))
             raise_verdict(verdict, exc)
 
     # ---------- embedding ----------
@@ -397,7 +436,7 @@ class LlmHttpClient:
             except (httpx.RequestError, LlmAPIError) as exc:
                 verdict = judge_failure(exc, label=label, path=path, attempt=attempt, max_retries=max_retries)
                 healed = (verdict.heal_reason is not None and self.admin is not None
-                          and self.admin.heal(model, verdict.heal_reason))
+                          and self.admin.heal(model, verdict.heal_reason, _heal_kind(path)))
                 if not verdict.retry:
                     raise_verdict(verdict, exc)
                 if not healed:
@@ -419,7 +458,7 @@ class LlmHttpClient:
                 verdict = judge_failure(exc, label=label, path=path, attempt=attempt, max_retries=max_retries,
                                         retry_on_read_timeout=retry_on_read_timeout)
                 healed = (verdict.heal_reason is not None and self.admin is not None
-                          and await asyncio.to_thread(self.admin.heal, model, verdict.heal_reason))
+                          and await asyncio.to_thread(self.admin.heal, model, verdict.heal_reason, _heal_kind(path)))
                 if not verdict.retry:
                     raise_verdict(verdict, exc)
                 if not healed:
