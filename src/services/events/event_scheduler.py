@@ -438,6 +438,11 @@ def _build_description(
 
 # ── 副作用入口（掛在 monitor send 尾巴；best-effort 不拋） ──
 
+def schedule_flags(config: dict) -> tuple[bool, bool]:
+    """config.json 裡活動排程的兩個開關：(enabled, dry_run)。預設開、預設 dry_run（首批保險）；狀態面板也讀這裡。"""
+    return bool(config.get("event_schedule_enabled", True)), bool(config.get("event_schedule_dry_run", True))
+
+
 async def maybe_schedule_events(
     bot,
     *,
@@ -471,9 +476,9 @@ async def maybe_schedule_events(
         # 閘門：只處理發進「活動公告頻道」(= article_monitor_channel_id) 的內容，即時讀、自動同步
         if str(channel_id) != str(config.get("article_monitor_channel_id")):
             return
-        if not config.get("event_schedule_enabled", True):
+        enabled, dry_run = schedule_flags(config)
+        if not enabled:
             return
-        dry_run = bool(config.get("event_schedule_dry_run", True))  # 首批保險：預設 dry-run
 
         events = parse_events(text, post_time=post_time, is_html=is_html, fallback_title=title or "")
         if not events:

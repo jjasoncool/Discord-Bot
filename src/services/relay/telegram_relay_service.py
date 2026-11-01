@@ -509,6 +509,13 @@ class TelegramMessageRepository:
             value = await conn.fetchval("SELECT COUNT(*) FROM telegram_relay_delivery_state;")
         return int(value or 0)
 
+    async def latest_message_time(self) -> Optional[datetime]:
+        """爬蟲最後一次寫進資料庫的時刻（`created_at` 是寫入時間，不是 Telegram 的發文時間；補掃舊訊息也算活著）。"""
+        if self.pool is None:
+            raise RuntimeError("TelegramMessageRepository 尚未 connect")
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval("SELECT max(created_at) FROM telegram_messages;")
+
     async def list_new_message_pks(self, after_pk: int, limit: int = 200) -> list[int]:
         if self.pool is None:
             raise RuntimeError("TelegramMessageRepository 尚未 connect")
@@ -1514,6 +1521,17 @@ class MessageRelayWorker:
     @property
     def running(self) -> bool:
         return self._running
+
+    def status(self) -> dict:
+        """worker 現況（狀態面板用）：{running, listening（LISTEN 連線活著）, queued, processing, last_polled_pk}。"""
+        conn = self._listen_conn
+        return {
+            "running": self._running,
+            "listening": conn is not None and not conn.is_closed(),
+            "queued": self._queue.qsize(),
+            "processing": len(self._processing),
+            "last_polled_pk": self._last_polled_pk,
+        }
 
     async def start(self) -> None:
         if self._running:

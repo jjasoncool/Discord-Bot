@@ -63,6 +63,23 @@ class NotifySecretTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs(notify_server.logger, "WARNING"):
             server._warn_if_unprotected()
 
+    async def test_accepted_pushes_are_timestamped_and_rejections_counted(self):
+        """機器人狀態面板看「爬蟲多久沒推送」靠這兩個數字：受理的記時刻，密鑰不符的計次。"""
+        with mock.patch.dict(notify_server._last_notify_at, {}, clear=True), \
+                mock.patch.object(notify_server, "_rejected_count", [0]), \
+                mock.patch.object(notify_server, "_last_rejected_at", [0.0]):
+            server = self.server("s3cret")
+            before = notify_server.last_notify_at()
+            self.assertNotIn("fb", before)
+            await server._handle_notify(request(headers={notify_server.SECRET_HEADER: "s3cret"}))
+            self.assertIn("fb", notify_server.last_notify_at(), "受理的推送要記下時刻")
+            self.assertEqual(0, notify_server.rejected_count())
+            with self.assertLogs(notify_server.logger, "WARNING"):
+                await server._handle_notify(request(source="article", headers={}))
+            self.assertEqual(1, notify_server.rejected_count())
+            self.assertGreater(notify_server.last_rejected_at(), 0, "記下最後一次被拒的時刻，修好之後面板才會轉綠")
+            self.assertNotIn("article", notify_server.last_notify_at(), "被拒的不算推送")
+
     async def test_health_check_needs_no_secret(self):
         response = await self.server("s3cret")._handle_health(request())
         self.assertEqual(200, response.status)

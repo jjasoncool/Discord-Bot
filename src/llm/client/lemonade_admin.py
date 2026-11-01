@@ -174,6 +174,15 @@ def heal_notice(outcome: str, model: str, reason: str = "", heals: int | None = 
     return f"Lemonade 自癒事件：{outcome} {model}（{reason}）"
 
 
+def heal_state() -> tuple[list[str], dict[str, int]]:
+    """（放棄中的模型名單, 這一小時重開過的模型 → 次數）；狀態面板用它定紅黃綠，文字用 `heal_summary`。"""
+    now = _clock()
+    with _LOCK:
+        gave_up = [model for (_, model) in _GAVE_UP]
+        recent = {model: len([t for t in ts if now - t < _HEAL_WINDOW_S]) for (_, model), ts in _HEAL_HISTORY.items()}
+    return gave_up, {model: n for model, n in recent.items() if n and model not in gave_up}
+
+
 def heal_summary() -> str:
     """狀態面板用的一行：哪顆模型放棄中（幾分鐘前）、哪顆這一小時重開了幾次；都沒有就是正常。"""
     now = _clock()

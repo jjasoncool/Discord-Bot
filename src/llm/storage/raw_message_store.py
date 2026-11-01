@@ -31,6 +31,7 @@ import json
 import logging
 import re
 import threading
+import time
 from typing import Any, Literal, Optional
 
 import discord
@@ -298,6 +299,17 @@ def total_buffer_size() -> int:
     return sum(buffer_sizes().values())
 
 
+#: 最後一次整批寫入成功的時刻（`time.time()`；還沒成功過是 None）與連續失敗次數：狀態面板看資料庫寫得進去嗎
+_last_flush_ok_at: Optional[float] = None
+_consecutive_failures = 0
+
+
+def flush_health() -> dict[str, Any]:
+    """{last_ok_at, consecutive_failures, buffered}（給狀態面板）。"""
+    return {"last_ok_at": _last_flush_ok_at, "consecutive_failures": _consecutive_failures,
+            "buffered": total_buffer_size()}
+
+
 def should_trigger_flush() -> bool:
     """任一 buffer 達閾值或總量超標時觸發立即 flush。"""
     sizes = buffer_sizes()
@@ -324,6 +336,7 @@ async def flush_raw_buffer() -> dict[str, int]:
         _delete_buffer.clear()
         _reaction_buffer.clear()
 
+    global _last_flush_ok_at, _consecutive_failures
     loop = asyncio.get_running_loop()
     try:
         stats = await loop.run_in_executor(
@@ -332,8 +345,11 @@ async def flush_raw_buffer() -> dict[str, int]:
             insert_batch, edit_batch, delete_batch, reaction_batch,
         )
     except Exception as exc:
+        _consecutive_failures += 1
         logger.error("raw_message_store flush 執行失敗: %s", exc, exc_info=True)
         return empty_stats
+    _consecutive_failures = 0
+    _last_flush_ok_at = time.time()
 
     if any(stats.values()):
         logger.info(

@@ -285,6 +285,26 @@ async def stream_exclusive():
         yield
 
 
+def cross_process_status() -> dict[str, object]:
+    """閘門現況（狀態面板用）：本行程誰拿著、鎖檔是不是別的行程拿著（本行程拿著時查不出來，回 None）、
+    等滿上限硬闖還剩幾秒。只試拿不等，毫秒級。"""
+    status: dict[str, object] = {"holder": _holder, "locked_here": _GPU_LOCK.locked(),
+                              "other_process": None, "skip_remaining_s": max(0.0, _skip_until - _clock())}
+    if status["locked_here"]:
+        return status      # 自己拿著鎖檔時再開一個 fd 也會被擋，分不出是不是別人
+    fd = _open_lock_file()
+    if fd is None:
+        return status
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        status["other_process"] = False
+    except BlockingIOError:
+        status["other_process"] = True
+    finally:
+        os.close(fd)   # 關檔就放鎖
+    return status
+
+
 def stream_busy() -> bool:
     """目前是否有人佔著 GPU（chat / embedding / 產圖都算）。
 

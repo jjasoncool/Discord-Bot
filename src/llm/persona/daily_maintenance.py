@@ -51,20 +51,25 @@ def _scheduled_model() -> Optional[str]:
     return runtime_config.personality_model or runtime_config.model
 
 
-async def run_once(guild) -> None:
-    """跑一次四步：① emoji 字典 → ② 招牌梗衰減 → ③ persona agent → ④ 發布精簡版。"""
+async def run_once(guild) -> bool:
+    """跑一次四步：① emoji 字典 → ② 招牌梗衰減 → ③ persona agent → ④ 發布精簡版。回 True＝這次有跑，False＝沒 guild 或已有一輪在跑。"""
     global _running
     if guild is None:
         logger.warning("每日維護：無可用 guild")
-        return
+        return False
     if _running:
         logger.info("每日維護略過：已有一輪正在執行中")
-        return
+        return False
     _running = True
     try:
         await _run_steps(guild)
     finally:
         _running = False
+    return True
+
+
+def is_running() -> bool:
+    return _running
 
 
 async def _run_steps(guild) -> None:

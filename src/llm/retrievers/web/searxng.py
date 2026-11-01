@@ -66,6 +66,19 @@ def _note_unresponsive(items: Any, settings: Any, log: logging.Logger) -> list[l
     return reported
 
 
+def blocked_engines() -> dict[str, float]:
+    """還在暫避的引擎 → 剩幾秒（給狀態面板顯示；到點的不列）。"""
+    now = time.monotonic()
+    return {name: until - now for name, until in _blocked_until.items() if until > now}
+
+
+def reset_blocked() -> list[str]:
+    """清掉暫避表（群主要「現在試」時）；回原本在暫避的引擎。"""
+    names = sorted(blocked_engines())
+    _blocked_until.clear()
+    return names
+
+
 @dataclass(frozen=True)
 class WebResult:
     """正規化後的單筆搜尋結果。"""

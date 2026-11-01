@@ -12,9 +12,10 @@
 - `inform(kind, key, text)`：一行通知、沒有按鈕，順便解除同一把的警報（例：自癒成功）。
 - `set_listener(fn)`：介面層接通知；接上時把還沒送的補送。fn 可能在任何執行緒被叫，自己排回 event loop。
 - `register(kind, *, title, retest=None, status=None)`：登記一種狀況：面板上的名稱、重測函式（async，吃 key、
-  回 `RetestResult`）、狀態函式（回一行字，sync 或 async 都可以）。
+  回 `RetestResult`）、狀態函式（回一行字或 `Status(level, text)`，sync 或 async 都可以）。
 - `retest(kind, key) -> RetestResult`：跑登記的重測；成功就解除那一把。
-- `status_line(kind) -> str`：那種狀況現在的一行狀態；沒登記狀態函式回空字串。
+- `status_of(kind) -> Status`：那種狀況現在的燈號與一行說明：有 error 警報＝alert（紅）、有 warning 警報＝至少 watch（黃）、
+  其餘照狀態函式回的（只回字串就算 ok）；`status_line(kind)` 只拿說明那一行。
 - `active()`／`resolve(kind, key)`／`kinds()`／`title(kind)`；`reset()` 清空（測試用）。
 
 規則：
@@ -70,8 +71,23 @@ class RetestResult:
     untested: bool = False
 
 
+#: 燈號由輕到重；面板排序與整體顏色都照這個順序
+LEVELS = ("ok", "watch", "alert")
+
+
+@dataclass(frozen=True)
+class Status:
+    """一種狀況現在的燈號：ok（綠、正常）、watch（黃、觀察中：自己會好、或剛好過）、alert（紅、要人處理）。"""
+    level: str
+    text: str = ""
+
+    @property
+    def rank(self) -> int:
+        return LEVELS.index(self.level) if self.level in LEVELS else len(LEVELS)
+
+
 Retest = Callable[[str], Awaitable[RetestResult]]
-Status = Callable[[], Any]
+StatusFn = Callable[[], Any]
 Listener = Callable[[Alert], None]
 
 
@@ -80,7 +96,7 @@ class KindSpec:
     kind: str
     title: str
     retest: Optional[Retest] = None
-    status: Optional[Status] = None
+    status: Optional[StatusFn] = None
 
 
 _LOCK = threading.Lock()
@@ -160,7 +176,7 @@ def set_listener(listener: Optional[Listener]) -> None:
         _deliver(listener, alert)
 
 
-def register(kind: str, *, title: str, retest: Optional[Retest] = None, status: Optional[Status] = None) -> None:
+def register(kind: str, *, title: str, retest: Optional[Retest] = None, status: Optional[StatusFn] = None) -> None:
     """登記一種狀況（重複登記就覆蓋，cog 重載時會這樣）。"""
     with _LOCK:
         _KINDS[kind] = KindSpec(kind, title, retest, status)
@@ -189,20 +205,34 @@ async def retest(kind: str, key: str) -> RetestResult:
     return result
 
 
-async def status_line(kind: str) -> str:
-    """那種狀況現在的一行狀態（狀態函式 sync、async 都可以）。"""
+async def status_of(kind: str) -> Status:
+    """那種狀況現在的燈號與說明：警報蓋過狀態函式（error → alert、warning → 至少 watch），狀態函式只回字串就當 ok；
+    沒登記狀態函式時說明用最新那則警報的文字。狀態函式 sync、async 都可以。"""
     with _LOCK:
         spec = _KINDS.get(kind)
-    if spec is None or spec.status is None:
-        return ""
-    try:
-        value = spec.status()
-        if inspect.isawaitable(value):
-            value = await value
-    except Exception as exc:  # 邊界：狀態只是顯示，一項查不到不該讓整個面板出不來
-        logger.warning("查 %s 的狀態失敗：%s", kind, exc)
-        return f"查不到狀態（{type(exc).__name__}）"
-    return str(value or "")
+        alerts = sorted((a for (k, _), a in _ACTIVE.items() if k == kind), key=lambda a: a.since)
+    reported = Status("ok", "")
+    if spec is not None and spec.status is not None:
+        try:
+            value = spec.status()
+            if inspect.isawaitable(value):
+                value = await value
+        except Exception as exc:  # 邊界：狀態只是顯示，一項查不到不該讓整個面板出不來
+            logger.warning("查 %s 的狀態失敗：%s", kind, exc)
+            value = Status("watch", f"查不到狀態（{type(exc).__name__}）")
+        reported = value if isinstance(value, Status) else Status("ok", str(value or ""))
+    level = reported.level
+    if any(a.severity == "error" for a in alerts):
+        level = "alert"
+    elif alerts and reported.rank < Status("watch").rank:
+        level = "watch"
+    text = reported.text or (alerts[-1].text if alerts else "")
+    return Status(level, text)
+
+
+async def status_line(kind: str) -> str:
+    """那種狀況現在的一行說明（`status_of` 的 text）。"""
+    return (await status_of(kind)).text
 
 
 def reset() -> None:

@@ -67,6 +67,12 @@ _threshold_paused_until = 0.0
 # 超過上限丟掉的則數，留到下一次 flush 才記一行 log，避免斷線期間每則訊息各記一行。
 _dropped_overflow = 0
 
+
+def buffer_status() -> dict:
+    """緩衝現況（狀態面板用）：{size, edits, paused_s（上一輪中止、距離下一次重試還有幾秒；0＝沒中止）, dropped}。"""
+    return {"size": len(_buffer), "edits": len(_edit_buffer),
+            "paused_s": max(0.0, _threshold_paused_until - time.monotonic()), "dropped": _dropped_overflow}
+
 # 跨批次共用的 LlamaIndex chat index，避免每次 flush 都 new 新 SafeLLMEmbedding / PGVectorStore；
 # 大量短連線會塞滿 Windows ephemeral port 池。
 # 只在 embed_model 換掉時重建；runtime config 熱切換仍會被感知。

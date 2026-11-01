@@ -14,6 +14,7 @@ endpoint：
 import asyncio
 import hmac
 import logging
+import time
 from functools import partial
 from aiohttp import web
 from typing import Callable, Coroutine, Dict, Optional
@@ -52,6 +53,27 @@ _RELAY_SOURCES: Dict[str, dict] = {
 
 #: 爬蟲打通知時帶密鑰的 header
 SECRET_HEADER = "X-Notify-Secret"
+
+
+#: 各來源最後一次收到推送的時刻（`time.time()`）與密鑰不符被拒的次數：給機器人狀態面板看爬蟲活不活、兩邊密鑰對不對
+_last_notify_at: Dict[str, float] = {}
+_rejected_count = [0]
+_last_rejected_at = [0.0]
+
+
+def last_notify_at() -> Dict[str, float]:
+    """來源 → 最後一次收到推送的時刻（`time.time()`）；bot 啟動後還沒收過的來源不在裡面。"""
+    return dict(_last_notify_at)
+
+
+def rejected_count() -> int:
+    """啟動以來密鑰不符被拒的推送次數。"""
+    return _rejected_count[0]
+
+
+def last_rejected_at() -> float:
+    """最後一次密鑰不符被拒的時刻（`time.time()`；沒有是 0）：修好之後面板看這個才會轉綠。"""
+    return _last_rejected_at[0]
 
 
 class NotifyServer:
@@ -122,6 +144,8 @@ class NotifyServer:
 
         if not self._authorized(request):
             logger.warning("拒絕通知：密鑰不符 source=%s remote=%s", source, request.remote)
+            _rejected_count[0] += 1
+            _last_rejected_at[0] = time.time()
             return web.json_response({"status": "error", "message": "密鑰不符"}, status=401)
 
         if source not in self._handlers:
@@ -129,6 +153,7 @@ class NotifyServer:
                 {"status": "error", "message": f"未知的通知來源: {source}"},
                 status=404,
             )
+        _last_notify_at[source] = time.time()   # 爬蟲每輪跑完都會打一次（0 筆也打），所以這就是「爬蟲還活著」的時刻
 
         try:
             try:

@@ -45,10 +45,14 @@ def content_send_lock(content_type: str, content_id) -> asyncio.Lock:
     return lock
 
 
+#: 爬蟲容器的 API；各 monitor 與機器人狀態面板都從這裡拿
+SCRAPER_API_URL = "http://scraper:8000"
+
+
 class BaseContentMonitor:
     """基礎內容監控類別"""
 
-    def __init__(self, bot, scraper_api_url: str = "http://scraper:8000"):
+    def __init__(self, bot, scraper_api_url: str = SCRAPER_API_URL):
         self.bot = bot
         self.scraper_api_url = scraper_api_url
         self._state_db: Optional[StateDB] = None
