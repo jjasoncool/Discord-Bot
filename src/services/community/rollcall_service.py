@@ -140,6 +140,8 @@ class RollCallService:
         self._response_view_factory = response_view_factory
         self.runtime = RollCallRuntime()
         self._tasks: List[asyncio.Task] = []
+        # 一次只跑一場抽選：自動排程與手動、或兩個裝置各按一次手動撞在一起時，不能各抽一批
+        self._pick_lock = asyncio.Lock()
 
     # ── 生命周期 ──
 
@@ -215,8 +217,20 @@ class RollCallService:
         config = self._get_config()
         return config.get("rollcall_channel_id")
 
+    @property
+    def picking(self) -> bool:
+        """正在抽選（自動或手動）：面板據此先擋下第二次手動點名並講原因。"""
+        return self._pick_lock.locked()
+
     async def do_roll_call(self, count: int = PICK_COUNT, *, manual: bool = False) -> List[discord.Member]:
-        """執行一次點名抽選，回傳被抽中的成員列表"""
+        """執行一次點名抽選，回傳被抽中的成員列表。上一場還在跑就略過這次（回空）：排隊等它做完再抽會變成兩批。"""
+        if self._pick_lock.locked():
+            logger.info("幽靈點名：上一場抽選還在跑，略過這次%s點名", "手動" if manual else "自動")
+            return []
+        async with self._pick_lock:
+            return await self._roll_call(count, manual=manual)
+
+    async def _roll_call(self, count: int, *, manual: bool) -> List[discord.Member]:
         # 抽選新成員前，先清理上一輪逾期未回覆者，避免他們因仍在 pending 而被排除
         try:
             await self.check_expired()
@@ -463,17 +477,34 @@ class RollCallService:
 
     # ── 管理面板用 ──
 
-    def get_status_embed(self) -> discord.Embed:
-        """產生管理面板的狀態 embed"""
+    def get_status_embed(self, guild: Optional[discord.Guild] = None) -> discord.Embed:
+        """管理面板的狀態 embed。給 guild 就印身分組名稱——面板在私訊裡，<@&id> 在那裡顯示不出來；沒給就用提及。"""
+
+        def roles_text(role_ids: List[int], empty: str) -> str:
+            if not role_ids:
+                return empty
+            if guild is None:
+                text = ", ".join(f"<@&{rid}>" for rid in role_ids)
+            else:
+                names = []
+                for rid in role_ids:
+                    role = guild.get_role(rid)
+                    names.append(role.name if role else f"未知（ID: {rid}）")
+                text = ", ".join(names)
+            return text if len(text) <= 1024 else text[:1000] + "…"   # embed 欄位上限
+
         status_icon = "🟢 已啟用" if self.runtime.enabled else "🔴 已停用"
+        role_text = roles_text(self._get_target_role_ids(), "未設定")
+        exclude_text = roles_text(self._get_exclude_role_ids(), "無")
 
-        # 取得目標身份組名稱
-        role_ids = self._get_target_role_ids()
-        role_text = ", ".join(f"<@&{rid}>" for rid in role_ids) if role_ids else "未設定"
-
-        # 取得排除身份組名稱
-        exclude_ids = self._get_exclude_role_ids()
-        exclude_text = ", ".join(f"<@&{rid}>" for rid in exclude_ids) if exclude_ids else "無"
+        # 點名訊息發到哪：沒綁要在面板上看得到，手動點名才不會莫名「沒人可抽」
+        channel_id = self._get_channel_id()
+        if not channel_id:
+            channel_text = "未綁定（到主控台「頻道設定」綁）"
+        elif self.bot.get_channel(channel_id) is None:
+            channel_text = f"找不到（ID: {channel_id}），到「頻道設定」重綁"
+        else:
+            channel_text = f"<#{channel_id}>"
 
         pending_count = len(self.runtime.pending)
         immune_count = sum(
@@ -486,6 +517,7 @@ class RollCallService:
             color=discord.Color.green() if self.runtime.enabled else discord.Color.greyple(),
         )
         embed.add_field(name="狀態", value=status_icon, inline=True)
+        embed.add_field(name="點名頻道", value=channel_text, inline=True)
         embed.add_field(name="目標身份組", value=role_text, inline=True)
         embed.add_field(name="排除身份組", value=exclude_text, inline=True)
         embed.add_field(name="每週抽選", value=f"{PICK_COUNT} 人", inline=True)

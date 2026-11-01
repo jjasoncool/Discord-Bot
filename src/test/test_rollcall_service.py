@@ -10,6 +10,8 @@
      服務層處理，別人按只會收到「不是你的點名」提示、不會替本人解除點名。
   5. 兩個排程迴圈被取消（停機、cog 卸載）時以「被取消」結束：吞掉的話 supervise 會當成迴圈自己結束、
      每次停機都記 WARNING。
+  6. 一次只跑一場抽選：自動排程與手動、或兩個裝置各按一次手動撞在一起時，第二場略過（回空、記 INFO），
+     不會各抽一批、把兩倍的人叫起來。
 
 執行期狀態檔（settings/runtime/rollcall.json）一律以假物件取代，測試不讀也不寫它。
 """
@@ -159,6 +161,28 @@ class LoopCancelTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await loop_task
 
+
+
+class PickLockTests(unittest.IsolatedAsyncioTestCase):
+    async def test_overlapping_picks_run_only_one_batch(self):
+        """第一場還在跑時再叫一次：第二場回空並記一行，等第一場做完 picking 才解除。"""
+        service = _make_service(mock.MagicMock())
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def slow_roll_call(count, *, manual):
+            started.set()
+            await release.wait()
+            return ["picked"]
+        service._roll_call = slow_roll_call
+        first = asyncio.create_task(service.do_roll_call(manual=False))
+        await started.wait()
+        self.assertTrue(service.picking)
+        with self.assertLogs("services.community.rollcall_service", "INFO") as logs:
+            self.assertEqual(await service.do_roll_call(manual=True), [])
+        self.assertIn("略過這次手動點名", logs.output[0])
+        release.set()
+        self.assertEqual(await first, ["picked"])
+        self.assertFalse(service.picking)
 
 
 class PickTickTests(unittest.IsolatedAsyncioTestCase):

@@ -19,7 +19,6 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -126,15 +125,15 @@ class ConfigTests(ConfigTestBase):
 
 
 class RollCallRoleTests(ConfigTestBase):
-    async def test_add_role_ids_only_adds_the_new_ones(self):
+    async def test_write_roles_only_touches_the_given_ids(self):
+        """面板改身份組只動那幾個 id：新增不重複、移除只拿掉指定的，檔裡其他 key 原樣保留。"""
         from commands import rollcall_commands
         self.write({"rollcall_target_role_ids": [1], "other": "keep"})
-        interaction = SimpleNamespace(response=SimpleNamespace(edit_message=mock.AsyncMock()))
         with mock.patch.object(rollcall_commands, "CONFIG_FILE", str(self.path)):
-            ok = await rollcall_commands._add_role_ids(interaction, "rollcall_target_role_ids", [1, 2, 3])
-        self.assertTrue(ok)
-        self.assertEqual(self.on_disk(), {"rollcall_target_role_ids": [1, 2, 3], "other": "keep"})
-        interaction.response.edit_message.assert_not_awaited()
+            await rollcall_commands._write_roles("rollcall_target_role_ids", "add", [1, 2, 3])
+            self.assertEqual(self.on_disk(), {"rollcall_target_role_ids": [1, 2, 3], "other": "keep"})
+            await rollcall_commands._write_roles("rollcall_target_role_ids", "remove", [1, 9])
+        self.assertEqual(self.on_disk(), {"rollcall_target_role_ids": [2, 3], "other": "keep"})
 
 
 if __name__ == "__main__":
