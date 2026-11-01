@@ -7,8 +7,8 @@
 
 介面：
 - `register_channel(label, channel_type, config_key, *, color, desc)`：登記一個「選頻道」功能；當裝飾器用就把下方函式設成綁定後動作。
-- `register_custom(label, *, color, desc, describe=)`：登記一個自己接管互動的功能（例：Telegram 路由先開表單）；
-  `describe(config)` 回面板上「現在設了什麼」的一行。
+- `register_custom(label, *, color, desc, describe=, input=)`：登記一個「先輸入一段文字、再選一個頻道」的功能（例：Telegram 路由先輸入來源）；
+  `input` 是表單欄位怎麼長（`InputSpec`），裝飾的函式吃 (輸入的文字, 頻道 id) 做寫入、回結果一句；`describe(config)` 回面板上「現在設了什麼」的一行。
 - `all_settings()`／`get_setting(label)`／`display_order()`（面板的順序：論壇、文字、語音分組，表單類最後）。
 - `bound_channel_id(setting)`／`telegram_routes(config=None)`：現在綁哪裡（沒綁回 None／空 dict）。
 - `apply(setting, *, bot, guild, channel) -> str`：寫進 config.json、跑綁定後動作，回要附在成功訊息後的附註；寫不進去丟 `ConfigWriteError`。
@@ -17,9 +17,10 @@
 
 規則：
 - 綁頻道寫 config.json 只走 `apply`／`unbind`（守衛擋別處直接寫 `*_channel_id`）；UI 只管畫面。
-- 選頻道一律用 bot 自己列的清單（`create_paginated_view`）：Discord 原生的頻道選單在私訊裡列不出伺服器的頻道，而主控台在私訊裡。
+- 這裡只有登記表與寫入，不碰互動：表單、頻道清單、畫面都在 `commands.channel_panel`（頻道清單由 bot 自己列——Discord 原生的頻道選單
+  在私訊裡列不出伺服器的頻道，而主控台在私訊裡）。
 - 三種登記方式：純綁頻道直接呼叫 `register_channel(...)`；綁頻道＋後續動作用 `@register_channel(...)` 裝飾 on_set；
-  不是「選一個頻道存 id」的（Telegram 路由要先輸入來源）用 `@register_custom(...)` 裝飾一個 handler，由它自己接管 interaction。
+  不是「選一個頻道存 id」的（Telegram 路由要先輸入來源）用 `@register_custom(..., input=InputSpec(...))` 裝飾寫入函式。
 - 登記順序＝組內顯示順序。
 
 例外與決策：
@@ -35,8 +36,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 import discord
 
-from utils.discord_members import home_guild
-from utils.utils import ChannelConfig, ConfigWriteError, create_paginated_view, safe_send_interaction_message
+from utils.utils import ChannelConfig, ConfigWriteError
 from shared.telegram import normalize_channel_identifier
 
 logger = logging.getLogger(__name__)
@@ -54,8 +54,19 @@ class ChannelSetContext:
 
 # on_set 簽名：吃 ctx，回傳要附加到成功訊息後面的 note（沒有就回 None）
 OnSet = Callable[[ChannelSetContext], Awaitable[Optional[str]]]
-# custom_handler 簽名：完全接管該次互動（例如 send_modal），不走標準選頻道流程
-CustomHandler = Callable[[discord.Interaction], Awaitable[None]]
+# 表單類的寫入：吃 (表單輸入、正規化過的文字, 選的頻道 id)，回要顯示在面板上的結果一句；寫不進去丟 ConfigWriteError
+ApplyInput = Callable[[str, int], Awaitable[str]]
+
+
+@dataclass(frozen=True)
+class InputSpec:
+    """表單類功能的那一格文字欄位長什麼樣，以及輸入完要選哪種頻道。"""
+
+    label: str                                  # 欄位名稱
+    placeholder: str
+    pick_type: discord.ChannelType              # 輸入完要選的頻道種類
+    max_length: int = 100
+    normalize: Callable[[str], str] = str.strip  # 送出時先正規化；回空字串＝輸入無效
 
 
 # describe 簽名：吃 config.json 的內容，回面板上「現在設了什麼」的一行（custom 類用；選頻道類顯示綁的頻道）
@@ -65,13 +76,14 @@ Describe = Callable[[dict], str]
 @dataclass
 class ChannelSetting:
     label: str                                  # 選單顯示名稱，例："音樂語音頻道"
-    channel_type: Optional[discord.ChannelType] # 要綁的頻道型別；custom_handler 類為 None
-    config_key: Optional[str]                   # 存到 config.json 的 key；custom_handler 類可為 None
+    channel_type: Optional[discord.ChannelType] # 要綁的頻道型別；表單類為 None（面板上排在最後一組）
+    config_key: Optional[str]                   # 存到 config.json 的 key；表單類為 None
     color: discord.Color                        # 選單 / embed 用色
     desc: str                                   # 選單說明
     on_set: Optional[OnSet] = None              # 設定完成後要做的事，沒有就 None
-    custom_handler: Optional[CustomHandler] = None  # 走特殊輸入流程，取代標準選頻道
-    describe: Optional[Describe] = None         # custom 類在面板上顯示現況的一行
+    input: Optional[InputSpec] = None           # 表單類：先輸入文字、再選頻道
+    apply_input: Optional[ApplyInput] = None    # 表單類的寫入
+    describe: Optional[Describe] = None         # 表單類在面板上顯示現況的一行
 
 
 _REGISTRY: list[ChannelSetting] = []
@@ -120,14 +132,15 @@ def register_custom(
     *,
     color: discord.Color,
     desc: str,
+    input: InputSpec,
     describe: Optional[Describe] = None,
-) -> Callable[[CustomHandler], CustomHandler]:
-    """登記一個「特殊輸入流程」功能（裝飾它的 handler）；`describe` 回面板上現況的一行。"""
-    setting = ChannelSetting(label, None, None, color, desc, describe=describe)
+) -> Callable[[ApplyInput], ApplyInput]:
+    """登記一個「先輸入文字、再選頻道」的功能（裝飾它的寫入函式）；`describe` 回面板上現況的一行。"""
+    setting = ChannelSetting(label, None, None, color, desc, input=input, describe=describe)
     _REGISTRY.append(setting)
 
-    def deco(fn: CustomHandler) -> CustomHandler:
-        setting.custom_handler = fn
+    def deco(fn: ApplyInput) -> ApplyInput:
+        setting.apply_input = fn
         return fn
 
     return deco
@@ -269,67 +282,21 @@ register_channel(
 )
 
 
-# ── Telegram 路由：特殊輸入流程（表單輸入來源 → 只有本人看得到的文字頻道清單選目標）──
-class _TelegramRouteInputModal(discord.ui.Modal):
-    """第一步：輸入來源。送出後回一則只有本人看得到的頻道清單選目標：清單是 bot 自己列的，私訊裡也能用。"""
+# ── Telegram 路由：先輸入來源，再選目標頻道（表單與頻道清單在 commands.channel_panel，這裡只管寫入）──
+async def _add_telegram_route(source_key: str, channel_id: int) -> str:
+    """把一個目標頻道加進這個來源的路由；同一個頻道不重複。回面板上要講的結果；寫不進去丟 ConfigWriteError。"""
+    def add_route(config: dict) -> None:
+        routes = telegram_routes(config)
+        ids = routes.get(source_key, [])
+        if channel_id not in ids:
+            ids.append(channel_id)
+        routes[source_key] = ids
+        config["telegram_channel_routes"] = routes
 
-    def __init__(self, guild: discord.Guild):
-        super().__init__(title="設定 Telegram 路由", timeout=300)
-        self.guild = guild
-        self.telegram_source = discord.ui.TextInput(
-            label="Telegram 來源（名稱或 chat_id）",
-            placeholder="例如：Seele_WW_leak、@Seele_WW_leak、-1001234567890",
-            required=True,
-            max_length=128,
-        )
-        self.add_item(self.telegram_source)
-
-    async def on_submit(self, modal_interaction: discord.Interaction):
-        source_raw = self.telegram_source.value.strip()
-        source_key = normalize_channel_identifier(source_raw).lower()
-        if not source_key:
-            await safe_send_interaction_message(modal_interaction, "來源值不可為空，請重新設定。", ephemeral=True)
-            return
-        channels = [c for c in self.guild.channels if c.type == discord.ChannelType.text]
-        if not channels:
-            await safe_send_interaction_message(modal_interaction, "這個伺服器沒有文字頻道，沒辦法設路由。", ephemeral=True)
-            return
-        options = [
-            discord.SelectOption(label=c.name[:100], value=str(c.id), description=f"ID: {c.id}",
-                                 emoji=type_icon(discord.ChannelType.text))
-            for c in channels
-        ]
-
-        async def on_select(pick: discord.Interaction, value: str) -> None:
-            selected_channel_id = int(value)
-
-            def add_route(config: dict) -> None:
-                routes = telegram_routes(config)
-                normalized_ids = routes.get(source_key, [])
-                if selected_channel_id not in normalized_ids:
-                    normalized_ids.append(selected_channel_id)
-                routes[source_key] = normalized_ids
-                config["telegram_channel_routes"] = routes
-
-            try:
-                config = await ChannelConfig.update_config(add_route, caller="channel_registry")
-            except ConfigWriteError as e:
-                logger.error(f"Telegram 路由寫入設定檔失敗: {e}")
-                await safe_send_interaction_message(
-                    pick, "❌ 設定檔讀取失敗，這次沒有寫入，請檢查 config.json。", ephemeral=True)
-                return
-            normalized_ids = config["telegram_channel_routes"][source_key]
-            await pick.response.edit_message(
-                content=f"✅ 已新增 Telegram 路由：`{source_key}` -> <#{selected_channel_id}>\n目前目標頻道數：{len(normalized_ids)}",
-                embed=None, view=None)
-
-        title = f"Telegram 路由：{source_key}"
-        description = "選擇要轉發到的 Discord 文字頻道。同一個來源可以轉到好幾個頻道：再設一次就多一個。"
-        _, view = create_paginated_view(options, "選擇要轉發的 Discord 文字頻道…", title, description,
-                                        discord.Color.teal(), on_select, custom_id_prefix="telegram_route_target")
-        await safe_send_interaction_message(
-            modal_interaction, embed=discord.Embed(title=title, description=description, color=discord.Color.teal()),
-            view=view, ephemeral=True)
+    config = await ChannelConfig.update_config(add_route, caller="channel_registry")
+    count = len(config["telegram_channel_routes"][source_key])
+    logger.info("Telegram 路由 %s 加入頻道 %s（目前 %s 個）", source_key, channel_id, count)
+    return f"✅ 已新增 Telegram 路由：`{source_key}` → <#{channel_id}>（目前目標頻道數：{count}）"
 
 
 def _describe_telegram_routes(config: dict) -> str:
@@ -341,18 +308,19 @@ def _describe_telegram_routes(config: dict) -> str:
                      for source, ids in routes.items())
 
 
-@register_custom(
+register_custom(
     "Telegram 路由設定",
     color=discord.Color.teal(),
-    desc="先輸入 Telegram 來源（名稱/chat_id），再選要轉發到的 Discord 文字頻道",
+    desc="先輸入 Telegram 來源（名稱/chat_id），再選要轉發到的 Discord 文字頻道；同一個來源再設一次就多一個頻道",
     describe=_describe_telegram_routes,
-)
-async def _handle_telegram_route(interaction: discord.Interaction):
-    guild = home_guild(interaction)
-    if guild is None:
-        await safe_send_interaction_message(interaction, "bot 不只在一個伺服器裡，請到伺服器裡用 /server_manager 操作。", ephemeral=True)
-        return
-    await interaction.response.send_modal(_TelegramRouteInputModal(guild))
+    input=InputSpec(
+        label="Telegram 來源（名稱或 chat_id）",
+        placeholder="例如：Seele_WW_leak、@Seele_WW_leak、-1001234567890",
+        pick_type=discord.ChannelType.text,
+        max_length=128,
+        normalize=lambda text: normalize_channel_identifier(text.strip()).lower(),
+    ),
+)(_add_telegram_route)
 
 
 # ── 自我介紹頻道：設定完自動發填寫面板（行為依賴 ManagementCommands cog）──
@@ -391,7 +359,7 @@ register_channel(
     discord.ChannelType.text,
     "rollcall_channel_id",
     color=discord.Color.dark_orange(),
-    desc="幽靈點名訊息與管理面板的文字頻道",
+    desc="幽靈點名訊息發到的文字頻道（管理面板在群主私訊）",
 )
 
 

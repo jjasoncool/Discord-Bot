@@ -78,6 +78,9 @@ class MyBot(commands.Bot):
         )
         self.echo_tracker = {}
         self.ambient_tracker = {}  # 功能二：per-channel 插話冷卻/計數狀態
+        self.failed_extensions: list[str] = []   # 載不起來的指令模組（機器人狀態面板列出來）
+        # 面板的「重測」要能再啟動一次 Telegram 轉發：掛在 bot 上給介面層呼叫，別處不 import 這個模組（它是 __main__，再 import 會重跑一遍）
+        self.start_telegram_relay = lambda: auto_start_telegram_relay(self)
         self.telegram_relay_worker = None
         self._shutdown_started = False
 
@@ -90,6 +93,7 @@ class MyBot(commands.Bot):
                 await self.load_extension(module)
                 logger.info(f"已載入指令模組: {module}")
             except Exception as e:
+                self.failed_extensions.append(module)
                 logger.error(f"載入指令模組 {module} 時發生錯誤: {str(e)}", exc_info=True)
 
         # 同步斜線命令
@@ -334,7 +338,7 @@ async def on_message(message):
         return
 
     # 私訊不是聊天：不存記憶、不插話、不算 echo（私訊頻道也沒有名稱，下面記 log 那行會出錯）。
-    # 群主的私訊是管理主控台的入口，由 owner_alert_commands 的 listener 接
+    # 私訊裡的文字現在不回：管理主控台只由 /server_manager 叫出來，私訊的對話留給之後的 AI 私聊規劃
     if message.guild is None:
         return
 

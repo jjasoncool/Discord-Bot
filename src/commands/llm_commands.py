@@ -39,7 +39,7 @@ from sys_settings.llm_settings import AskAIChatSearchSettings, AskAICommandSetti
 from sys_settings.time_settings import APP_TZ
 from utils.discord_content import send_model_text
 from utils.dm_notifier import send_dm
-from utils.discord_members import require_access
+from utils.discord_members import home_guild, require_access
 from utils.utils import safe_send_interaction_message
 from utils.background_tasks import supervise
 
@@ -1103,8 +1103,31 @@ class PersonalityCommands(commands.Cog):
         """
         if not await require_access(interaction, admin_only=True):   # 不在伺服器、不是管理員都在這裡擋
             return
+        await self.run_persona_test(interaction, target, model, save)
 
+    async def run_persona_test(
+        self,
+        interaction: discord.Interaction,
+        target: discord.Member,
+        model: str | None = None,
+        save: bool = False,
+    ) -> None:
+        """/persona_agent_test 那條路：先 defer 再回「開始跑了」；權限由呼叫端檢查（管理員）。"""
         await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.followup.send(await self.start_persona_test(interaction, target, model, save), ephemeral=True)
+
+    async def start_persona_test(
+        self,
+        interaction: discord.Interaction,
+        target: discord.Member,
+        model: str | None = None,
+        save: bool = False,
+    ) -> str:
+        """對單一成員跑一次 persona agent 的本體：在背景跑、結果私訊發起人；回要給人看的「開始跑了」那段
+        （主控台寫在畫面上、指令回訊息）。權限由呼叫端檢查；私訊裡用 bot 唯一的伺服器（主控台從私訊叫）。"""
+        guild = home_guild(interaction)
+        if guild is None:
+            return "bot 不只在一個伺服器裡，請到伺服器裡用指令。"
 
         from llm.persona.agent import agent as persona_agent
         from llm.persona.agent import tools as persona_tools
@@ -1118,14 +1141,7 @@ class PersonalityCommands(commands.Cog):
         )
         target_model = model or runtime_config.personality_model or runtime_config.model
         user_id = str(target.id)
-        guild_id = interaction.guild.id
-
-        await interaction.followup.send(
-            f"🔬 persona agent 開始跑 **{target.display_name}**（model=`{target_model}`）\n"
-            f"會禮讓 /askai 與插話，白天可能要等上一段時間。\n"
-            f"**結果會私訊給你** —— interaction token 只有 15 分鐘，這支常跑更久。",
-            ephemeral=True,
-        )
+        guild_id = guild.id
 
         async def _run_and_report() -> None:
             from llm.persona.agent.batch import load_nickname_note
@@ -1137,7 +1153,7 @@ class PersonalityCommands(commands.Cog):
                 # 跟每晚批次附同一份名字表，手動跑的結果才代表晚上會寫出什麼
                 nickname_note=await load_nickname_note(
                     guild_id, target_id=user_id,
-                    member_names=member_names_from_guild(interaction.guild),
+                    member_names=member_names_from_guild(guild),
                 ),
             )
             try:
@@ -1167,6 +1183,9 @@ class PersonalityCommands(commands.Cog):
 
         task = asyncio.create_task(_run_and_report())
         self._track_task(task)
+        return (f"🔬 persona agent 開始跑 **{target.display_name}**（model=`{target_model}`）\n"
+                f"會禮讓 /askai 與插話，白天可能要等上一段時間。\n"
+                f"**結果會私訊給你** —— interaction token 只有 15 分鐘，這支常跑更久。")
 
     async def _report_agent_result(
         self,
@@ -1235,8 +1254,8 @@ class PersonalityCommands(commands.Cog):
                     filename=f"persona_diff_{target.id}.json",
                 )
 
-        # 出口再驗一次管理員（沿用入口那支 require_access，不另寫判斷）
-        if not await require_access(interaction, admin_only=True):
+        # 出口再驗一次管理員（沿用入口那支 require_access，不另寫判斷；從私訊主控台發起的只有群主）
+        if not await require_access(interaction, admin_only=True, allow_dm=True):
             logger.warning(
                 "persona_agent_test 結果不送出：發起人 %s 已非管理員", interaction.user
             )
@@ -1254,21 +1273,22 @@ class PersonalityCommands(commands.Cog):
         """手動觸發每日日記（不必等到午夜）；用來測試與臨時補發。"""
         if not await require_access(interaction, admin_only=True):   # 不在伺服器、不是管理員都在這裡擋，回只有本人看得到的訊息
             return
+        await self.run_diary(interaction)
+
+    async def run_diary(self, interaction: discord.Interaction) -> None:
+        """/ai_diary 那條路：先 defer 再回結果；權限由呼叫端檢查（管理員）。"""
         await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.followup.send(await self.write_diary_now(), ephemeral=True)
+
+    async def write_diary_now(self) -> str:
+        """立即寫今天日記的本體：產生並發到日記頻道，回要給人看的結果一句（沒寫成的原因在 log）。主控台與指令共用。"""
         from llm.ambient.ambient_diary import run_daily_reflection
         try:
             diary = await run_daily_reflection(self.bot)
-        except Exception as exc:
+        except Exception as exc:  # 邊界：手動觸發的一次日記；失敗要回給人看，不能讓呼叫端等不到結果
             logger.error("手動 AI 日記失敗: %s", exc, exc_info=True)
             diary = None
-        if diary:
-            await interaction.followup.send(
-                "🖊️ 今天的日記寫好、發到日記頻道了。", ephemeral=True
-            )
-        else:
-            await interaction.followup.send(
-                "⚠️ 沒寫成——可能未設定 AI 日記頻道、或生成失敗（看 log）。", ephemeral=True
-            )
+        return "🖊️ 今天的日記寫好、發到日記頻道了。" if diary else "⚠️ 沒寫成——可能未設定 AI 日記頻道、或生成失敗（看 log）。"
 
 
 async def setup(bot):

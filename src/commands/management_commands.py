@@ -9,9 +9,12 @@ from discord import app_commands
 from discord.ext import commands
 from typing import Optional
 
-# 注意：需確保 utils 資料夾下的 utils.py 包含 create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, ChannelConfig 等定義
-from utils.discord_members import require_access
-from utils.utils import create_paginated_view, ITEMS_PER_PAGE, safe_send_interaction_message, ChannelConfig, ConfigWriteError
+from utils.discord_members import NO_HOME_GUILD, home_guild, require_access
+from utils.discord_content import edit_screen, guarded_screen
+from utils.discord_members import (
+    addable_role_ids, role_ids_after, role_ids_changed, role_name, role_select_options, roles_by_position,
+)
+from utils.utils import ITEMS_PER_PAGE, paginate, safe_send_interaction_message, ChannelConfig, ConfigWriteError
 from utils.panel_bump import PanelBumper
 from utils import runtime_file
 from sys_settings.paths import runtime_path
@@ -24,7 +27,7 @@ from services.community.intro_profile_service import (
 )
 from services.community.impression_moderation_service import ImpressionModerationService
 from llm.storage.member_profile_store import get_member_profile_store
-from commands import channel_panel
+from commands import admin_console, channel_panel
 
 # 獲取 logger
 logger = logging.getLogger(__name__)
@@ -64,69 +67,6 @@ def _build_impression_submission_key(*, guild_id: int, author_id: int, target_us
     """他人印象提交訊息的 runtime key。"""
     return f"{guild_id}:{author_id}:{target_user_id}"
 
-
-class ServerInfoView(discord.ui.View):
-    """/server_info 主入口 persistent view"""
-
-    def __init__(self, cog: "ManagementCommands"):
-        super().__init__(timeout=None)
-        self.cog = cog
-
-    @discord.ui.button(label="列出頻道", style=discord.ButtonStyle.primary, custom_id="list_channels")
-    async def list_channels_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await require_access(interaction, owner_only=True):
-            return
-        await self.cog._list_channels(interaction)
-
-    @discord.ui.button(label="列出身份組", style=discord.ButtonStyle.secondary, custom_id="list_roles")
-    async def list_roles_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await require_access(interaction, owner_only=True):
-            return
-        await self.cog._list_roles(interaction)
-
-
-class RoleManagerView(discord.ui.View):
-    """/role_manager 主入口 persistent view"""
-
-    def __init__(self, cog: "ManagementCommands"):
-        super().__init__(timeout=None)
-        self.cog = cog
-
-    @discord.ui.button(label="設定角色權限", style=discord.ButtonStyle.primary, custom_id="set_role_permissions")
-    async def set_role_permissions_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.set_role_permissions_cmd(interaction)
-
-    @discord.ui.button(label="列出角色權限", style=discord.ButtonStyle.secondary, custom_id="list_role_permissions")
-    async def list_role_permissions_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.list_role_permissions_cmd(interaction)
-
-    @discord.ui.button(label="移除角色權限", style=discord.ButtonStyle.danger, custom_id="remove_role_permissions")
-    async def remove_role_permissions_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.remove_role_permissions_cmd(interaction)
-
-
-class ServerManagerView(discord.ui.View):
-    """/server_manager 主入口 persistent view"""
-
-    def __init__(self, cog: "ManagementCommands"):
-        super().__init__(timeout=None)
-        self.cog = cog
-
-    @discord.ui.button(label="角色管理", style=discord.ButtonStyle.primary, custom_id="role_manager")
-    async def role_manager_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.role_manager_cmd(interaction)
-
-    @discord.ui.button(label="頻道設定", style=discord.ButtonStyle.secondary, custom_id="set_channel")
-    async def set_channel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.set_channel_cmd(interaction)
-
-    @discord.ui.button(label="機器人狀態", style=discord.ButtonStyle.secondary, custom_id="bot_status")
-    async def bot_status_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cog = interaction.client.get_cog("OwnerAlertCommands")
-        if cog is None:
-            await safe_send_interaction_message(interaction, "狀態功能目前沒有在運作，請看 log。", ephemeral=True)
-            return
-        await cog.show_status(interaction)
 
 class IntroProfileModal(discord.ui.Modal):
     """自我介紹 Modal - 已修正初始化與 defer"""
@@ -512,6 +452,159 @@ class IntroPanelView(discord.ui.View):
         await interaction.response.send_modal(IntroImpressionModal(self.intro_service, self.management_cog))
 
 
+# ────────────────────────────────────────────
+#  角色管理：Trader、Moderator 各對應哪些身份組（主控台的一個畫面：主畫面列現況、勾選畫面分頁多選）
+# ────────────────────────────────────────────
+
+#: 動作、哪種角色、新增或移除、頁碼；選單另一個樣板（同一則訊息裡 custom_id 不能撞）
+ROLE_TEMPLATE = r"roles:(?P<action>home|pick)(?::(?P<kind>trader|moderator))?(?::(?P<mode>add|remove))?(?::(?P<page>\d+))?"
+ROLE_SELECT_TEMPLATE = r"roles:sel:(?P<kind>trader|moderator):(?P<mode>add|remove):(?P<page>\d+)"
+#: 代號 →（config.json `role_mapping` 的 key、說明）
+ROLE_KINDS: dict[str, tuple[str, str]] = {
+    "trader": ("Trader", "交易員：自由市場、商品與購物車的交易身份"),
+    "moderator": ("Moderator", "版主：社群管理類指令"),
+}
+_ROLE_ACCESS = dict(owner_only=True, allow_dm=True)
+_CONFIG_BROKEN = "❌ 設定檔讀取失敗，這次沒有寫入，請檢查 config.json。"
+
+
+def _mapped_role_ids(kind: str) -> list[int]:
+    """這種角色目前對應的身份組 id（舊設定用 [0] 當「沒設」，略過）。"""
+    mapping = ChannelConfig.load_config(caller="ManagementCommands").get("role_mapping", {})
+    ids = mapping.get(ROLE_KINDS[kind][0], []) if isinstance(mapping, dict) else []
+    return [int(rid) for rid in ids if isinstance(rid, int) and rid > 0] if isinstance(ids, list) else []
+
+
+def render_roles_home(guild: discord.Guild, *, notice: Optional[str] = None) -> discord.ui.LayoutView:
+    """主畫面：每種角色一行現況、一排「新增」「移除」；沒得加、沒得減的那顆灰掉。"""
+    box = admin_console.screen_box("## 🎭 角色管理\n-# Trader、Moderator 各對應哪些身份組；新增、移除都在這裡設，改了馬上生效",
+                                   notice=notice, colour=discord.Color.purple())
+    rows: list[list[discord.ui.Item]] = []
+    for kind, (key, desc) in ROLE_KINDS.items():
+        current = roles_by_position(guild, _mapped_role_ids(kind))
+        names = "、".join(role_name(guild, rid) for rid in current) or "未設定"
+        box.add_item(discord.ui.TextDisplay(f"**{key}**　{names[:900]}\n-# {desc}"))
+        rows.append([
+            RoleButton("pick", kind, "add", 0, label=f"➕ {key} 新增", style=discord.ButtonStyle.success,
+                       disabled=not addable_role_ids(guild, current)),
+            RoleButton("pick", kind, "remove", 0, label=f"➖ {key} 移除", style=discord.ButtonStyle.danger, disabled=not current),
+        ])
+    return admin_console.screen_view(box, *rows, [admin_console.back_button()])
+
+
+def render_role_pick(guild: discord.Guild, kind: str, mode: str, page: int) -> discord.ui.LayoutView:
+    """勾選畫面：這一頁的身份組一個選單（可多選、一次送出一頁），超過 25 個才有上一頁／下一頁；頁碼夾回合法範圍。
+    沒東西可選就退回主畫面並說原因。"""
+    key, _ = ROLE_KINDS[kind]
+    current = _mapped_role_ids(kind)
+    adding = mode == "add"
+    role_ids = addable_role_ids(guild, current) if adding else roles_by_position(guild, current)
+    if not role_ids:
+        return render_roles_home(guild, notice=(f"⚠️ 所有身份組都已經在 {key} 的設定裡，沒有可新增的。" if adding
+                                                else f"⚠️ {key} 目前沒有已設定的身份組可移除。"))
+    shown, page, pages = paginate(role_ids, page, ITEMS_PER_PAGE)
+    verb = "新增" if adding else "移除"
+    title = f"## {'➕' if adding else '➖'} {key} {verb}身份組\n-# 勾選要{verb}的身份組（可多選；一次送出一頁）。"
+    if pages > 1:
+        title += f"\n-# 第 {page + 1}／{pages} 頁，共 {len(role_ids)} 個。"
+    box = admin_console.screen_box(title, colour=discord.Color.green() if adding else discord.Color.red())
+    buttons: list[discord.ui.Item] = []
+    if pages > 1:
+        buttons.append(RoleButton("pick", kind, mode, max(page - 1, 0), label="◀ 上一頁", disabled=page <= 0))
+        buttons.append(RoleButton("pick", kind, mode, min(page + 1, pages - 1), label="下一頁 ▶", disabled=page >= pages - 1))
+    buttons.append(RoleButton("home", label="↩️ 回上一層"))
+    return admin_console.screen_view(box, [RoleSelect(kind, mode, page, options=role_select_options(guild, shown))], buttons)
+
+
+async def _apply_role_change(interaction: discord.Interaction, guild: discord.Guild, kind: str, mode: str,
+                             picked: list[int]) -> None:
+    """勾好送出：寫 config.json 的 role_mapping，回主畫面並在最上面講結果。"""
+    key, _ = ROLE_KINDS[kind]
+    changed = role_ids_changed(_mapped_role_ids(kind), picked, mode)
+    verb = "新增" if mode == "add" else "移除"
+    if not changed:
+        notice = "⚠️ 勾的身份組都已經在設定裡了。" if mode == "add" else "⚠️ 勾的身份組都不在設定裡。"
+    else:
+        # 名字在寫檔前就算好：寫完才查，查不到會變成「寫進去了但畫面說失敗」
+        names = [role_name(guild, rid) for rid in changed]
+
+        def change(c: dict) -> None:
+            mapping = c.setdefault("role_mapping", {})
+            mapping[key] = [rid for rid in role_ids_after(mapping.get(key), mode, changed) if rid > 0]
+
+        try:
+            await ChannelConfig.update_config(change, caller="ManagementCommands")
+        except ConfigWriteError as exc:
+            logger.error("角色管理：%s %s 寫入設定檔失敗: %s", key, verb, exc)
+            notice = _CONFIG_BROKEN
+        else:
+            logger.info("角色管理：%s %s %s → %s", interaction.user, key, verb, ", ".join(names))
+            notice = f"✅ {key} 已{verb} {len(names)} 個身份組：{', '.join(f'**{n}**' for n in names)}"
+    await edit_screen(interaction, view=render_roles_home(guild, notice=notice))
+
+
+async def _guarded_roles(interaction: discord.Interaction, label: str, run) -> None:
+    """角色管理一次操作的外殼：先驗群主與伺服器，做壞了換回主畫面並標錯誤。"""
+    if not await require_access(interaction, **_ROLE_ACCESS):
+        return
+    guild = home_guild(interaction)
+    if guild is None:
+        await safe_send_interaction_message(interaction, NO_HOME_GUILD, ephemeral=True)
+        return
+    await guarded_screen(interaction, f"角色管理：{label}", lambda: run(guild), log=logger,
+                         rescue=lambda notice: edit_screen(interaction, view=render_roles_home(guild, notice=notice)))
+
+
+class RoleButton(discord.ui.DynamicItem[discord.ui.Button], template=ROLE_TEMPLATE):
+    """角色管理的按鈕：回主畫面、進勾選畫面（哪種角色、新增或移除、頁碼都在 custom_id）。"""
+
+    def __init__(self, action: str, kind: Optional[str] = None, mode: Optional[str] = None, page: Optional[int] = None, *,
+                 label: str, style: discord.ButtonStyle = discord.ButtonStyle.secondary, disabled: bool = False):
+        parts = ["roles", action] + [p for p in (kind, mode) if p] + ([str(int(page))] if page is not None else [])
+        super().__init__(discord.ui.Button(label=label, style=style, custom_id=":".join(parts), disabled=disabled))
+        self.action, self.kind, self.mode = action, kind, mode
+        self.page = int(page) if page is not None else 0
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match, /):
+        return cls(match["action"], match["kind"], match["mode"], match["page"], label=item.label or "…",
+                   style=item.style, disabled=item.disabled)
+
+    async def callback(self, interaction: discord.Interaction):
+        async def run(guild: discord.Guild) -> None:
+            if self.action == "pick" and self.kind in ROLE_KINDS and self.mode in ("add", "remove"):
+                await edit_screen(interaction, view=render_role_pick(guild, self.kind, self.mode, self.page))
+            else:
+                await edit_screen(interaction, view=render_roles_home(guild))
+
+        await _guarded_roles(interaction, self.custom_id, run)
+
+
+class RoleSelect(discord.ui.DynamicItem[discord.ui.Select], template=ROLE_SELECT_TEMPLATE):
+    """勾選畫面的選單：選項是這一頁的身份組，可多選；送出就寫設定檔。"""
+
+    def __init__(self, kind: str, mode: str, page: int, *, options=()):
+        opts = list(options) or [discord.SelectOption(label="（沒有項目）", value="-")]
+        super().__init__(discord.ui.Select(
+            custom_id=f"roles:sel:{kind}:{mode}:{int(page)}",
+            placeholder=f"勾選要{'新增' if mode == 'add' else '移除'}的身份組…",
+            min_values=1, max_values=len(opts), options=opts, disabled=not options,
+        ))
+        self.kind, self.mode, self.page = kind, mode, int(page)
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Select, match, /):
+        return cls(match["kind"], match["mode"], int(match["page"]), options=item.options)
+
+    async def callback(self, interaction: discord.Interaction):
+        picked = [int(v) for v in self.item.values if v.isdigit()]
+        await _guarded_roles(interaction, self.custom_id,
+                             lambda guild: _apply_role_change(interaction, guild, self.kind, self.mode, picked))
+
+
+ROLE_DYNAMIC_ITEMS = (RoleButton, RoleSelect)
+
+
 class ManagementCommands(commands.Cog):
     def __init__(self, bot, intro_profile_service: Optional[IntroProfileServiceProtocol] = None):
         self.bot = bot
@@ -526,11 +619,9 @@ class ManagementCommands(commands.Cog):
 
     async def cog_load(self):
         # 註冊 persistent views，避免機器人重啟後主入口按鈕失效
-        self.bot.add_view(ServerInfoView(self))
-        self.bot.add_view(RoleManagerView(self))
-        self.bot.add_view(ServerManagerView(self))
         self.bot.add_view(IntroPanelView(self.intro_profile_service, self))
-        self.bot.add_dynamic_items(*channel_panel.DYNAMIC_ITEMS)
+        # 主控台、頻道綁定、角色管理的按鈕狀態都在 custom_id 裡，走 DynamicItem；舊的伺服器資訊、角色管理選單按了由主控台接手
+        self.bot.add_dynamic_items(*channel_panel.DYNAMIC_ITEMS, *admin_console.DYNAMIC_ITEMS, *ROLE_DYNAMIC_ITEMS)
         logger.info("已註冊 ManagementCommands persistent views")
 
     async def _delete_previous_submission_messages(
@@ -630,395 +721,23 @@ class ManagementCommands(commands.Cog):
         """發送錯誤訊息"""
         await safe_send_interaction_message(interaction, message, ephemeral=True)
 
-    async def _list_channels(self, interaction: discord.Interaction):
-        """列出伺服器中所有可見的頻道"""
-        # 建立頻道列表
-        text_channels = []
-        voice_channels = []
-        categories = []
-        forum_channels = []
-        other_channels = []
-
-        for channel in interaction.guild.channels:
-            if isinstance(channel, discord.TextChannel):
-                text_channels.append(f"📝 {channel.name} (ID: {channel.id})")
-            elif isinstance(channel, discord.VoiceChannel):
-                voice_channels.append(f"🔊 {channel.name} (ID: {channel.id})")
-            elif isinstance(channel, discord.CategoryChannel):
-                categories.append(f"📁 {channel.name} (ID: {channel.id})")
-            elif isinstance(channel, discord.ForumChannel):
-                forum_channels.append(f"📌 {channel.name} (ID: {channel.id})")
-            else:
-                other_channels.append(f"⚪ {channel.name} (ID: {channel.id})")
-
-        # 創建嵌入訊息
-        embed = discord.Embed(
-            title=f"{interaction.guild.name} 的頻道列表",
-            description="以下是此伺服器中所有可見的頻道列表，包含各頻道的 ID：",
-            color=discord.Color.blue()
-        )
-
-        if categories:
-            embed.add_field(name="📁 類別", value="\n".join(categories), inline=False)
-
-        if text_channels:
-            embed.add_field(name="📝 文字頻道", value="\n".join(text_channels), inline=False)
-
-        if voice_channels:
-            embed.add_field(name="🔊 語音頻道", value="\n".join(voice_channels), inline=False)
-
-        if forum_channels:
-            embed.add_field(name="📌 論壇頻道", value="\n".join(forum_channels), inline=False)
-
-        if other_channels:
-            embed.add_field(name="⚪ 其他頻道", value="\n".join(other_channels), inline=False)
-
-        embed.set_footer(text="提示：您可以使用這些頻道 ID 來設定頻道監控")
-
-        await safe_send_interaction_message(interaction, embed=embed, ephemeral=True)
-
-    async def _list_roles(self, interaction: discord.Interaction):
-        """列出伺服器中所有身份組及其ID"""
-        # 建立身份組列表
-        roles = [f"🎭 {role.name} (ID: {role.id})" for role in interaction.guild.roles if not role.is_default()]
-
-        # 創建嵌入訊息
-        embed = discord.Embed(
-            title=f"{interaction.guild.name} 的身份組列表",
-            description="以下是此伺服器中所有身份組列表，包含各身份組的 ID：",
-            color=discord.Color.purple()
-        )
-
-        if roles:
-            embed.add_field(name="🎭 身份組", value="\n".join(roles), inline=False)
-        else:
-            embed.add_field(name="🎭 身份組", value="此伺服器中沒有自定義身份組。", inline=False)
-
-        await safe_send_interaction_message(interaction, embed=embed, ephemeral=True)
-
-    @app_commands.command(name="server_info", description="檢視伺服器相關資訊")
+    @app_commands.command(name="server_info", description="伺服器資訊：列出頻道與身份組的 ID（只有群主；私訊裡也能用）")
+    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=False)
     async def server_info_cmd(self, interaction: discord.Interaction):
-        """斜線命令：檢視伺服器相關資訊"""
+        """斜線命令：直接開在主控台的「伺服器資訊」那一頁（清單一頁一頁翻）"""
         logger.info(f'收到來自 {interaction.user} 的 /server_info 斜線命令')
+        await admin_console.send_console(interaction, screen="info")
 
-        if not await require_access(interaction, owner_only=True):
-            return
+    async def open_roles(self, interaction: discord.Interaction, guild: discord.Guild) -> None:
+        """主控台的「角色管理」：把角色管理畫在主控台那一則上（權限由主控台先驗）。"""
+        await edit_screen(interaction, view=render_roles_home(guild))
 
-        action_view = ServerInfoView(self)
-
-        embed = discord.Embed(
-            title="檢視伺服器資訊",
-            description="請選擇您要檢視的伺服器資訊。",
-            color=discord.Color.greyple()
-        )
-        await safe_send_interaction_message(interaction, embed=embed, view=action_view, ephemeral=True)
-
-    async def set_channel_cmd(self, interaction: discord.Interaction):
-        """頻道設定：開頻道綁定面板（每一項綁哪裡、選一項改綁、解除綁定；私訊裡也能用）。"""
-        logger.info(f'收到來自 {interaction.user} 的 set_channel 請求')
-        await channel_panel.send_panel(interaction)
-
-    async def set_role_permissions_cmd(self, interaction: discord.Interaction):
-        """設定角色的命令執行權限"""
-        logger.info(f'收到來自 {interaction.user} 的 /set_role_permissions 斜線命令')
-
-        if not await require_access(interaction, owner_only=True):
-            return
-
-        role_types = {
-            "Trader": {"desc": "交易員角色", "color": discord.Color.green()},
-            "Moderator": {"desc": "版主角色", "color": discord.Color.blue()}
-        }
-
-        # 創建角色類型選單
-        type_select = discord.ui.Select(
-            placeholder="選擇要設定的角色類型...",
-            custom_id="management_set_role_permissions_type_select",
-            options=[
-                discord.SelectOption(label=role_type, value=role_type, description=info["desc"])
-                for role_type, info in role_types.items()
-            ]
-        )
-
-        async def type_select_callback(interaction: discord.Interaction):
-            selected_type = type_select.values[0]
-            if selected_type not in role_types:
-                await safe_send_interaction_message(interaction, f"無效的角色類型：{selected_type}。請重試。", ephemeral=True)
-                return
-
-            role_info = role_types[selected_type]
-            roles = [role for role in interaction.guild.roles if not role.is_default()]
-            if not roles:
-                await safe_send_interaction_message(interaction, f"此伺服器中沒有找到自定義身份組！", ephemeral=True)
-                return
-
-            # 創建身份組選單，實現分頁功能
-            role_options = [
-                discord.SelectOption(
-                    label=role.name,
-                    value=str(role.id),
-                    description=f"ID: {role.id}",
-                    emoji="🎭"
-                )
-                for role in roles
-            ]
-
-            if not role_options:
-                await safe_send_interaction_message(interaction, f"沒有可供選擇的身份組！", ephemeral=True)
-                return
-
-            async def on_select_callback(interaction, selected_value):
-                selected_role_id = int(selected_value)
-                role = interaction.guild.get_role(selected_role_id)
-                if role and not role.is_default():
-                    config = ChannelConfig.load_config(caller="ManagementCommands")
-                    current = config.get("role_mapping", {}).get(selected_type, [])
-
-                    if selected_role_id not in current:
-                        def add_role(c):
-                            ids = c.setdefault("role_mapping", {}).setdefault(selected_type, [])
-                            if selected_role_id not in ids:
-                                ids.append(selected_role_id)
-                        try:
-                            await ChannelConfig.update_config(add_role, caller="ManagementCommands")
-                        except ConfigWriteError as e:
-                            logger.error(f"新增角色權限寫入設定檔失敗: {e}")
-                            await safe_send_interaction_message(interaction, "❌ 設定檔讀取失敗，這次沒有寫入，請通知管理員檢查 config.json。", ephemeral=True)
-                            return
-
-                        await interaction.response.edit_message(view=None)
-                        await safe_send_interaction_message(
-                            interaction,
-                            f"✅ 已將 {selected_type} 角色權限設定為 **{role.name}** (ID: {selected_role_id})！",
-                            ephemeral=True
-                        )
-                        logger.info(f"{selected_type} 角色權限已設定為 {role.name} (ID: {selected_role_id})")
-                    else:
-                        await interaction.response.edit_message(view=None)
-                        await safe_send_interaction_message(
-                            interaction,
-                            f"⚠️ {selected_type} 角色權限已經包含 **{role.name}** (ID: {selected_role_id})！",
-                            ephemeral=True
-                        )
-                else:
-                    await safe_send_interaction_message(interaction, f"選擇的身份組無效，請重試。", ephemeral=True)
-
-            current_page, role_view = create_paginated_view(
-                role_options,
-                lambda page: f"選擇一個身份組... (第 {page + 1} 頁)" if len(role_options) > ITEMS_PER_PAGE else f"選擇一個身份組...",
-                f"選擇身份組",
-                lambda page: f"請從以下選項中選擇一個身份組作為 {selected_type} 角色。(第 {page + 1} 頁)" if len(role_options) > ITEMS_PER_PAGE else f"請從以下選項中選擇一個身份組作為 {selected_type} 角色。",
-                role_info["color"],
-                on_select_callback,
-                custom_id_prefix=f"management_set_role_permissions_{selected_type.lower()}"
-            )
-
-            embed = discord.Embed(
-                title=f"選擇身份組",
-                description=f"請從以下選項中選擇一個身份組作為 {selected_type} 角色。" + (f" (第 {current_page + 1} 頁)" if len(role_options) > ITEMS_PER_PAGE else ""),
-                color=role_info["color"]
-            )
-            await interaction.response.edit_message(embed=embed, view=role_view)
-
-        type_select.callback = type_select_callback
-        type_view = discord.ui.View()
-        type_view.add_item(type_select)
-
-        embed = discord.Embed(
-            title="選擇角色類型",
-            description="請選擇您要設定的角色類型。",
-            color=discord.Color.greyple()
-        )
-        await safe_send_interaction_message(interaction, embed=embed, view=type_view, ephemeral=True)
-
-    async def list_role_permissions_cmd(self, interaction: discord.Interaction):
-        """列出角色的命令執行權限設定"""
-        logger.info(f'收到來自 {interaction.user} 的 /list_role_permissions 斜線命令')
-
-        if not await require_access(interaction, owner_only=True):
-            return
-
-        config = ChannelConfig.load_config(caller="ManagementCommands")
-
-        role_mapping = config.get("role_mapping", {})
-        if not role_mapping:
-            await safe_send_interaction_message(interaction, "目前沒有設定任何角色權限。", ephemeral=True)
-            return
-
-        embed = discord.Embed(
-            title="角色權限設定列表",
-            description="以下是目前設定的角色權限列表：",
-            color=discord.Color.purple()
-        )
-
-        for role_type, role_ids in role_mapping.items():
-            if role_ids and role_ids != [0]:
-                role_names = []
-                for role_id in role_ids:
-                    role = interaction.guild.get_role(role_id)
-                    if role:
-                        role_names.append(f"{role.name} (ID: {role_id})")
-                    else:
-                        role_names.append(f"未知身份組 (ID: {role_id})")
-                embed.add_field(
-                    name=f"🎭 {role_type} 角色",
-                    value="\n".join(role_names),
-                    inline=False
-                )
-            else:
-                embed.add_field(
-                    name=f"🎭 {role_type} 角色",
-                    value="未設定",
-                    inline=False
-                )
-
-        await safe_send_interaction_message(interaction, embed=embed, ephemeral=True)
-
-    async def remove_role_permissions_cmd(self, interaction: discord.Interaction):
-        """移除角色的命令執行權限"""
-        logger.info(f'收到來自 {interaction.user} 的 /remove_role_permissions 斜線命令')
-
-        if not await require_access(interaction, owner_only=True):
-            return
-
-        config = ChannelConfig.load_config(caller="ManagementCommands")
-
-        role_mapping = config.get("role_mapping", {})
-        if not role_mapping:
-            await safe_send_interaction_message(interaction, "目前沒有設定任何角色權限。", ephemeral=True)
-            return
-
-        # 創建角色類型選單
-        type_select = discord.ui.Select(
-            placeholder="選擇要移除的角色類型...",
-            custom_id="management_remove_role_permissions_type_select",
-            options=[
-                discord.SelectOption(label=role_type, value=role_type, description=f"移除 {role_type} 角色權限")
-                for role_type in role_mapping.keys()
-            ]
-        )
-
-        async def type_select_callback(interaction: discord.Interaction):
-            selected_type = type_select.values[0]
-            if selected_type not in role_mapping:
-                await safe_send_interaction_message(interaction, f"無效的角色類型：{selected_type}。請重試。", ephemeral=True)
-                return
-
-            role_ids = role_mapping[selected_type]
-            if not role_ids or role_ids == [0]:
-                await safe_send_interaction_message(interaction, f"目前沒有設定 {selected_type} 角色權限。", ephemeral=True)
-                return
-
-            # 創建身份組選單，實現分頁功能
-            role_options = []
-            for role_id in role_ids:
-                role = interaction.guild.get_role(role_id)
-                if role:
-                    role_options.append(discord.SelectOption(
-                        label=role.name,
-                        value=str(role.id),
-                        description=f"ID: {role.id}",
-                        emoji="🎭"
-                    ))
-                else:
-                    role_options.append(discord.SelectOption(
-                        label=f"未知身份組 (ID: {role_id})",
-                        value=str(role_id),
-                        description=f"ID: {role_id}",
-                        emoji="🎭"
-                    ))
-
-            async def on_select_callback(interaction, selected_value):
-                selected_role_id = int(selected_value)
-                if selected_role_id in role_mapping[selected_type]:
-                    role_mapping[selected_type].remove(selected_role_id)
-
-                    def remove_role(c):
-                        ids = c.get("role_mapping", {}).get(selected_type, [])
-                        if selected_role_id in ids:
-                            ids.remove(selected_role_id)
-                    try:
-                        await ChannelConfig.update_config(remove_role, caller="ManagementCommands")
-                    except ConfigWriteError as e:
-                        logger.error(f"移除角色權限寫入設定檔失敗: {e}")
-                        await safe_send_interaction_message(interaction, "❌ 設定檔讀取失敗，這次沒有寫入，請通知管理員檢查 config.json。", ephemeral=True)
-                        return
-
-                    role = interaction.guild.get_role(selected_role_id)
-                    role_name = role.name if role else f"未知身份組 (ID: {selected_role_id})"
-                    await interaction.response.edit_message(view=None)
-                    await safe_send_interaction_message(
-                        interaction,
-                        f"✅ 已移除 {selected_type} 角色權限中的 **{role_name}**！",
-                        ephemeral=True
-                    )
-                    logger.info(f"已移除 {selected_type} 角色權限中的 {role_name}")
-                else:
-                    await safe_send_interaction_message(interaction, f"選擇的身份組不在 {selected_type} 角色權限中，請重試。", ephemeral=True)
-
-            current_page, role_view = create_paginated_view(
-                role_options,
-                lambda page: f"選擇要移除的身份組... (第 {page + 1} 頁)" if len(role_options) > ITEMS_PER_PAGE else f"選擇要移除的身份組...",
-                f"選擇要移除的身份組",
-                lambda page: f"請從以下選項中選擇一個要從 {selected_type} 角色權限中移除的身份組。(第 {page + 1} 頁)" if len(role_options) > ITEMS_PER_PAGE else f"請從以下選項中選擇一個要從 {selected_type} 角色權限中移除的身份組。",
-                discord.Color.red(),
-                on_select_callback,
-                custom_id_prefix=f"management_remove_role_permissions_{selected_type.lower()}"
-            )
-
-            embed = discord.Embed(
-                title=f"選擇要移除的身份組",
-                description=f"請從以下選項中選擇一個要從 {selected_type} 角色權限中移除的身份組。" + (f" (第 {current_page + 1} 頁)" if len(role_options) > ITEMS_PER_PAGE else ""),
-                color=discord.Color.red()
-            )
-            await interaction.response.edit_message(embed=embed, view=role_view)
-
-        type_select.callback = type_select_callback
-        type_view = discord.ui.View()
-        type_view.add_item(type_select)
-
-        embed = discord.Embed(
-            title="選擇角色類型",
-            description="請選擇您要移除的角色類型。",
-            color=discord.Color.greyple()
-        )
-        await safe_send_interaction_message(interaction, embed=embed, view=type_view, ephemeral=True)
-
-    async def role_manager_cmd(self, interaction: discord.Interaction):
-        """管理角色的命令執行權限"""
-        logger.info(f'收到來自 {interaction.user} 的 role_manager 請求')
-
-        if not await require_access(interaction, owner_only=True):
-            return
-
-        action_view = RoleManagerView(self)
-
-        embed = discord.Embed(
-            title="管理角色權限",
-            description="請選擇您要執行的操作。",
-            color=discord.Color.greyple()
-        )
-        await safe_send_interaction_message(interaction, embed=embed, view=action_view, ephemeral=True)
-
-    def manager_menu(self) -> tuple[discord.Embed, discord.ui.View]:
-        """管理選單（/server_manager 與私訊主控台同一份）。"""
-        embed = discord.Embed(
-            title="伺服器管理",
-            description="請選擇您要管理的項目。頻道設定與機器人狀態在私訊裡也能用；角色管理要在伺服器裡。",
-            color=discord.Color.greyple()
-        )
-        return embed, ServerManagerView(self)
-
-    @app_commands.command(name="server_manager", description="管理伺服器設定")
+    @app_commands.command(name="server_manager", description="管理主控台：狀態、頻道、角色、文章、點名、AI（只有群主；私訊裡也能用）")
+    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=False)
     async def server_manager_cmd(self, interaction: discord.Interaction):
-        """斜線命令：管理伺服器設定（私訊裡也能用，只有群主）"""
+        """斜線命令：管理主控台（私訊裡也能用，只有群主；私訊裡只有這個指令會叫出選單）"""
         logger.info(f'收到來自 {interaction.user} 的 /server_manager 斜線命令')
-
-        if not await require_access(interaction, owner_only=True, allow_dm=True):
-            return
-
-        embed, action_view = self.manager_menu()
-        await safe_send_interaction_message(interaction, embed=embed, view=action_view, ephemeral=interaction.guild is not None)
+        await admin_console.send_console(interaction)
 
     async def send_intro_panel_cmd(self, interaction: discord.Interaction):
         """在設定好的自我介紹頻道發送/更新填寫面板（非斜線指令入口）。"""

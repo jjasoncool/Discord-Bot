@@ -10,8 +10,8 @@
   它們的私訊也標成已恢復；從「機器人狀態」面板按的，結果寫在面板上、整個面板重畫（重新整理與各項目的按鈕都還在）
 - 通知一則一則依序送：同一把先「壞了」後「好了」，「好了」回寫得到「壞了」那則
 - 自癒成功那種一行通知沒有按鈕，順便把放棄那則標成已恢復
-- 「機器人狀態」列每一種登記過的狀況：紅＝有警報、綠＝正常，有重測的掛按鈕；重啟後舊按鈕的 custom_id 解析得回種類與 key
-- 群主在私訊裡傳任何一句話就拿到管理選單；別人與伺服器裡的訊息不理
+- 「機器人狀態」是主控台的一個畫面（`admin_status`，那邊自己的測試守）；從面板按重測，結果寫在面板最上面、整個面板重畫
+- 私訊裡傳文字不會叫出任何選單（主控台只由 /server_manager 進）
 - Lemonade 的重測：清自癒紀錄、向量與聊天模型各真的算一次，各自照結果解除自己的警報；按的那一把照它那顆的結果回報；
   向量模型好了才回填向量、聊天模型好了才叫醒 Telegram 補判
 - 自癒放棄中的模型行程換了（群主重啟 Lemonade）：自動重新偵測；好了一行通知、舊警報標已恢復；還是壞就重發一則警報
@@ -39,8 +39,10 @@ if SRC_DIR not in sys.path:
 
 import discord
 
+from commands import admin_status
 from commands import owner_alert_commands as oac
 from services import llm_service
+from utils.discord_content import layout_text
 from services.llm_service import LLMService, ProbeResult
 from utils import discord_members, dm_notifier, owner_alerts
 from utils.owner_alerts import RetestResult
@@ -165,14 +167,19 @@ class BusTests(unittest.TestCase):
 
 
 def make_interaction(*, user_id=OWNER, dm=True, content="🛑 放棄了", panel=False):
+    state = {"done": False}
+
+    async def mark_done(*args, **kwargs):
+        state["done"] = True
+    # 回應過（defer、send_message 或 edit_message）之後 is_done 變 True，後面的換畫面才會像真的一樣改原訊息
     return SimpleNamespace(
         guild=None if dm else SimpleNamespace(id=1), data={}, channel=SimpleNamespace(id=5),
         client=SimpleNamespace(get_cog=lambda name: None, guilds=[]),
         user=SimpleNamespace(id=user_id, display_name="群主"),
         message=SimpleNamespace(content="" if panel else content, embeds=["status-embed"] if panel else [],
                                 flags=SimpleNamespace(ephemeral=False), edit=mock.AsyncMock()),
-        response=SimpleNamespace(edit_message=mock.AsyncMock(), send_message=mock.AsyncMock(),
-                                 defer=mock.AsyncMock(), is_done=lambda: False),
+        response=SimpleNamespace(edit_message=mock.AsyncMock(side_effect=mark_done), send_message=mock.AsyncMock(side_effect=mark_done),
+                                 defer=mock.AsyncMock(side_effect=mark_done), is_done=lambda: state["done"]),
         followup=SimpleNamespace(send=mock.AsyncMock()),
         edit_original_response=mock.AsyncMock(),
     )
@@ -196,10 +203,9 @@ class CogTests(unittest.IsolatedAsyncioTestCase):
             self.sent.append(message)
             return message
 
-        self.manager = SimpleNamespace(manager_menu=lambda: ("menu-embed", "menu-view"))
         self.bot = SimpleNamespace(
             add_dynamic_items=mock.Mock(), remove_dynamic_items=mock.Mock(),
-            get_cog=lambda name: self.manager if name == "ManagementCommands" else None,
+            get_cog=lambda name: None,
             telegram_relay_worker=None,
         )
         self.cog = oac.OwnerAlertCommands(self.bot)
@@ -208,6 +214,8 @@ class CogTests(unittest.IsolatedAsyncioTestCase):
         for p in (mock.patch.object(oac, "send_dm", fake_send_dm),
                   mock.patch.object(oac, "resolve_user", mock.AsyncMock(return_value=self.owner_user)),
                   mock.patch("llm.storage.ai_interactions_store.backfill_embeddings", self.backfill),
+                  # 其餘八項的狀態函式會去讀設定檔、算權限：這裡只測通知與 Lemonade 那項，不登記它們
+                  mock.patch.object(oac.admin_status, "register_kinds", mock.Mock()),
                   mock.patch.dict(os.environ, {"OWNER_ID": str(OWNER)})):
             p.start()
             self.addCleanup(p.stop)
@@ -216,7 +224,7 @@ class CogTests(unittest.IsolatedAsyncioTestCase):
         self.bot.loop = asyncio.get_running_loop()
         await self.cog.cog_load()
         self.addAsyncCleanup(self.cog.cog_unload)
-        self.bot.add_dynamic_items.assert_called_once_with(oac.RetestButton, oac.StatusRefreshButton)
+        self.bot.add_dynamic_items.assert_called_once_with(oac.RetestButton, *admin_status.DYNAMIC_ITEMS)
 
     async def test_alert_becomes_a_dm_with_a_retest_button(self):
         await self.cog.deliver(owner_alerts.Alert("lemonade", "emb", "🛑 放棄", "error", 0.0, 0.0))
@@ -337,16 +345,52 @@ class CogTests(unittest.IsolatedAsyncioTestCase):
         await self.cog.deliver(owner_alerts.active()[0])
         dm = self.sent[0]
         panel = make_interaction(panel=True)
-        await self.cog.handle_retest(panel, "lemonade", "emb")
+        await self.cog.handle_retest(panel, "lemonade", "emb", panel_expanded=True)
         panel.response.defer.assert_awaited_once()
         panel.response.edit_message.assert_not_awaited()
         kwargs = panel.edit_original_response.await_args.kwargs
-        self.assertIn("重新偵測：正常——都正常", kwargs["content"])
-        self.assertIn("🟢 **模型後端**", kwargs["embed"].description, "面板重畫成現況")
-        ids = [getattr(getattr(c, "item", c), "custom_id", None) for c in kwargs["view"].children]
-        self.assertIn(oac.STATUS_REFRESH_ID, ids, "重新整理還在")
-        self.assertIn("owner:retest:lemonade:*", ids, "沒警報了，重測按鈕的 key 變回 *")
+        self.assertEqual(set(kwargs), {"view", "content", "embed"}, "改成新版版面要明確清掉 content 與 embed")
+        self.assertIsNone(kwargs["content"])
+        self.assertIsNone(kwargs["embed"])
+        text = layout_text(kwargs["view"])
+        self.assertIn("重新偵測：正常——都正常", text, "結果寫在面板最上面")
+        self.assertIn("🟢 **模型後端**", text, "面板重畫成現況")
+        ids = [getattr(getattr(c, "item", c), "custom_id", None) for c in kwargs["view"].walk_children()]
+        self.assertIn("owner:status:refresh1", ids, "重新整理還在（面板是展開的）")
+        self.assertIn("owner:panel:1:lemonade:*", ids, "沒警報了，重測按鈕的 key 變回 *")
         self.assertIn("已恢復", dm.edit.await_args.kwargs["content"], "警報那則私訊也標成已恢復")
+
+    async def test_old_embed_panel_button_redraws_as_the_new_panel(self):
+        """升級前發出去的 embed 版狀態面板還在私訊裡：上面的重測按鈕沒帶展開旗標，要當面板處理、換成新版版面，不能只剩一顆按鈕。"""
+        owner_alerts.register("lemonade", title="模型後端", retest=mock.AsyncMock(return_value=RetestResult(True, "都正常")),
+                              status=lambda: "這一小時沒有重開過")
+        old_panel = make_interaction(panel=True)     # message.embeds 非空、flags 沒有 components_v2
+        await self.cog.handle_retest(old_panel, "lemonade", "*")
+        old_panel.response.defer.assert_awaited_once()
+        kwargs = old_panel.edit_original_response.await_args.kwargs
+        self.assertIsInstance(kwargs["view"], discord.ui.LayoutView)
+        self.assertIsNone(kwargs["content"])
+        self.assertIsNone(kwargs["embed"])
+        self.assertIn("正常 1 項：模型後端", layout_text(kwargs["view"]), "重畫成新版面板（沒展開，正常的收成一行）")
+
+    async def test_retest_all_only_probes_lemonade_without_resetting(self):
+        """面板的「全部重測」只是看看：模型後端只探測，不清自癒紀錄與放棄名單。"""
+        probes = {True: ProbeResult(True, "emb", 0.4), False: ProbeResult(True, "chat", 1.3)}
+        llm = SimpleNamespace(probe=mock.AsyncMock(side_effect=lambda embedding: probes[embedding]),
+                              probe_backend=mock.AsyncMock(), replaced_backends=lambda: [])
+        self.cog._llm = llm
+        interaction = make_interaction()
+        interaction.client.get_cog = lambda name: self.cog if name == "OwnerAlertCommands" else None
+        with mock.patch.object(oac.lemonade_admin, "reset_cache") as reset, \
+                mock.patch.object(oac.lemonade_admin, "release"), \
+                mock.patch.object(oac.lemonade_admin, "heal_state", return_value=([], {})), \
+                mock.patch.object(oac.lemonade_admin, "heal_summary", return_value="這一小時沒有重開過"):
+            await admin_status.retest_all(interaction)
+        reset.assert_not_called()
+        self.assertEqual(llm.probe.await_count, 2, "兩顆主模型各算一次")
+        text = layout_text(interaction.edit_original_response.await_args.kwargs["view"])
+        self.assertIn("1 項正常", text)
+        self.assertIn("沒清自癒紀錄", text)
 
     async def test_failed_retest_keeps_the_dm_for_a_later_heal(self):
         owner_alerts.register("lemonade", title="模型後端", retest=mock.AsyncMock(return_value=RetestResult(False, "還是 5xx")))
@@ -392,36 +436,22 @@ class CogTests(unittest.IsolatedAsyncioTestCase):
             await self.cog.handle_retest(nobody, "lemonade", "emb")
         retest.assert_not_awaited()
 
-    async def test_status_lists_every_kind(self):
-        owner_alerts.register("lemonade", title="模型後端", retest=mock.AsyncMock(), status=lambda: "這一小時沒有重開過")
-        owner_alerts.register("owner_id", title="群主通知", status=lambda: "OWNER_ID 已設定")
-        owner_alerts.emit("lemonade", "emb", "🛑 放棄")
-        embed, view = await self.cog.status_message()
-        self.assertIn("🔴 **模型後端**", embed.description)
-        self.assertIn("-# 🛑 放棄", embed.description)
-        self.assertIn("🟢 **群主通知**　OWNER_ID 已設定", embed.description)
-        ids = [getattr(getattr(c, "item", c), "custom_id", None) for c in view.children]
-        self.assertEqual(ids, ["owner:retest:lemonade:emb", oac.STATUS_REFRESH_ID])
+    def test_status_panel_is_a_console_screen_not_a_separate_message(self):
+        self.assertFalse(hasattr(self.cog, "show_status"), "機器人狀態由主控台直接畫 admin_status.render_status，不另發訊息")
 
-        interaction = make_interaction()
-        await self.cog.show_status(interaction)
-        self.assertFalse(interaction.response.send_message.await_args.kwargs["ephemeral"], "私訊裡是一般訊息")
-        in_guild = make_interaction(dm=False)
-        await self.cog.show_status(in_guild)
-        self.assertTrue(in_guild.response.send_message.await_args.kwargs["ephemeral"])
+    def test_no_dm_listener_anymore(self):
+        self.assertFalse(hasattr(self.cog, "on_dm"), "私訊裡傳文字不再叫出選單，主控台只由 /server_manager 進")
 
-    async def test_owner_dm_gets_the_manager_menu(self):
-        channel = SimpleNamespace(send=mock.AsyncMock())
-
-        def message(user_id, guild=None, bot=False):
-            return SimpleNamespace(guild=guild, author=SimpleNamespace(id=user_id, bot=bot), channel=channel)
-
-        await self.cog.on_dm(message(OWNER))
-        channel.send.assert_awaited_once_with(embed="menu-embed", view="menu-view")
-        await self.cog.on_dm(message(7))
-        await self.cog.on_dm(message(OWNER, guild=SimpleNamespace(id=1)))
-        await self.cog.on_dm(message(OWNER, bot=True))
-        self.assertEqual(channel.send.await_count, 1, "別人、伺服器裡、bot 自己的都不理")
+    async def test_lemonade_status_levels(self):
+        with mock.patch.object(oac.lemonade_admin, "heal_state", return_value=([], {})), \
+                mock.patch.object(oac.lemonade_admin, "heal_summary", return_value="這一小時沒有重開過"):
+            self.assertEqual((await self.cog.lemonade_status()).level, "ok")
+        with mock.patch.object(oac.lemonade_admin, "heal_state", return_value=([], {"emb": 2})), \
+                mock.patch.object(oac.lemonade_admin, "heal_summary", return_value="emb 這一小時重開 2 次"):
+            self.assertEqual((await self.cog.lemonade_status()).level, "watch", "重開過但沒放棄＝觀察")
+        with mock.patch.object(oac.lemonade_admin, "heal_state", return_value=(["emb"], {})), \
+                mock.patch.object(oac.lemonade_admin, "heal_summary", return_value="emb 已放棄"):
+            self.assertEqual((await self.cog.lemonade_status()).level, "alert")
 
     async def test_without_owner_id_nothing_is_sent(self):
         with mock.patch.dict(os.environ, {"OWNER_ID": "0"}):
@@ -595,7 +625,10 @@ class AccessTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(await discord_members.require_access(stranger, owner_only=True, allow_dm=True))
             self.assertIn("擁有者", stranger.response.send_message.await_args.kwargs["content"])
             admin = make_interaction()
-            self.assertFalse(await discord_members.require_access(admin, admin_only=True, allow_dm=True), "私訊裡看不到身分組")
+            self.assertTrue(await discord_members.require_access(admin, admin_only=True, allow_dm=True),
+                            "私訊裡看不到身分組：allow_dm 一律只放群主，管理員限定的操作群主也能從私訊用")
+            not_owner = make_interaction(user_id=7)
+            self.assertFalse(await discord_members.require_access(not_owner, admin_only=True, allow_dm=True))
         with mock.patch.dict(os.environ, {"OWNER_ID": "0"}):
             self.assertFalse(await discord_members.require_access(make_interaction(user_id=0), owner_only=True, allow_dm=True))
 

@@ -1,30 +1,33 @@
-"""群主通知與管理主控台：要人介入的狀況私訊群主、底下一顆「重新偵測」；「機器人狀態」列各種狀況；群主私訊 bot 就拿到管理選單。
+"""群主通知：要人介入的狀況私訊群主、底下一顆「重新偵測」；登記模型後端那項的重測與狀態；「機器人狀態」面板本體在 `admin_status`。
 
 架構定位：介面層（commands）的 cog。
-  上層：`discord_bot` 的 COMMAND_MODULES 載入；`management_commands` 的「機器人狀態」按鈕呼叫 `show_status`。
-  下層：`utils.owner_alerts`（警報與登記表）、`utils.dm_notifier`（私訊）、`utils.discord_members`（群主、權限）、
-  `llm.client.lemonade_admin`／`services.llm_service`（Lemonade 的重測）、`llm.storage.ai_interactions_store`
-  （重測成功後回填向量）、`bot.telegram_relay_worker`（叫醒補判）、`commands.management_commands`（管理選單）。
+  上層：`discord_bot` 的 COMMAND_MODULES 載入；主控台的「機器人狀態」直接畫 `admin_status.render_status`，重測按鈕才回到這裡；
+  `admin_status` 的面板按鈕呼叫 `handle_retest`、`close_resolved_dms`。
+  下層：`utils.owner_alerts`（警報與登記表）、`commands.admin_status`（面板、其餘八項的登記）、`utils.dm_notifier`（私訊）、
+  `utils.discord_members`（群主、權限）、`llm.client.lemonade_admin`／`services.llm_service`（Lemonade 的重測）、
+  `llm.storage.ai_interactions_store`（重測成功後回填向量）、`bot.telegram_relay_worker`（叫醒補判）。
 
 介面：
-- `OwnerAlertCommands.show_status(interaction)`：回「機器人狀態」（伺服器裡只有本人看得到；私訊裡一般訊息）。
-- `OwnerAlertCommands.handle_retest(interaction, kind, key)`：按鈕按下：重測、把結果回寫在同一則訊息上。
+- `OwnerAlertCommands.handle_retest(interaction, kind, key, panel_expanded=None)`：按鈕按下：重測、把結果回寫在同一則訊息上
+  （`panel_expanded` 有給＝從面板按的，面板整個重畫）。
+- `OwnerAlertCommands.close_resolved_dms()`：把已解除的警報的私訊都標成已恢復（面板全部重測後呼叫）。
+- `OwnerAlertCommands.probe_lemonade()`：只探測不清紀錄（面板「全部重測」用；那一列自己的「重測」才清自癒紀錄）。
 - `OwnerAlertCommands.check_backend_restarts()`：每分鐘一次：自癒放棄中的模型行程換了（群主重啟了 Lemonade）就自動重新偵測、私訊結果。
-- `RetestButton`／`StatusRefreshButton`：DynamicItem，custom_id `owner:retest:<kind>:<key>`、`owner:status:refresh`，重啟後照樣能按。
-- 私訊 listener：群主在私訊裡傳任何一句話，回管理選單（和 /server_manager 同一份）。
+- `RetestButton`：DynamicItem，custom_id `owner:retest:<kind>:<key>`，警報私訊上那顆，重啟後照樣能按。
 
 規則：
-- 按鈕、狀態、私訊入口只有群主能用（`_ACCESS`／`_is_console_user`）；要放寬到管理員只改那兩處。
-- 各種狀況的重測在 `cog_load` 登記：要碰 bot 的東西（轉發 worker）才放這裡，純後端的探測在 `LLMService.probe`／`probe_backend`。
+- 按鈕只有群主能用（`_ACCESS`）；要放寬到管理員只改那一行。
+- 各種狀況的重測在 `cog_load` 登記：模型後端在這裡（要碰 bot 的東西：轉發 worker），其餘八項在 `admin_status.register_kinds`；
+  純後端的探測在 `LLMService.probe`／`probe_backend`。
 - 通知文案由發警報的那層寫；這裡只加時間、結果那一行（訊息太長時保留最新那行、截掉前面的）。
 - Lemonade 自癒只在 bot 這個行程做：`cog_load` 打開（`lemonade_admin.allow_heal`）、`cog_unload` 關掉——有人收通知、
   有重新偵測、有重開偵測的地方才自癒。
 
 例外與決策：
-- 私訊不存聊天、不插話：`discord_bot.on_message` 一開始就把私訊擋掉，只有這裡的 listener 看私訊。
+- 私訊裡的文字不回：管理主控台只由 /server_manager 叫出來（私訊的對話留給之後的 AI 私聊）。
 - 解除時回寫原本那則私訊（補一行「已恢復」、按鈕停用）；訊息與最後寫上去的文字記在記憶體，重啟就忘——重啟後舊訊息上的按鈕還是能按。
 - 通知一則一則依序送（同一把先「壞了」後「好了」時，回寫才找得到前一則）。
-- 從「機器人狀態」按重測：結果寫在面板最上面、整個面板重畫（各項目與重新整理都還在）；從警報私訊按：補在那則底下。
+- 從「機器人狀態」按重測：結果寫在面板最上面、整個面板重畫（各項目與按鈕都還在）；從警報私訊按：補在那則底下。
 - Lemonade 的重測：群主按的（`retest_lemonade`）先清全部自癒紀錄，向量、聊天兩顆主模型都測，按的是別顆（例如 reranker）
   就再單獨測那顆；各自照自己的結果解除自己的警報，回報照按的那顆。回填向量只看向量模型、叫醒 Telegram 補判只看聊天模型。
 - 自動重測（`check_backend_restarts`）不清紀錄：放棄中的模型行程換了才探測一輪，確認好了才只放那幾顆（`release`），
@@ -41,20 +44,21 @@ from typing import Iterable, Optional
 import discord
 from discord.ext import commands
 
+from commands import admin_status
 from llm.client import lemonade_admin
 from services.llm_service import LLMService, ProbeResult
 from sys_settings.time_settings import APP_TZ
 from utils import owner_alerts
 from utils.background_tasks import periodic, spawn, supervise
 from utils.discord_members import bot_owner_id, require_access, resolve_user
+from utils.discord_content import edit_screen
 from utils.dm_notifier import send_dm
-from utils.owner_alerts import Alert, RetestResult
+from utils.owner_alerts import Alert, RetestResult, Status
 from utils.utils import safe_send_interaction_message
 
 logger = logging.getLogger(__name__)
 
 RETEST_TEMPLATE = r"owner:retest:(?P<kind>[a-z0-9_]+):(?P<key>[A-Za-z0-9._*\-]+)"
-STATUS_REFRESH_ID = "owner:status:refresh"
 #: 誰能按；要放寬到管理員只改這裡（私訊裡只放得了群主）
 _ACCESS = dict(owner_only=True, allow_dm=True)
 _NOT_LOADED = "狀態功能目前沒有在運作，請看 log。"
@@ -118,27 +122,6 @@ class RetestButton(discord.ui.DynamicItem[discord.ui.Button], template=RETEST_TE
         await cog.handle_retest(interaction, self.kind, self.key)
 
 
-class StatusRefreshButton(discord.ui.DynamicItem[discord.ui.Button], template=STATUS_REFRESH_ID):
-    """「機器人狀態」的重新整理：同一則訊息換內容。"""
-
-    def __init__(self):
-        super().__init__(discord.ui.Button(label="重新整理", style=discord.ButtonStyle.secondary, custom_id=STATUS_REFRESH_ID))
-
-    @classmethod
-    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match, /):
-        return cls()
-
-    async def callback(self, interaction: discord.Interaction):
-        cog = _cog(interaction)
-        if cog is None:
-            await safe_send_interaction_message(interaction, _NOT_LOADED, ephemeral=True)
-            return
-        if not await require_access(interaction, **_ACCESS):
-            return
-        embed, view = await cog.status_message()
-        await interaction.response.edit_message(embed=embed, view=view)
-
-
 class OwnerAlertCommands(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -152,10 +135,10 @@ class OwnerAlertCommands(commands.Cog):
         self._recheck: set[str] = set()
 
     async def cog_load(self):
-        self.bot.add_dynamic_items(RetestButton, StatusRefreshButton)
+        self.bot.add_dynamic_items(RetestButton, *admin_status.DYNAMIC_ITEMS)
         owner_alerts.register(lemonade_admin.ALERT_KIND, title="模型後端（Lemonade）",
                               retest=self.retest_lemonade, status=self.lemonade_status)
-        owner_alerts.register("owner_id", title="群主通知", status=self.owner_status)
+        admin_status.register_kinds(self.bot)
         owner_alerts.set_listener(self._on_alert_threadsafe)
         lemonade_admin.allow_heal(True)
         self._restart_watch = supervise(
@@ -171,7 +154,7 @@ class OwnerAlertCommands(commands.Cog):
             self._restart_watch = None
         lemonade_admin.allow_heal(False)
         owner_alerts.set_listener(None)
-        self.bot.remove_dynamic_items(RetestButton, StatusRefreshButton)
+        self.bot.remove_dynamic_items(RetestButton, *admin_status.DYNAMIC_ITEMS)
 
     # ---------- 通知 ----------
 
@@ -218,16 +201,20 @@ class OwnerAlertCommands(commands.Cog):
 
     # ---------- 按鈕 ----------
 
-    async def handle_retest(self, interaction: discord.Interaction, kind: str, key: str) -> None:
+    async def handle_retest(self, interaction: discord.Interaction, kind: str, key: str, *,
+                            panel_expanded: Optional[bool] = None) -> None:
         """按「重新偵測」：跑登記的重測，把結果寫回按的那則訊息。
 
         警報私訊：先把按鈕換成「偵測中」，結果補在底下，成功就停用按鈕、失敗按鈕留著。
-        「機器人狀態」面板（有 embed 的那種）：結果寫在最上面、整個面板重畫，各項目的按鈕與重新整理都還在。
+        「機器人狀態」面板（`panel_expanded` 有給）：結果寫在最上面、整個面板重畫，各項目的按鈕都還在。
         """
         if not await require_access(interaction, **_ACCESS):
             return
         message = interaction.message
-        on_panel = bool(getattr(message, "embeds", None))
+        if panel_expanded is None and getattr(message, "embeds", None) \
+                and not getattr(getattr(message, "flags", None), "components_v2", False):
+            panel_expanded = False      # 舊版（embed）狀態面板上的重測按鈕：當面板處理，重畫成新版版面
+        on_panel = panel_expanded is not None
         original = (getattr(message, "content", "") or "")
         if on_panel:
             await interaction.response.defer()
@@ -246,8 +233,7 @@ class OwnerAlertCommands(commands.Cog):
         line = f"{icon} {_stamp()} 重新偵測：{verdict}" + (f"——{result.text}" if result.text else "")
         try:
             if on_panel:
-                embed, view = await self.status_message()
-                await interaction.edit_original_response(content=line[:_MESSAGE_MAX], embed=embed, view=view)
+                await edit_screen(interaction, view=await admin_status.render_status(expanded=bool(panel_expanded), headline=line))
             else:
                 content = _append_line(original, line)
                 button = (RetestButton(kind, key, label="已恢復", disabled=True, style=discord.ButtonStyle.success)
@@ -266,39 +252,18 @@ class OwnerAlertCommands(commands.Cog):
 
     # ---------- 狀態 ----------
 
-    async def status_message(self) -> tuple[discord.Embed, discord.ui.View]:
-        """「機器人狀態」：登記過的每種狀況一行（紅＝要你處理、綠＝正常），有重測的掛一顆按鈕。"""
-        alerts = owner_alerts.active()
-        lines: list[str] = []
-        view = _view()
-        for spec in owner_alerts.kinds():
-            mine = [a for a in alerts if a.kind == spec.kind]
-            status = await owner_alerts.status_line(spec.kind)
-            lines.append(f"{'🔴' if mine else '🟢'} **{spec.title}**　{status or ('要你處理' if mine else '正常')}")
-            for alert in mine:
-                lines.append(f"-# {alert.text[:300]}")
-            if spec.retest is not None:
-                view.add_item(RetestButton(spec.kind, mine[0].key if mine else "*", label=f"重測 {spec.title}"[:80]))
-        view.add_item(StatusRefreshButton())
-        embed = discord.Embed(
-            title="機器人狀態", description="\n".join(lines) or "（還沒有登記任何狀況）",
-            color=discord.Color.red() if alerts else discord.Color.green(),
-        )
-        embed.set_footer(text=f"{_stamp()} 更新 · 紅＝要你處理、綠＝正常；按下面的按鈕會重測那一項")
-        return embed, view
+    async def close_resolved_dms(self) -> None:
+        """已經不在警報裡、但私訊還開著的，都標成已恢復（面板全部重測後）。"""
+        still = {(a.kind, a.key) for a in owner_alerts.active()}
+        for pair in [pair for pair in self._messages if pair not in still]:
+            await self._mark_resolved(*pair)
 
-    async def show_status(self, interaction: discord.Interaction) -> None:
-        if not await require_access(interaction, **_ACCESS):
-            return
-        embed, view = await self.status_message()
-        await safe_send_interaction_message(interaction, embed=embed, view=view, ephemeral=interaction.guild is not None)
-
-    def owner_status(self) -> str:
-        return "OWNER_ID 已設定" if bot_owner_id() else "OWNER_ID 沒設定：通知送不出去、主控台沒人能用"
-
-    async def lemonade_status(self) -> str:
+    async def lemonade_status(self) -> Status:
         # 看紀錄要拿 lemonade_admin 的鎖，別的執行緒正在載入模型時不能卡住 event loop
-        return await asyncio.to_thread(lemonade_admin.heal_summary)
+        gave_up, restarted = await asyncio.to_thread(lemonade_admin.heal_state)
+        text = await asyncio.to_thread(lemonade_admin.heal_summary)
+        level = "alert" if gave_up else "watch" if restarted else "ok"
+        return Status(level, text)
 
     # ---------- Lemonade 的重測 ----------
 
@@ -315,6 +280,12 @@ class OwnerAlertCommands(commands.Cog):
         mine = results.get(owner_alerts.clean_key(key))
         judged = [mine] if mine is not None else list(results.values())
         failed = [probe for probe in judged if not probe.ok]
+        return RetestResult(not failed, "；".join(parts), untested=bool(failed) and all(p.busy for p in failed))
+
+    async def probe_lemonade(self, key: str = "*") -> RetestResult:
+        """只探測、不清紀錄（面板「全部重測」用）：兩顆主模型各算一次，能算的照舊解除自己的警報。"""
+        results, parts = await self._probe_lemonade()
+        failed = [probe for probe in results.values() if not probe.ok]
         return RetestResult(not failed, "；".join(parts), untested=bool(failed) and all(p.busy for p in failed))
 
     async def check_backend_restarts(self) -> None:
@@ -373,24 +344,6 @@ class OwnerAlertCommands(commands.Cog):
             worker.wake_recheck()
             parts.append("已叫醒 Telegram 過濾補判")
         return results, parts
-
-    # ---------- 私訊入口 ----------
-
-    def _is_console_user(self, user) -> bool:
-        """誰能從私訊叫出管理選單；要放寬到管理員只改這裡（要回伺服器查成員）。"""
-        owner_id = bot_owner_id()
-        return bool(owner_id) and getattr(user, "id", None) == owner_id
-
-    @commands.Cog.listener("on_message")
-    async def on_dm(self, message: discord.Message) -> None:
-        if message.guild is not None or message.author.bot or not self._is_console_user(message.author):
-            return
-        manager = self.bot.get_cog("ManagementCommands")
-        if manager is None:
-            await message.channel.send("管理指令模組沒有載入，請看 log。")
-            return
-        embed, view = manager.manager_menu()
-        await message.channel.send(embed=embed, view=view)
 
 
 async def setup(bot):
