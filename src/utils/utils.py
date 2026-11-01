@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Optional
 import copy
 import logging
+import math
 import json
 import os
 import asyncio
@@ -11,6 +12,7 @@ import discord
 from sys_settings.paths import APP_ROOT, LOGS_DIR
 from utils.safe_write import replace_text
 from utils import hot_files
+from utils.discord_content import split_message
 
 # 獲取 logger
 logger = logging.getLogger(__name__)
@@ -104,6 +106,17 @@ async def safe_send_interaction_message(
                 custom_id,
             )
             await asyncio.sleep(delay)
+
+
+async def safe_send_interaction_text(interaction: discord.Interaction, text: str, *, ephemeral: bool = True) -> None:
+    """回一段長度不限的純文字：切成放得下的幾則，第一則回應互動、其餘接續送（都照同一個 ephemeral）。
+
+    清單類的回覆（頻道、身分組、狀態詳細）長度跟伺服器大小走，塞進 embed 欄位會撞 1024 字上限被退件；
+    純文字切段才不會因為多了幾個頻道就整則送不出去。切段規則用 split_message（換行優先、不切壞暴雷標記）。
+    """
+    for chunk in split_message(text) or ["（沒有內容）"]:
+        await safe_send_interaction_message(interaction, chunk, ephemeral=ephemeral)
+
 
 class ConfigWriteError(RuntimeError):
     """設定檔讀不到或格式壞掉，這次沒有寫入（避免把整份檔寫成只剩這次改的那一項）。"""
@@ -245,6 +258,15 @@ def get_paginated_options(options, page, items_per_page=25):
 
 ITEMS_PER_PAGE = 25
 
+
+def paginate(items, page, per_page=ITEMS_PER_PAGE):
+    """切出第 `page` 頁：回 (這一頁的項目, 夾回合法範圍的頁碼, 總頁數)；空清單也算 1 頁、頁碼負的或超過都夾回來。
+    常駐面板的分頁用它：頁碼寫在按鈕的 custom_id，選項每次照現況重列。"""
+    per_page = max(1, int(per_page))
+    pages = max(1, math.ceil(len(items) / per_page))
+    page = min(max(0, int(page)), pages - 1)
+    return list(items[page * per_page:(page + 1) * per_page]), page, pages
+
 def create_paginated_view(
     options,
     placeholder_text,
@@ -253,6 +275,7 @@ def create_paginated_view(
     embed_color,
     on_select_callback,
     custom_id_prefix: str = "paginated",
+    max_values: int = 1,
 ):
     """
     創建分頁視圖
@@ -263,7 +286,8 @@ def create_paginated_view(
         embed_title: 嵌入訊息的標題
         embed_description: 嵌入訊息的描述
         embed_color: 嵌入訊息的顏色
-        on_select_callback: 選擇回調函數
+        on_select_callback: 選擇回調函數；單選收到選到的值，多選（max_values > 1）收到值的 list
+        max_values: 這一頁最多選幾個；大於 1 就是多選（一次送出一頁，翻頁不保留勾選）
 
     Returns:
         tuple: (current_page, view)
@@ -277,10 +301,12 @@ def create_paginated_view(
         else:
             placeholder = placeholder_text + (f" (第 {page + 1} 頁)" if len(options) > ITEMS_PER_PAGE else "")
 
+        page_options = get_paginated_options(options, page, ITEMS_PER_PAGE)
         channel_select = discord.ui.Select(
             placeholder=placeholder,
             custom_id=f"{safe_prefix}_select_{page}",
-            options=get_paginated_options(options, page, ITEMS_PER_PAGE)
+            options=page_options,
+            max_values=max(1, min(max_values, len(page_options))),
         )
 
         async def channel_select_callback(interaction: discord.Interaction):
@@ -292,7 +318,7 @@ def create_paginated_view(
                     interaction.guild.id if interaction.guild else None,
                     interaction.channel.id if interaction.channel else None,
                 )
-                selected_value = channel_select.values[0]
+                selected_value = list(channel_select.values) if max_values > 1 else channel_select.values[0]
                 await on_select_callback(interaction, selected_value)
             except Exception as e:
                 logger.error(

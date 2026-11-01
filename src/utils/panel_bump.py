@@ -19,6 +19,8 @@ from typing import Awaitable, Callable, Iterable, Optional
 
 import discord
 
+from utils.discord_content import message_custom_ids
+
 from utils import runtime_file
 
 logger = logging.getLogger(__name__)
@@ -118,8 +120,4 @@ class PanelBumper:
         return deleted
 
     def _is_panel(self, message: discord.Message) -> bool:
-        for row in message.components:
-            for child in getattr(row, "children", ()):
-                if getattr(child, "custom_id", None) in self._custom_ids:
-                    return True
-        return False
+        return not self._custom_ids.isdisjoint(message_custom_ids(message))

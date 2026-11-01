@@ -1062,6 +1062,24 @@ RULES = [
         allowed=set(),
     ),
     Rule(
+        name="切段後自己逐則送（第一則回應、其餘 followup 的流程每處都少一半）",
+        pattern=r"for [\w, ]+ in (?:enumerate\()?split_message\(",
+        canonical="utils.utils.safe_send_interaction_text（回互動的長清單）／utils.discord_content.send_model_text（模型寫的文字）",
+        allowed={"utils/utils.py", "utils/discord_content.py"},
+    ),
+    Rule(
+        name="換畫面自己判斷回應過沒、自己清 content／embed（面板上每一處都會少寫一半）",
+        pattern=r"\.(?:edit_message|edit_original_response)\(content=None, embed=None, view=",
+        canonical="utils.discord_content.edit_screen(interaction, view=…)（embed 版面板給 embed=）",
+        allowed={"utils/discord_content.py"},
+    ),
+    Rule(
+        name="面板上一次操作做壞了救回畫面（try／except Exception 加救援再加 HTTPException）",
+        pattern=r"救援畫面也改不了",
+        canonical="utils.discord_content.guarded_screen(interaction, label, run, rescue=…, log=logger)",
+        allowed={"utils/discord_content.py"},
+    ),
+    Rule(
         name="把頻道綁定寫進 config.json（會繞過綁定後動作）",
         finder=_find_channel_binding_writes,
         canonical="settings.channel_registry.apply(setting, bot=, guild=, channel=)／unbind(setting)",

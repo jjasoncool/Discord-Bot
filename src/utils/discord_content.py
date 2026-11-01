@@ -44,6 +44,61 @@ def linkify_image_urls(text: str) -> str:
     return re.sub(r'https?://[^\s<>"]+', _replace, text)
 
 
+def layout_text(view: "discord.ui.LayoutView") -> str:
+    """新版版面（LayoutView）上所有文字接成一段（log、測試比對用；Discord 端怎麼排不管）。"""
+    return "\n".join(item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay))
+
+
+async def edit_screen(interaction: discord.Interaction, *, view, embed: Optional[discord.Embed] = None,
+                      content: Optional[str] = None) -> None:
+    """換畫面一律改互動所在的那一則訊息：還沒回應就用回應改；回應過（已切成「處理中」、或 defer 了）就改原訊息。
+
+    新版版面（LayoutView）的畫面只給 view：content／embed 明確清成 None，舊的 embed 版訊息按下去才換得過去，
+    本來就是新版版面的多帶無害。embed 版面板給 embed＋view。表單送出的互動（從按鈕或選單開的表單）也能這樣改。"""
+    kwargs = dict(content=content, embed=embed, view=view)
+    if interaction.response.is_done():
+        await interaction.edit_original_response(**kwargs)
+    else:
+        await interaction.response.edit_message(**kwargs)
+
+
+async def guarded_screen(interaction: discord.Interaction, label: str, run: Callable[[], Awaitable[None]], *,
+                         rescue: Callable[[str], Awaitable[None]], log: logging.Logger = logger) -> None:
+    """面板上一次操作的外殼：做壞了把畫面換回 `rescue(notice)` 給的那個並記 ERROR（不能停在「處理中」全灰、沒按鈕）；
+    救援畫面也改不了（訊息在做的途中被刪）只記一行 WARNING，不讓例外再往外丟。log 給呼叫端自己的 logger，才看得出是哪個面板。"""
+    try:
+        await run()
+    except Exception as exc:  # 邊界：面板按鈕的一次互動；要把畫面從「處理中」救回來，細節進 log
+        log.error("%s 失敗：%s", label, exc, exc_info=True)
+        try:
+            await rescue(f"❌ 操作失敗（{type(exc).__name__}），請再試一次；細節在 log。")
+        except discord.HTTPException as rescue_exc:
+            log.warning("%s：救援畫面也改不了（面板可能已被刪）：%s", label, rescue_exc)
+
+
+def message_custom_ids(message) -> set[str]:
+    """一則訊息上所有按鈕與選單的 custom_id（新版版面的容器、區段與區段右邊的按鈕都走進去；最多三層）。"""
+    found: set[str] = set()
+
+    def walk(node, depth: int) -> None:
+        custom_id = getattr(node, "custom_id", None)
+        if isinstance(custom_id, str):
+            found.add(custom_id)
+        if depth >= 3:
+            return
+        children = getattr(node, "children", None)
+        for child in children if isinstance(children, (list, tuple)) else ():
+            walk(child, depth + 1)
+        accessory = getattr(node, "accessory", None)
+        if accessory is not None and isinstance(getattr(accessory, "custom_id", None), str):
+            found.add(accessory.custom_id)
+
+    components = getattr(message, "components", None)
+    for component in components if isinstance(components, (list, tuple)) else ():
+        walk(component, 0)
+    return found
+
+
 def split_message(text: str, limit: int = DISCORD_MESSAGE_LIMIT) -> list[str]:
     """把長文切成多段，每段長度 <= limit（Telegram 轉發的長貼文、/askai 的長回答共用）。
 

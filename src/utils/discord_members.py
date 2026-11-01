@@ -14,6 +14,10 @@
   不行就自己回一則只有本人看得到的訊息、回 False，呼叫端直接 return。不帶參數＝最低要求：在伺服器裡、不是私訊。
   `allow_dm=True` 只放行私訊裡的群主（`owner_only`）：管理主控台的按鈕與指令在私訊裡用；其他條件要看身分組與頻道權限，私訊裡沒有這些。
 - `home_guild(interaction)`：這次操作指的是哪個伺服器：在伺服器裡就是那個；私訊裡用 bot 所在的唯一伺服器，bot 在好幾個伺服器就回 None。
+- 身分組清單（面板上「選幾個身分組加進或拿掉某個設定」共用）：`role_name(guild, id)`（不存在的印「未知（ID: …）」）、
+  `roles_by_position(guild, ids)`（照高低排、不存在的最後）、`addable_role_ids(guild, current)`（還沒設定的、由高到低、@everyone 不算）、
+  `role_select_options(guild, ids)`（選單選項）、`role_ids_changed(current, picked, mode)`（送出時真的會變的那些）、
+  `role_ids_after(ids, mode, picked)`（加進或拿掉之後的清單）。
   全專案的管理員限制都走它（守衛擋 `has_permissions`：它擋下時回英文錯誤還記一筆 ERROR）。
   `require_` 表示不符合會擋下並告訴對方；`check_` 留給只回是或否的 `check_role`。
 
@@ -119,6 +123,10 @@ async def check_role(user, required_role: str = None) -> bool:
 _PERMISSION_NAMES = {"manage_messages": "管理訊息"}
 
 
+#: home_guild 回 None（私訊裡 bot 不只在一個伺服器）時給使用者的回話；各指令模組共用同一句
+NO_HOME_GUILD = "bot 不只在一個伺服器裡，請到伺服器裡用 /server_manager 操作。"
+
+
 def home_guild(interaction: discord.Interaction) -> discord.Guild | None:
     """這次操作指的是哪個伺服器：在伺服器裡就是那個；私訊裡用 bot 所在的唯一伺服器，不只一個就回 None（請對方到伺服器裡操作）。"""
     if interaction.guild is not None:
@@ -140,14 +148,15 @@ async def require_access(interaction: discord.Interaction, owner_only: bool = Fa
         required_role: 所需的角色名稱（例如 'Trader' 或 'Moderator'）
         permission: 所需的 Discord 權限（例如 'manage_messages'）。看的是**這個頻道**解析過覆寫的權限
             （`interaction.permissions`，thread 繼承母頻道）；`OWNER_ID` 自動通過，跟 check_role 一致
-        allow_dm: 私訊裡也放行，但只放群主（`owner_only`）：私訊裡沒有身分組與頻道權限可看
+        allow_dm: 私訊裡也放行，但只放群主：私訊裡沒有身分組與頻道權限可看，所以不管原本要求的是群主、管理員還是
+            哪個權限，私訊裡一律只有群主過得了（管理主控台的指令與按鈕用）
 
     Returns:
         bool: 是否通過權限檢查
     """
     # 檢查是否在伺服器中使用
     if not interaction.guild:
-        if allow_dm and owner_only:
+        if allow_dm:
             owner_id = bot_owner_id()
             if owner_id and interaction.user.id == owner_id:
                 return True
@@ -189,3 +198,51 @@ async def require_access(interaction: discord.Interaction, owner_only: bool = Fa
             return False
 
     return True
+
+
+# ── 身分組清單：點名的目標／排除身分組、角色管理的 Trader／Moderator 都是「一個設定對應幾個身分組」，畫面與寫法共用這幾支 ──
+
+def role_name(guild, role_id: int) -> str:
+    """身分組名稱；已經不存在的印「未知（ID: …）」（設定檔裡留著被刪掉的身分組是常態）。"""
+    role = guild.get_role(int(role_id)) if guild is not None else None
+    return role.name if role else f"未知（ID: {role_id}）"
+
+
+def roles_by_position(guild, role_ids) -> list[int]:
+    """照伺服器裡的高低排（高的在前）；已經不存在的排最後。"""
+    def position(rid: int) -> int:
+        role = guild.get_role(int(rid))
+        return role.position if role else -1
+    return sorted((int(rid) for rid in role_ids), key=position, reverse=True)
+
+
+def addable_role_ids(guild, current) -> list[int]:
+    """還沒在清單裡的身分組，由高到低；@everyone 不算。"""
+    taken = {int(rid) for rid in current}
+    return [r.id for r in sorted(guild.roles, key=lambda r: r.position, reverse=True)
+            if not r.is_default() and r.id not in taken]
+
+
+def role_select_options(guild, role_ids) -> list[discord.SelectOption]:
+    """身分組選單的選項：名稱當標籤、ID 當說明（私訊裡 Discord 原生的身分組選單列不出東西，清單由 bot 自己列）。"""
+    return [discord.SelectOption(label=role_name(guild, rid)[:100], value=str(rid), description=f"ID: {rid}", emoji="🎭")
+            for rid in role_ids]
+
+
+def role_ids_changed(current, picked, mode: str) -> list[int]:
+    """勾好送出時真的會變的那些：新增只算還不在清單裡的、移除只算還在的（別人同時改過設定也不會把畫面講錯）。"""
+    taken = {int(rid) for rid in current}
+    adding = mode == "add"
+    return [int(rid) for rid in picked if (int(rid) not in taken) == adding]
+
+
+def role_ids_after(ids, mode: str, picked) -> list[int]:
+    """把這幾個身分組加進或拿掉清單：新增不重複、移除只拿掉指定的、其餘順序照舊；設定檔裡不是清單的值當空清單。"""
+    current = [int(rid) for rid in ids] if isinstance(ids, list) else []
+    if mode == "add":
+        for rid in picked:
+            if int(rid) not in current:
+                current.append(int(rid))
+        return current
+    wanted = {int(rid) for rid in picked}
+    return [rid for rid in current if rid not in wanted]
