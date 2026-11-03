@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import discord
 
-from services.relay.telegram_filter import Verdict
+from services.relay.telegram_filter import OTHER_GAME_LABEL, Verdict
 from services.relay.telegram_quarantine import QuarantineThreads
 from services.relay.telegram_relay_service import MessageRelayWorker, TelegramMediaRecord, TelegramMessageRecord
 
@@ -379,6 +379,12 @@ class FakeFilter:
         self.delay = 0.0
         self.active = 0
         self.max_active = 0
+        #: 文字含這些字就回「點名別款遊戲」：字 → 遊戲名
+        self.other_games: dict[str, str] = {}
+
+    def other_game(self, text):
+        game = next((name for word, name in self.other_games.items() if word in (text or "")), None)
+        return None if game is None else Verdict(True, label=OTHER_GAME_LABEL, reason=game, by_model=False)
 
     def quarantine(self, pk: int, label: str = "灌水", reason: str = "每日打卡") -> None:
         self.verdicts[pk] = Verdict(True, label=label, reason=reason)

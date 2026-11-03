@@ -2006,16 +2006,19 @@ class MessageRelayWorker:
         - 判定：判成垃圾、而且要真的隔離時才有；其他情況（沒開、只記錄、放行）是 None。
         - 待補判：正式模式下模型沒判到（沒回應、出錯、回答看不懂）就照常送主頻道的，之後補判、是垃圾再搬走
           （每則訊息都要被檢查過）。
-        - `complete=False`（相簿等待逾時只到齊一部分、單則的圖等太久還沒到）不判、照常送：只看到一部分就判，
-          會把「文字只有水、圖是設計稿」那種情報錯關（13649）。
+        - `complete=False`（相簿等待逾時只到齊一部分、單則的圖等太久還沒到）不問模型、照常送：只看到一部分就判，
+          會把「文字只有水、圖是設計稿」那種情報錯關（13649）。文字點名別款遊戲例外，那不用看圖。
         """
         if not self._filter_active():
             return None, False
         mode = self._filter.mode
-        if not complete:
-            logger.info("Telegram 過濾：圖還沒到齊，不判、照常送 message_pk=%s", unit.message_pk)
-            return None, False
-        verdict = await self._filter.judge(unit.text, self._filter_media(unit), trace_id=f"tgfilter-{unit.message_pk}")
+        if complete:
+            verdict = await self._filter.judge(unit.text, self._filter_media(unit), trace_id=f"tgfilter-{unit.message_pk}")
+        else:
+            verdict = self._filter.other_game(unit.text)
+            if verdict is None:
+                logger.info("Telegram 過濾：圖還沒到齊，不判、照常送 message_pk=%s", unit.message_pk)
+                return None, False
         logger.info(
             "Telegram 過濾：message_pk=%s 判定=%s 標籤=%s 理由=%s 看圖=%s 秒=%.1f 由模型判=%s mode=%s",
             unit.message_pk, "隔離" if verdict.quarantine else "放行", verdict.label or "-", verdict.reason or "-",
@@ -2250,8 +2253,8 @@ class MessageRelayWorker:
     async def judge_existing(self, message_pk: int) -> Optional[Verdict]:
         """直接判一則已經在資料庫的（相簿整本），不看開關、不送；沒接過濾或找不到回 None。一次性搬移用。
 
-        圖還沒到齊的不判、回放行，跟轉發端 `complete=False` 一樣：只看到一部分就判，會把「文字只有水、
-        圖是設計稿」那種情報錯關（13649）。
+        圖還沒到齊的不問模型、回放行，跟轉發端 `complete=False` 一樣：只看到一部分就判，會把「文字只有水、
+        圖是設計稿」那種情報錯關（13649）；文字點名別款遊戲例外，那不用看圖。
         """
         record = await self.repository.get_message_by_pk(message_pk)
         if self._filter is None or record is None:
@@ -2266,7 +2269,7 @@ class MessageRelayWorker:
         if unit is None:
             return None
         if not complete:
-            return Verdict(False, reason="圖還沒到齊，不判", by_model=False)
+            return self._filter.other_game(unit.text) or Verdict(False, reason="圖還沒到齊，不判", by_model=False)
         return await self._filter.judge(unit.text, self._filter_media(unit), trace_id=f"tgfilter-{message_pk}")
 
     async def relay_posts(self, channel, *, after: Optional[datetime] = None) -> dict[int, list[discord.Message]]:

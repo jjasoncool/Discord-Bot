@@ -483,6 +483,11 @@ class KindTests(unittest.IsolatedAsyncioTestCase):
             self.bot.failed_extensions = []
             with mock.patch.dict(os.environ, {"OWNER_ID": "0"}):
                 self.assertIn("OWNER_ID 沒設", (await admin_status.settings_status(self.bot)).text)
+            self.assertNotIn("別款遊戲名單", status.text)
+            with mock.patch.object(admin_status, "other_games_problem", return_value="ValidationError"):
+                status = await admin_status.settings_status(self.bot)
+            self.assertIn("別款遊戲名單讀不到", status.text)
+            self.assertIn("ValidationError", status.text)
 
     async def test_probe_results_feed_the_status_line(self):
         with mock.patch.object(admin_status.switches, "current", return_value=SimpleNamespace(askai_intel_search_mode="on", ambient_search_mode="off")):

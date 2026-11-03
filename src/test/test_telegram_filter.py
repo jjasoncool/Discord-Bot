@@ -14,12 +14,16 @@
 - 每個發送單位最多給模型 `max_images` 張：前幾個媒體各一張，媒體不夠時剩下的名額給動圖多抽幾格；
   音訊、壓縮檔不看；圖縮到長邊上限並轉 JPEG；模型真的拿到圖、而且關掉思考
 - 隔離時帶標籤（灌水、閒聊、罵人、無關圖片，模型寫別的記「其他」）與理由，給隔離那則最上面一行用
+- 文字點名別款遊戲就隔離、不問模型，連附語音的也是；英文比完整單字（content 不算 NTE）；同一則也提到鳴潮、
+  聯動與參照其他作品的鳴潮情報、沒點名的素材都照常問模型；名單改了下一則生效，寫壞了沿用上次、從沒讀到就全交給模型，
+  有空名字算壞檔（空字串會比中每一則）
 
 執行：
     cd src && python -m unittest test.test_telegram_filter -v
 """
 import asyncio
 import base64
+import json
 import os
 import shutil
 import subprocess
@@ -38,6 +42,8 @@ if SRC_DIR not in sys.path:
 from PIL import Image, ImageDraw
 
 from services.relay import telegram_filter as tf
+from sys_settings.telegram_relay_settings import TelegramFilterSettings
+from utils import hot_files
 
 
 def _png(size=(64, 64), colour=(220, 30, 30)) -> bytes:
@@ -87,8 +93,11 @@ class FilterTestBase(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         prompt = self.tmp / "prompt.txt"
         prompt.write_text("判斷有沒有鳴潮的資訊。", encoding="utf-8")
+        self.other_games = self.tmp / "other_games.json"
+        self.write_other_games({"games": [{"name": "異環", "aliases": ["NTE", "异环"]}], "this_game": ["鸣潮", "WW"]})
         self.settings = tf._SETTINGS.model_copy(update={
-            "prompt_path": str(prompt), "retry_initial_seconds": 0.01, "retry_max_seconds": 0.5,
+            "prompt_path": str(prompt), "other_games_path": str(self.other_games),
+            "retry_initial_seconds": 0.01, "retry_max_seconds": 0.5,
             "busy_poll_seconds": 0.01, "give_up_seconds": 10,
         })
         self.llm = FakeLLM()
@@ -107,6 +116,12 @@ class FilterTestBase(unittest.IsolatedAsyncioTestCase):
         path = self.tmp / name
         path.write_bytes(data)
         return tf.MediaFile(path, kind)
+
+    def write_other_games(self, content) -> None:
+        """改名單檔；修改時間的解析度可能分不出連續兩次寫入，所以順手丟掉快取。"""
+        raw = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+        self.other_games.write_text(raw, encoding="utf-8")
+        hot_files.forget(self.other_games)
 
     async def judge(self, text="", media=()):
         return await tf.judge(text, list(media), trace_id="test")
@@ -390,6 +405,131 @@ class VideoTests(FilterTestBase):
         v = await self.judge("水", [bad])
         self.assertFalse(v.by_model)
         self.assertEqual(self.llm.calls, [])
+
+
+class OtherGameNameTests(FilterTestBase):
+    """文字點名別款遊戲：名字要比得準，不能關到鳴潮情報。"""
+
+    def real_list(self):
+        """換回正式的名單檔；這些紀錄上的句子要照它判。"""
+        patcher = mock.patch.object(tf, "_SETTINGS", self.settings.model_copy(
+            update={"other_games_path": TelegramFilterSettings().other_games_path}))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def assert_quarantined(self, text, game, media=()):
+        v = await self.judge(text, media)
+        self.assertTrue(v.quarantine, text)
+        self.assertEqual((v.label, v.reason), ("別款遊戲", game), text)
+        self.assertFalse(v.by_model)
+
+    async def assert_asks_model(self, text, media=()):
+        before = len(self.llm.calls)
+        v = await self.judge(text, media)
+        self.assertEqual(len(self.llm.calls), before + 1, f"要問模型：{text}")
+        self.assertTrue(v.by_model, text)
+
+    async def test_named_goes_to_quarantine_without_asking_the_model(self):
+        await self.assert_quarantined("NTE 1.5 Vehicle047 省流：没图没模型", "異環")
+        await self.assert_quarantined("nte 1.5 深测似乎即将开启。", "異環")
+        await self.assert_quarantined("《异环》海特洛来信", "異環")
+        self.assertEqual(self.llm.calls, [])
+
+    async def test_named_with_audio_is_not_passed_as_unviewable(self):
+        audio = self.file("a.ogg", b"not audio", "other")
+        await self.assert_quarantined("NTE 1.5 mainline boss bgm", "異環", [audio])
+
+    async def test_named_with_image_does_not_need_the_image(self):
+        image = self.file("a.png", _png(), "image")
+        await self.assert_quarantined("NTE 1.5 周本场景", "異環", [image])
+        self.assertEqual(self.llm.calls, [])
+
+    async def test_english_names_match_whole_words_only(self):
+        for text in ("new content in the next patch", "INTERNET 不好", "CONTENT", "NTEST", "ANTE"):
+            await self.assert_asks_model(text)
+        for text in ("NTE1.5 新角色", "「NTE」", "这是nte的图", "NTE_1.5"):
+            await self.assert_quarantined(text, "異環")
+
+    async def test_also_naming_wuwa_goes_back_to_the_model(self):
+        await self.assert_asks_model("鸣潮和 NTE 同一天更新")
+        await self.assert_asks_model("WW 3.8 比 NTE 1.5 早一天")
+        await self.assert_quarantined("www.example.com NTE 1.5", "異環")
+
+    async def test_material_without_a_name_is_still_judged_by_the_model(self):
+        await self.assert_asks_model("", [self.file("a.png", _png(), "image")])
+        await self.assert_asks_model("other new asset", [self.file("b.png", _png(), "image")])
+
+    async def test_audio_without_a_name_still_passes(self):
+        v = await self.judge("Hiyuki's voice from plot", [self.file("a.ogg", b"not audio", "other")])
+        self.assertFalse(v.quarantine)
+        self.assertEqual(self.llm.calls, [])
+
+    async def test_edit_takes_effect_on_the_next_message(self):
+        await self.assert_asks_model("黑神话钟馗 leak")
+        self.write_other_games({"games": [{"name": "黑神話", "aliases": ["黑神话"]}], "this_game": ["鸣潮"]})
+        await self.assert_quarantined("黑神话钟馗 leak", "黑神話")
+
+    async def test_broken_file_keeps_the_last_good_list(self):
+        await self.assert_quarantined("NTE 1.5", "異環")
+        for broken in ("{不是 JSON", {"games": [{"name": "異環", "aliases": [""]}], "this_game": ["鸣潮"]},
+                       {"games": [{"name": "異環", "aliases": ["  "]}], "this_game": ["鸣潮"]},
+                       {"games": [{"name": "異環", "aliases": []}], "this_game": ["鸣潮"]},
+                       {"games": [], "this_game": [""]}, {"games": []}, ["NTE"]):
+            with self.subTest(broken=broken):
+                # 不丟快取：要看的就是「上次的好內容」還在。修改時間手動往後推，才一定會重讀到壞檔
+                later = self.other_games.stat().st_mtime_ns + 1_000_000
+                raw = broken if isinstance(broken, str) else json.dumps(broken, ensure_ascii=False)
+                self.other_games.write_text(raw, encoding="utf-8")
+                os.utime(self.other_games, ns=(later, later))
+                self.assertIsNotNone(tf.other_games_problem())
+                await self.assert_quarantined("NTE 1.5", "異環")
+                await self.assert_asks_model("今日首水")
+
+    async def test_never_read_list_leaves_everything_to_the_model(self):
+        for content in ("{不是 JSON", {"games": [{"name": "空", "aliases": [""]}], "this_game": ["鸣潮"]}):
+            with self.subTest(content=content):
+                self.write_other_games(content)
+                self.assertIsNotNone(tf.other_games_problem())
+                await self.assert_asks_model("NTE 1.5")
+        self.other_games.unlink()
+        hot_files.forget(self.other_games)
+        self.assertIsNotNone(tf.other_games_problem())
+        await self.assert_asks_model("NTE 1.5")
+
+    def test_problem_is_none_when_the_list_is_fine(self):
+        self.assertIsNone(tf.other_games_problem())
+
+    async def test_real_list_catches_what_the_records_named(self):
+        self.real_list()
+        self.assertIsNone(tf.other_games_problem(), "正式的名單檔要讀得起來")
+        for text, game in (
+            ("NTE 1.5 曳尔沐给你发的短信：数日之后的回电", "異環"),
+            ("《异环》海特洛来信 | 鉴定师，给你", "異環"),
+            ("endfield 1.6版本将于10月15日开启", "終末地"),
+            ("spoiler endfield 1.5 cutscene no voice", "終末地"),
+            ("经过确认，终末地的安卓预下载形式如下", "終末地"),
+            ("ZMD 新角色", "終末地"),
+            ("事已至此，有无黑神话钟馗leak", "黑神話"),
+            ("你们今天应该都在玩影之刃零了吧", "影之刃"),
+        ):
+            await self.assert_quarantined(text, game)
+        self.assertEqual(self.llm.calls, [])
+
+    async def test_real_list_leaves_wuwa_news_about_other_works_alone(self):
+        self.real_list()
+        for text in (
+            "《鸣潮》×《赛博朋克：边缘行者》联动预告",
+            "*Please note it as STC 联动池子单开，卡池规则和返利参照战双 X 鬼泣五，具体细则请以KUROGAMES为准。",
+            "「第二索拉：未名之梦」OP公开",
+            "《鸣潮》先约电台 现已正式上架QQ音乐、网易云音乐等平台",
+            "喜欢3.8男4星的孩子们可以为他编技能组了",
+            "all from lol（aka blu）",
+            "莉莉在睡觉 zzz",
+            "new content from the interesting internet",
+            "KUROGAMES 這次和 NTE 同一天開測",
+            "库洛和终末地撞期了",
+        ):
+            await self.assert_asks_model(text)
 
 
 if __name__ == "__main__":

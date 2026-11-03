@@ -51,6 +51,7 @@ from llm.storage import raw_message_store, store_chat
 from services import notify_server
 from services.events import event_scheduler
 from services.relay.base_monitor import SCRAPER_API_URL
+from services.relay.telegram_filter import other_games_problem
 from settings import channel_registry
 from sys_settings import switches
 from sys_settings.llm_settings import AskAIWebSettings, LLMServiceSettings
@@ -461,6 +462,9 @@ async def settings_status(bot) -> Status:
         watch.append("活動排程 dry_run：只記 log、不建活動（首批保險，刻意關著）")
     else:
         notes.append("活動排程會建活動")
+    other_games = other_games_problem()
+    if other_games:
+        watch.append(f"別款遊戲名單讀不到（{other_games}）：沿用上次讀到的內容，沒有就全交給模型判")
     ambient = channel_registry.get_setting("AI 插話頻道")
     if ambient is not None and not await channel_registry.bound_channel_id(ambient):
         watch.append("AI 插話頻道沒綁：插話整個靜默")

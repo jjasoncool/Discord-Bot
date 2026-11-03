@@ -6,7 +6,8 @@
 - 每個發送單位判一次：相簿整本判一次、整本一起去同一處
 - 晚到的圖跟著同一本的去向（隔離的進同一個 thread、放行的進主頻道），以「（補圖）」送出、不再判
 - 被隔離的再被排進來（爬蟲通知、輪詢、重啟補償）不重判、不重貼；thread 被刪重建後，舊紀錄仍認得出來
-- 沒看到完整內容不判、照常送：相簿等待逾時只到齊一部分、單則的圖等太久還沒到（只看一部分會錯關情報）
+- 沒看到完整內容不判、照常送：相簿等待逾時只到齊一部分、單則的圖等太久還沒到（只看一部分會錯關情報）；
+  文字點名別款遊戲例外，那不用看圖：進隔離區、晚到的圖也跟進去；只記錄模式照常送主頻道
 - 單則有圖標示、圖還沒下載到：先不送、不判、不記成處理過，等爬蟲補到圖的通知；有文字的滿 30 分鐘先送文字，
   沒文字的等到補圖時限
 - 隔離 thread 開在主頻道底下、7 天才封存，之後一直用同一個（重啟也是）；封存的先解封；開不了就這次不送、
@@ -36,7 +37,7 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from services.relay.telegram_filter import Verdict
+from services.relay.telegram_filter import OTHER_GAME_LABEL, Verdict
 from services.relay.telegram_quarantine import QuarantineThreads
 from test.telegram_relay_fakes import CHANNEL, FakeBot, FakeFilter, make_worker, media_of
 
@@ -216,6 +217,53 @@ class AlbumTests(FilterTestBase):
         await self.worker._process_one(1)
         self.assertEqual(self.filter.calls, [], "只到齊一部分不判")
         self.assertEqual(self.publisher.to(CHANNEL)[0]["media"], media_of(1))
+
+    async def test_partial_album_naming_another_game_goes_to_quarantine(self):
+        self.filter.other_games = {"NTE": "異環"}
+        self.repo.add_ready(1, 101, text="NTE 1.5 周本场景")
+        self.repo.add_row(2, 102)       # 下載一直沒完成
+        await self.worker._process_one(1)
+        self.assertEqual(self.filter.calls, [], "不用問模型")
+        self.assertEqual(self.publisher.to(CHANNEL), [], "主頻道不能出現")
+        [plan] = self.publisher.to(self.thread().id)
+        self.assertEqual(plan.header, f"判定：{OTHER_GAME_LABEL}｜異環")
+        self.assertEqual(self.repo.channels_of(1), {self.thread().id})
+
+        self.repo.add_ready(2, 102)     # 晚到的圖跟著去隔離區，主頻道還是沒有
+        await self.worker._process_one(2)
+        self.assertEqual(self.publisher.to(CHANNEL), [])
+        self.assertEqual(len(self.publisher.to(self.thread().id)), 2)
+
+    async def test_partial_album_naming_another_game_stays_in_main_on_dry_run(self):
+        self.filter.mode = "dry_run"
+        self.filter.other_games = {"NTE": "異環"}
+        self.repo.add_ready(1, 101, text="NTE 1.5 周本场景")
+        self.repo.add_row(2, 102)
+        await self.worker._process_one(1)
+        self.assertEqual(len(self.publisher.to(CHANNEL)), 1)
+        self.assertIsNone(self.thread())
+
+    async def test_partial_album_without_a_name_still_goes_to_main(self):
+        self.filter.other_games = {"NTE": "異環"}
+        self.repo.add_ready(1, 101, text="WW 3.8 新角色")
+        self.repo.add_row(2, 102)
+        await self.worker._process_one(1)
+        self.assertEqual(len(self.publisher.to(CHANNEL)), 1)
+        self.assertIsNone(self.thread())
+
+    async def test_judge_existing_on_partial_album_only_looks_at_the_name(self):
+        self.filter.other_games = {"NTE": "異環"}
+        self.repo.add_ready(1, 101, text="NTE 1.5 周本场景")
+        self.repo.add_row(2, 102)
+        verdict = await self.worker.judge_existing(1)
+        self.assertTrue(verdict.quarantine)
+        self.assertEqual(verdict.reason, "異環")
+        self.assertEqual(self.filter.calls, [])
+
+        self.filter.other_games = {}
+        verdict = await self.worker.judge_existing(1)
+        self.assertFalse(verdict.quarantine)
+        self.assertEqual(self.filter.calls, [])
 
     async def test_late_image_goes_to_rebuilt_thread(self):
         self.repo.add_ready(1, 101)

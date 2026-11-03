@@ -2,7 +2,7 @@
 
 每個 pk（相簿給哪一張都行，整本一起判、一起搬）：
 1. 判斷：清單檔有寫判定的照清單（使用者看過的，不重判：模型每次判的不一定一樣）；沒寫的用跟轉發同一套的判斷
-   （`MessageRelayWorker.judge_existing`；不看 switches.json，開關是給新訊息的；圖沒到齊的不判）
+   （`MessageRelayWorker.judge_existing`；不看 switches.json，開關是給新訊息的；圖沒到齊的只看文字有沒有點名別款遊戲）
 2. 判成垃圾才搬（`MessageRelayWorker.move_to_quarantine`）：在 thread 照正常流程重貼（最上面「判定：…」）
    → 刪主頻道原貼文 → 發送紀錄的頻道欄位改成 thread（送出時間不動）
 3. 搬完在 thread 貼放回面板；判錯的用面板放回
@@ -123,7 +123,8 @@ async def run(targets: dict[int, Optional[Verdict]], apply: bool) -> None:
                 why = "判斷失敗" if verdict is None else ("放行" if verdict.by_model else "沒判（放行）")
                 print(f"db#{pk}：{why}｜{getattr(verdict, 'reason', '')}，不搬")
                 continue
-            head = f"db#{pk}：隔離｜{verdict.label}｜{verdict.reason}（{'清單' if given else '模型'}）"
+            source = "清單" if given else "模型" if verdict.by_model else "別款遊戲名單"
+            head = f"db#{pk}：隔離｜{verdict.label}｜{verdict.reason}（{source}）"
             ok, note = await worker.move_to_quarantine(pk, verdict, posts, apply=apply)
             print(f"{head}；{note}")
             if ok and apply:

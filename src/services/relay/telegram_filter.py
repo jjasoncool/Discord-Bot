@@ -1,35 +1,55 @@
-"""Telegram 訊息轉進 Discord 前，讓主模型判斷有沒有《鳴潮》的遊戲資訊。
+"""Telegram 訊息轉進 Discord 前判斷該不該進主頻道：文字點名別款遊戲就隔離，其餘讓主模型看文字和圖判斷有沒有《鳴潮》的遊戲資訊。
 
-**為什麼**：來源是兩個內鬼爆料頻道，偶爾混進頻道管理員自己的灌水、閒聊、罵人，或跟遊戲無關的梗圖。
-關鍵字做不到：含「水」的 85 則只有約 10 則是灌水，很短的文字多半是
-情報（「亚服」「V2来了」），文字只有「水」的那則圖卻是角色設計稿（13649）——所以**一定要看圖**。
+架構定位
+  層級：功能層（services.relay）。只負責判斷；判完送去哪裡由轉發端決定（`mode`、隔離 thread）。
+  上層（誰呼叫）：services.relay.telegram_relay_service（新訊息、補判）、scripts/telegram_move_to_quarantine.py、
+    commands.admin_status（名單檔的狀態）、手動抽查 test.integration.it_telegram_filter。
+  下層（呼叫誰）：services.llm_service（模型）、llm.client（GPU 閘門、錯誤型別）、llm.preprocess.vision_image（縮圖、抽幀）、
+    utils.hot_files（prompt、名單）、sys_settings（開關、細項）。
 
-判斷標準：
-- 文字或任一張圖有遊戲資訊就放行；拿不準放行。
-- **模型忙就排隊、不放行**（原本 90 秒沒回應就放行，插話一次佔
-  模型好幾分鐘時垃圾就漏進主頻道，14106）：排在插話、產圖、別的行程後面；模型逾時或連不上就等一下再問。
-  轉發開著過濾時一次只處理一則，後面的訊息跟著排隊，晚一點送但不會漏判。
-- **排了 `give_up_seconds`（30 分鐘）還判不到才放行**：正常的排隊不會這麼久（插話一次最多 3 分鐘、/askai 5 分鐘），
-  到這裡代表模型壞了，情報不能卡好幾個小時。之後認定模型掛了：每則只問一次、失敗就放行，不再每則都等滿
-  30 分鐘（一次一則，不然 5 則就卡 2.5 小時）；有一次問到就恢復排隊。
-- 判不了的才放行：看不了的檔案（語音、壓縮檔）、有圖沒看到、讀不到 prompt、模型回錯誤、回答看不懂。
-  寧可漏掉一則垃圾，不能擋掉一則情報。
-- 每個發送單位（單則或整本相簿）判一次，最多看 `max_images` 張圖：前幾個媒體各一張，媒體不到這個數時，
-  剩下的名額給動圖與影片多抽幾格（GIF、動態 WebP 用 `extract_key_frames`，影片用 `video_key_frames`，
-  挑幀規則只有一份）。音訊、壓縮檔不看。
+介面
+  judge(text, media, trace_id=)  判斷一個發送單位；判不了回放行（`by_model=False`），不拋例外
+  other_game_verdict(text)       只看文字：點名別款遊戲回隔離的判定，否則 None；不碰模型，圖沒到齊時也能用
+  other_games_problem()          名單檔現在讀不讀得起來（給狀態面板）
+  media_kind(…)                  媒體列 → image／video／other
+  parse_verdict(answer)          模型回答 → 判定；看不懂回 None
+  collect_images(media)          發送單位的媒體 → 給模型看的 JPEG
+  RelayFilter                    轉發端用的介面：目前的模式與上面兩種判斷（測試換成假的，不打模型）
 
-這裡只負責判斷；判完送去哪裡由轉發端決定（`mode`、隔離 thread）。
+規則
+  1. 文字點名 `settings/telegram_other_games.json` 的遊戲就隔離，不問模型，排在所有放行路徑前面；
+     同一則也提到鳴潮就交回模型判，免得比較貼文被關。名單手改、下一則生效，寫壞了沿用上次的內容。
+  2. 文字或任一張圖有遊戲資訊就放行；拿不準放行。
+  3. 模型忙就排隊、不放行：排在插話、產圖、別的行程後面；模型逾時或連不上就等一下再問。
+     轉發開著過濾時一次只處理一則，後面的訊息跟著排隊，晚一點送但不會漏判。
+  4. 排了 `give_up_seconds` 還判不到才放行，並認定模型掛了：之後每則只問一次、失敗就放行，
+     有一次問到就恢復排隊。
+  5. 判不了的放行：看不了的檔案（語音、壓縮檔）、有圖沒看到、讀不到 prompt、模型回錯誤、回答看不懂。
+  6. 每個發送單位（單則或整本相簿）判一次，最多看 `max_images` 張圖：前幾個媒體各一張，媒體不到這個數時，
+     剩下的名額給動圖與影片多抽幾格（挑幀規則只有 vision_image 一份）。音訊、壓縮檔不看。
+
+例外與決策
+  - 灌水不靠關鍵字、一定要看圖：來源頻道的管理員偶爾灌水、閒聊、罵人，但含「水」的 85 則只有約 10 則是灌水，
+    很短的文字多半是情報（「亚服」「V2来了」），文字只有「水」的那則圖卻是角色設計稿（13649）。
+  - 別款遊戲靠名單不靠模型：模型會把「NTE 1.5 …」當成爆料放行，語音與圖沒到齊的路又根本不經模型；
+    遊戲名字沒有「水」那種歧義，提到名字就是在講那款遊戲。沒寫名字的連發貼文比不到，算到放行這邊。
+  - 寧可漏掉一則垃圾，不能擋掉一則情報：放行是所有判不了的情況的出口。
+  - 30 分鐘是給正常排隊留的餘裕（插話一次最多 3 分鐘、/askai 5 分鐘）；模型壞了情報也不能卡好幾個小時，
+    認定掛了之後不再每則等滿，否則一次一則、5 則就卡 2.5 小時。
 """
 from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
+from typing import Annotated, Iterable, Optional, Sequence
+
+from pydantic import BaseModel, Field, StringConstraints
 
 from llm.client import gpu_gate
 from llm.client.http_client import LlmConnectionError, LlmTimeoutError
@@ -46,6 +66,8 @@ _LLM = None
 
 #: 隔離時的標籤（prompt 裡列的那幾個）；模型寫了別的就記成「其他」
 LABELS = ("灌水", "閒聊", "罵人", "無關圖片")
+#: 文字點名別款遊戲時的標籤：由名單判定，不列給模型選
+OTHER_GAME_LABEL = "別款遊戲"
 _VERDICT = re.compile(r"^(放行|隔離)\s*(?:[｜|]\s*(.*))?$")
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 _VIDEO_EXTS = {".mp4", ".webm", ".mov", ".mkv", ".m4v"}
@@ -64,7 +86,7 @@ class Verdict:
     #: 隔離時是 LABELS 之一（或「其他」）；放行時空字串
     label: str = ""
     reason: str = ""
-    #: 有沒有真的由模型判斷；False＝模型不能用而放行（`reason` 寫原因）
+    #: 有沒有真的由模型判斷；False＝沒問模型：判不了而放行（`reason` 寫原因），或文字點名別款遊戲而隔離
     by_model: bool = True
     #: 沒經模型判、但之後再判可能判得出來（模型沒回應、出錯、回答看不懂）：轉發端記成待補判。
     #: 看不了的檔案、有圖沒看到再判也一樣，不補
@@ -72,6 +94,69 @@ class Verdict:
     images_seen: int = 0
     seconds: float = 0.0
     answer: str = field(default="", repr=False)
+
+
+#: 空字串會比中每一則訊息、整個頻道都被隔離，所以有空名字就算壞檔
+_Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+
+class _GameEntry(BaseModel):
+    name: _Name
+    aliases: list[_Name] = Field(min_length=1)
+
+
+class _OtherGamesFile(BaseModel):
+    games: list[_GameEntry]
+    this_game: list[_Name] = Field(min_length=1)
+
+
+@dataclass(frozen=True)
+class _OtherGames:
+    #: (顯示的遊戲名, 比對式)
+    games: tuple[tuple[str, re.Pattern], ...]
+    this_game: re.Pattern
+
+
+def _names_pattern(names: Sequence[str]) -> re.Pattern:
+    """英文比完整單字（`nte` 是 content、interesting 的一部分），後面可以緊接數字（「NTE1.5」）；中文有出現就算。"""
+    parts = [
+        rf"(?<![A-Za-z0-9]){re.escape(name)}(?![A-Za-z])" if name.isascii() else re.escape(name)
+        for name in sorted(names, key=len, reverse=True)
+    ]
+    return re.compile("|".join(parts), re.IGNORECASE)
+
+
+def _parse_other_games(raw: str) -> _OtherGames:
+    parsed = _OtherGamesFile.model_validate(json.loads(raw))
+    return _OtherGames(
+        games=tuple((game.name, _names_pattern(game.aliases)) for game in parsed.games),
+        this_game=_names_pattern(parsed.this_game),
+    )
+
+
+def _named_other_game(text: str) -> Optional[str]:
+    """文字點名的別款遊戲；沒點名、同一則也提到鳴潮、名單讀不到都回 None（照常往下判，不能因此擋情報）。"""
+    if not text:
+        return None
+    names = hot_files.read_parsed(_SETTINGS.other_games_path, parse=_parse_other_games, label="別款遊戲名單")
+    if names is None or names.this_game.search(text):
+        return None
+    return next((game for game, pattern in names.games if pattern.search(text)), None)
+
+
+def other_game_verdict(text: str) -> Optional[Verdict]:
+    """文字點名別款遊戲 → 隔離的判定；否則 None。只看文字、不碰模型，圖沒到齊也能判。"""
+    game = _named_other_game(text)
+    return None if game is None else Verdict(True, label=OTHER_GAME_LABEL, reason=game, by_model=False)
+
+
+def other_games_problem() -> Optional[str]:
+    """名單檔現在讀不起來的原因；沒問題回 None。壞檔會沿用上次的內容、不會自己好，要讓人看得到。"""
+    try:
+        _parse_other_games(Path(_SETTINGS.other_games_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return type(exc).__name__
+    return None
 
 
 def media_kind(media_type: Optional[str], mime_type: Optional[str], path: str) -> str:
@@ -253,11 +338,14 @@ class _GaveUp(Exception):
 
 
 async def judge(text: str, media: Iterable[MediaFile], *, trace_id: str) -> Verdict:
-    """判斷一個發送單位。模型忙或沒回應就排隊等（最多 `give_up_seconds`）；判不了的（看不了的檔案、出錯、
-    回答看不懂、等太久）回放行（`by_model=False`），不拋例外。"""
+    """判斷一個發送單位。文字點名別款遊戲直接隔離；其餘問模型，模型忙或沒回應就排隊等（最多 `give_up_seconds`）；
+    判不了的（看不了的檔案、出錯、回答看不懂、等太久）回放行（`by_model=False`），不拋例外。"""
     started = time.monotonic()
     images: list[bytes] = []
     try:
+        named = other_game_verdict(text)
+        if named is not None:
+            return named
         media = list(media)
         if any(m.kind == "other" for m in media):
             # 語音、壓縮檔模型看不了：歷史上有好幾則語音爆料沒有文字，當成「什麼都沒有」會被錯關
@@ -290,4 +378,7 @@ class RelayFilter:
 
     async def judge(self, text: str, media: Iterable[MediaFile], *, trace_id: str) -> Verdict:
         return await judge(text, media, trace_id=trace_id)
+
+    def other_game(self, text: str) -> Optional[Verdict]:
+        return other_game_verdict(text)
 

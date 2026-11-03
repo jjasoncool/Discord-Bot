@@ -6,7 +6,7 @@ from typing import Any, Tuple
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from sys_settings.paths import prompt_file
+from sys_settings.paths import prompt_file, settings_file
 
 
 class TelegramRelaySettings(BaseModel, frozen=True):
@@ -31,6 +31,8 @@ class TelegramFilterSettings(BaseSettings):
     """
 
     prompt_path: str = prompt_file("telegram_filter_prompt.txt")
+    #: 別款遊戲名單：文字點名就直接隔離、不問模型。手改的檔案，改了下一則就生效
+    other_games_path: str = settings_file("telegram_other_games.json")
 
     #: 每個發送單位（單則或整本相簿）最多給模型看幾張圖：前幾個媒體各一張，媒體不到這個數時，
     #: 剩下的名額給動圖與影片多抽幾格（相簿看前 4 張）

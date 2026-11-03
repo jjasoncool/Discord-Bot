@@ -60,6 +60,9 @@ SAMPLES = [
     (14062, "Q", "「一缸石榴」"), (14064, "Q", "「二缸石榴」"),
     # 7 天清單裡明顯無關的，留著確認放寬手辦規則後仍會隔離
     (14076, "Q", "無關圖"), (14095, "Q", "無關圖"),
+    # 文字點名別款遊戲（照名單判、不問模型）；後面兩則提到別的作品但是鳴潮情報，要交給模型放行
+    (14144, "Q", "點名NTE"), (14879, "Q", "點名NTE+音訊"), (14139, "Q", "點名终末地"), (12697, "Q", "點名endfield+圖"),
+    (4566, "P", "參照战双的聯動卡池"), (6619, "P", "賽博朋克聯動"),
 ]
 
 
@@ -131,7 +134,7 @@ async def recent(days: int) -> None:
                   f"{v.seconds:.1f}s｜{shown}")
             if v.quarantine:
                 quarantined.append((pk, when, v.label, v.reason, shown))
-            if not v.by_model:
+            if not v.by_model and not v.quarantine:
                 fallback.append((pk, v.reason))
     finally:
         await repo.close()
@@ -169,12 +172,13 @@ async def main(ids: list[int], save: bool) -> None:
                 wrong_quarantine.append(pk)
             if expected == "Q" and got == "P":
                 missed.append(pk)
-            if not v.by_model:
+            passed_unjudged = not v.by_model and not v.quarantine
+            if passed_unjudged:
                 fallback.append(pk)
             shown = " ".join(text.split())[:30]
             print(f"{mark}{pk:>6} 期望 {expected} 判 {got} {v.label or '':4}｜{v.reason}｜圖 {v.images_seen}｜"
                   f"{v.seconds:.1f}s｜{category}｜{shown}")
-            if not v.by_model or mark.strip():
+            if passed_unjudged or mark.strip():
                 print(f"          模型回答：{' / '.join(v.answer.split(chr(10)))[:200]}")
     finally:
         await repo.close()
