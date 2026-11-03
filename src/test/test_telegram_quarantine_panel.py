@@ -13,12 +13,15 @@
 - 選日期後面板重畫成沒選取（不然再選同一天 Discord 不會通知 bot）
 - 有新的隔離訊息或放回時，面板置底（刪舊發新）並更新日期
 - 面板、訊息選單、確認按鈕的 custom_id 重啟後解析得回原本的日期與訊息
+- 主頻道右鍵「移到垃圾訊息」：先跳只有自己看得到的確認（文字開頭、會刪幾則），按了才搬；按下後先拿掉按鈕；
+  不能搬的只說原因、不給按鈕；沒權限什麼都不動；出錯不停在「移動中」；指令只給有「管理訊息」的人、私訊裡不出現
 
 執行：
     cd src && python -m unittest test.test_telegram_quarantine_panel -v
 """
 import asyncio
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -36,11 +39,19 @@ if SRC_DIR not in sys.path:
 import discord
 
 from commands import telegram_quarantine_commands as tqc
-from services.relay.telegram_relay_service import QuarantineItem
-from test.telegram_relay_fakes import CHANNEL, FakeBot, FakeFilter, make_worker, media_of
+from discord.ext import commands
+
+from services.relay.telegram_relay_service import QuarantineItem, relay_post_pks
+from test.telegram_relay_fakes import CHANNEL, FakeBot, FakeFilter, FakeMessage, make_worker, media_of
 from utils import utils as bot_utils
 
 TZ8 = timezone(timedelta(hours=8))
+
+
+def bot_fake_message(bot, *, author_id):
+    message = FakeMessage(bot.main, bot.next_id(), "db#9", footer="db#9", attachments=["tg_9_0.jpg"], author_id=author_id)
+    bot.main.messages.append(message)
+    return message
 
 
 def at(day: int, hour: int, minute: int = 0) -> datetime:
@@ -273,9 +284,9 @@ class PanelFlowTests(QuarantineTestBase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def interaction(self, *, can_manage=True, user_id=42):
+    def interaction(self, *, can_manage=True, user_id=42, channel=None):
         return SimpleNamespace(
-            guild=SimpleNamespace(id=1), channel=self.thread(), data={},
+            guild=SimpleNamespace(id=1), channel=channel if channel is not None else self.thread(), data={},
             user=SimpleNamespace(id=user_id, display_name="小明"),
             permissions=SimpleNamespace(manage_messages=can_manage),
             response=SimpleNamespace(edit_message=mock.AsyncMock(), defer=mock.AsyncMock(),
@@ -316,6 +327,98 @@ class PanelFlowTests(QuarantineTestBase):
         with mock.patch.object(self.worker, "restore", side_effect=RuntimeError("轉發端出錯")):
             await self.cog.handle_restore(press, 9)
         self.assertIn("出錯", press.edit_original_response.await_args.kwargs["content"], "不能一直停在「放回中……」")
+
+    async def post_to_main(self, pk, text="已开服"):
+        self.repo.add_row(pk, 200 + pk, grouped_id=None, text=text, has_media=False)
+        await self.worker._process_one(pk)
+        return next(m for m in self.bot.main.messages if pk in relay_post_pks(m))
+
+    def on_main(self, **kwargs):
+        return self.interaction(channel=self.bot.main, **kwargs)
+
+    async def test_right_click_asks_first_then_moves(self):
+        post = await self.post_to_main(9, "NTE 1.5 新角色")
+        menu = self.on_main()
+        await self.cog.handle_move_menu(menu, post)
+        menu.response.defer.assert_awaited_once_with(ephemeral=True)
+        self.assertFalse(post.deleted, "還沒確認不能動")
+        sent = menu.followup.send.await_args
+        self.assertTrue(sent.kwargs["ephemeral"])
+        self.assertIn("NTE 1.5 新角色", sent.args[0])
+        self.assertIn("會刪主頻道 1 則", sent.args[0])
+        [button] = sent.kwargs["view"].children
+        self.assertEqual(button.item.custom_id, "tgq:move:9")
+
+        press = self.on_main()
+        await self.cog.handle_move(press, 9)
+        self.assertEqual(press.response.edit_message.await_args.kwargs, {"content": "移動中……", "view": None})
+        self.assertIn("已搬進隔離區", press.edit_original_response.await_args.kwargs["content"])
+        self.assertTrue(post.deleted)
+        self.assertTrue(self.thread().messages[0].content.startswith("判定：手動移入｜小明"))
+
+    async def test_right_click_on_something_else_only_says_why(self):
+        await self.post_to_main(9)
+        human = bot_fake_message(self.bot, author_id=42)
+        menu = self.on_main()
+        await self.cog.handle_move_menu(menu, human)
+        sent = menu.followup.send.await_args
+        self.assertIn("認不出", sent.args[0])
+        self.assertNotIn("view", sent.kwargs, "不能搬就不給按鈕")
+        self.assertTrue(sent.kwargs["ephemeral"])
+
+    async def test_right_click_without_permission_nothing_happens(self):
+        post = await self.post_to_main(9)
+        with mock.patch.dict(os.environ, {"OWNER_ID": "1"}):
+            denied = self.on_main(can_manage=False)
+            await self.cog.handle_move_menu(denied, post)
+            await self.cog.handle_move(denied, 9)
+        denied.response.defer.assert_not_awaited()
+        denied.response.edit_message.assert_not_awaited()
+        denied.followup.send.assert_not_awaited()
+        self.assertFalse(post.deleted)
+        replies = [c.kwargs.get("content", "") for c in denied.response.send_message.await_args_list]
+        self.assertEqual(len(replies), 2)
+        self.assertTrue(all("管理訊息" in r for r in replies), replies)
+
+    async def test_right_click_when_relay_is_not_running(self):
+        post = await self.post_to_main(9)
+        self.cog.worker = None
+        for run in (lambda i: self.cog.handle_move_menu(i, post), lambda i: self.cog.handle_move(i, 9)):
+            stopped = self.on_main()
+            await run(stopped)
+            self.assertIn("沒有在運作", stopped.response.send_message.await_args.kwargs["content"])
+        self.assertFalse(post.deleted)
+
+    async def test_errors_do_not_leave_it_hanging(self):
+        post = await self.post_to_main(9)
+        with mock.patch.object(self.worker, "preview_manual_move", side_effect=RuntimeError("壞了")):
+            menu = self.on_main()
+            await self.cog.handle_move_menu(menu, post)
+        self.assertIn("出錯", menu.followup.send.await_args.args[0])
+        with mock.patch.object(self.worker, "move_manually", side_effect=RuntimeError("壞了")):
+            press = self.on_main()
+            await self.cog.handle_move(press, 9)
+        self.assertIn("出錯", press.edit_original_response.await_args.kwargs["content"], "不能一直停在「移動中」")
+
+    async def test_move_button_survives_restart(self):
+        match = re.fullmatch(tqc.MOVE_TEMPLATE, "tgq:move:9")
+        button = await tqc.QuarantineMoveButton.from_custom_id(None, None, match)
+        self.assertEqual(button.pk, 9)
+        self.assertEqual(button.item.custom_id, "tgq:move:9")
+
+    async def test_menu_is_registered_only_for_message_managers(self):
+        bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
+        with mock.patch.object(bot, "add_dynamic_items", wraps=bot.add_dynamic_items) as dynamic:
+            await tqc.setup(bot)
+        self.assertIn(tqc.QuarantineMoveButton, dynamic.call_args.args, "重啟後舊的確認按鈕要還按得動")
+        menu = bot.tree.get_command(tqc.MOVE_MENU_NAME, type=discord.AppCommandType.message)
+        self.assertIsNotNone(menu, "bot 啟動時 tree.sync 才會把它送上 Discord")
+        self.assertTrue(menu.guild_only)
+        self.assertEqual(menu.default_permissions, discord.Permissions(manage_messages=True))
+        self.assertEqual(menu.to_dict(bot.tree)["default_member_permissions"],
+                         discord.Permissions(manage_messages=True).value)
+        await bot.remove_cog("TelegramQuarantineCommands")
+        self.assertIsNone(bot.tree.get_command(tqc.MOVE_MENU_NAME, type=discord.AppCommandType.message))
 
     async def test_without_permission_nothing_happens(self):
         await self.quarantine_single(9)

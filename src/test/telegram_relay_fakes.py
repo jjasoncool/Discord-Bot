@@ -276,11 +276,14 @@ class _MessageHolder:
         self.messages.append(message)
         return message
 
-    async def history(self, *, limit=100, after=None):
+    async def history(self, *, limit=100, after=None, before=None):
+        self.__dict__.setdefault("history_calls", []).append({"after": after, "before": before})
         # 跟 discord.py 一樣：沒給 after 時新到舊；給了 after 時舊到新、只回之後的
         messages = list(self.messages) if after is not None else list(reversed(self.messages))
         if after is not None:
             messages = [m for m in messages if m.created_at > after]
+        if before is not None:
+            messages = [m for m in messages if m.created_at < before]
         for message in messages[:limit]:
             yield message
 

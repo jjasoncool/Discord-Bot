@@ -1,13 +1,33 @@
-"""Telegram 過濾的隔離區面板：「垃圾訊息」thread 最底下一個面板，把判錯的放回主頻道。
+"""Telegram 轉發的隔離區操作：「垃圾訊息」thread 底下放回主頻道的面板，與主頻道貼文右鍵「移到垃圾訊息」。
 
-- 置底面板只有日期選單（固定 custom_id，重啟後照樣能用）。選日期 → 只有自己看得到的訊息選單 → 選訊息 →
-  只有自己看得到的確認（附連到隔離那則的連結）→ 按「放回主頻道」才送，避免選錯就公開送出。
-- 第二層以後都是只有按的人看得到的訊息，兩位管理員同時操作不互相干擾；放回本身在轉發端一次只做一則，
-  同一則只會送一次。
-- 只有在這裡有「管理訊息」權限的人能操作。
-- 有新的隔離訊息、或有人放回時，面板置底並更新日期（`QuarantineThreads.on_change`）。
-- 選單只列被隔離、還沒放回的；依發文時間排，有文字顯示文字開頭，沒文字顯示「圖片」「影片」。
-  Discord 一個選單最多 25 項：日期只列最近 25 天，一天也最多列 25 則（一天約一則，夠用）。
+架構定位
+  層級：介面層（commands）。流程都在轉發端，這裡只有畫面與權限。
+  上層（誰呼叫）：Discord 互動；discord_bot（把轉發端 worker 接上、隔離區變動時叫 `on_quarantine_change`）；
+    scripts/telegram_move_to_quarantine.py（搬完貼面板）。
+  下層（呼叫誰）：services.relay.telegram_relay_service.MessageRelayWorker（quarantine_items、restore、
+    preview_manual_move、move_manually）、utils.panel_bump、utils.discord_members.require_access。
+
+介面
+  TelegramQuarantineCommands.on_quarantine_change(parent_id, thread)  面板置底並更新日期
+  TelegramQuarantineCommands.post_panel(parent_id, thread)            馬上置底並等它完成（一次性腳本用）
+  右鍵選單「移到垃圾訊息」                                            cog_load 掛上、cog_unload 拿掉
+
+規則
+  1. 只有在這裡有「管理訊息」權限的人能操作，每一步都重新檢查。
+  2. 放回：置底面板只有日期選單（固定 custom_id，重啟後照樣能用）。選日期 → 只有自己看得到的訊息選單 → 選訊息 →
+     只有自己看得到的確認（附連到隔離那則的連結）→ 按「放回主頻道」才送，避免選錯就公開送出。
+  3. 手動搬：主頻道貼文按右鍵 → 只有自己看得到的確認（文字開頭、會刪幾則）→ 按「移到垃圾訊息」才動，
+     判定那行寫「手動移入｜操作的人」，放錯可以從面板放回。
+  4. 第二層以後都是只有按的人看得到的訊息，兩位管理員同時操作不互相干擾；放回與搬移在轉發端一次只做一則，
+     同一則只會做一次。
+  5. 有新的隔離訊息、或有人放回時，面板置底並更新日期。
+  6. 選單只列被隔離、還沒放回的；依發文時間排，有文字顯示文字開頭，沒文字顯示「圖片」「影片」。
+     Discord 一個選單最多 25 項：日期只列最近 25 天，一天也最多列 25 則（一天約一則，夠用）。
+
+例外與決策
+  - 手動搬不放進管理主控台：看到貼文當下就要能處理，翻清單或查編號都太慢；權限也和放回一樣開給管理員，不只群主。
+  - 判定那行固定寫「手動移入」、不選標籤：人看過才搬，少按一步，標籤也沒有別的用途。
+  - 右鍵指令同時設 Discord 端的預設權限，沒有「管理訊息」的人選單裡看不到；伺服器設定改得動它，所以程式照樣檢查。
 """
 from __future__ import annotations
 
@@ -16,6 +36,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from services.relay.telegram_relay_service import QuarantineItem
@@ -31,6 +52,8 @@ logger = logging.getLogger(__name__)
 DATE_SELECT_ID = "tgq:date"
 PICK_TEMPLATE = r"tgq:pick:(?P<parent>\d+):(?P<day>\d{8})"
 RESTORE_TEMPLATE = r"tgq:restore:(?P<pk>\d+)"
+MOVE_TEMPLATE = r"tgq:move:(?P<pk>\d+)"
+MOVE_MENU_NAME = "移到垃圾訊息"
 #: 面板位置（bot 自己寫的狀態，不進版控）。跟隔離 thread 的紀錄分開放，兩邊寫入不會互相蓋掉
 PANEL_RUNTIME_PATH = runtime_path("telegram_quarantine_panel.json")
 _MAX_OPTIONS = 25
@@ -95,7 +118,7 @@ def _current_options(interaction: discord.Interaction) -> list[discord.SelectOpt
 
 
 async def _not_running(interaction: discord.Interaction) -> None:
-    await safe_send_interaction_message(interaction, "放回功能目前沒有在運作，請通知管理員。", ephemeral=True)
+    await safe_send_interaction_message(interaction, "這個功能目前沒有在運作，請通知管理員。", ephemeral=True)
 
 
 class QuarantinePanelView(discord.ui.View):
@@ -160,6 +183,25 @@ class QuarantineRestoreButton(discord.ui.DynamicItem[discord.ui.Button], templat
         await cog.handle_restore(interaction, self.pk)
 
 
+class QuarantineMoveButton(discord.ui.DynamicItem[discord.ui.Button], template=MOVE_TEMPLATE):
+    """確認：把主頻道這則移到垃圾訊息。"""
+
+    def __init__(self, pk: int):
+        super().__init__(discord.ui.Button(label=MOVE_MENU_NAME, emoji="🗑️", style=discord.ButtonStyle.danger,
+                                           custom_id=f"tgq:move:{pk}"))
+        self.pk = pk
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match, /):
+        return cls(int(match["pk"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        cog = interaction.client.get_cog("TelegramQuarantineCommands")
+        if cog is None:
+            return await _not_running(interaction)
+        await cog.handle_move(interaction, self.pk)
+
+
 def _view(*items: discord.ui.Item) -> discord.ui.View:
     view = discord.ui.View(timeout=None)
     for item in items:
@@ -168,7 +210,7 @@ def _view(*items: discord.ui.Item) -> discord.ui.View:
 
 
 class TelegramQuarantineCommands(commands.Cog):
-    """隔離區面板（沒有 slash 指令；面板由轉發端在有隔離訊息時發出、置底）。"""
+    """隔離區的面板與右鍵選單（沒有 slash 指令；面板由轉發端在有隔離訊息時發出、置底）。"""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -178,7 +220,14 @@ class TelegramQuarantineCommands(commands.Cog):
 
     async def cog_load(self):
         self.bot.add_view(QuarantinePanelView(self, [discord.SelectOption(label="-", value="-")]))
-        self.bot.add_dynamic_items(QuarantinePickSelect, QuarantineRestoreButton)
+        self.bot.add_dynamic_items(QuarantinePickSelect, QuarantineRestoreButton, QuarantineMoveButton)
+        menu = app_commands.ContextMenu(name=MOVE_MENU_NAME, callback=self.handle_move_menu)
+        menu.guild_only = True
+        menu.default_permissions = discord.Permissions(manage_messages=True)
+        self.bot.tree.add_command(menu)
+
+    async def cog_unload(self):
+        self.bot.tree.remove_command(MOVE_MENU_NAME, type=discord.AppCommandType.message)
 
     def _worker(self):
         worker = self.worker
@@ -266,6 +315,46 @@ class TelegramQuarantineCommands(commands.Cog):
         except Exception as exc:
             logger.error("隔離區面板：放回出錯 pk=%s：%s", pk, exc, exc_info=True)
             ok, message = False, "放回時出錯了，請通知管理員看 log；先確認主頻道有沒有送出，再決定要不要重按。"
+        await interaction.edit_original_response(content=("✅ " if ok else "⚠️ ") + message)
+
+    async def handle_move_menu(self, interaction: discord.Interaction, message: discord.Message) -> None:
+        """右鍵「移到垃圾訊息」：先查能不能搬，能搬才給確認按鈕。"""
+        if not await self._allowed(interaction):
+            return
+        worker = self._worker()
+        if worker is None:
+            return await _not_running(interaction)
+        # 找原貼文要翻頻道歷史，可能超過 3 秒：先回應，之後都是只有自己看得到的訊息
+        await interaction.response.defer(ephemeral=True)
+        try:
+            item, note = await worker.preview_manual_move(message)
+        except Exception as exc:
+            logger.error("手動搬移：查這則出錯 message_id=%s：%s", getattr(message, "id", None), exc, exc_info=True)
+            item, note = None, "查這則時出錯了，請通知管理員看 log。"
+        if item is None:
+            await interaction.followup.send(f"⚠️ {note}", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"要把這則移到垃圾訊息嗎？\n> {item_option(item).label}\n{note}，放錯可以從垃圾訊息的面板放回。",
+            view=_view(QuarantineMoveButton(item.pk)), ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def handle_move(self, interaction: discord.Interaction, pk: int) -> None:
+        if not await self._allowed(interaction):
+            return
+        worker = self._worker()
+        if worker is None:
+            return await _not_running(interaction)
+        # 先拿掉按鈕，避免連按；重貼可能要壓縮影片，做完再回報
+        await interaction.response.edit_message(content="移動中……", view=None)
+        try:
+            ok, message = await worker.move_manually(pk, interaction.user.display_name)
+        except Exception as exc:
+            logger.error("手動搬移出錯 pk=%s：%s", pk, exc, exc_info=True)
+            ok, message = False, "移動時出錯了，請通知管理員看 log；先確認主頻道和垃圾訊息裡有沒有這則，再決定要不要重按。"
+        if ok:
+            logger.info("手動搬移：%s 把 db#%s 移到垃圾訊息", interaction.user.display_name, pk)
         await interaction.edit_original_response(content=("✅ " if ok else "⚠️ ") + message)
 
 

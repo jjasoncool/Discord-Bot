@@ -24,9 +24,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from sys_settings.paths import APP_ROOT, TELEGRAM_SCRAPER_DIR
 from sys_settings.telegram_relay_settings import TelegramRelaySettings
+from sys_settings.time_settings import APP_TZ
 from utils import hot_files
 from utils.utils import CONFIG_FILE, ChannelConfig
-from typing import Optional
+from typing import Iterable, Optional
 from urllib.parse import quote_plus
 
 import asyncpg
@@ -1430,6 +1431,13 @@ class QuarantineItem:
     video_count: int = 0
 
 
+def _quarantine_item(pk: int, posted: Optional[datetime], text: str, media_types: Iterable[str]) -> QuarantineItem:
+    types = list(media_types)
+    return QuarantineItem(pk=pk, posted=posted, text=text,
+                          image_count=sum(1 for t in types if t in ("photo", "image")),
+                          video_count=sum(1 for t in types if t == "video"))
+
+
 class SentButNotRecorded(RuntimeError):
     """已經送出，但發送紀錄沒寫上（資料庫暫時失敗）。重送會重複貼文，呼叫端不能當成「沒送出」重試。"""
 
@@ -1449,6 +1457,10 @@ def relay_post_pks(message) -> set[int]:
     """bot 轉發的一則 Discord 訊息屬於哪幾則 Telegram 訊息（pk）；不是轉發的回空集合。"""
     names = [getattr(a, "filename", "") or "" for a in getattr(message, "attachments", None) or []]
     return _footer_pks(message) | {int(m.group(1)) for name in names if (m := _ATTACHMENT_PK.match(name))}
+
+
+#: 管理員手動搬進隔離區時，判定那行的標籤（理由寫操作的人）
+MANUAL_MOVE_LABEL = "手動移入"
 
 
 class MessageRelayWorker:
@@ -1846,6 +1858,8 @@ class MessageRelayWorker:
     # 補圖時效：該組首次送出超過這麼久，晚到的組員就不補發。重啟時 reconcile 會把所有
     # 沒有 delivery 記錄的組員重新排入，沒有時效會把舊相簿的缺圖一口氣倒進頻道。
     _GROUP_FOLLOWUP_MAX_AGE = timedelta(hours=12)
+    #: 手動搬移找原貼文時，發送紀錄前後各掃多久
+    _MOVE_SCAN_MARGIN = timedelta(hours=1)
     _GROUP_FOLLOWUP_TITLE_SUFFIX = "（補圖）"
 
     async def _wait_group_settled(self, grouped_id: int, chat_id: int) -> list[tuple[int, bool]]:
@@ -2119,13 +2133,10 @@ class MessageRelayWorker:
         items = []
         for members in units.values():
             members.sort(key=lambda r: r["telegram_message_id"])
-            media = [m for r in members for m in r["media"]]
-            items.append(QuarantineItem(
-                pk=members[0]["pk"],
-                posted=members[0]["message_date"],
-                text="\n".join(r["text"].strip() for r in members if r["text"].strip()),
-                image_count=sum(1 for m in media if m in ("photo", "image")),
-                video_count=sum(1 for m in media if m == "video"),
+            items.append(_quarantine_item(
+                members[0]["pk"], members[0]["message_date"],
+                "\n".join(r["text"].strip() for r in members if r["text"].strip()),
+                (m for r in members for m in r["media"]),
             ))
         items.sort(key=lambda i: (i.posted is None, i.posted or datetime.min.replace(tzinfo=timezone.utc), i.pk))
         return items
@@ -2134,34 +2145,44 @@ class MessageRelayWorker:
         """把隔離區裡的一則（相簿整本）照正常流程送回主頻道、記主頻道的發送紀錄，隔離那則改成「已由 X 放回」。
 
         不判斷（使用者看過才放回的）。回傳 (有沒有放回, 給操作者看的說明)。
-        相簿放回途中算「處理中」：這段時間晚到的組員先登記，放回後再處理（那時已有主頻道紀錄，會以補圖送主頻道），
-        不然它會被當成隔離相簿的補圖送進隔離區，之後這本永遠留在選單裡放不回去。
         """
         async with self._quarantine_lock:
             record = await self.repository.get_message_by_pk(message_pk)
             if record is None:
                 return False, "找不到這則訊息。"
-            album_key = None
-            if record.grouped_id is not None:
-                album_key = (record.telegram_chat_id, int(record.grouped_id))
-                if album_key in self._active_groups:
+            async with self._album_on_hold(record) as free:
+                if not free:
                     return False, "這本相簿正在處理中，請稍後再試。"
-                self._active_groups.add(album_key)
-            try:
                 return await self._restore_unit(record, restored_by)
-            finally:
-                if album_key is not None:
-                    self._active_groups.discard(album_key)
-                    if album_key in self._dirty_groups:
-                        self._dirty_groups.discard(album_key)
-                        spawn(self._after_restore_followup(record), name="Telegram 相簿補發")
 
-    async def _after_restore_followup(self, record: TelegramMessageRecord) -> None:
+    @contextlib.asynccontextmanager
+    async def _album_on_hold(self, record: TelegramMessageRecord):
+        """換一本相簿去向的途中算「處理中」：這段時間晚到的組員先登記，做完再處理，那時發送紀錄已經改好，會跟著新去向。
+
+        不然它會照舊去向送出：放回途中的圖進隔離區，這本永遠留在選單裡放不回去；搬移途中的圖留在主頻道。
+        yield 能不能動手（False＝有人正在處理這本）；單則不用擋，一律 True。
+        """
+        if record.grouped_id is None:
+            yield True
+            return
+        key = (record.telegram_chat_id, int(record.grouped_id))
+        if key in self._active_groups:
+            yield False
+            return
+        self._active_groups.add(key)
+        try:
+            yield True
+        finally:
+            self._active_groups.discard(key)
+            if key in self._dirty_groups:
+                self._dirty_groups.discard(key)
+                spawn(self._after_album_hold(record), name="Telegram 相簿補發")
+
+    async def _after_album_hold(self, record: TelegramMessageRecord) -> None:
         try:
             await self._process_group_member(record, time.perf_counter())
         except Exception as exc:
-            logger.error("Telegram 隔離區：放回後處理晚到的組員失敗 grouped_id=%s：%s", record.grouped_id, exc,
-                         exc_info=True)
+            logger.error("Telegram 隔離區：處理晚到的組員失敗 grouped_id=%s：%s", record.grouped_id, exc, exc_info=True)
 
     async def _restore_unit(self, record: TelegramMessageRecord, restored_by: str) -> tuple[bool, str]:
         message_pk = record.message_pk
@@ -2272,25 +2293,84 @@ class MessageRelayWorker:
             return self._filter.other_game(unit.text) or Verdict(False, reason="圖還沒到齊，不判", by_model=False)
         return await self._filter.judge(unit.text, self._filter_media(unit), trace_id=f"tgfilter-{message_pk}")
 
-    async def relay_posts(self, channel, *, after: Optional[datetime] = None) -> dict[int, list[discord.Message]]:
+    async def relay_posts(self, channel, *, after: Optional[datetime] = None,
+                          before: Optional[datetime] = None) -> dict[int, list[discord.Message]]:
         """頻道裡 bot 轉發的貼文，依 Telegram 那則的 pk 分組。一個發送單位可能是好幾則 Discord 訊息
         （長文分段、相簿分批、影片另一則、補圖），要整組刪才不會留半則。整批搬移時掃一次給每則用。"""
         me = getattr(getattr(self.bot, "user", None), "id", None)
         out: dict[int, list[discord.Message]] = {}
-        async for message in channel.history(limit=None, after=after):
+        async for message in channel.history(limit=None, after=after, before=before):
             if getattr(message.author, "id", None) != me:
                 continue
             for pk in relay_post_pks(message):
                 out.setdefault(pk, []).append(message)
         return out
 
+    async def preview_manual_move(self, message) -> tuple[Optional[QuarantineItem], str]:
+        """管理員右鍵點的這則能不能搬 →（這個發送單位, 會刪幾則）；不能搬回 (None, 原因)。什麼都不動。
+
+        相簿、長文分段、補圖點哪一則都算整個發送單位。
+        """
+        me = getattr(getattr(self.bot, "user", None), "id", None)
+        pks = relay_post_pks(message) if getattr(message.author, "id", None) == me else set()
+        record = await self.repository.get_message_by_pk(min(pks)) if pks else None
+        if record is None:
+            return None, "認不出這則：只能搬機器人轉發的情報貼文，07-25 以前的舊貼文也認不出來。"
+        if getattr(message.channel, "id", None) not in self._routes(record.telegram_chat_id):
+            return None, "這則不在主頻道，沒有東西要搬。"
+        ok, note = await self._manual_move(record.message_pk, "", apply=False)
+        if not ok:
+            return None, note
+        unit = await self._merge_group_messages(await self.unit_pks(record)) if record.grouped_id is not None else record
+        unit = unit or record
+        return _quarantine_item(record.message_pk, unit.message_date, unit.text,
+                                (m.media_type for m in unit.media_items)), note
+
+    async def move_manually(self, message_pk: int, moved_by: str) -> tuple[bool, str]:
+        """管理員確認後搬進隔離區；判定那行寫「手動移入｜操作的人」。回傳 (有沒有搬, 說明)。"""
+        return await self._manual_move(message_pk, moved_by, apply=True)
+
+    async def _manual_move(self, message_pk: int, moved_by: str, *, apply: bool) -> tuple[bool, str]:
+        """就在負責補圖的這個行程裡搬，所以不用等補圖時效：先擋住補圖，擋住之後才找原貼文，不會漏掉剛補進來的。"""
+        record = await self.repository.get_message_by_pk(message_pk)
+        if record is None:
+            return False, f"找不到這則訊息（db#{message_pk}）。"
+        verdict = Verdict(True, label=MANUAL_MOVE_LABEL, reason=moved_by, by_model=False)
+        async with self._album_on_hold(record) as free:
+            if not free:
+                return False, "這本相簿正在處理中，請稍後再試。"
+            posts = await self._unit_posts(record)
+            return await self.move_to_quarantine(message_pk, verdict, posts, apply=apply, followups_on_hold=True)
+
+    async def _unit_posts(self, record: TelegramMessageRecord) -> dict[int, list[discord.Message]]:
+        """這個發送單位在主頻道的貼文。只掃它送出的前後：掃到最新的話，舊貼文要翻很久，管理員會一直等。
+
+        發送紀錄是整組送完才寫，影片壓縮時本文可能早就貼出去，所以前後都留 `_MOVE_SCAN_MARGIN`。
+        """
+        route_ids = self._routes(record.telegram_chat_id)
+        deliveries = await self._route_deliveries(await self.unit_pks(record), route_ids)
+        posts: dict[int, list[discord.Message]] = {}
+        for route_id in route_ids:
+            delivered = deliveries.get(route_id)
+            channel = await self._resolve_channel(route_id) if delivered is not None and delivered.main else None
+            if channel is None:
+                continue
+            times = delivered.main.values()
+            found = await self.relay_posts(channel, after=min(times) - self._MOVE_SCAN_MARGIN,
+                                           before=max(times) + self._MOVE_SCAN_MARGIN)
+            for pk, messages in found.items():
+                posts.setdefault(pk, []).extend(messages)
+        return posts
+
     async def move_to_quarantine(self, message_pk: int, verdict: Verdict, posts: dict[int, list[discord.Message]],
-                                 *, apply: bool = True) -> tuple[bool, str]:
+                                 *, apply: bool = True, followups_on_hold: bool = False) -> tuple[bool, str]:
         """把已經在主頻道的一則（相簿整本，含補圖）移進隔離區，之後跟新判的一樣能從面板放回。
 
         順序：照正常流程貼進隔離 thread（帶判定那行）→ 刪主頻道原貼文 → 發送紀錄的頻道從主頻道改成 thread。
         原貼文一則都沒刪掉就不改紀錄、收回 thread 那份：不然面板會列出它，放回後主頻道變兩份。
         `posts`：`relay_posts` 掃主頻道的結果。`apply=False`：只做同樣的檢查、回報會刪幾則（腳本的預覽）。
+        `followups_on_hold`：呼叫端在這個行程裡擋住了這本的補圖（`_album_on_hold`），不用等補圖時效；
+        腳本是另一個行程擋不住，要等。
         回傳 (有沒有搬（預覽：會不會搬）, 說明)。
         """
         async with self._quarantine_lock:
@@ -2307,12 +2387,12 @@ class MessageRelayWorker:
                 if delivered is None or not delivered.main or delivered.quarantine:
                     continue   # 沒送到這個主頻道，或已經在隔離區（含放回過的）
                 main_pks = [pk for pk in pks if pk in delivered.main]
-                originals, problem = self._move_originals(record, main_pks, route_id, delivered, posts)
+                originals, problem = self._move_originals(record, main_pks, route_id, delivered, posts, followups_on_hold)
                 if problem:
                     return False, f"{problem}，沒搬（db#{message_pk}）。"
                 plans.append((route_id, main_pks, originals))
             if not plans:
-                return False, f"不在主頻道（沒送過或已經在隔離區），沒搬（db#{message_pk}）。"
+                return False, f"不在主頻道（沒送過、已經在隔離區或放回過），沒搬（db#{message_pk}）。"
             if not apply:
                 return True, "；".join(f"會刪主頻道 {len(originals)} 則" for _, _, originals in plans)
             notes = []
@@ -2324,15 +2404,17 @@ class MessageRelayWorker:
             return True, "；".join(notes)
 
     def _move_originals(self, record: TelegramMessageRecord, main_pks: list[int], route_id: int,
-                        delivered: _RouteDeliveries, posts: dict[int, list[discord.Message]]) -> tuple[list, str]:
+                        delivered: _RouteDeliveries, posts: dict[int, list[discord.Message]],
+                        followups_on_hold: bool = False) -> tuple[list, str]:
         """這個主頻道要刪的原貼文（照貼出的相反順序）；不能搬時回 ([], 原因)。"""
-        if record.grouped_id is not None:
+        if record.grouped_id is not None and not followups_on_hold:
             first_sent = min(delivered.main.values())
             if datetime.now(timezone.utc) - first_sent < self._GROUP_FOLLOWUP_MAX_AGE:
                 # 補圖時效內，線上 bot（另一個行程，這裡的鎖管不到）還可能把晚到的圖補進主頻道：搬到一半補進來的
                 # 會留在主頻道，這本在面板上也放不回去
                 hours = int(self._GROUP_FOLLOWUP_MAX_AGE.total_seconds() // 3600)
-                return [], f"相簿第一次送出還不到 {hours} 小時，晚到的圖還可能補進主頻道"
+                ready = (first_sent + self._GROUP_FOLLOWUP_MAX_AGE).astimezone(APP_TZ).strftime("%m-%d %H:%M")
+                return [], f"相簿第一次送出還不到 {hours} 小時，晚到的圖還可能補進主頻道，{ready} 之後才能搬"
         # 相反順序刪（Discord 的訊息 id 依時間遞增）：本文那則（帶 db#）最後刪，中途失敗時它還在，重跑認得出來、補得完
         originals = sorted({m.id: m for pk in main_pks for m in posts.get(pk, [])
                             if getattr(m.channel, "id", None) == route_id}.values(), key=lambda m: m.id, reverse=True)
