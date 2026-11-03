@@ -386,3 +386,5 @@ WW_RoverDetective = 偵探、思考 | think
 WW_Sigrika = 震驚、嚇到 | think
 WW_SigrikaHyped = 興奮、嗨了 | laugh
 moon1 = 得意、偷笑 | laugh
+67 = 斜眼、懷疑 | think
+B6 = 星星眼、興奮期待 | agree
