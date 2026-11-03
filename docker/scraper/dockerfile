@@ -33,11 +33,11 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # 安裝 GeckoDriver (Firefox 的 Selenium 驅動)
-RUN wget -q https://github.com/mozilla/geckodriver/releases/download/v0.36.0/geckodriver-v0.36.0-linux64.tar.gz \
-    && tar -xzf geckodriver-v0.36.0-linux64.tar.gz \
+RUN wget -q https://github.com/mozilla/geckodriver/releases/download/v0.37.1/geckodriver-v0.37.1-linux64.tar.gz \
+    && tar -xzf geckodriver-v0.37.1-linux64.tar.gz \
     && mv geckodriver /usr/local/bin/ \
     && chmod +x /usr/local/bin/geckodriver \
-    && rm geckodriver-v0.36.0-linux64.tar.gz
+    && rm geckodriver-v0.37.1-linux64.tar.gz
 
 # 建立應用程式使用者
 RUN groupadd -r appuser && useradd -r -g appuser -m -d /home/appuser -u 1000 appuser

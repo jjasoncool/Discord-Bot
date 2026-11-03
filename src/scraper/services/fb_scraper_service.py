@@ -241,12 +241,10 @@ class FBScraperService:
 
     # ---------- 人類式行為 & Driver ----------
     def _get_firefox_user_agent(self) -> str:
-        """動態取得系統目前最新的 Firefox User-Agent（最佳實踐）
+        """動態取得系統目前 Firefox 的 User-Agent，跟著系統 Firefox 版本走、不會過期。
 
-        優點：
-        - 永遠跟系統 Firefox 版本同步，不會過期
-        - 大幅降低被 Facebook 偵測為 bot 的風險
-        - 自動 fallback 安全版本
+        真正的 Firefox 只送主版本號加 .0（153.6.0esr 送的是 Firefox/153.0），所以這裡只取主版本號；
+        偵測不到版本時用備援值。
         """
         try:
             # 執行 firefox --version 取得版本號
@@ -258,24 +256,24 @@ class FBScraperService:
                 check=True
             )
             version_output = result.stdout.strip()
-            # 解析如 "Mozilla Firefox 149.0.2" → 取出版本
-            match = re.search(r"Firefox\s+(\d+\.\d+(?:\.\d+)?)", version_output)
-            version = match.group(1) if match else "149.0.2"
+            # 解析如 "Mozilla Firefox 153.6.0esr" → 只取主版本號
+            match = re.search(r"Firefox\s+(\d+)", version_output)
+            major = match.group(1) if match else "149"
 
-            self.logger.info(f"🔍 偵測到 Firefox 版本: {version}，已套用最新 User-Agent")
+            self.logger.info(f"🔍 偵測到 Firefox 版本: {version_output}，已套用 User-Agent 版本 {major}.0")
             return (
-                f"Mozilla/5.0 (X11; Linux x86_64; rv:{version}) "
-                f"Gecko/20100101 Firefox/{version}"
+                f"Mozilla/5.0 (X11; Linux x86_64; rv:{major}.0) "
+                f"Gecko/20100101 Firefox/{major}.0"
             )
         except Exception as e:
-            self.logger.warning(f"⚠️ 無法偵測 Firefox 版本，使用 fallback 149.0.2: {e}")
+            self.logger.warning(f"⚠️ 無法偵測 Firefox 版本，使用 fallback 149.0: {e}")
             return (
-                "Mozilla/5.0 (X11; Linux x86_64; rv:149.0.2) "
-                "Gecko/20100101 Firefox/149.0.2"
+                "Mozilla/5.0 (X11; Linux x86_64; rv:149.0) "
+                "Gecko/20100101 Firefox/149.0"
             )
 
     def setup_driver(self):
-        """設定瀏覽器驅動（已改用動態 UA）"""
+        """設定瀏覽器驅動（User-Agent 見 _get_firefox_user_agent）"""
         opts = FirefoxOptions()
         env_firefox = os.path.join(sys.prefix, 'bin', 'firefox')
         if os.path.exists(env_firefox):
@@ -288,6 +286,8 @@ class FBScraperService:
         opts.add_argument("--private")
         opts.add_argument("--lang=zh-TW")
         opts.set_preference("intl.accept_languages", "zh-TW,zh,en-US,en")
+        # FB 對這條線路的 IPv4 會導去登入頁，IPv6 可以直接開；系統的位址排序不一定先選 IPv6，所以在瀏覽器指定
+        opts.set_preference("network.dns.preferIPv6", True)
 
         # 使用動態最新 UA
         ua = self._get_firefox_user_agent()

@@ -157,6 +157,7 @@ services:
       - NOTIFY_SHARED_SECRET=${NOTIFY_SHARED_SECRET:-}
     networks:
       - discord-net
+      - scraper-v6
 
   telegram-scraper:
     build:
@@ -247,6 +248,13 @@ services:
 networks:
   discord-net:
     driver: bridge
+  # 只給 scraper 對外走 IPv6：FB 對這條線路的 IPv4 會導去登入頁，走主機的 IPv6 可以直接開。
+  # 另開一張網路，discord-net 不用動、其他容器不用重建；IPv4 與容器間連線照舊走 discord-net。
+  # 第一次建立前，主機要先跑 scripts/prepare_host_ipv6.sh，否則主機的 IPv6 出口之後會斷。
+  scraper-v6:
+    driver: bridge
+    enable_ipv4: false
+    enable_ipv6: true
   # hermes 專用的隔離網路，成員為 hermes、discord-bot、search-mcp。
   # hermes 不可直連 Lemonade：外網與宿主機一併阻斷。
   #   internal：不提供預設路由，阻斷對外連線
