@@ -20,7 +20,10 @@
 - 「有圖」只算真的下載得到的，照 Telethon 依外層型別分派：沒附圖的網頁預覽、過期照片、只有空尺寸的照片、
   網頁預覽附空殼文件、帳單、投票等不算（以前標成有圖卻永遠下載不到，轉發端的相簿因此空等）；
   看不懂的媒體型別記 WARNING 並帶上型別名
-- 爬蟲下載媒體一律經過 `media_download.download_with_stall_guard`（守衛擋直接呼叫 download_media）
+- 爬蟲存媒體一律經過 `media_download.fetch_media_file`（守衛擋直接呼叫 download_media、download_with_stall_guard）
+- 同一個 Telegram 檔案已完整在硬碟就不重新下載，照樣寫媒體列、照樣通知；大小不符（舊版留下的殘檔）才重下；
+  照片沒有大小可比，非空就算
+- 下載中斷、卡住、關機都不能傷到已存在的檔；任何情況都不留暫存檔，被強制結束留下的由下次啟動清掉
 
 bot 容器沒有 Telethon（用假模組）；`RealTelethonTypesTests` 只在爬蟲容器跑，見 telegram_scraper_fakes。
 
@@ -42,7 +45,7 @@ if HERE not in sys.path:
 from test import timing_sensitive  # noqa: E402
 from telegram_scraper_fakes import (  # noqa: E402
     CHANNEL, CHAT, REAL_TELETHON, FakeClient, FakeDB, FakeTelegramDatabase, FakeWatcher, fake_config, hours_ago,
-    load_scraper, media, msg, photo_media, video_media, webpage_media,
+    load_scraper, media, msg, photo_media, video_media, webpage_media, write_fake_download,
 )
 
 S = load_scraper()
@@ -238,6 +241,235 @@ class StallGuardTests(MediaTestBase):
         self.assertEqual(len(client.downloads), 1, "要真的試過下載（不是提早結束才沒卡住）")
 
 
+class ExistingFileTests(MediaTestBase):
+    """同一個 Telegram 檔案被另一則訊息帶到（別的頻道複製貼上）：不重抓，也不能弄壞已有的檔。"""
+
+    VIDEO_SIZE = 10_000
+
+    def media_path(self, name: str) -> str:
+        return os.path.join(self.config.media_dir, name)
+
+    def existing(self, name: str, content: bytes) -> str:
+        path = self.media_path(name)
+        with open(path, "wb") as f:
+            f.write(content)
+        return path
+
+    def read(self, path: str) -> bytes:
+        with open(path, "rb") as f:
+            return f.read()
+
+    def assert_no_parts(self):
+        left = [n for n in os.listdir(self.config.media_dir) if n.endswith(media_download.PART_SUFFIX)]
+        self.assertEqual(left, [], "不能留下暫存檔")
+
+    def saved_paths(self, message_id: int) -> list[str]:
+        return [item["file_rel_path"] for item in self.db.media.get(self.db.pk_of(message_id)) or []]
+
+    async def test_complete_video_is_not_downloaded_again(self):
+        path = self.existing("601.mp4", b"x" * self.VIDEO_SIZE)
+        with self.assertLogs("handlers", "INFO") as logs:
+            await self.process(msg(10, text="同一支影片", media_obj=video_media(size=self.VIDEO_SIZE)))
+        self.assertTrue(any("不重新下載" in line for line in logs.output), "要看得出這則沒有真的下載")
+        self.assertFalse(any("媒體已下載" in line for line in logs.output), logs.output)
+        self.assertEqual(self.client.downloads, [], "大小相符就不重新下載")
+        self.assertEqual(self.read(path), b"x" * self.VIDEO_SIZE)
+        self.assertEqual(len(self.saved_paths(10)), 1, "沒下載也要寫媒體列，這則才送得出圖")
+        self.assertTrue(self.saved_paths(10)[0].endswith("601.mp4"))
+        self.assertEqual(self.db.notified, [self.db.pk_of(10)], "新訊息照常通知轉發端")
+
+    async def test_existing_photo_is_not_downloaded_again(self):
+        self.existing("501.jpg", b"photo")
+        await self.process(msg(10, media_obj=photo_media()))
+        self.assertEqual(self.client.downloads, [], "照片沒有大小可比，非空就算")
+        self.assertEqual(len(self.saved_paths(10)), 1)
+
+    async def test_empty_photo_file_is_downloaded(self):
+        path = self.existing("501.jpg", b"")
+        await self.process(msg(10, media_obj=photo_media()))
+        self.assertEqual(len(self.client.downloads), 1, "空檔不算有檔")
+        self.assertEqual(self.read(path), b"downloaded")
+
+    async def test_wrong_size_is_downloaded_and_replaced(self):
+        """舊版中斷留下的殘檔：大小對不上要重新下載，檔案才修得好。"""
+        path = self.existing("601.mp4", b"broken")
+        with self.assertLogs("media_download", "WARNING"):
+            await self.process(msg(10, media_obj=video_media(size=self.VIDEO_SIZE)))
+        self.assertEqual(len(self.client.downloads), 1)
+        self.assertEqual(self.read(path), b"downloaded")
+        self.assert_no_parts()
+
+    async def test_download_is_written_beside_the_final_name(self):
+        seen = {}
+
+        async def record(target, file, progress_callback):
+            seen["file"] = file
+            seen["final_exists"] = os.path.exists(self.media_path("601.mp4"))
+            return write_fake_download(file)
+        self.client.download_impl = record
+        await self.process(msg(10, media_obj=video_media()))
+        self.assertTrue(seen["file"].endswith(media_download.PART_SUFFIX), seen["file"])
+        self.assertEqual(os.path.dirname(seen["file"]), self.config.media_dir, "同一個資料夾，換名才不會跨檔案系統")
+        self.assertFalse(seen["final_exists"], "下載途中正式檔名上不能出現沒寫完的檔")
+        self.assertTrue(os.path.exists(self.media_path("601.mp4")))
+        self.assert_no_parts()
+
+    async def test_interrupted_download_keeps_existing_file(self):
+        path = self.existing("601.mp4", b"old")
+
+        async def interrupted(target, file, progress_callback):
+            write_fake_download(file, b"half")
+            raise ConnectionError("連線中斷")
+        self.client.download_impl = interrupted
+        await self.process(msg(10, media_obj=video_media(size=self.VIDEO_SIZE)))
+        self.assertEqual(self.read(path), b"old", "下載失敗不能傷到已有的檔")
+        self.assertEqual(self.saved_paths(10), [], "下載失敗不寫媒體列，補掃才會重試")
+        self.assert_no_parts()
+
+    async def test_nothing_downloaded_keeps_existing_file(self):
+        path = self.existing("601.mp4", b"old")
+
+        async def none(*args):
+            return None
+        self.client.download_impl = none
+        with self.assertLogs("handlers", "WARNING") as logs:
+            await self.process(msg(10, media_obj=video_media(size=self.VIDEO_SIZE)))
+        self.assertTrue(any("沒有拿到檔案" in line for line in logs.output), logs.output)
+        self.assertEqual(self.read(path), b"old")
+        self.assertEqual(self.saved_paths(10), [])
+        self.assert_no_parts()
+
+    async def test_stalled_download_keeps_existing_file(self):
+        path = self.existing("601.mp4", b"old")
+
+        async def stalls(target, file, progress_callback):
+            write_fake_download(file, b"half")
+            await asyncio.Event().wait()
+        self.client.download_impl = stalls
+        await asyncio.wait_for(self.process(msg(10, media_obj=video_media(size=self.VIDEO_SIZE))), 2)
+        self.assertEqual(self.read(path), b"old")
+        self.assert_no_parts()
+
+    @timing_sensitive
+    async def test_shutdown_keeps_existing_file_and_removes_part(self):
+        path = self.existing("601.mp4", b"old")
+        started = asyncio.Event()
+
+        async def hangs(target, file, progress_callback):
+            write_fake_download(file, b"half")
+            started.set()
+            await asyncio.Event().wait()
+        self.client.download_impl = hangs
+        with mock.patch.object(media_download, "MEDIA_STALL_TIMEOUT_SEC", 30):
+            task = asyncio.ensure_future(self.process(msg(10, media_obj=video_media(size=self.VIDEO_SIZE))))
+            await asyncio.wait_for(started.wait(), 2)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertEqual(self.read(path), b"old")
+        self.assert_no_parts()
+
+    async def test_two_messages_downloading_the_same_file_at_once(self):
+        """不同訊息各自一把鎖，可能同時下載同一個檔：暫存檔要分開，不然互相寫壞、換名還會找不到檔。"""
+        files = []
+        both_writing = asyncio.Event()
+
+        async def together(target, file, progress_callback):
+            files.append(file)
+            write_fake_download(file, b"same")
+            if len(files) == 2:
+                both_writing.set()
+            await asyncio.wait_for(both_writing.wait(), 2)
+            return file
+        self.client.download_impl = together
+        with mock.patch.object(media_download, "MEDIA_STALL_TIMEOUT_SEC", 5):
+            await asyncio.gather(self.process(msg(10, media_obj=video_media())),
+                                 self.process(msg(11, media_obj=video_media())))
+        self.assertEqual(len(set(files)), 2, files)
+        self.assertEqual(self.read(self.media_path("601.mp4")), b"same")
+        self.assertEqual(len(self.saved_paths(10)), 1)
+        self.assertEqual(len(self.saved_paths(11)), 1)
+        self.assert_no_parts()
+
+    async def test_without_stable_name_telethon_picks_the_name(self):
+        """網頁預覽的圖沒有穩定檔名：傳資料夾、不經過暫存檔，也不會把資料夾當成已有的檔。"""
+        seen = []
+
+        async def record(target, file, progress_callback):
+            seen.append(file)
+            return write_fake_download(os.path.join(file, "preview.jpg"))
+        self.client.download_impl = record
+        await self.process(msg(10, text="https://x.com/a", media_obj=webpage_media(with_photo=True)))
+        self.assertEqual(seen, [self.config.media_dir])
+        self.assertTrue(self.saved_paths(10)[0].endswith("preview.jpg"))
+
+    async def test_catch_up_retry_uses_existing_file(self):
+        """下載失敗的訊息重試時，檔案已被另一則帶到：不重抓，也要補通知轉發端。"""
+        self.existing("601.mp4", b"x" * self.VIDEO_SIZE)
+        self.db.add_row(100, has_media=True, date=hours_ago(1))
+        self.client.history = {CHANNEL: [msg(100, text="t", media_obj=video_media(size=self.VIDEO_SIZE), date=hours_ago(1))]}
+        await runner._catch_up_channel(CHANNEL, self.client, self.config, self.watcher, self.db, runner.KeyedLock())
+        pk = self.db.pk_of(100)
+        self.assertEqual(self.client.downloads, [])
+        self.assertTrue(self.db.media.get(pk))
+        self.assertEqual(self.db.notified, [pk])
+
+    async def test_custom_emoji_is_written_atomically_too(self):
+        seen = []
+
+        async def record(target, file, progress_callback):
+            seen.append(file)
+            return write_fake_download(file)
+
+        class EmojiClient(FakeClient):
+            async def __call__(self, request):
+                return [SimpleNamespace(id=9001, mime_type="image/webp", size=10)]
+        client = EmojiClient()
+        client.download_impl = record
+        entities = [{"type": "MessageEntityCustomEmoji", "offset": 0, "length": 2, "document_id": 9001}]
+        await handlers._download_custom_emojis(
+            message_pk=1, entities=entities, client=client, media_dir=self.config.media_dir,
+            db=self.db, log_prefix="Telegram")
+        self.assertTrue(seen[0].endswith(media_download.PART_SUFFIX), seen)
+        self.assertTrue(os.path.exists(self.media_path("emoji_9001.webp")))
+        self.assert_no_parts()
+
+    def test_remove_stale_parts_only_touches_parts(self):
+        keep = self.existing("601.mp4", b"keep")
+        finished = self.existing("602.part", b"keep")
+        self.existing("601.mp4.abcd1234.part", b"stale")
+        self.existing("602.part.0b72ac29.part", b"stale")
+        self.assertEqual(media_download.remove_stale_parts(self.config.media_dir), 2)
+        self.assertEqual(
+            sorted(os.listdir(self.config.media_dir)),
+            sorted(os.path.basename(path) for path in (keep, finished)),
+            "原檔名本來就是 .part 的文件是存好的檔，不是暫存檔",
+        )
+
+    def test_remove_stale_parts_survives_missing_folder(self):
+        with self.assertLogs("media_download", "WARNING"):
+            self.assertEqual(media_download.remove_stale_parts(self.media_path("不存在")), 0)
+
+    async def test_startup_clears_stale_parts_before_downloading(self):
+        self.existing("601.mp4.abcd1234.part", b"stale")
+        seen = []
+
+        async def record(target, file, progress_callback):
+            seen.append([n for n in os.listdir(self.config.media_dir) if n.startswith("601.mp4.abcd1234")])
+            return write_fake_download(file)
+        client = FakeClient(history={CHANNEL: [msg(10, media_obj=video_media())]})
+        client.download_impl = record
+        db = FakeTelegramDatabase()
+        db_class = mock.Mock(return_value=db)
+        db_class.ensure_database_exists = FakeTelegramDatabase.ensure_database_exists
+        with mock.patch.object(runner, "TelegramClient", lambda *a, **k: client), \
+             mock.patch.object(runner, "TelegramDatabase", db_class), \
+             mock.patch.object(runner, "TelegramRuntimeConfigWatcher", lambda **k: self.watcher):
+            await runner.run_telegram_scraper(self.config)
+        self.assertEqual(seen, [[]], "開始下載前舊的暫存檔就要清掉")
+        self.assert_no_parts()
+
+
 class CatchUpRetryTests(MediaTestBase):
     async def test_retries_recent_row_missing_media(self):
         self.db.add_row(100, has_media=True, date=hours_ago(1))
@@ -284,7 +516,7 @@ class HistoryScanResilienceTests(MediaTestBase):
             calls.append(target.id)
             if target.id == 10:
                 raise RuntimeError("下載失敗")
-            return file
+            return write_fake_download(file)
         client = FakeClient(history={CHANNEL: [msg(10, media_obj=photo_media(1)), msg(11, media_obj=photo_media(2))]})
         client.download_impl = first_fails
         db = FakeTelegramDatabase()
@@ -489,6 +721,16 @@ class RealTelethonTypesTests(unittest.TestCase):
                           "Telethon 取 document or photo：文件是空殼就不會改抓照片")
         page_ok = types.WebPage(id=2, url="https://x", display_url="x", hash=0, photo=photo)
         self.assertIsNotNone(downloadable(msg(1, media_obj=types.MessageMediaWebPage(webpage=page_ok))))
+
+    def test_real_telethon_keeps_the_part_name(self):
+        """真的 Telethon 不能把暫存檔改名（例如加 (1) 或換副檔名），不然換名時找不到檔。"""
+        from telethon.client.downloads import DownloadMethods
+        proper = DownloadMethods._get_proper_filename
+        with tempfile.TemporaryDirectory() as folder:
+            part = os.path.join(folder, f"123.mp4.abcd1234{media_download.PART_SUFFIX}")
+            self.assertEqual(proper(part, "video", ".mp4"), part)
+            write_fake_download(part)
+            self.assertEqual(proper(part, "video", ".mp4"), part, "暫存檔已存在時也不能改名")
 
 
 if __name__ == "__main__":

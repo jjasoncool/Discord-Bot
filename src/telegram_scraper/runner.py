@@ -14,7 +14,7 @@ from handlers import (
     handle_new_message,
     handle_refetch_message,
 )
-from media_download import MEDIA_RETRY_WINDOW
+from media_download import MEDIA_RETRY_WINDOW, remove_stale_parts
 from message_lock import KeyedLock, message_lock_key
 from tg_config import TelegramConfig, TelegramRuntimeConfigWatcher
 
@@ -283,6 +283,10 @@ async def run_telegram_scraper(config: TelegramConfig) -> None:
         fallback_config=config,
     )
     runtime_snapshot = runtime_watcher.get_snapshot()
+    # 正常停止時下載會自己清暫存檔；被強制結束才會留下，大檔一個就幾 GB，又不一定有人再下載同一個檔
+    removed_parts = remove_stale_parts(runtime_snapshot.media_dir)
+    if removed_parts:
+        logger.info(f"[Telegram] 已清掉上次留下的下載暫存檔 {removed_parts} 個")
 
     await TelegramDatabase.ensure_database_exists(
         admin_dsn=config.build_admin_dsn(),

@@ -8,9 +8,11 @@
 - FakeDB 是記憶體版的 TelegramDatabase，只實作測試用得到的方法；FakeClient 記下每次呼叫，
   用來斷言「先做什麼、後做什麼」。
 
-在爬蟲容器跑（真 Telethon）：
+在爬蟲容器跑（真 Telethon；爬蟲容器沒有 bot 的 utils，複本的 test/__init__.py 要換成只有 timing_sensitive）：
+    docker exec telegram-scraper mkdir -p /tmp/scraper_tests/test
     docker cp src/test/. telegram-scraper:/tmp/scraper_tests/test/
-    docker exec -w /tmp/scraper_tests -e PYTHONPATH=/app -e PYTHONDONTWRITEBYTECODE=1 telegram-scraper \\
+    docker exec telegram-scraper sh -c 'printf "def timing_sensitive(test):\\n    return test\\n" > /tmp/scraper_tests/test/__init__.py'
+    docker exec -w /tmp/scraper_tests -e PYTHONPATH=/app:/opt/pylib -e PYTHONDONTWRITEBYTECODE=1 telegram-scraper \\
         python -m unittest test.test_telegram_scraper_media test.test_telegram_scraper_updates -v
 """
 import importlib.machinery
@@ -268,6 +270,13 @@ class FakeTelegramDatabase(FakeDB):
 
 # ── Telegram client ────────────────────────────────────────────────────────
 
+def write_fake_download(path: str, content: bytes = b"downloaded") -> str:
+    """跟真的 Telethon 一樣把檔案寫到指定路徑再回傳路徑；呼叫端要把暫存檔換名，沒寫檔會找不到。"""
+    with open(path, "wb") as f:
+        f.write(content)
+    return path
+
+
 class FakeClient:
     """記下每次呼叫（`calls`）；下載行為可替換（`download_impl`）。"""
 
@@ -306,7 +315,9 @@ class FakeClient:
         self.downloads.append(target)
         if self.download_impl is not None:
             return await self.download_impl(target, file, progress_callback)
-        return file if file and file.endswith((".jpg", ".mp4", ".png")) else os.path.join(file or "/tmp", "x.jpg")
+        if file and file.endswith((".jpg", ".mp4", ".png", ".part")):
+            return write_fake_download(file)
+        return write_fake_download(os.path.join(file or "/tmp", "x.jpg"))
 
     async def start(self):
         self.calls.append(("start",))

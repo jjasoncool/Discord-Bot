@@ -12,7 +12,7 @@ from filters import (
     is_forward_source_in_whitelist,
     should_skip_forward,
 )
-from media_download import MEDIA_HOLD_NOTIFY, MEDIA_RETRY_WINDOW, download_with_stall_guard
+from media_download import MEDIA_HOLD_NOTIFY, MEDIA_RETRY_WINDOW, fetch_media_file
 from tg_config import TelegramConfig, TelegramRuntimeConfigWatcher, add_identifier_to_forward_whitelist
 
 logger = logging.getLogger(__name__)
@@ -278,7 +278,7 @@ async def _download_custom_emojis(
         is_animated = mime == "application/x-tgsticker" or mime.startswith("video/")
         target_path = os.path.join(media_dir, f"emoji_{doc_id}{_ext_from_mime(mime)}")
         try:
-            file_path = await download_with_stall_guard(client, doc, file=target_path)
+            file_path, _ = await fetch_media_file(client, doc, target_path, expected_size=getattr(doc, "size", None))
         except Exception as exc:
             logger.warning(f"[{log_prefix}] 下載自訂表情失敗 doc_id={doc_id}: {exc}")
             continue
@@ -486,9 +486,13 @@ async def _process_message(
             # 使用穩定檔名（依 photo/document ID），避免重啟產生 (N) 後綴
             target_path = _build_stable_media_path(message, runtime_snapshot.media_dir)
             file_path = None
+            reused = False
             try:
-                file_path = await download_with_stall_guard(
-                    client, message, file=target_path or runtime_snapshot.media_dir)
+                document = getattr(message.media, "document", None)
+                file_path, reused = await fetch_media_file(
+                    client, message, target_path or runtime_snapshot.media_dir,
+                    expected_size=getattr(document, "size", None),
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -501,7 +505,9 @@ async def _process_message(
                     f"dc_id={getattr(_downloadable_media(message), 'dc_id', None)}: {exc!r}"
                 )
             else:
-                if file_path:
+                if reused:
+                    logger.info(f"[{log_prefix}] 同一個 Telegram 檔案已在硬碟，不重新下載: {file_path}")
+                elif file_path:
                     logger.info(f"[{log_prefix}] 媒體已下載: {file_path}")
                 else:
                     logger.warning(
