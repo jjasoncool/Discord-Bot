@@ -388,3 +388,4 @@ WW_SigrikaHyped = 興奮、嗨了 | laugh
 moon1 = 得意、偷笑 | laugh
 67 = 斜眼、懷疑 | think
 B6 = 星星眼、興奮期待 | agree
+emoji_56 = 無奈、被纏住 | negative
