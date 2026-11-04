@@ -523,6 +523,9 @@ class ArticleCommands(commands.Cog):
                 if not target_channels:
                     return "❌ 沒有設定監控頻道，請先使用 `/article_manager` 開始監控。"
 
+            #: 送出了但有缺的部分（FB 少了圖、影片沒傳成），要讓操作者知道，不能只回成功
+            notes: list[str] = []
+
             # 根據類型處理
             if content_type == "article":
                 article_id = self._parse_positive_int(id)
@@ -540,13 +543,13 @@ class ArticleCommands(commands.Cog):
                 if fb_db_id is None:
                     return "❌ FB 貼文 ID 必須是數字（資料庫 ID）"
                 try:
-                    content = await self.fb_monitor.fetch_fb_post_by_id(fb_db_id)
+                    content = await self.fb_monitor.fetch_fb_post_for_resend(fb_db_id, notes=notes)
                 except Exception as e:
                     logger.error(f"獲取 FB 貼文資料庫 ID {fb_db_id} 失敗: {e}", exc_info=True)
                     return "❌ 獲取 FB 貼文時發生錯誤，請稍後再試。"
                 content_name = f"FB 貼文 `{fb_db_id}`"
                 send_method = functools.partial(
-                    self.fb_monitor.send_fb_post_to_channel, force_event_rebuild=True)
+                    self.fb_monitor.send_fb_post_to_channel, force_event_rebuild=True, notes=notes)
                 logger.info(f"[RESEND_ROUTE] 路由到 FB 流程: fb_db_id={fb_db_id}")
 
             else:  # it_article（系統設備新知 / IT快訊）
@@ -574,7 +577,8 @@ class ArticleCommands(commands.Cog):
                 for channel_id in target_channels:
                     channel = self.bot.get_channel(channel_id)
                     channel_names.append(f"#{channel.name}" if channel else f"<#{channel_id}>")
-                return f"✅ 已成功將{content_name}重新發送到 {success_count} 個頻道：{', '.join(channel_names)}"
+                result = f"✅ 已成功將{content_name}重新發送到 {success_count} 個頻道：{', '.join(channel_names)}"
+                return f"{result}\n⚠️ {'；'.join(dict.fromkeys(notes))}" if notes else result
             return f"❌ 發送{content_name}到所有頻道都失敗，請查看日誌。"
 
         except Exception as e:  # 邊界：一次重送；結果要回給人看，不能讓畫面停在「處理中」
