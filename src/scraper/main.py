@@ -69,9 +69,12 @@ def fb_scrape_task():
         results = fb_service.scrape_facebook_posts()
         empty_link_failure = bool(getattr(fb_service, "last_empty_link_failure", False))
 
-        if results:
-            logger.info(f"Facebook 爬蟲任務完成，抓取到 {len(results)} 篇貼文")
+        if fb_service.last_links_found:
+            logger.info(
+                f"Facebook 爬蟲任務完成，取得 {fb_service.last_links_found} 個連結，開了 {len(results)} 篇貼文頁"
+            )
             fb_retry_scheduled_at = None
+            # 全部不用開貼文頁也要通知：bot 只靠這個通知才會補送之前沒送成的貼文
             _notify_discord_bot("fb", {"count": len(results)})
         elif empty_link_failure:
             if fb_retry_scheduled_at is None:

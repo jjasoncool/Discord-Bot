@@ -16,13 +16,15 @@ Facebook 貼文抓取服務類別，支持模組調用和獨立執行
   2) 由貼文小圖追到「照片頁」，從 og:image 擷取大圖 URL（images 只回大圖）。
   3) **分頁管理精簡版**：每次開始抓「新的一篇」貼文前，先關閉主分頁以外的所有分頁。
 
-  4) content_hash（唯一）：以 clean_text(text) + 規範化後 images 路徑（去 query/fragment）做 SHA256，
-     作為內容唯一特徵。
-  5) 去重決策集中在 _save_fb_posts_to_json：**只看 content_hash**，合併時僅「補空白欄位」、文字取較長、圖片取較多。
+  4) content_hash（唯一）：只看正規化後的文字（連 hashtag 都拿掉）做 SHA256，不含圖片。
+  5) 去重決策集中在 _save_fb_posts_to_json：先比網址，再比 content_hash。網址或發文時間也對得上才算同一篇，
+     合併時僅「補空白欄位」、文字取較長、圖片取較多；文字相同但發文時間不同的，只補空白的網址。
   6) URL 欄位策略固定：`url` 儲存「傳統數字型」連結；`pfbid_url` 儲存 `/posts/pfbid...`。
   7) collect_first_n_links 階段即正規化（www + 去 tracking）；同時 logs/fb_url_list.txt 持續累積、不重複。
-  8) JSON 做出 insert/update/noop 決策的同時，同步生成 DB ops 並一次性套用到 DB。
-  9) debug_mode=True 時才落地 page_source_*.html 與 test_fb_results_*.json。
+  8) JSON 做出 insert/update/noop 決策的同時，同步生成 DB ops 並一次性套用到 DB。先寫 DB，成功才寫 JSON：
+     JSON 是判斷有沒有這篇的依據，先寫的話 DB 失敗後下一輪就當已存在，這篇再也進不了 DB，bot 也發不出去。
+     代價：每次都會發生的 DB 錯誤，那一批每輪都會重試。
+  9) debug_mode=True 時才落地 page_source_*.html、test_fb_results_*.json，以及關掉登入對話框後的截圖 fb_debug_*.png（每輪蓋寫）。
 
   10) **時間戳修正（本版）**：
       使用 `python-dateutil` 解析，支援：
@@ -41,6 +43,16 @@ Facebook 貼文抓取服務類別，支持模組調用和獨立執行
          - `"timestamp":{"...","story":{"creation_time":1761908406,...}}`（同頁） :contentReference[oaicite:4]{index=4}
       B. 若全數失敗，再嘗試解析「相對時間」（如 `2天`、`3小時`、`剛剛` 等）轉為絕對時間。
       C. 同步在寫入資料庫前，把 JSON 中的 `timestamp`（ISO/UTC）轉為 SQLite DATETIME（`YYYY-MM-DD HH:MM:SS`，以本地時區表示）。
+
+  12) 一個連結都沒拿到時，不看 debug_mode，一律記下當時的頁面資訊，並把畫面與原始碼蓋寫到 logs/fb_empty_links.png、.html。
+
+  13) 網址確認過圖片齊全就不再開貼文頁（記在 fb_posts.json 的 confirmed_urls）：開頁時已存張數符合頁面才算確認，
+      已存或頁面表示 0 張都不算（頁面沒載入時也是 0 張）。代價：貼文被編輯時，要等網址換掉才會更新；確認當下頁面少算張數的話，
+      也要等網址換掉才會再檢查。
+
+  14) 圖片與影片的檔案網址約 4.4 天過期，文章網址不會。要重發或要影片時用 refetch_post 重開文章拿新網址，
+      影片與新網址都不存，所以資料庫不用多放東西。影片封面照舊存成圖片，張數判斷不用為影片開特例；
+      API 回傳時才拿掉（見 is_video_cover）。
 """
 
 import os
@@ -52,9 +64,13 @@ import html as ihtml
 import hashlib
 import copy  # 本版新增：為了不改動寫回 JSON 的內容，DB 同步時複製 ops
 import subprocess
+import threading
 from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Sequence, Tuple
 from urllib.parse import urlparse, parse_qs, urlunparse, urlencode, urljoin, unquote
+
+#: 確認過圖片齊全的網址最多記幾個。只有最上面幾則會再看到，舊網址留著沒用，上限只是不讓 JSON 一直長
+CONFIRMED_URLS_KEPT = 300
 
 # === 依賴 ===
 try:
@@ -117,6 +133,111 @@ except Exception as _e:
 IMAGE_LIMIT = 20          # ← 這裡改數字即可！建議 20~30
 # =========================================================
 
+# 內嵌 JSON 裡的斜線會跳脫成 \/，所以斜線前的反斜線可有可無
+_POST_URL_IN_SOURCE_RE = re.compile(r"posts\\?/(pfbid[0-9A-Za-z]+)")
+# 路徑裡的長識別碼換成 *，同一種連結才會算在一起
+_LINK_ID_SEGMENT_RE = re.compile(r"^(pfbid[0-9A-Za-z]+|\d{5,})$")
+
+
+def count_post_urls_in_source(html: str) -> int:
+    """頁面原始碼裡有幾則不同的 /posts/pfbid… 貼文連結（一般 HTML 與內嵌 JSON 都算）。"""
+    return len(set(_POST_URL_IN_SOURCE_RE.findall(html or "")))
+
+
+def summarize_link_shapes(hrefs: List[str], top: int = 10) -> str:
+    """把頁面上的連結依路徑前兩段分類計數，看得出連結長相是不是變了。"""
+    shapes: Dict[str, int] = {}
+    for href in hrefs:
+        if (href or "").startswith("#"):
+            key = "#"  # 只有 # 的連結沒有網址可抓，要和真的連結分開算
+        else:
+            segments = [s for s in urlparse(href or "").path.split("/") if s][:2]
+            key = "/" + "/".join("*" if _LINK_ID_SEGMENT_RE.match(s) else s for s in segments)
+        shapes[key] = shapes.get(key, 0) + 1
+    ranked = sorted(shapes.items(), key=lambda item: -item[1])[:top]
+    return " ".join(f"{shape}×{count}" for shape, count in ranked) or "（沒有連結）"
+
+
+#: 開瀏覽器打 FB 同一時間只做一件事：每小時那一輪與重開單篇不要疊在一起
+FB_BROWSER_LOCK = threading.Lock()
+#: 重開單篇時等每小時那一輪做完的上限（秒）；那一輪碰到多圖貼文要翻照片，會花幾分鐘
+REFETCH_LOCK_WAIT_SECONDS = 240
+#: 影片封面的路徑：FB 把封面當一般圖片給，檔名格式也和照片一樣，只有路徑分得出來
+_VIDEO_COVER_PATH = "/t15.5256-"
+#: 短於這個長度的不算貼文影片：頁面上可能有 1 秒、沒聲音的小片段
+_MIN_VIDEO_MS = 3000
+_JSON_SCRIPT_RE = re.compile(r'<script[^>]*type="application/json"[^>]*>(.*?)</script>', re.S)
+
+
+def is_video_cover(url: str) -> bool:
+    """這個圖片網址是影片封面。"""
+    return _VIDEO_COVER_PATH in urlparse(url or "").path
+
+
+def _walk_json(node):
+    """走過 JSON 裡每一個物件。"""
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from _walk_json(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _walk_json(value)
+
+
+def _main_story(html: str) -> Optional[Dict]:
+    """頁面內嵌資料裡，這篇貼文本身的內容；找不到回 None。"""
+    for match in _JSON_SCRIPT_RE.finditer(html or ""):
+        if '"node_v2"' not in match.group(1):
+            continue
+        try:
+            data = json.loads(match.group(1))
+        except ValueError:
+            continue
+        for obj in _walk_json(data):
+            node = obj.get("node_v2")
+            if isinstance(node, dict) and node.get("__typename") == "Story":
+                story = ((node.get("comet_sections") or {}).get("content") or {}).get("story")
+                if story:
+                    return story
+    return None
+
+
+def extract_post_videos(html: str) -> List[Dict]:
+    """這篇貼文自己的影片：回傳 id、hd_url、sd_url、duration_ms、permalink_url。沒有影片或讀不懂回空清單。
+
+    只讀這篇的附件與它分享的那篇的附件（分享貼文的影片在 attached_story 底下）。整頁搜尋網址不行：
+    頁面內嵌資料還有留言與別篇貼文的影片，連沒有影片的貼文都找得到別人的影片網址。
+    網址保持原樣，簽章參數改了就不能下載。直播只回連結，沒有可下載的檔案。
+    """
+    story = _main_story(html)
+    if not story:
+        return []
+    videos: List[Dict] = []
+    seen = set()
+    for holder in (story, story.get("attached_story") or {}):
+        for attachment in holder.get("attachments") or []:
+            style = (attachment.get("styles") or {}).get("attachment") or {}
+            subs = (style.get("all_subattachments") or {}).get("nodes") or []
+            for media in [style.get("media") or {}] + [sub.get("media") or {} for sub in subs]:
+                video_id = media.get("id")
+                if media.get("__typename") != "Video" or not video_id or video_id in seen:
+                    continue
+                duration = media.get("playable_duration_in_ms")
+                if duration is not None and duration < _MIN_VIDEO_MS:
+                    continue
+                seen.add(video_id)
+                legacy = {} if media.get("is_live_streaming") else (media.get("videoDeliveryLegacyFields") or {})
+                videos.append({
+                    "id": str(video_id),
+                    "hd_url": legacy.get("browser_native_hd_url"),
+                    "sd_url": legacy.get("browser_native_sd_url"),
+                    "duration_ms": duration,
+                    "permalink_url": media.get("permalink_url"),
+                })
+    return videos
+
+
 class FBScraperService:
     """
     Facebook 貼文抓取服務
@@ -167,6 +288,8 @@ class FBScraperService:
 
         # 由外部 scheduler 讀取的本輪狀態
         self.last_empty_link_failure = False
+        #: 這輪順利跑完時取得幾個連結；全部不用開貼文頁時結果是空的，要靠它分辨「跑完了」和「出錯」
+        self.last_links_found = 0
 
         # 主分頁 handle（啟動後會記錄）
         self.main_handle: Optional[str] = None
@@ -1080,7 +1203,7 @@ class FBScraperService:
                 self.logger.info(f"  └─ 第 {flip} 次翻頁")
 
                 # ==================== 登入牆恢復 ====================
-                if self._is_login_wall_blocking(driver):
+                if self._clear_login_dialog(driver):
                     self.logger.info(f"     ⚠️  偵測到關不掉的登入牆！開始恢復流程 (第 {flip} 輪)")
                     resume_url = driver.current_url or start_url
                     recovered = False
@@ -1102,7 +1225,7 @@ class FBScraperService:
                                 self.close_login_wall(driver)
                                 self.wait_page_loaded(driver, timeout=12)
                                 self.human_sleep(1.5, 3.0)
-                                if not self._is_login_wall_blocking(driver):
+                                if not self._clear_login_dialog(driver):
                                     recovered = True
                                     self.logger.info(f"     ✅ 登入牆恢復成功 (第 {attempt+1} 次)")
                                     break
@@ -1232,6 +1355,97 @@ class FBScraperService:
             pass
         return False
 
+    def _clear_login_dialog(self, driver) -> bool:
+        """偵測到登入對話框才關，回傳關完後是否仍被擋。
+
+        未登入時的對話框會晚幾秒才跳，開頁時關不到，所以判定被擋之前要先試著關；
+        網址已被導去登入頁時關了也沒用，仍會回傳 True。
+        """
+        if not self._is_login_wall_blocking(driver):
+            return False
+        if not self._close_password_dialog(driver):
+            self.close_login_wall(driver)
+        return self._is_login_wall_blocking(driver)
+
+    def _close_password_dialog(self, driver) -> bool:
+        """按有密碼欄那個對話框自己的關閉鈕；沒有這種對話框或按不到回 False。
+
+        貼文頁同時有貼文與登入兩個對話框，close_login_wall 按的是排在前面、被登入框蓋住的貼文那一顆，登入框還在。
+        """
+        try:
+            for dialog in driver.find_elements(By.CSS_SELECTOR, 'div[role="dialog"]'):
+                if not dialog.is_displayed() or not dialog.find_elements(By.CSS_SELECTOR, 'input[type="password"]'):
+                    continue
+                for button in dialog.find_elements(By.CSS_SELECTOR, '[aria-label="關閉"], [aria-label="Close"]'):
+                    if button.is_displayed() and self.safe_click(driver, button):
+                        self.logger.info("關閉登入對話框")
+                        self.human_sleep(0.4, 0.8)
+                        return True
+        except Exception as e:
+            # 頁面途中換掉時元素會失效；退回 close_login_wall，判定被擋與否由呼叫端再看一次
+            self.logger.info(f"按登入框的關閉鈕失敗：{e}")
+        return False
+
+    def _collect_post_thumbs(self, driver, root) -> List[Tuple[int, str, Optional[str]]]:
+        """列出貼文本體顯示的圖片：(分數, 圖片網址, 所在連結)，濾掉佔位圖、表情與留言區的圖。"""
+        thumbs: List[Tuple[int, str, Optional[str]]] = []
+        try:
+            nodes = root.find_elements(By.CSS_SELECTOR, "img[src]")
+            for im in nodes:
+                src = im.get_attribute("src") or ""
+                if src.startswith("data:image") or "svg" in src or any(k in src for k in ["emoji", "static.xx.fbcdn.net", "assets"]):
+                    continue
+                if self.node_in_comments(driver, im):
+                    continue
+                href = self._nearest_anchor_href(driver, im)
+                href_resolved = self._resolve_href(href, driver.current_url) if href else ""
+                score = 1 + (2 if "scontent" in src else 0)
+                thumbs.append((score, src, href_resolved))
+        except Exception:
+            pass
+        return thumbs
+
+    def _overlay_image_count(self, root) -> Optional[int]:
+        """多圖版面表示有幾張圖：露出 4 張加上「+N」，不超過每篇的抓圖上限；不是多圖版面回 None。"""
+        overlay = self._get_photo_overlay_count(root)
+        return min(overlay + 4, self.config.get("image_limit", 20)) if overlay else None
+
+    def _expected_image_count(self, driver, root) -> int:
+        """貼文頁面表示有幾張圖：多圖版面看「+N」，其餘照顯示的張數；不超過每篇的抓圖上限。"""
+        expected = self._overlay_image_count(root)
+        if expected:
+            return expected
+        limit = self.config.get("image_limit", 20)
+        return min(len({src for _, src, _ in self._collect_post_thumbs(driver, root)}), limit)
+
+    def _is_same_post(self, saved: Dict, timestamp: Optional[str]) -> bool:
+        """內文雜湊比對到的已存貼文，是不是真的同一篇：發文時間也要相同。
+
+        雜湊只看文字（連 hashtag 都拿掉），只有 hashtag 的貼文、每次「更新了封面相片」都會比對到同一筆。
+        讀不到發文時間就分不出來，當成不同篇：寧可這次的圖不存，也不要把別篇的圖混進來。
+        """
+        return bool(timestamp) and saved.get("timestamp") == timestamp
+
+    def _saved_images_if_complete(self, driver, root, text: str, timestamp: Optional[str]) -> Tuple[Optional[List[str]], int]:
+        """回傳 (已存的圖, 頁面表示的張數)。這篇已存、圖片數量也符合頁面時才有已存的圖；否則是 None，照常抓圖。
+
+        每輪都會重讀最上面幾則貼文，不跳過的話，多圖貼文只要還在上面，每輪都要重開照片頁翻一次。
+        """
+        content_hash = self._build_content_hash(text, [])
+        saved = next(
+            (p for p in self._load_existing_json().get("posts", []) if p.get("content_hash") == content_hash),
+            None,
+        )
+        if saved is None or not self._is_same_post(saved, timestamp):
+            return None, 0
+        images = [img for img in (saved.get("images") or []) if img]
+        expected = self._expected_image_count(driver, root)
+        if len(images) < expected:
+            self.logger.info(f"已存 {len(images)} 張，頁面表示 {expected} 張，重新抓圖")
+            return None, expected
+        self.logger.info(f"已存 {len(images)} 張，頁面表示 {expected} 張，不再開照片頁")
+        return images, expected
+
     def extract_images_from_root(self, driver, root) -> List[str]:
         """從根元素提取圖片 - 一進來就先判斷是否有 +XX 多圖覆蓋
         有 +XX → 直接走副流程（viewer 翻頁），完全不跑主流程
@@ -1271,22 +1485,7 @@ class FBScraperService:
         # Step 2: 沒有 +XX → 走原本的主流程
         self.logger.info("無多圖覆蓋 → 執行主流程")
 
-        thumbs: List[Tuple[int, str, Optional[str]]] = []
-        try:
-            nodes = root.find_elements(By.CSS_SELECTOR, "img[src]")
-            for im in nodes:
-                src = im.get_attribute("src") or ""
-                if src.startswith("data:image") or "svg" in src or any(k in src for k in ["emoji", "static.xx.fbcdn.net", "assets"]):
-                    continue
-                if self.node_in_comments(driver, im):
-                    continue
-                href = self._nearest_anchor_href(driver, im)
-                href_resolved = self._resolve_href(href, driver.current_url) if href else ""
-                score = 1 + (2 if "scontent" in src else 0)
-                thumbs.append((score, src, href_resolved))
-        except Exception:
-            pass
-
+        thumbs = self._collect_post_thumbs(driver, root)
         if not thumbs:
             return []
 
@@ -1718,8 +1917,11 @@ class FBScraperService:
 
         return None
 
-    def extract_post_by_url(self, driver, url, idx=1):
-        """根據 URL 提取單篇貼文（文字 + 圖片）"""
+    def extract_post_by_url(self, driver, url, idx=1, *, refetch=False):
+        """根據 URL 提取單篇貼文（文字 + 圖片）
+
+        refetch=True 是重開已存的貼文拿新網址：不沿用已存的圖（那些可能已過期），回傳值多一個 videos。
+        """
         self.ensure_only_main_tab(driver)
 
         open_url = self.normalize_fb_url_for_nav(url)
@@ -1741,6 +1943,8 @@ class FBScraperService:
             self.human_sleep(0.6, 1.0)
             self.wait_page_loaded(driver)
             self.logger.info(f"貼文載入完成：{driver.current_url}")
+            # 開照片頁可能換掉頁面內容，影片要先讀
+            videos = extract_post_videos(driver.page_source or "") if refetch else None
 
             # 取兩種 URL
             pfbid_url = self._extract_pfbid_url(driver) or ""
@@ -1760,7 +1964,6 @@ class FBScraperService:
                 pass
 
             text, text_md = self.extract_text_from_root(driver, root)
-            images = self.extract_images_from_root(driver, root)
             ts     = self.extract_timestamp(driver, root)
 
             # ★ 修正：若在 m 站抓不到時間，改嘗試 www 站 canonical 重新抓一次（正確處理分頁返回）
@@ -1794,6 +1997,13 @@ class FBScraperService:
                 except Exception:
                     pass
 
+            # 要先有發文時間：跳過判斷靠它分辨文字相同的是不是同一篇
+            saved_images, page_images = (None, 0) if refetch else self._saved_images_if_complete(driver, root, text, ts)
+            # 翻照片可能中途放棄，要比對才知道少了圖；只看多圖版面：其他版面數的是縮圖，可能含影片封面。
+            # 「+N」數的是格子，影片也佔一格，呼叫端比對時要把影片算進去
+            expected_images = self._overlay_image_count(root) if refetch else None
+            images = saved_images if saved_images is not None else self.extract_images_from_root(driver, root)
+
             # ★ 偵測 FB 錯誤頁面，跳過不寫入
             _FB_ERROR_MARKERS = [
                 "We're working on getting this fixed",
@@ -1815,7 +2025,12 @@ class FBScraperService:
                 "images": images,
                 "timestamp": ts,   # JSON 仍存 ISO/UTC（Z）
                 "content_hash": content_hash,
+                # 已存或頁面表示 0 張都不算確認：頁面沒載入時也是 0 張，記下來這個網址就不會再回頭檢查
+                "images_confirmed": bool(saved_images) and page_images > 0,
             }
+            if refetch:
+                data["videos"] = videos
+                data["expected_images"] = expected_images
 
             if text:
                 preview = (text[:160] + "...") if len(text) > 160 else text
@@ -1824,6 +2039,7 @@ class FBScraperService:
                 self.logger.warning("未擷取到文字內容")
             self.logger.info(f"圖片數量: {len(images)} | 時間戳: {ts}")
 
+            self._take_debug_screenshot(driver, f"post_{idx}")
             return data
 
         finally:
@@ -1837,15 +2053,113 @@ class FBScraperService:
                 pass
 
     # ---------- 主流程 ----------
+    def _take_debug_screenshot(self, driver, name: str, scroll_to: Optional[str] = None) -> None:
+        """debug_mode 才截圖：有登入對話框就先關掉，才看得到底下的頁面。固定檔名、每輪蓋寫，不會累積。
+
+        要在資料都讀完才呼叫：關對話框可能連帶關掉貼文那一層，不能影響讀到的內容。截圖失敗不影響抓取。
+        """
+        if not self.config.get("debug_mode", False):
+            return
+        path = os.path.join(self.config["html_log_dir"], f"fb_debug_{name}.png")
+        try:
+            self._clear_login_dialog(driver)
+            if scroll_to:
+                driver.execute_script("document.querySelector(arguments[0])?.scrollIntoView();", scroll_to)
+                self.human_sleep(0.8, 1.2)
+            driver.save_screenshot(path)
+            self.logger.info(f"📸 截圖：{path}")
+        except Exception as e:
+            self.logger.warning(f"❌ 截圖失敗：{e}")
+
+    def _record_empty_links_page(self, driver) -> None:
+        """一個連結都沒拿到時，記下瀏覽器當下看到什麼。
+
+        被導去登入頁、內容沒載入、連結長相變了，這幾種只看「0 個連結」分不出來，處理方式卻不同。
+        畫面與原始碼固定蓋寫同一份檔，重試再多也不會越積越多。
+        任何一步失敗都只記一行就繼續：外層要回報「0 個連結」才會排補抓。
+        """
+        def attempt(read, default):
+            try:
+                return read()
+            except Exception as e:  # 邊界：診斷失敗不能影響補抓排程
+                self.logger.warning(f"記錄 0 連結頁面時失敗: {e}")
+                return default
+
+        html = attempt(lambda: driver.page_source, "") or ""
+        hrefs = attempt(lambda: driver.execute_script(
+            "return Array.from(document.querySelectorAll('a[href]')).map(a => a.getAttribute('href'));"
+        ), []) or []
+        counts = attempt(lambda: driver.execute_script(
+            "return {articles: document.querySelectorAll(\"[role='article'], article\").length,"
+            " dialogs: document.querySelectorAll(\"[role='dialog']\").length};"
+        ), {}) or {}
+        body_text = attempt(lambda: driver.execute_script(
+            "return document.body ? document.body.innerText.slice(0, 200) : '';"
+        ), "") or ""
+
+        self.logger.warning(
+            f"0 連結頁面：網址={attempt(lambda: driver.current_url, '')} "
+            f"標題={attempt(lambda: driver.title, '')} "
+            f"貼文區塊={counts.get('articles')} 對話框={counts.get('dialogs')} "
+            f"原始碼={len(html)} 字元 原始碼內貼文連結={count_post_urls_in_source(html)} 則"
+        )
+        shapes = attempt(lambda: summarize_link_shapes(hrefs), "")
+        self.logger.warning(f"0 連結頁面的連結分類（共 {len(hrefs)} 個）：{shapes}")
+        self.logger.warning("0 連結頁面的開頭文字：" + " ".join(body_text.split()))
+
+        base = os.path.join(self.config["html_log_dir"], "fb_empty_links")
+        attempt(lambda: driver.save_screenshot(f"{base}.png"), False)
+
+        def write_source():
+            with open(f"{base}.html", "w", encoding="utf-8") as f:
+                f.write(html)
+        attempt(write_source, None)
+
     def scrape_facebook_posts(self) -> List[Dict]:
         """
         主要的 FB 抓取方法
         Returns:
             List[Dict]: 抓取到的貼文列表
         """
-        results, empty_link_failure = self._scrape_facebook_posts_once()
+        with FB_BROWSER_LOCK:
+            results, empty_link_failure = self._scrape_facebook_posts_once()
         self.last_empty_link_failure = empty_link_failure
         return results
+
+    def refetch_post(self, url: str, *, timestamp: Optional[str] = None, text: str = "") -> Optional[Dict]:
+        """重開一篇已存的貼文，回傳新的 images、videos 與 expected_images（頁面表示幾張，多圖版面才有）；
+        打不開或認不出是這篇回 None。不寫 JSON、不寫資料庫。
+
+        timestamp 是資料庫的發文時間（本機時區字串），text 是資料庫的文字：都對不上就當作開錯頁，
+        不能把別篇的圖與影片發出去。文字改過的貼文雜湊會不同，所以時間對得上就算。影片封面不算圖片。
+        """
+        if not FB_BROWSER_LOCK.acquire(timeout=REFETCH_LOCK_WAIT_SECONDS):
+            self.logger.warning(f"等不到瀏覽器，這次不重開貼文：{url}")
+            return None
+        driver = None
+        try:
+            driver = self.setup_driver()
+            driver.get("about:blank")
+            self.main_handle = driver.current_window_handle
+            data = self.extract_post_by_url(driver, url, refetch=True)
+        finally:
+            if driver:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+            FB_BROWSER_LOCK.release()
+
+        same_time = bool(timestamp) and self._to_sqlite_datetime_local(data.get("timestamp")) == timestamp
+        same_text = bool(data.get("content_hash")) and data["content_hash"] == self._build_content_hash(text, [])
+        if not same_time and not same_text:
+            self.logger.warning(f"重開的頁面認不出是這篇，不使用（時間 {data.get('timestamp')}）：{url}")
+            return None
+        return {
+            "images": [image for image in data.get("images") or [] if not is_video_cover(image)],
+            "videos": data.get("videos") or [],
+            "expected_images": data.get("expected_images"),
+        }
 
     def _scrape_facebook_posts_once(self) -> Tuple[List[Dict], bool]:
         """單輪抓取；回傳 (results, empty_link_failure)。"""
@@ -1867,21 +2181,33 @@ class FBScraperService:
             links = self.collect_first_n_links(driver)
             if not links:
                 self.logger.error("未能取得任何貼文連結")
+                self._record_empty_links_page(driver)
                 return [], True
+            self._take_debug_screenshot(driver, "fan_page", scroll_to='[role="article"]')
 
+            confirmed = set(self._load_existing_json().get("confirmed_urls", []))
             results = []
+            newly_confirmed = []
             for i, url in enumerate(links, 1):
+                if url in confirmed:
+                    self.logger.info(f"第 {i} 篇的網址已確認圖片齊全，不開貼文頁：{url}")
+                    continue
+
                 self.logger.info(f"\n--- 解析第 {i} 篇 ---")
                 self.ensure_only_main_tab(driver)
 
                 data = self.extract_post_by_url(driver, url, idx=i)
+                if data.pop("images_confirmed", False):
+                    newly_confirmed.append(url)
                 data["post_id"] = f"fb_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{i}"
                 results.append(data)
 
                 self.ensure_only_main_tab(driver)
 
             # 集中決策：去重 + 合併 + 產生 DB ops + 寫 JSON + 套 DB
-            self._save_fb_posts_to_json(results)
+            if results:
+                self._save_fb_posts_to_json(results, confirmed_urls=newly_confirmed)
+            self.last_links_found = len(links)
             return results, False
 
         except Exception as e:
@@ -1915,7 +2241,10 @@ class FBScraperService:
                     p["url"] = self.normalize_fb_url_for_storage(p["url"])
                 if p.get("pfbid_url"):
                     p["pfbid_url"] = self.normalize_fb_url_for_storage(p["pfbid_url"])
-            return {"source": "facebook", "last_updated": data.get("last_updated"), "total_posts": len(posts), "posts": posts}
+            return {
+                "source": "facebook", "last_updated": data.get("last_updated"), "total_posts": len(posts), "posts": posts,
+                "confirmed_urls": data.get("confirmed_urls", []),
+            }
         except Exception:
             return {"source": "facebook", "last_updated": None, "total_posts": 0, "posts": []}
 
@@ -1989,7 +2318,7 @@ class FBScraperService:
 
         return changed
 
-    def _save_fb_posts_to_json(self, new_posts: List[Dict]) -> None:
+    def _save_fb_posts_to_json(self, new_posts: List[Dict], confirmed_urls: Sequence[str] = ()) -> None:
         """
         儲存 Facebook 貼文到 JSON 並以同決策同步資料庫。
         * 兩道去重關卡：
@@ -2117,17 +2446,25 @@ class FBScraperService:
                             break
 
                     if existing_by_hash:
-                        # 找到相同 content_hash → 合併 URL 欄位
-                        changed = False
-                        if not existing_by_hash.get("url") and new_url:
-                            existing_by_hash["url"] = new_url
-                            changed = True
-                        if not existing_by_hash.get("pfbid_url") and new_pfbid_url:
-                            existing_by_hash["pfbid_url"] = new_pfbid_url
-                            changed = True
+                        if self._is_same_post(existing_by_hash, np.get("timestamp")):
+                            # 同一篇的 pfbid 會隔一段時間換一個，換了就走到這裡；圖片也要合併，第一次沒抓齊的才補得回來
+                            changed = self._merge_fields_for_duplicate(existing_by_hash, np)
+                        else:
+                            # 文字相同但可能是另一篇：只補空白的網址，圖片和文字都不碰
+                            self.logger.info(
+                                f"內文相同但發文時間不同（已存 {existing_by_hash.get('timestamp')}、"
+                                f"這次 {np.get('timestamp')}），當成不同篇，只補空白的網址：{new_pfbid_url or new_url}"
+                            )
+                            changed = False
+                            if not existing_by_hash.get("url") and new_url:
+                                existing_by_hash["url"] = new_url
+                                changed = True
+                            if not existing_by_hash.get("pfbid_url") and new_pfbid_url:
+                                existing_by_hash["pfbid_url"] = new_pfbid_url
+                                changed = True
 
-                        # 更新 last_seen
-                        existing_by_hash["last_seen"] = np["last_seen"]
+                            # 更新 last_seen
+                            existing_by_hash["last_seen"] = np["last_seen"]
 
                         if changed:
                             updated_count += 1
@@ -2152,6 +2489,17 @@ class FBScraperService:
             bundle["posts"] = existing_posts
             bundle["last_updated"] = datetime.now().isoformat()
             bundle["total_posts"] = len(existing_posts)
+            if confirmed_urls:
+                kept = [u for u in bundle.get("confirmed_urls", []) if u not in confirmed_urls]
+                bundle["confirmed_urls"] = (kept + list(confirmed_urls))[-CONFIRMED_URLS_KEPT:]
+
+            # 以相同決策同步 DB（DB 不做自行去重判斷）；失敗就不寫 JSON，下一輪照同樣的決策重來
+            if db_available and ops:
+                if not self._sync_db_from_ops(ops):
+                    self.logger.warning("資料庫寫入失敗，這輪不更新 JSON，下一輪重來")
+                    return
+            elif db_available:
+                self.logger.info("資料庫：無需異動（全部為 noop）")
 
             # 寫檔
             filepath = os.path.join(self.config["data_dir"], "fb_posts.json")
@@ -2160,20 +2508,15 @@ class FBScraperService:
 
             self.logger.info(f"✅ FB 貼文 JSON 已更新：新增 {added_count}、更新 {updated_count}、無變動 {noop_count}；總計 {len(existing_posts)} 篇")
 
-            # 以相同決策同步 DB（DB 不做自行去重判斷）
-            if db_available and ops:
-                self._sync_db_from_ops(ops)
-            elif db_available:
-                self.logger.info("資料庫：無需異動（全部為 noop）")
-
         except Exception as e:
             self.logger.error(f"儲存 FB 貼文 JSON 失敗: {e}")
             import traceback
             self.logger.error(traceback.format_exc())
 
     # ---------- 以 JSON 決策同步到資料庫 ----------
-    def _sync_db_from_ops(self, ops: List[Dict]) -> None:
+    def _sync_db_from_ops(self, ops: List[Dict]) -> bool:
         """
+        回傳有沒有寫成；資料庫模組不可用時沒有東西要寫，算寫成。
         僅依據 JSON 決策執行資料庫操作：
         - action == insert → 以 content_hash 新增
         - action == update → 以 content_hash 定位並「補空白欄位 / 合併較長文本 / 合併新圖片」
@@ -2185,7 +2528,7 @@ class FBScraperService:
         """
         if not db_available:
             self.logger.warning("資料庫模組不可用，跳過資料庫儲存")
-            return
+            return True
 
         # 準備送往 DB 的 ops 副本（只轉 timestamp 格式）
         ops_for_db: List[Dict] = []
@@ -2210,8 +2553,12 @@ class FBScraperService:
             inserted = sum(1 for op in ops_for_db if op.get("action") == "insert")
             updated = sum(1 for op in ops_for_db if op.get("action") == "update")
 
-            db_manager.commit()
+            # commit 失敗不丟例外、只回 False（只有更新的批次，資料庫鎖住就走到這裡），不看的話資料庫沒寫成也會寫 JSON
+            if not db_manager.commit():
+                self.logger.error("FB 貼文資料庫提交失敗")
+                return False
             self.logger.info(f"✅ FB 貼文資料庫已同步：新增 {inserted}、更新 {updated}")
+            return True
 
         except Exception as e:
             self.logger.error(f"同步 FB 貼文到資料庫失敗: {e}")
@@ -2219,6 +2566,7 @@ class FBScraperService:
                 session.rollback()
             import traceback
             self.logger.error(traceback.format_exc())
+            return False
         finally:
             if session:
                 session.close()

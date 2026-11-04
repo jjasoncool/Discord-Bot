@@ -12,6 +12,7 @@ from sqlalchemy import case
 
 from db.models import ArticleMenu, ArticleDetail, FBPost, FBImage, PTTPost, BahamutPost, BahamutPostComment, HardwareNews, get_db_session
 from sqlalchemy.orm import joinedload, subqueryload
+from services.fb_scraper_service import FBScraperService, is_video_cover
 from utils.logger import get_logger
 
 # 建立 FastAPI 實例
@@ -64,9 +65,31 @@ class FBPostResponse(BaseModel):
     timestamp: Optional[str]
     created_at: str
     images: List[str]
+    #: 這篇是影片貼文：影片封面不放進 images，要影片本身就打 /refresh
+    has_video: bool = False
 
     class Config:
         from_attributes = True
+
+
+class FBVideoResponse(BaseModel):
+    """FB 影片的下載資訊；網址約 4.4 天過期"""
+    id: str
+    hd_url: Optional[str] = None
+    sd_url: Optional[str] = None
+    duration_ms: Optional[int] = None
+    permalink_url: Optional[str] = None
+
+
+class FBRefreshResponse(BaseModel):
+    """重開一篇貼文拿到的新網址"""
+    success: bool
+    images: List[str] = []
+    videos: List[FBVideoResponse] = []
+    #: 頁面表示有幾格（多圖版面才有，影片也佔一格）；比 images 加 videos 多代表翻照片中途放棄了
+    expected_images: Optional[int] = None
+    message: Optional[str] = None
+
 
 class FBPostsResponse(BaseModel):
     """FB 貼文列表回應模型"""
@@ -339,6 +362,23 @@ async def get_article_by_id(
         # 保持 HTTP 500 錯誤，因為這是伺服器內部錯誤
         raise HTTPException(status_code=500, detail=f"查詢文章失敗: {str(e)}")
 
+def _fb_post_response(post: FBPost) -> FBPostResponse:
+    """資料庫一列 → API 回應。影片封面不當圖片給：發到 Discord 的應該是影片，封面可能只是一張白圖。"""
+    urls = [img.image_url for img in post.images]
+    return FBPostResponse(
+        id=post.id,
+        post_id=post.post_id,
+        url=post.url,
+        pfbid_url=post.pfbid_url,
+        text=post.text,
+        text_md=post.text_md,
+        timestamp=post.timestamp.isoformat() if post.timestamp else None,
+        created_at=post.created_at.isoformat(),
+        images=[url for url in urls if not is_video_cover(url)],
+        has_video=any(is_video_cover(url) for url in urls),
+    )
+
+
 @app.get("/api/fb_posts/recent", response_model=FBPostsResponse)
 async def get_recent_fb_posts(
     days: int = 7,
@@ -368,22 +408,7 @@ async def get_recent_fb_posts(
         ).order_by(FBPost.created_at.desc()).limit(limit).all()
 
         # 轉換為回應格式
-        post_responses = []
-        for post in posts:
-            # 獲取關聯的圖片
-            images = [img.image_url for img in post.images] if hasattr(post, 'images') else []
-
-            post_responses.append(FBPostResponse(
-                id=post.id,
-                post_id=post.post_id,
-                url=post.url,
-                pfbid_url=post.pfbid_url,
-                text=post.text,
-                text_md=post.text_md,
-                timestamp=post.timestamp.isoformat() if post.timestamp else None,
-                created_at=post.created_at.isoformat(),
-                images=images
-            ))
+        post_responses = [_fb_post_response(post) for post in posts]
 
         logger.info(f"找到 {len(post_responses)} 篇 FB 貼文")
 
@@ -430,26 +455,39 @@ async def get_fb_post_by_id(
             logger.warning(f"API 查詢：找不到 {query_type} 的 FB 貼文")
             return SingleFBPostResponse(success=False, message=f"找不到 {query_type} 的 FB 貼文")
 
-        # 獲取關聯的圖片
-        images = [img.image_url for img in post.images] if hasattr(post, 'images') else []
-
-        response_data = FBPostResponse(
-            id=post.id,
-            post_id=post.post_id,
-            url=post.url,
-            pfbid_url=post.pfbid_url,
-            text=post.text,
-            text_md=post.text_md,
-            timestamp=post.timestamp.isoformat() if post.timestamp else None,
-            created_at=post.created_at.isoformat(),
-            images=images
-        )
-
-        return SingleFBPostResponse(success=True, post=response_data)
+        return SingleFBPostResponse(success=True, post=_fb_post_response(post))
 
     except Exception as e:
         logger.error(f"查詢 FB 貼文 {post_id} 時發生錯誤: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"查詢 FB 貼文失敗: {str(e)}")
+
+
+@app.post("/api/fb_posts/{post_id}/refresh", response_model=FBRefreshResponse)
+def refresh_fb_post(post_id: int, db: Session = Depends(get_db)):
+    """重開一篇貼文，回傳新的圖片與影片網址。
+
+    bot 開不了 FB（沒有瀏覽器，走 IPv4 又會被導去登入頁），圖片與影片網址過期後只能由爬蟲重開。不寫資料庫。
+    不是 async：開瀏覽器要幾十秒，交給 FastAPI 的執行緒池，不擋其他查詢。
+    """
+    post = db.query(FBPost).filter(FBPost.id == post_id).first()
+    if not post:
+        return FBRefreshResponse(success=False, message=f"找不到資料庫 ID {post_id} 的 FB 貼文")
+    # url 欄有幾列存到別篇的網址，pfbid_url 才是這篇自己的
+    url = post.pfbid_url or post.url
+    timestamp = post.timestamp.strftime("%Y-%m-%d %H:%M:%S") if post.timestamp else None
+    text = post.text or ""
+    if not url:
+        return FBRefreshResponse(success=False, message="這篇沒有文章網址")
+    try:
+        fresh = FBScraperService().refetch_post(url, timestamp=timestamp, text=text)
+    except Exception as e:  # 邊界：一次外部請求；瀏覽器開不起來就回失敗，由 bot 改發舊網址與連結
+        logger.error(f"重開 FB 貼文 {post_id} 失敗: {e}", exc_info=True)
+        return FBRefreshResponse(success=False, message="重開貼文失敗")
+    if fresh is None:
+        return FBRefreshResponse(success=False, message="重開貼文失敗")
+    return FBRefreshResponse(
+        success=True, images=fresh["images"], videos=fresh["videos"], expected_images=fresh.get("expected_images"),
+    )
 
 
 @app.get("/api/ptt_posts/recent", response_model=PTTPostsResponse)
