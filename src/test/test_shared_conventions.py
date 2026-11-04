@@ -884,6 +884,12 @@ RULES = [
         allowed={"telegram_scraper/media_download.py"},
     ),
     Rule(
+        name="Discord 上傳單檔上限（離上限留一點餘裕）",
+        pattern=r"filesize_limit\s*-\s*512",
+        canonical="utils.discord_content.upload_limit",
+        allowed={"utils/discord_content.py"},
+    ),
+    Rule(
         name="爬蟲存媒體檔（已有完整的檔不重抓、中斷不傷舊檔）",
         pattern=r"\bdownload_with_stall_guard\(",
         canonical="telegram_scraper.media_download.fetch_media_file",

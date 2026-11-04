@@ -34,7 +34,7 @@ import asyncpg
 import discord
 from services.relay.telegram_filter import MediaFile, Verdict, media_kind
 from shared.telegram import MEDIA_HOLD_NOTIFY, MEDIA_RETRY_WINDOW, normalize_channel_identifier
-from utils.discord_content import split_message
+from utils.discord_content import split_message, upload_limit
 from utils.discord_threads import fetch_thread, reopen_thread
 from utils.media_probe import probe_duration, run_media_tool
 from utils.background_tasks import spawn, supervise
@@ -989,18 +989,13 @@ class TelegramRenderAdapter:
 class DiscordMessagePublisher:
     """共用發送能力：只執行 RenderPlan，不決定內容。"""
 
-    # 備用上限（無法取得 guild 資訊時使用）
-    _DISCORD_FILE_LIMIT_FALLBACK = 25 * 1024 * 1024 - 512 * 1024  # ~24.5 MB
     _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff"}
     _VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".wmv"}
 
     @staticmethod
     def _get_file_limit(channel: discord.abc.Messageable) -> int:
-        """從 channel 所屬 guild 取得實際檔案上限，留 512 KB 餘裕。"""
-        guild = getattr(channel, "guild", None)
-        if guild is not None:
-            return guild.filesize_limit - 512 * 1024
-        return DiscordMessagePublisher._DISCORD_FILE_LIMIT_FALLBACK
+        """從 channel 所屬 guild 取得實際檔案上限。"""
+        return upload_limit(channel)
 
     @staticmethod
     def _chunk_attachments(attachments: list[AttachmentSpec], chunk_size: int = 10) -> list[list[AttachmentSpec]]:

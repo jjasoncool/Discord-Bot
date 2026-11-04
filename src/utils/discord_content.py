@@ -171,6 +171,19 @@ def content_hash(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()
 
 
+#: 離上傳上限留一點餘裕：Discord 算的是整個請求，不只檔案本身
+_UPLOAD_MARGIN = 512 * 1024
+#: 拿不到伺服器資訊時的上限（沿用 Telegram 轉發原本的值；實際發文都有伺服器資訊，走不到這裡）
+_FALLBACK_UPLOAD_LIMIT = 25 * 1024 * 1024 - _UPLOAD_MARGIN
+
+
+def upload_limit(target) -> int:
+    """這個頻道（或伺服器）能傳的單檔上限。每次從伺服器讀，加成等級變了就跟著變。"""
+    guild = getattr(target, "guild", target)
+    limit = getattr(guild, "filesize_limit", None)
+    return limit - _UPLOAD_MARGIN if limit else _FALLBACK_UPLOAD_LIMIT
+
+
 def chunk_discord_files(files: List[discord.File], chunk_size: int = 10) -> List[List[discord.File]]:
     """將 Discord 附件依 Discord 限制切成多批。"""
     if not files:

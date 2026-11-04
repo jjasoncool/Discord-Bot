@@ -67,6 +67,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 描述品質規則 | `persona_description_rules.txt`（各處讀同一個檔） |
 | 人格素描的角色設定 | 疊在 `personality_extraction_prompt.json` 的 `system_prompt` 之上 |
 | 發文到頻道 | `utils.discord_content.post_to_channel`（論壇／文字頻道自動分流、附件分批、失敗退純文字） |
+| Discord 上傳單檔上限（離上限留一點餘裕；每次從伺服器讀） | `utils.discord_content.upload_limit(channel 或 guild)`；守衛擋自己算 `filesize_limit - 512…` |
 | 把長文切成 Discord 放得下的多段 | `utils.discord_content.split_message`（不丟內容、優先換行與空白切、不切壞暴雷 `||`；上限常數 `DISCORD_MESSAGE_LIMIT`） |
 | 回互動一段長度跟資料量走的純文字（一次性的長文字回覆） | `utils.utils.safe_send_interaction_text(interaction, text, ephemeral=)`（切段、第一則回應、其餘接續；embed 欄位 1024 字放不下清單，守衛擋自己寫 `for … in split_message(` 的送出迴圈）；主控台裡的清單（頻道、身分組、狀態詳細）不用它，改成分頁畫面一頁一頁翻（見「群主的管理操作放哪」） |
 | 面板或主控台上換畫面（改互動所在的那一則訊息） | `utils.discord_content.edit_screen(interaction, view=…)`（還沒回應用回應改、回應過或 defer 了就改原訊息；新版版面只給 view，content／embed 明確清掉，舊 embed 訊息才換得過去；embed 版面板給 `embed=`；從按鈕或選單開的表單送出時也能這樣改原訊息；守衛擋自己寫 `edit_message(content=None, embed=None, view=`） |

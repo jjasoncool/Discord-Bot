@@ -53,6 +53,7 @@ from services.relay.telegram_relay_service import (  # noqa: E402
     TelegramRenderAdapter,
     build_telegram_pg_dsn_from_env,
 )
+from utils.discord_content import upload_limit  # noqa: E402
 
 
 class _Publisher(DiscordMessagePublisher):
@@ -104,7 +105,7 @@ async def run(targets: dict[int, Optional[Verdict]], apply: bool) -> None:
         worker = MessageRelayWorker(
             bot=client, repository=repo, route_resolver=resolver,
             render_adapter=TelegramRenderAdapter(),
-            publisher=_Publisher(guild.filesize_limit - 512 * 1024),
+            publisher=_Publisher(upload_limit(guild)),
             dsn="", content_filter=RelayFilter(), quarantine=quarantine,
         )
 
