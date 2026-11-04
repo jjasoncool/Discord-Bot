@@ -22,8 +22,12 @@ load_dotenv()
 logger = get_logger('main')
 
 
-FB_EMPTY_URL_RETRY_DELAY_MINUTES = 15
+#: 0 URL 時隔多久補抓（從上一次跑完算）
+FB_EMPTY_URL_RETRY_DELAY_MINUTES = 20
+#: 每輪最多補抓幾次。補抓會往後飄，靠時間湊到下一輪的話，第三次會排在排程之後幾分鐘、連打兩次，所以用次數擋
+FB_EMPTY_URL_MAX_RETRIES = 2
 fb_retry_scheduled_at = None
+fb_retries_done = 0
 fb_task_running = False
 
 
@@ -54,9 +58,9 @@ def article_scrape_task():
             scraper_service.db_manager.close()
 
 
-def fb_scrape_task():
-    """Facebook 爬蟲任務"""
-    global fb_retry_scheduled_at, fb_task_running
+def fb_scrape_task(is_retry: bool = False):
+    """Facebook 爬蟲任務；is_retry=True 是 0 URL 之後的補抓，其餘是新的一輪，補抓次數重算。"""
+    global fb_retry_scheduled_at, fb_retries_done, fb_task_running
 
     if fb_task_running:
         logger.warning("Facebook 爬蟲任務已在執行中，略過本次重複觸發")
@@ -64,6 +68,10 @@ def fb_scrape_task():
 
     fb_task_running = True
     try:
+        if not is_retry:
+            # 新的一輪接手：還沒跑的補抓取消，不然幾分鐘內會再打一次
+            fb_retry_scheduled_at = None
+            fb_retries_done = 0
         logger.info("開始執行 Facebook 爬蟲任務")
         fb_service = FBScraperService()
         results = fb_service.scrape_facebook_posts()
@@ -77,16 +85,14 @@ def fb_scrape_task():
             # 全部不用開貼文頁也要通知：bot 只靠這個通知才會補送之前沒送成的貼文
             _notify_discord_bot("fb", {"count": len(results)})
         elif empty_link_failure:
-            if fb_retry_scheduled_at is None:
+            if fb_retries_done >= FB_EMPTY_URL_MAX_RETRIES:
+                logger.warning("Facebook 已補抓 %s 次仍為 0 URL，等下一輪排程", fb_retries_done)
+            else:
                 fb_retry_scheduled_at = datetime.now() + timedelta(minutes=FB_EMPTY_URL_RETRY_DELAY_MINUTES)
                 logger.warning(
-                    "Facebook 本輪為 0 URL，已排入 %s 分鐘後補抓：scheduled_at=%s",
+                    "Facebook 本輪為 0 URL，已排入 %s 分鐘後補抓（已補抓 %s 次）：scheduled_at=%s",
                     FB_EMPTY_URL_RETRY_DELAY_MINUTES,
-                    fb_retry_scheduled_at.isoformat(),
-                )
-            else:
-                logger.warning(
-                    "Facebook 本輪為 0 URL，但已有待執行補抓，不重複排入：scheduled_at=%s",
+                    fb_retries_done,
                     fb_retry_scheduled_at.isoformat(),
                 )
         else:
@@ -99,8 +105,8 @@ def fb_scrape_task():
 
 
 def run_pending_fb_retry_if_needed():
-    """若先前 FB 首頁 0 URL，於指定時間補抓一次；僅由單一主迴圈呼叫。"""
-    global fb_retry_scheduled_at, fb_task_running
+    """若先前 FB 首頁 0 URL，於指定時間補抓；僅由單一主迴圈呼叫。"""
+    global fb_retry_scheduled_at, fb_retries_done, fb_task_running
 
     if fb_retry_scheduled_at is None:
         return
@@ -113,12 +119,13 @@ def run_pending_fb_retry_if_needed():
 
     scheduled_at = fb_retry_scheduled_at
     fb_retry_scheduled_at = None
+    fb_retries_done += 1
     logger.info(
         "開始執行 Facebook 0 URL 延後補抓任務：scheduled_at=%s now=%s",
         scheduled_at.isoformat(),
         now.isoformat(),
     )
-    fb_scrape_task()
+    fb_scrape_task(is_retry=True)
 
 
 def ptt_scrape_task():
@@ -320,7 +327,8 @@ def main():
 
     # 設定定時任務（各自獨立 thread）
     schedule.every(15).minutes.do(_run_in_thread(article_scrape_task))
-    schedule.every(1).hours.do(_run_in_thread(fb_scrape_task))
+    # 官方多半在整點發文，固定 :05 抓才不會晚將近一小時；固定時間，重啟也不會換
+    schedule.every().hour.at(":05").do(_run_in_thread(fb_scrape_task))
     schedule.every(1).hours.do(_run_in_thread(ptt_scrape_task))
     schedule.every(1).hours.do(_run_in_thread(bahamut_scrape_task))
     schedule.every(1).hours.do(_run_in_thread(hkepc_scrape_task))
@@ -331,7 +339,7 @@ def main():
         threading.Thread(target=task, daemon=True).start()
 
     # 啟動定時任務循環
-    logger.info("定時任務已啟動：每15分鐘執行文章爬蟲，每1小時執行 Facebook/PTT/Bahamut 爬蟲")
+    logger.info("定時任務已啟動：每15分鐘執行文章爬蟲，每小時 :05 執行 Facebook，每1小時執行 PTT/Bahamut 爬蟲")
     while True:
         try:
             schedule.run_pending()
