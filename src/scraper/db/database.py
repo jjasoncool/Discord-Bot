@@ -296,6 +296,12 @@ class DatabaseManager:
             self.logger.error(f"更新 FB 貼文失敗: {str(e)}")
             return None
 
+    def _get_fb_post_by_both_urls(self, url: Optional[str], pfbid_url: Optional[str]) -> Optional[FBPost]:
+        """兩個網址都有值時找同樣網址的那一列；少一個就不會撞唯一限制，不用找。"""
+        if not (url and pfbid_url):
+            return None
+        return self.session.query(FBPost).filter(FBPost.url == url, FBPost.pfbid_url == pfbid_url).first()
+
     # === 新增：依 JSON 決策同步（ops 驅動；不重複判斷） ===
     def sync_fb_posts_ops(self, ops: List[Dict]) -> None:
         """
@@ -338,10 +344,22 @@ class DatabaseManager:
                 elif action == "update":
                     existing = self.get_fb_post_by_content_hash(ch)
                     if not existing:
-                        # 若找不到，退化為 insert（但原則上不會發生）
+                        # 文字改過雜湊就變了，用雜湊找不到。兩個網址都有值時，資料庫不准同樣的網址再多一列，
+                        # 撞上會整批失敗、之後每輪重來，連帶擋住同一批的新貼文
+                        same_urls = self._get_fb_post_by_both_urls(p.get("url"), p.get("pfbid_url"))
+                        new_time = parse_datetime(p.get("timestamp"))
+                        if same_urls and new_time and same_urls.timestamp == new_time:
+                            # 同一篇改了文字：改那一列，文字照 JSON 換成新的；列沒有多，也就不會重發
+                            same_urls.content_hash = ch
+                            same_urls.text = p.get("text", "")
+                            same_urls.text_md = p.get("text_md", "")
+                            same_urls.images  # 觸發 lazy load，避免重複插入同圖造成 UNIQUE constraint
+                            self._update_fb_post(same_urls, p)
+                            continue
+                        # 其餘退化為 insert。網址相同但發文時間不同是別篇，不能蓋掉它；不帶 url 才寫得進去
                         new_post = FBPost(
                             post_id=p.get("post_id"),
-                            url=(p.get("url") or None),
+                            url=None if same_urls else (p.get("url") or None),
                             pfbid_url=(p.get("pfbid_url") or None),
                             text=p.get("text", ""),
                             text_md=p.get("text_md", ""),
