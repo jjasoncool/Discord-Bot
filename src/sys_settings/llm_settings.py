@@ -528,8 +528,10 @@ class AmbientChatSettings(BaseSettings):
     # 對照現行權重的實際分數（單一鉤子命中）：
     #   什麼都沒命中 0.23｜聊完停頓 0.45｜獨白・對話正熱 0.50｜徵詢 0.52
     #   ｜懸空問句 0.73｜叫名字 0.79　　（可疊加，例如熱聊+停頓＝0.73）
-    # 取 0.4 的意義：**任一個鉤子命中就能開口**，只有「完全沒訊號的零星對話」才閉嘴（0.23）。
-    hook_threshold: float = 0.4
+    # 取 0.5 的意義：k-NN 中性時，獨白、對話正熱、徵詢、懸空問句、叫名字單獨命中就能開口，「聊完停頓」要再疊一個。
+    # 獨白與對話正熱單獨命中剛好踩在門檻上：k-NN 低於整體接話率就過不了，高於就過。
+    # 這個值維持 k-NN 固定扣分時的開口量；不調的話每天會多喚醒模型二、三十次。重算的數字記在交接檔的插話區塊。
+    hook_threshold: float = 0.5
     hook_explore_rate: float = 0.15  # ε-greedy：無視分數強制放行的比例，專收「鉤子不看好」的樣本。
     # 探索的前提：頻道最近真的有人在。沒人聊天時探索既學不到東西（沒人在，標籤必然是
     # 「沒人接」），又會在死寂的頻道突然冒一句——實測那正是「沒人聊天也硬回」的來源。
@@ -538,6 +540,10 @@ class AmbientChatSettings(BaseSettings):
     hook_knn_enabled: bool = True    # k-NN 特徵：過去語意相近情境下插話被接的比率（一次 embedding）
     hook_knn_top_k: int = 20
     hook_knn_max_distance: float = 0.50
+    hook_knn_base_days: int = 60          # k-NN 中性點：看最近幾天的整體接話率
+    hook_knn_base_min_samples: int = 50   # 樣本少於這個數就用預設值
+    hook_knn_default_base: float = 0.25   # 預設值：把用回覆功能接話算進去後的實測接話率
+    hook_knn_base_ttl_seconds: float = 3600.0  # 整體接話率多久重查一次
     hook_debug: bool = True          # 把每次鉤子計分的細項寫進 discord_bot.log（調門檻用）
 
     # 與 /askai 的讓位：foreground 活躍此秒數內，背景插話暫停（防換模型 ping-pong）

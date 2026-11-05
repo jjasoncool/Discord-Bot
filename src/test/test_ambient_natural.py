@@ -9,6 +9,8 @@
   5. 靜默期依對話節奏切換：慢節奏等人講完、熱聊只等一下就開講
   6. L4-b 接續（armed 用完即熄、window、chain 上限）
   7. 最新這則給模型看的文字：只回貼圖不會被當成「被 @ 卻沒說話」、自訂表情換成意思（2026-10-02）
+  8. 鉤子 k-NN 相對整體接話率：一般情境 0 分、比一般好才加分；整體接話率會重查、查不到用預設值、不拋例外
+  9. 預設門檻：多數單一鉤子能開口，只有「聊完停頓」要再疊一個
 
 全部 hermetic：不碰 DB、不碰模型、不連網（k-NN 特徵在測試中被替換掉）。
 
@@ -33,6 +35,7 @@ if SRC_DIR not in sys.path:
 
 from llm.ambient import ambient_hooks, ambient_reply
 from llm.ambient.ambient_hooks import _structural_features, _text_features
+from llm.storage import ai_interactions_store
 from llm.ambient.ambient_reply import _is_silence, _parse_line_choice, _passes_content_gate
 from llm.preprocess import chat_line
 from llm.preprocess.chat_line import (
@@ -600,6 +603,86 @@ class TextHookTests(unittest.TestCase):
         self.assertEqual(0.0, feats["solicit"])
 
 
+class KnnFeatureTests(unittest.TestCase):
+    """k-NN 特徵相對整體接話率：一般情境是 0 分，比一般好才加分，不是幾乎每次都扣分。"""
+
+    def setUp(self):
+        self.base = mock.Mock(return_value=(500, 0.25))
+        self.stats = mock.Mock(return_value=(20, 0.25))
+        self.now = 1000.0
+        for patcher in (
+            mock.patch.object(ai_interactions_store, "fetch_reply_base_rate", self.base),
+            mock.patch.object(ai_interactions_store, "fetch_reply_rate_stats", self.stats),
+            mock.patch.object(ambient_hooks, "_base_rate_cache", None),
+            mock.patch.object(ambient_hooks, "_clock", lambda: self.now),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def _feature():
+        return asyncio.run(ambient_hooks._knn_feature("大家在聊抽卡"))
+
+    def test_an_ordinary_situation_is_neutral(self):
+        self.assertEqual((0.0, 20), self._feature())
+
+    def test_better_than_usual_scores_up_and_worse_scores_down(self):
+        self.stats.return_value = (20, 0.4)
+        self.assertAlmostEqual(0.15, self._feature()[0])
+        self.stats.return_value = (20, 0.1)
+        self.assertAlmostEqual(-0.15, self._feature()[0])
+
+    def test_too_few_neighbours_is_no_signal(self):
+        self.stats.return_value = (4, 0.0)
+        self.assertEqual((0.0, 4), self._feature())
+        self.base.assert_not_called()
+
+    def test_too_few_samples_for_the_base_uses_the_default(self):
+        self.base.return_value = (3, 0.9)
+        self.stats.return_value = (20, 0.25)
+        expected = 0.25 - ambient_hooks._SETTINGS.hook_knn_default_base
+        self.assertAlmostEqual(expected, self._feature()[0])
+
+    def test_the_base_is_reread_after_the_ttl_because_the_bot_runs_for_days(self):
+        self._feature()
+        self._feature()
+        self.assertEqual(1, self.base.call_count)
+        self.now += ambient_hooks._SETTINGS.hook_knn_base_ttl_seconds + 1
+        self._feature()
+        self.assertEqual(2, self.base.call_count)
+
+    def test_a_broken_query_is_no_signal(self):
+        self.stats.side_effect = RuntimeError("資料庫連不上")
+        self.assertEqual((0.0, 0), self._feature())
+
+
+class ReplyBaseRateStoreTests(unittest.TestCase):
+    """整體接話率和 k-NN 的比率取一樣的樣本，失敗不拋。"""
+
+    def _conn(self, row):
+        self.cur = mock.MagicMock()
+        self.cur.__enter__.return_value = self.cur
+        self.cur.fetchone.return_value = row
+        conn = mock.MagicMock()
+        conn.__enter__.return_value = conn
+        conn.cursor.return_value = self.cur
+        return conn
+
+    def test_counts_only_observed_spontaneous_interjections(self):
+        with mock.patch.object(ai_interactions_store, "_get_conn", return_value=self._conn((800, 0.24))):
+            self.assertEqual((800, 0.24), ai_interactions_store.fetch_reply_base_rate(days=60))
+        sql = self.cur.execute.call_args.args[0]
+        for condition in ("got_reply IS NOT NULL", "directed = FALSE", "followup = FALSE"):
+            self.assertIn(condition, sql)
+        self.assertEqual((60,), self.cur.execute.call_args.args[1])
+
+    def test_no_rows_and_failures_come_back_empty(self):
+        with mock.patch.object(ai_interactions_store, "_get_conn", return_value=self._conn((0, None))):
+            self.assertEqual((0, 0.0), ai_interactions_store.fetch_reply_base_rate())
+        with mock.patch.object(ai_interactions_store, "_get_conn", side_effect=RuntimeError("連不上")):
+            self.assertEqual((0, 0.0), ai_interactions_store.fetch_reply_base_rate())
+
+
 class EvaluateTests(unittest.TestCase):
     """整體計分：否決 → 不過；強鉤子 → 過；ε-greedy → 分數沒過也可能放行。"""
 
@@ -646,6 +729,32 @@ class EvaluateTests(unittest.TestCase):
         decision = self._run(msgs)
         self.assertTrue(decision.passed)
         self.assertFalse(decision.explore)
+
+    def _decide_with(self, feature):
+        """預設門檻下，只命中這一個鉤子會不會放行（探索關掉、k-NN 中性）。"""
+        self._override(hook_explore_rate=0.0)
+        ambient_hooks._structural_features = lambda recent, now_ts, obs: ({feature: 1.0}, None)
+        return self._run([_msg("今天好累", mid=1, author_id=5)]).passed
+
+    def test_most_single_hooks_can_open_but_a_lull_alone_cannot(self):
+        # 門檻是話多話少的主旋鈕：這條守住 settings 註解講的那條線，改門檻要連說明一起改
+        for feature in ("active_chat", "monologue", "dangling_question"):
+            self.assertTrue(self._decide_with(feature), feature)
+        self.assertFalse(self._decide_with("lull_after_burst"))
+
+    def test_a_hook_sitting_on_the_threshold_is_decided_by_knn(self):
+        # 對話正熱單獨命中剛好踩在門檻上：情境比一般差就過不了、不差就過
+        async def worse(_situation):
+            return (-0.1, 20)
+
+        ambient_hooks._knn_feature = worse
+        self.assertFalse(self._decide_with("active_chat"))
+
+        async def better(_situation):
+            return (0.1, 20)
+
+        ambient_hooks._knn_feature = better
+        self.assertTrue(self._decide_with("active_chat"))
 
     def test_explore_requires_the_channel_to_have_people(self):
         # 迴歸：探索原本不管有沒有人在，於是死寂的頻道也會被硬放行——實測「無任何特徵卻被

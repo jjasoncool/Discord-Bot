@@ -273,6 +273,15 @@ def mark_got_reply(
     )
 
 
+def clear_got_reply(reply_message_id: str) -> bool:
+    """把「有人接」收回來，其他欄位不動：群主用回覆罵它，不記仇，但那也不算話被接下去。sync。"""
+    return _update_with_retry(
+        f"""UPDATE {_TABLE} SET got_reply = FALSE
+            WHERE reply_message_id = %s AND got_reply IS NOT NULL""",
+        reply_message_id, what="got_reply 收回", attempts=1, retry_delay=0.0,
+    )
+
+
 def mark_insulted(
     reply_message_id: str, *, attempts: int = 4, retry_delay: float = 2.5
 ) -> bool:
@@ -414,6 +423,36 @@ def fetch_reply_rate_stats(
     if not rows:
         return (0, 0.0)
     return (len(rows), sum(1 for r in rows if r[0]) / len(rows))
+
+
+def fetch_reply_base_rate(*, days: int = 60) -> tuple[int, float]:
+    """最近幾天自發插話被接話的整體比率，鉤子 k-NN 特徵的中性點。回 (樣本數, 比率)；沒資料或失敗回 (0, 0.0)。
+
+    取樣條件和 `fetch_reply_rate_stats` 相同（已觀測、純自發），兩邊才比得起來。
+    """
+    try:
+        conn = _get_conn()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        SELECT count(*), avg(got_reply::int)
+                        FROM {_TABLE}
+                        WHERE got_reply IS NOT NULL
+                          AND directed = FALSE
+                          AND followup = FALSE
+                          AND ts >= now() - make_interval(days => %s)
+                        """,
+                        (days,),
+                    )
+                    n, rate = cur.fetchone()
+        finally:
+            conn.close()
+    except Exception as exc:  # 邊界：統計失敗不該拖垮插話，呼叫端退回預設基準
+        logger.debug("ai_interactions 接話基準統計失敗：%s", exc)
+        return (0, 0.0)
+    return (int(n or 0), float(rate or 0.0))
 
 
 def note_reaction(

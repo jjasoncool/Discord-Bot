@@ -8,6 +8,7 @@
   不記名單；標記夾在其他文字裡＝拿不定主意 → 不送，也不按表情、不記仇（保護機制門檻要高）
 - 開關 off：記仇的效果全停（照常主動接話、點名不帶心情、讚照算）
 - 被點名就用掉「接話」判定：對方用回覆罵完、下一句跟別人聊，不能被當成在接它的話
+- 用回覆功能回它的話算「有人接」，標在被回的那則；只 @ 它、回別人都不算
 - 最近罵過它的人：最新一則是他的就不主動插話、模型選了他那則來接也不送；他點名照樣回
 - 記仇中的人點名：system prompt 帶上【你的心情】（幾天前、幾次），不帶他罵的原話與名字（那是可信區）；
   別人點名不帶
@@ -175,8 +176,31 @@ class EntryTests(unittest.TestCase):
         self._armed_after_interjecting_on(INSULTER)
         self._send(_entry_message("媽的 腦殘AI 閉嘴拉", reply_to_bot=True, mid=1),
                    _entry_message("416婚紗", mid=2))
-        self.mark_got_reply.assert_not_called()
+        # 只有回覆那則本身標過一次（之後模型判定辱罵，mark_insulted 會翻回 FALSE）；跟別人聊的那句不算
+        self.mark_got_reply.assert_called_once_with(str(BOT_MSG), attempts=1)
         self.assertFalse(self.pass_mock.await_args.kwargs.get("followup"))
+
+    def test_replying_to_its_words_counts_as_taken_up(self):
+        self._send(_entry_message("這句是什麼意思", reply_to_bot=True))
+        self.mark_got_reply.assert_called_once_with(str(BOT_MSG), attempts=1)
+
+    def test_a_reply_to_a_recent_interjection_retries_until_the_record_lands(self):
+        # 插話紀錄可能還在算 embedding、還沒寫進去：追蹤得到的才重試，回轉發或 /askai 的訊息不白等
+        with mock.patch.object(ambient_reply, "is_tracked_reply", return_value=True):
+            self._send(_entry_message("這句是什麼意思", reply_to_bot=True))
+        self.mark_got_reply.assert_called_once_with(str(BOT_MSG), attempts=4)
+
+    def test_a_plain_mention_does_not_say_which_words_were_taken_up(self):
+        msg = _entry_message("琇紫 今晚打本嗎")
+        msg.mentions = [BOT_USER]
+        self._send(msg)
+        self.mark_got_reply.assert_not_called()
+
+    def test_replying_to_someone_else_is_not_taking_up_its_words(self):
+        msg = _entry_message("真的假的", reply_to_bot=True)
+        msg.reference.resolved.author = SimpleNamespace(id=INSULTER)
+        self._send(msg)
+        self.mark_got_reply.assert_not_called()
 
     def test_taking_up_its_words_still_counts(self):
         # 對照組：沒有被點名夾在中間時，同一個人緊接著講話仍算接它的話
@@ -192,7 +216,9 @@ class PassTests(unittest.TestCase):
     def setUp(self):
         self.record_insult = mock.Mock()
         self.mark_insulted = mock.Mock()
-        for attr, value in (("record_insult", self.record_insult), ("mark_insulted", self.mark_insulted)):
+        self.clear_got_reply = mock.Mock()
+        for attr, value in (("record_insult", self.record_insult), ("mark_insulted", self.mark_insulted),
+                            ("clear_got_reply", self.clear_got_reply)):
             patcher = mock.patch.object(ambient_insult, attr, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -386,6 +412,8 @@ class PassTests(unittest.TestCase):
         msg.add_reaction.assert_awaited_once()
         self.record_insult.assert_not_called()
         self.mark_insulted.assert_not_called()
+        # 不記仇，但回覆那則先前已記成有人接，罵它不算話被接下去
+        self.clear_got_reply.assert_called_once_with(str(BOT_MSG))
 
 
 class _FakeCursor:

@@ -51,6 +51,7 @@ import discord
 
 from llm.storage.ai_interactions_store import (
     fetch_similar_positive,
+    is_tracked_reply,
     mark_got_reply,
     record_interaction,
 )
@@ -151,20 +152,20 @@ def _is_command_like(stripped: str) -> bool:
     return stripped.startswith("!") or stripped.startswith("/")
 
 
+def _replied_bot_message_id(bot, message: discord.Message) -> Optional[str]:
+    """這則訊息用 Discord 回覆功能回了機器人的哪一則；回的不是機器人就是 None。"""
+    ref = message.reference
+    resolved = getattr(ref, "resolved", None) if ref is not None else None
+    if isinstance(resolved, discord.Message) and bot.user is not None and resolved.author.id == bot.user.id:
+        return str(resolved.id)
+    return None
+
+
 def _is_directed(bot, message: discord.Message) -> bool:
     """是否被點名：@ 機器人，或 reply 機器人的訊息。"""
     if bot.user is not None and bot.user in message.mentions:
         return True
-    ref = message.reference
-    if ref is not None:
-        resolved = getattr(ref, "resolved", None)
-        if (
-            isinstance(resolved, discord.Message)
-            and bot.user is not None
-            and resolved.author.id == bot.user.id
-        ):
-            return True
-    return False
+    return _replied_bot_message_id(bot, message) is not None
 
 
 def _get_tracker(bot, channel_id: int) -> dict:
@@ -864,6 +865,14 @@ async def maybe_ambient_reply(bot, message: discord.Message) -> None:
             state["followup_armed"] = False
             state["directed"] = message
             state["directed_kind"] = "directed"
+            # 用回覆功能回它的話，是最直接的「話被接下去了」，鉤子學習少了這些正標籤會低估約三成。
+            # 模型判定成辱罵會翻回 FALSE；沒判到的（生成逾時、排隊時被下一則蓋掉、辱罵開關關著）就留著，量很少。
+            # 回的不是插話（轉發、/askai）標不到，不必重試。
+            replied_mid = _replied_bot_message_id(bot, message)
+            if replied_mid:
+                spawn(asyncio.to_thread(mark_got_reply, replied_mid,
+                                        attempts=4 if is_tracked_reply(replied_mid) else 1),
+                      name="插話互動標記")
         elif _is_followup_to_bot(state, message):   # 它剛回的那個人接話了
             state["directed"] = message
             state["directed_kind"] = "followup"

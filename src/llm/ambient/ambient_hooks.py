@@ -95,7 +95,7 @@ _W = {
     "lull_after_burst": 1.0,   # 聊了一陣後停下來 → 話題告一段落
     "named": 2.5,              # 沒 @ 但叫名字
     "solicit": 1.3,            # 明確徵詢全場
-    "knn_reply_rate": 1.8,     # k-NN：語意相近情境過去被接話的比率（置中後 ±0.5）
+    "knn_reply_rate": 1.8,     # k-NN：語意相近情境過去被接話的比率，相對整體接話率的差值
 }
 # 全部是正權重、沒有負鉤子：鉤子只回答「這一刻值不值得花 ~120s 去想」，
 # 「該不該插進這段對話」是語意問題，留給模型的第一關。
@@ -259,11 +259,34 @@ def _text_features(recent: list) -> dict:
     }
 
 
-async def _knn_feature(situation: str) -> tuple[float, int]:
-    """k-NN 軟特徵：過去語意相近情境下，自發插話被接話的比率。回 (置中後的值, 樣本數)。
+#: 接話基準的快取：(過期的時刻, 基準)
+_base_rate_cache: Optional[tuple[float, float]] = None
+#: 看時間走這個名字，測試才換得掉
+_clock = time.monotonic
 
-    值域置中到 [-0.5, +0.5]（比率 0.5 ＝中性 0）；樣本不足 5 筆視為沒訊號回 (0.0, n)——
-    功能剛上線時 got_reply 幾乎全是 NULL，這個特徵會自動休眠，等資料長出來才生效。
+
+async def _reply_base_rate() -> float:
+    """目前整體的接話率，k-NN 特徵的中性點。一小時重查一次（標籤會持續累積，bot 又長時間不重啟）；
+    樣本太少就用設定的預設值。"""
+    global _base_rate_cache
+    now = _clock()
+    if _base_rate_cache is not None and now < _base_rate_cache[0]:
+        return _base_rate_cache[1]
+    import asyncio
+
+    from llm.storage.ai_interactions_store import fetch_reply_base_rate
+
+    n, rate = await asyncio.to_thread(fetch_reply_base_rate, days=_SETTINGS.hook_knn_base_days)
+    base = rate if n >= _SETTINGS.hook_knn_base_min_samples else _SETTINGS.hook_knn_default_base
+    _base_rate_cache = (now + _SETTINGS.hook_knn_base_ttl_seconds, base)
+    return base
+
+
+async def _knn_feature(situation: str) -> tuple[float, int]:
+    """k-NN 軟特徵：過去語意相近情境下，自發插話被接話的比率。回 (相對整體接話率的差值, 樣本數)。
+
+    對「整體接話率」置中，比一般情境好才是正分：實際接話率只有兩成上下，對固定的 0.5 置中等於幾乎每次都扣分。
+    樣本不足 5 筆視為沒訊號回 (0.0, n)——功能剛上線時 got_reply 幾乎全是 NULL，這個特徵會自動休眠，等資料長出來才生效。
     """
     if not _SETTINGS.hook_knn_enabled or not situation.strip():
         return (0.0, 0)
@@ -278,12 +301,12 @@ async def _knn_feature(situation: str) -> tuple[float, int]:
             k=_SETTINGS.hook_knn_top_k,
             max_distance=_SETTINGS.hook_knn_max_distance,
         )
+        if n < 5:
+            return (0.0, n)
+        return (rate - await _reply_base_rate(), n)
     except Exception as exc:
         logger.debug("鉤子 k-NN 特徵取得失敗：%s", exc)
         return (0.0, 0)
-    if n < 5:
-        return (0.0, n)
-    return (rate - 0.5, n)
 
 
 async def evaluate(recent: list, *, situation: str = "") -> HookDecision:

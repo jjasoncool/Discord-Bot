@@ -24,7 +24,7 @@ from typing import Optional
 
 import discord
 
-from llm.storage.ai_interactions_store import mark_insulted, recent_insults, record_insult
+from llm.storage.ai_interactions_store import clear_got_reply, mark_insulted, recent_insults, record_insult
 from sys_settings import switches
 from sys_settings.llm_settings import AmbientChatSettings
 from sys_settings.time_settings import APP_TZ
@@ -108,6 +108,8 @@ async def respond(message: discord.Message, *, insulted_reply_id: Optional[str])
         logger.info("ambient 被罵：按表情失敗 message=%s：%s", message.id, exc)
     if message.author.id == bot_owner_id():
         logger.info("ambient 被群主罵 channel=%s：按表情，不記仇", message.channel.id)
+        if insulted_reply_id:
+            await asyncio.to_thread(clear_got_reply, insulted_reply_id)
         return
     await asyncio.to_thread(
         record_insult,
