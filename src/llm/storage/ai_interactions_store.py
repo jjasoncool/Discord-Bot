@@ -593,6 +593,39 @@ def fetch_similar_positive(
     return rows
 
 
+def fetch_learned_lines(since: str, *, limit: int = 500) -> list[str]:
+    """`since` 之後的自發插話裡，換到回應（有讚或有人接）、沒有負評、沒被罵的句子，新到舊。sync；失敗回空。
+
+    「換到回應」只代表有人理，不代表語氣好，所以這些句子只當參考，不取代預設句庫。
+    """
+    try:
+        conn = _get_conn()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        SELECT reply_text
+                        FROM {_TABLE}
+                        WHERE ts >= %s::timestamptz
+                          AND directed = FALSE
+                          AND followup = FALSE
+                          AND NOT insulted
+                          AND negative_reactions = 0
+                          AND (positive_reactions > 0 OR got_reply)
+                        ORDER BY ts DESC
+                        LIMIT %s
+                        """,
+                        (since, limit),
+                    )
+                    return [r[0] for r in cur.fetchall()]
+        finally:
+            conn.close()
+    except Exception as exc:  # 邊界：讀不到學到的句子就只用預設句，不該拖垮插話
+        logger.warning("ai_interactions 讀學到的句子失敗：%s", exc)
+        return []
+
+
 def backfill_embeddings(*, batch: int = 50, max_rows: Optional[int] = None) -> int:
     """回填 embedding IS NULL 且有情境文字的舊列（idempotent、best-effort）。
 

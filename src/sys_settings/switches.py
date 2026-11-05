@@ -69,6 +69,9 @@ class Switches(BaseModel):
     #: dry_run＝記錄模式：工具照宣告、名字檢查照做、額度照扣，但不出網、不給她結果，只記下她想查什麼；
     #: off＝不給工具，system 段跟原本一樣（user 段照樣帶今天日期）
     ambient_search_mode: Literal["off", "dry_run", "on"] = "off"
+    #: 插話的語氣參考句從哪來（llm.ambient.ambient_style_lines）：off＝照舊撈被讚過的舊插話（style_refs）；
+    #: on＝每次從預設句庫與學到的句子抽幾句放 user 段。要和新人格的提示詞一起切，舊人格配新句庫會兩邊打架
+    ambient_seed_lines_mode: Literal["off", "on"] = "off"
     #: 插話的思考強度（主模型模板的 reasoning_effort）：default＝模板預設的最高強度，開頭會叫模型仔細想；medium＝沒有
     #: 那句，低一點。只影響插話。改了第一次要整段重讀提示詞，約多 40 秒
     ambient_reasoning_effort: Literal["default", "medium", "low"] = "default"

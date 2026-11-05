@@ -90,6 +90,12 @@ class GenerateReplyToolTests(unittest.IsolatedAsyncioTestCase):
     async def ask(self, runner, **kwargs):
         return await self.svc.generate_reply(prompt="深塔多久重置？", system="你是 bot", tool_runner=runner, **kwargs)
 
+    async def test_the_style_refs_note_reaches_the_prompt_builder(self):
+        # 插話的語氣參考句來自句庫時要換掉開頭說明，中間漏傳的話模型會看到「你過去講過」
+        self.replies = [says("正式回答")]
+        await self.ask(FakeRunner(), style_refs=["一句"], style_refs_note="（換一段說明）")
+        self.assertEqual("（換一段說明）", self.build.call_args.kwargs["style_refs_note"])
+
     async def test_the_reasoning_effort_reaches_every_model_call(self):
         self.replies = [says("正式回答")]
         await self.ask(FakeRunner(), reasoning_effort="medium")

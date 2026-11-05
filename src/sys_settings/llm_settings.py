@@ -439,6 +439,14 @@ class AmbientChatSettings(BaseSettings):
     style_refs_max_distance: float = 0.45 # cosine 距離地板（越小越像）；保守起步，看 debug 再放寬
     style_refs_inject_count: int = 2      # 過地板後最多注入幾條（在池子裡抽樣 → 每次不同、不跳針）
     style_refs_min_positive: int = 1      # 至少幾個正向反應才進召回池
+    # ── 語氣參考句（開關 ambient_seed_lines_mode）：預設句庫＋學到的句子，每次抽幾句放 user 段。
+    seed_lines_path: str = prompt_file("ambient_seed_lines.json")  # 手改即生效；learned_since 也寫在這份
+    seed_lines_per_turn: int = 3          # 每次幾句
+    seed_lines_learned_start_at: int = 30 # 學到幾句後開始放一句學到的（少於這個數，樣本太雜）
+    seed_lines_learned_more_at: int = 100 # 學到幾句後只留一句預設，其餘都放學到的
+    seed_lines_learned_max_chars: int = 40  # 太長的多半在講當時的事，換個場面用不上
+    seed_lines_learned_ttl_seconds: float = 3600.0  # 學到的句子多久重查一次
+    seed_lines_recent_size: int = 15      # 記最近用過幾句，下次先避開
 
     # 背景上下文：抓近期幾則當短期對話記憶（插話模型的 context 夠大，可帶完整脈絡）
     history_limit: int = 20

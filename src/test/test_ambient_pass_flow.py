@@ -23,7 +23,7 @@ if SRC_DIR not in sys.path:
 
 import discord  # noqa: E402
 
-from llm.ambient import ambient_insult, ambient_reply, ambient_search  # noqa: E402
+from llm.ambient import ambient_insult, ambient_reply, ambient_search, ambient_style_lines  # noqa: E402
 from llm.ambient.ambient_hooks import HookDecision  # noqa: E402
 from sys_settings import switches  # noqa: E402
 from sys_settings.switches import Switches  # noqa: E402
@@ -89,6 +89,9 @@ class PassFlowTests(unittest.TestCase):
         self.persona_cards = None
         self.memory_lines = None
         self.tag_lines = None
+        self.style_refs = mock.AsyncMock(return_value=None)
+        self.style_lines = mock.AsyncMock(return_value=None)
+        self.style_lines_on = False
         self.search_tools = None
 
     def _model_says(self, reply, error_kind=None):
@@ -123,7 +126,8 @@ class PassFlowTests(unittest.TestCase):
             recall_lines=mock.AsyncMock(return_value=self.memory_lines),
             recall_signature_tags=mock.AsyncMock(return_value=self.tag_lines),
             _build_chat_callback_context=mock.AsyncMock(return_value=None),
-            _build_style_refs=mock.AsyncMock(return_value=None),
+            _build_style_refs=self.style_refs,
+            _build_style_lines=self.style_lines,
             _prepare_search_tools=mock.AsyncMock(side_effect=lambda *a, **k: self.search_tools),
             _write_ambient_debug=lambda **k: self.debug_writes.append(k),
             _log_skip=lambda cid, reason: self.skips.append(reason),
@@ -134,6 +138,7 @@ class PassFlowTests(unittest.TestCase):
         self.persona_builder = stubs["_build_persona_context"]
         self.prepare_search = stubs["_prepare_search_tools"]
         with mock.patch.multiple(ambient_reply, **stubs), \
+                mock.patch.object(ambient_style_lines, "enabled", lambda: self.style_lines_on), \
                 mock.patch.object(ambient_insult, "grudges", _grudges), \
                 mock.patch.object(ambient_insult, "enabled", lambda: True):
             asyncio.run(ambient_reply._run_one_ambient_pass(
@@ -145,6 +150,24 @@ class PassFlowTests(unittest.TestCase):
 
     def _state(self):
         return ambient_reply._get_proc_state(CHANNEL_ID)
+
+    # ── 語氣參考：開關決定句子從哪來，說明跟著句子走 ──
+    def test_style_lines_off_keeps_the_old_refs_and_their_note(self):
+        self.style_refs.return_value = ["舊句"]
+        self._run(_message("這波真的很誇張"))
+        kwargs = self._generate_kwargs()
+        self.assertEqual(["舊句"], kwargs["style_refs"])
+        self.assertIsNone(kwargs["style_refs_note"])
+        self.style_lines.assert_not_awaited()
+
+    def test_style_lines_on_sends_the_lines_with_their_own_note(self):
+        self.style_lines_on = True
+        self.style_lines.return_value = ["・（情境）一句"]
+        self._run(_message("這波真的很誇張"))
+        kwargs = self._generate_kwargs()
+        self.assertEqual(["・（情境）一句"], kwargs["style_refs"])
+        self.assertEqual(ambient_style_lines.NOTE, kwargs["style_refs_note"])
+        self.style_refs.assert_not_awaited()
 
     # ── 思考強度：只有插話照開關走 ──
     def _effort_sent_with(self, value):

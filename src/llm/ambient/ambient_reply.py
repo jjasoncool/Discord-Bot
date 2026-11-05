@@ -3,6 +3,7 @@
 架構定位：功能層（`llm/ambient`）。上層：介面層的 `discord_bot.on_message`（背景 task 執行，不阻塞訊息處理）。
 下層：`services.llm_service.LLMService`（生成）、`ambient_hooks`（鉤子閘）、`ambient_memory`（偏好與招牌梗召回）、
 `ambient_insult`（被罵的應對與記仇名單）、`ambient_search`（判斷時可以先查一次遊戲情報或網路）、
+`ambient_style_lines`（語氣參考句）、
 `llm.preprocess`（聊天行格式、人名錨點、貼文與表情描述）、`llm.storage.ai_interactions_store`（互動紀錄）、
 `llm.client.gpu_gate`（前景讓位）、`utils.discord_content`（回覆太長時切段）。
 
@@ -55,7 +56,7 @@ from llm.storage.ai_interactions_store import (
     mark_got_reply,
     record_interaction,
 )
-from llm.ambient import ambient_insult, ambient_search
+from llm.ambient import ambient_insult, ambient_search, ambient_style_lines
 from llm.ambient.ambient_hooks import HookDecision, evaluate as evaluate_hook
 from llm.ambient.ambient_memory import enqueue_for_memory, recall_lines, recall_signature_tags
 from llm.preprocess.chat_line import (
@@ -1045,6 +1046,17 @@ async def _build_style_refs(situation: str) -> Optional[list]:
     return lines
 
 
+async def _build_style_lines(message: discord.Message, participant_ids: list[int]) -> Optional[list]:
+    """這次的語氣參考句（句庫）。壞掉就當這次沒有參考句，不影響插話。"""
+    people = [*participant_ids, *_mentioned_user_ids(message)]
+    try:
+        return await ambient_style_lines.pick(
+            names=functools.partial(ambient_search.name_parts_for, message.guild, people))
+    except Exception as exc:  # 邊界：一次插話的輸入準備；參考句壞掉不該擋住開口
+        logger.warning("語氣參考句失敗，這次不帶：%s: %s", type(exc).__name__, exc)
+        return None
+
+
 async def _record_ambient_interaction(
     *, message: discord.Message, directed: bool, stripped: str, has_image: bool,
     chat_context: Optional[list], reply: str, sent_msg, trace_id: str,
@@ -1176,6 +1188,8 @@ class _Inputs:
     recalled_context: Optional[list]
     style_refs: Optional[list]
     grudge: object
+    # style_refs 的開頭說明：語氣參考句來自句庫時才有，None＝撈被讚過的舊插話那段說明
+    style_note: Optional[str] = None
     # 這次插話給模型的查詢工具（開關關、額度用完就 None）與今天的日期
     search_tools: Optional[object] = None
     today: str = ""
@@ -1394,8 +1408,10 @@ async def _gather_inputs(
     tag_lines = await recall_signature_tags(message.guild.id, participant_ids, message.guild)
     # 本頻道歷史 callback（實驗，預設關；三因子 gate 後的模糊印象）→ 獨立 <recalled_context>
     callback_lines = await _build_chat_callback_context(message, stripped)
-    # 風格召回——撈「被群裡按過讚、語意相近」的舊插話當靈感（學味道別照抄；shadow 可關）
-    style_ref_lines = await _build_style_refs(stripped)
+    # 語氣參考：開關開著用句庫；否則撈「被群裡按過讚、語意相近」的舊插話當靈感（學味道別照抄；shadow 可關）
+    use_style_lines = ambient_style_lines.enabled()
+    style_ref_lines = (await _build_style_lines(message, participant_ids) if use_style_lines
+                       else await _build_style_refs(stripped))
     persona_context = (
         (persona_cards or []) + (memory_lines or []) + (tag_lines or [])
     ) or None
@@ -1408,6 +1424,7 @@ async def _gather_inputs(
         asker_for_bundle=asker_for_bundle, bot_display_name=bot_display_name,
         search_tools=search_tools, today=_today_line(datetime.now(APP_TZ)),
         persona_context=persona_context, recalled_context=callback_lines, style_refs=style_ref_lines,
+        style_note=ambient_style_lines.NOTE if use_style_lines else None,
         grudge=grudge, persona_count=len(persona_cards or []), memory_count=len(memory_lines or []),
     )
 
@@ -1483,6 +1500,7 @@ async def _generate(inputs: _Inputs, ambient_model: str, directed: bool) -> tupl
         persona_context=inputs.persona_context,
         recalled_context=inputs.recalled_context,
         style_refs=inputs.style_refs,
+        style_refs_note=inputs.style_note,
         reasoning_effort=_reasoning_effort(),
         # 鉤子量到的事實（誰問了沒人回、誰連講沒人接、誰跟誰在來回）→ 卸掉模型自己推導
         # 時間關係的負擔，判斷仍歸它。directed 時 hook 為 None，不帶（對方在直接跟它說話）。

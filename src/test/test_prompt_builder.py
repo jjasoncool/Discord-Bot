@@ -34,6 +34,7 @@ RULES = SimpleNamespace(
 )
 OPEN_TAG, CLOSE_TAG = "<latest_user_message>", "</latest_user_message>"
 
+
 EVERYTHING = dict(
     chat_context=["[14:30] 甲: 聊天\x00一"],
     bot_history=["機器人先前的回覆"],
@@ -61,6 +62,13 @@ def build(**kwargs):
 
 
 class PromptBundleContractTests(unittest.TestCase):
+    def test_style_refs_note_replaces_the_default_when_given(self):
+        # 語氣參考句來自句庫時，不能還寫「你過去講過、群裡反應不錯」；沒給就維持原本那段
+        self.assertIn("反應不錯", build(**EVERYTHING).messages[1]["content"])
+        replaced = build(style_refs_note="（換一段說明）", **EVERYTHING).messages[1]["content"]
+        self.assertIn("（換一段說明）", replaced)
+        self.assertNotIn("反應不錯", replaced)
+
     def test_today_opens_the_user_message_only_when_given(self):
         with_date = build(today="2026-10-17（星期五）", **EVERYTHING)
         user = with_date.messages[1]["content"]

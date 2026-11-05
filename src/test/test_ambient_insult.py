@@ -265,6 +265,7 @@ class PassTests(unittest.TestCase):
             recall_signature_tags=mock.AsyncMock(return_value=None),
             _build_chat_callback_context=mock.AsyncMock(return_value=None),
             _build_style_refs=mock.AsyncMock(return_value=None),
+            _build_style_lines=mock.AsyncMock(return_value=None),
             _write_ambient_debug=lambda **_k: None,
             _record_ambient_interaction=self.record_interaction,
             _get_llm=lambda: self.llm,

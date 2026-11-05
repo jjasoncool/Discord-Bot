@@ -39,6 +39,7 @@ def build_prompt_bundle(
     persona_context: Optional[List[str]] = None,
     recalled_context: Optional[List[str]] = None,
     style_refs: Optional[List[str]] = None,
+    style_refs_note: Optional[str] = None,
     situation_signals: Optional[List[str]] = None,
     target_profiles: Optional[List[str]] = None,
     web_context: Optional[List[str]] = None,
@@ -61,6 +62,7 @@ def build_prompt_bundle(
     persona_context: 自然語言人物描述（每人一個字串，例如 "「老哥」— 群裡的非酋代表"）
     recalled_context: 從頻道過去語意檢索回來的「模糊印象/舊發言」（callback），放獨立的
         <recalled_context> 區塊，與人物卡分開——它是「回憶起的過去脈絡」，不是某人的人物設定
+    style_refs_note: <style_refs> 開頭的說明；沒給就用「被群裡按過讚的舊話」那段（句子來源不同時由呼叫端換）
     situation_signals: 鉤子量到的**客觀事實**（誰問了沒人回、誰連講沒人接、誰跟誰在來回），
         見 llm/ambient/ambient_hooks.describe_signals。只陳述事實、不下結論、不含分數；用途是把
         「容易算錯的事實推導」從模型身上卸下來，判斷仍完全歸模型。插話專用，/askai 不傳
@@ -152,11 +154,11 @@ def build_prompt_bundle(
         # 你過去在類似情境講過、且群裡反應不錯的話。只給「調子/招式」當範本，嚴禁照抄字句——
         # 否則小模型會逐字複誦，反而跳針、失去個性。不貼切就完全忽略。
         composed_user_prompt += "<style_refs>\n"
-        composed_user_prompt += (
+        composed_user_prompt += (style_refs_note or (
             "（以下是你過去在類似情境講過、而且群裡反應不錯的話，只用來提醒你「自己說話的調子與"
             "招式」——比如怎麼隔一層看戲、怎麼機智回敬、刺要怎麼點到為止。**只學那個味道，千萬"
-            "別照抄字句、別逐字重複**；這次請用當下的話題、講你自己的新句子。不貼切就忽略。）\n"
-        )
+            "別照抄字句、別逐字重複**；這次請用當下的話題、講你自己的新句子。不貼切就忽略。）"
+        )) + "\n"
         for line in style_refs:
             composed_user_prompt += f"{_sanitize_text(line)}\n"
         composed_user_prompt += "</style_refs>\n\n"
