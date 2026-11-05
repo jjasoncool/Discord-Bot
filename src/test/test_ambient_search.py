@@ -2,7 +2,7 @@
 
 守的底線：
   - 開關 off → 不給工具；dry_run（記錄模式）→ 工具照宣告（情報只有 search、沒有 fetch，加 web_search），
-    規則讀插話自己的規則檔（不是 /askai 要附網址那份）
+    規則讀插話自己的規則檔（不是 /askai 要附網址那份）；on → 宣告與規則和記錄模式一字不差（提示詞快取不失效）
   - 同一次插話只執行第一個呼叫，第二個回「只能查一次」
   - 每天額度：用完當天不宣告工具；每次有查的插話扣一次（記錄模式也扣，成本在多出來的那一輪）
   - web_search 的查詢字含群友名字或識別碼就擋下，不碰內層工具；情報查詢只到本機、不檢查
@@ -88,6 +88,14 @@ class PrepareTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["search", "web_search"], [t["function"]["name"] for t in tools.tools])   # 沒有 fetch
         self.assertIn("插話", tools.instructions)                 # 插話自己的規則檔（正式路徑讀得到）
         self.assertNotIn("附引用的網址", tools.instructions)      # 不是 /askai 那份
+
+    async def test_on_declares_the_same_tools_and_rules_as_record_mode(self):
+        record_mode = await self.prepare()
+        with mock.patch.object(ambient_search, "mode", return_value="on"):
+            on = await self.prepare()
+        self.assertEqual("on", on.mode)
+        self.assertEqual(record_mode.tools, on.tools)
+        self.assertEqual(record_mode.instructions, on.instructions)
 
     async def test_quota_exhausted_means_no_tools_today(self):
         for _ in range(AmbientSearchSettings().daily_limit):

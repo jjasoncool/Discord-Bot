@@ -65,10 +65,10 @@ class Switches(BaseModel):
     #: 預設 dry_run：只讀不寫，跟 off 一樣安全，又能先從 log 看到要補多少再決定切到 on
     chat_index_backfill_mode: Literal["off", "dry_run", "on"] = "dry_run"
     #: 插話上網查（llm.ambient.ambient_search）：琇紫判斷要不要插話的同一次生成裡，可以先查一次遊戲情報或網路。
-    #: dry_run＝記錄模式：工具照宣告、名字檢查照做、額度照扣，但不出網、不給她結果，只記下她想查什麼（先確認沒把
-    #: 群友名字送出去，再決定全開）；off＝不給工具，system 段跟原本一樣（user 段照樣帶今天日期）。全開（on）等記錄週
-    #: 看過紀錄再加
-    ambient_search_mode: Literal["off", "dry_run"] = "off"
+    #: on＝真的查、結果交給她（網路查詢先過名字與識別碼檢查，再經 SearXNG 出去；遊戲情報只到本機 search-mcp）；
+    #: dry_run＝記錄模式：工具照宣告、名字檢查照做、額度照扣，但不出網、不給她結果，只記下她想查什麼；
+    #: off＝不給工具，system 段跟原本一樣（user 段照樣帶今天日期）
+    ambient_search_mode: Literal["off", "dry_run", "on"] = "off"
     #: 聊天向量索引用哪種形狀（sys_settings.pgvector_settings.CHAT_INDEX_PROFILES；查詢的排序表達式要和資料庫裡的索引一致）：
     #: full＝整欄 1024 維、32 位元（索引約 2.2 GB）；halfvec512＝前 512 維、16 位元（約 0.5 GB，8 GB 主機才放得進快取）。
     #: 切之前先把對應的索引建好（建法在交接檔）；對不上只是退回全表掃描變慢，不會錯

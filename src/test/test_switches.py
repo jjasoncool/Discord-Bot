@@ -77,6 +77,11 @@ class SwitchesTests(unittest.TestCase):
         self.assertTrue(any("telegram_filter_mod'" in line for line in logs.output))
         self.assertFalse(any("_說明" in line for line in logs.output))
 
+    def test_ambient_search_can_be_switched_on(self):
+        # 不接受 on 時，手改成 on 只會記一行 warning 然後退回 off：以為開了，其實連記錄模式都停了
+        self.write({"ambient_search_mode": "on"})
+        self.assertEqual(switches.current().ambient_search_mode, "on")
+
     def test_defaults_are_safe(self):
         self.assertEqual(switches.Switches().telegram_filter_mode, "off")
         self.assertEqual(switches.Switches().ambient_search_mode, "off")
