@@ -25,6 +25,8 @@ import discord  # noqa: E402
 
 from llm.ambient import ambient_insult, ambient_reply, ambient_search  # noqa: E402
 from llm.ambient.ambient_hooks import HookDecision  # noqa: E402
+from sys_settings import switches  # noqa: E402
+from sys_settings.switches import Switches  # noqa: E402
 
 BOT_ID = 1385591938438135848
 BOT_USER = SimpleNamespace(id=BOT_ID, bot=True, display_name="琇紫", name="琇紫")
@@ -143,6 +145,18 @@ class PassFlowTests(unittest.TestCase):
 
     def _state(self):
         return ambient_reply._get_proc_state(CHANNEL_ID)
+
+    # ── 思考強度：只有插話照開關走 ──
+    def _effort_sent_with(self, value):
+        with mock.patch.object(switches, "current", lambda: Switches(ambient_reasoning_effort=value)):
+            self._run(_message("這波真的很誇張"))
+        return self._generate_kwargs()["reasoning_effort"]
+
+    def test_the_default_effort_sends_nothing(self):
+        self.assertIsNone(self._effort_sent_with("default"))
+
+    def test_a_chosen_effort_is_sent(self):
+        self.assertEqual("medium", self._effort_sent_with("medium"))
 
     # ── 閘門：不勞動模型 ──
     def test_burst_without_substance_is_skipped(self):

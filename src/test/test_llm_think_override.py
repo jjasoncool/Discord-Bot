@@ -65,6 +65,25 @@ def build(svc, **kwargs):
     return svc._build_chat_extra_body(**kwargs)
 
 
+class ReasoningEffortTests(unittest.TestCase):
+    """思考強度只有呼叫端明確要才帶，其他功能的請求一個字都不變。"""
+
+    def test_it_joins_the_template_kwargs_without_touching_the_rest(self):
+        body = build(lemonade_service(), reasoning_effort="medium")
+        self.assertEqual("medium", body["chat_template_kwargs"]["reasoning_effort"])
+        self.assertIs(True, body["chat_template_kwargs"]["enable_thinking"])
+
+    def test_the_shared_profile_is_not_changed(self):
+        # 設定檔的那份是共用的，改到它就變成所有功能都用這個強度
+        svc = lemonade_service()
+        build(svc, reasoning_effort="medium")
+        self.assertNotIn("reasoning_effort", build(svc)["chat_template_kwargs"])
+
+    def test_other_backends_do_not_get_it(self):
+        svc = service_with("ollama", {"ollama": BackendProfile(extra_body=dict(OLLAMA_EXTRA))})
+        self.assertNotIn("chat_template_kwargs", build(svc, reasoning_effort="medium"))
+
+
 class NoRegressionTests(unittest.TestCase):
     """think=None（既有 caller 的情境）→ extra_body 必須原封不動。"""
 

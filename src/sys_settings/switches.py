@@ -69,6 +69,9 @@ class Switches(BaseModel):
     #: dry_run＝記錄模式：工具照宣告、名字檢查照做、額度照扣，但不出網、不給她結果，只記下她想查什麼；
     #: off＝不給工具，system 段跟原本一樣（user 段照樣帶今天日期）
     ambient_search_mode: Literal["off", "dry_run", "on"] = "off"
+    #: 插話的思考強度（主模型模板的 reasoning_effort）：default＝模板預設的最高強度，開頭會叫模型仔細想；medium＝沒有
+    #: 那句，低一點。只影響插話。改了第一次要整段重讀提示詞，約多 40 秒
+    ambient_reasoning_effort: Literal["default", "medium", "low"] = "default"
     #: 聊天向量索引用哪種形狀（sys_settings.pgvector_settings.CHAT_INDEX_PROFILES；查詢的排序表達式要和資料庫裡的索引一致）：
     #: full＝整欄 1024 維、32 位元（索引約 2.2 GB）；halfvec512＝前 512 維、16 位元（約 0.5 GB，8 GB 主機才放得進快取）。
     #: 切之前先把對應的索引建好（建法在交接檔）；對不上只是退回全表掃描變慢，不會錯

@@ -501,6 +501,7 @@ class LLMService:
         repeat_penalty: Optional[float],
         num_ctx: Optional[int],
         keep_alive: Optional[str],
+        reasoning_effort: Optional[str] = None,
     ) -> dict[str, Any]:
         """依 runtime config 的 backend profile 組 extra_body。
 
@@ -573,6 +574,10 @@ class LLMService:
                     backend, ignored,
                 )
 
+        if backend == "lemonade" and reasoning_effort:
+            # 模板預設最高強度，開頭會叫模型仔細想；只有呼叫端明確要求才換，其他功能的行為不變
+            extra_body["chat_template_kwargs"] = {**extra_body.get("chat_template_kwargs", {}),
+                                                  "reasoning_effort": reasoning_effort}
         return extra_body
 
     async def chat_raw(
@@ -589,6 +594,7 @@ class LLMService:
         keep_alive: Optional[str] = None,
         trace_id: Optional[str] = None,
         max_tokens: Optional[int] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> str:
         """底層 /v1/chat/completions：caller 自組 messages，回傳 assistant content。
 
@@ -629,6 +635,7 @@ class LLMService:
             repeat_penalty=repeat_penalty,
             num_ctx=num_ctx,
             keep_alive=keep_alive,
+            reasoning_effort=reasoning_effort,
         )
         if max_tokens is not None:
             extra_body["max_tokens"] = max_tokens
@@ -769,6 +776,7 @@ class LLMService:
         keep_alive: Optional[str] = None,
         trace_id: Optional[str] = None,
         max_tokens: Optional[int] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> ChatMessageResult:
         """tool-calling 版的底層呼叫：回傳完整 assistant message 而非 content 字串。
 
@@ -802,6 +810,7 @@ class LLMService:
             repeat_penalty=None,
             num_ctx=num_ctx,
             keep_alive=keep_alive,
+            reasoning_effort=reasoning_effort,
         )
         if tools:
             extra_body["tools"] = tools
@@ -910,6 +919,7 @@ class LLMService:
         trace_id: Optional[str],
         max_tool_rounds: int,
         max_tokens: Optional[int] = None,
+        reasoning_effort: Optional[str] = None,
         nudge: Optional[str] = None,
         plain_fallback: bool = True,
     ) -> str:
@@ -940,7 +950,8 @@ class LLMService:
         answered_once = False
         nudged = False
         common = dict(model=model, temperature=temperature, top_p=top_p, num_ctx=num_ctx, timeout=timeout,
-                      keep_alive=keep_alive, trace_id=trace_id, max_tokens=max_tokens)
+                      keep_alive=keep_alive, trace_id=trace_id, max_tokens=max_tokens,
+                      reasoning_effort=reasoning_effort)
         while True:
             try:
                 result = await self.chat_with_tools(messages=messages, tools=runner.tools, think=think, **common)
@@ -1011,6 +1022,7 @@ class LLMService:
         tool_nudge: Optional[str] = None,
         tools_plain_fallback: bool = True,
         today: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> "GenerateReplyResult":
         """組 prompt bundle → 呼叫模型 → 回 GenerateReplyResult；/askai、插話、日記、印象審核都走這裡。
 
@@ -1075,6 +1087,7 @@ class LLMService:
                     think=target_think, temperature=temperature, top_p=top_p, num_ctx=num_ctx, timeout=timeout,
                     keep_alive=keep_alive, trace_id=trace_id, max_tool_rounds=max_tool_rounds,
                     max_tokens=max_tokens, nudge=tool_nudge, plain_fallback=tools_plain_fallback,
+                    reasoning_effort=reasoning_effort,
                 )
                 return text, list(progress), list(transcript_so_far)
             text = await self.chat_raw(
@@ -1089,6 +1102,7 @@ class LLMService:
                 keep_alive=keep_alive,
                 max_tokens=max_tokens,
                 trace_id=trace_id,
+                reasoning_effort=reasoning_effort,
             )
             return text, list(messages), []
 

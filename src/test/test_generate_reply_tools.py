@@ -90,6 +90,14 @@ class GenerateReplyToolTests(unittest.IsolatedAsyncioTestCase):
     async def ask(self, runner, **kwargs):
         return await self.svc.generate_reply(prompt="深塔多久重置？", system="你是 bot", tool_runner=runner, **kwargs)
 
+    async def test_the_reasoning_effort_reaches_every_model_call(self):
+        self.replies = [says("正式回答")]
+        await self.ask(FakeRunner(), reasoning_effort="medium")
+        self.assertEqual("medium", self.model_calls[0]["reasoning_effort"])
+        self.svc.chat_raw.reset_mock()
+        await self.svc.generate_reply(prompt="沒有工具", system="你是 bot", reasoning_effort="medium")
+        self.assertEqual("medium", self.svc.chat_raw.await_args.kwargs["reasoning_effort"])
+
     async def test_no_search_needed_is_a_single_call_with_the_normal_settings(self):
         self.replies = [says("正式回答")]
         runner = FakeRunner()

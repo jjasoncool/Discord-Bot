@@ -54,6 +54,12 @@
     "on：真的查——同一次判斷裡可以查一次，結果交給她再決定要不要開口（網路查詢先過名字與識別碼檢查，再經 SearXNG 出去；遊戲情報只到本機）；每天最多 30 次，有查的那次會回得比較晚"
   ],
   "ambient_search_mode": "dry_run",
+  "_ambient_reasoning_effort 可以填": [
+    "default：插話照模型預設的最高強度思考，想比較久、比較容易逾時",
+    "medium：想短一點，插話比較不會逾時；改了第一次要整段重讀提示詞，約多 40 秒",
+    "low：再更短；對談測試裡語氣有變差，一般不用"
+  ],
+  "ambient_reasoning_effort": "medium",
   "_chat_vector_index 可以填": [
     "full：聊天向量用整欄 1024 維、32 位元的索引（discord_messages_idx_hnsw，約 2.2 GB）",
     "halfvec512：用前 512 維、16 位元的索引（discord_messages_idx_hnsw_h512，約 0.5 GB）；要先把那個索引建好再切，對不上只會變慢、不會錯"

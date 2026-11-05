@@ -82,6 +82,14 @@ class SwitchesTests(unittest.TestCase):
         self.write({"ambient_search_mode": "on"})
         self.assertEqual(switches.current().ambient_search_mode, "on")
 
+    def test_a_bad_reasoning_effort_falls_back_to_default(self):
+        # 寫錯的值不能送到後端：模板遇到不認得的強度會直接丟例外，所有插話一起失敗
+        self.write({"ambient_reasoning_effort": "medium"})
+        self.assertEqual(switches.current().ambient_reasoning_effort, "medium")
+        with self.assertLogs("sys_settings.switches", "WARNING"):
+            self.write({"ambient_reasoning_effort": "max"})
+            self.assertEqual(switches.current().ambient_reasoning_effort, "default")
+
     def test_defaults_are_safe(self):
         self.assertEqual(switches.Switches().telegram_filter_mode, "off")
         self.assertEqual(switches.Switches().ambient_search_mode, "off")

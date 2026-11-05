@@ -69,6 +69,7 @@ from llm.preprocess.external_emoji import external_emoji_context
 from llm.preprocess.tweet_context import expand_tweets
 from llm.preprocess.emoji_text_utils import is_emoji_or_symbol_only, is_link_only
 from llm.client.gpu_gate import foreground_recently_active, stream_busy
+from sys_settings import switches
 from sys_settings.time_settings import APP_TZ
 from llm.preprocess.vision_image import DEFAULT_MAX_FRAMES, extract_key_frames, is_vision_image
 from llm.logger_factory import get_or_create_file_logger
@@ -1453,6 +1454,12 @@ def _frame_latest(
     return prompt_text, chat_context, None
 
 
+def _reasoning_effort() -> Optional[str]:
+    """開關 ambient_reasoning_effort：default 就不指定，用模型模板的預設。"""
+    effort = switches.current().ambient_reasoning_effort
+    return None if effort == "default" else effort
+
+
 async def _generate(inputs: _Inputs, ambient_model: str, directed: bool) -> tuple[str, Optional[int], str]:
     """叫模型，判讀它說了什麼。回 (outcome, 它宣告要接的行號, 要講的話)；
     outcome ∈ reply／pass／insult／error:<kind>，prompt 與原樣輸出一律寫進 debug 檔。"""
@@ -1476,6 +1483,7 @@ async def _generate(inputs: _Inputs, ambient_model: str, directed: bool) -> tupl
         persona_context=inputs.persona_context,
         recalled_context=inputs.recalled_context,
         style_refs=inputs.style_refs,
+        reasoning_effort=_reasoning_effort(),
         # 鉤子量到的事實（誰問了沒人回、誰連講沒人接、誰跟誰在來回）→ 卸掉模型自己推導
         # 時間關係的負擔，判斷仍歸它。directed 時 hook 為 None，不帶（對方在直接跟它說話）。
         situation_signals=(hook.signals if hook is not None else None) or None,
