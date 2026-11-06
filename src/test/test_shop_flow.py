@@ -6,6 +6,7 @@
   1. 上架：只有觀星者；bot 代發商品貼文（標題、說明、上架者暱稱、商品圖換固定檔名並由 embed 引用第一張）；
      幣別有數字（只能填符號，金額在品項）、太長（塞不進按鈕的 custom_id）、圖太大都在發文前擋下；
      還沒有品項就沒有購買選單；不是圖片、商品論壇沒綁定都說清楚原因。之後更新貼文不傳附件清單（圖才不會被刪）。
+     商品圖照使用者選的順序（第一張當大圖）：discord.py 照附件對照表排，不照選的順序，上架與編輯商品資訊都要重排。
   2. 管理：只有上架者或管理員（含群主）；新增（單一、批次）後購買選單出現，有預購就掛「預購中」；
      全部賣完時購買選單停用並寫「已售完」，管理按鈕照常可按，補貨後選單恢復；
      最多 25 個；品項編號不重用；編輯時數量填「剩餘數量」（預填目前剩幾個、賣光預填 0，存的上限＝已下單＋剩餘，
@@ -265,6 +266,61 @@ class ListingCreateTests(ShopTestCase):
         with self.assertRaises(ShopError) as caught:
             self.list_item()
         self.assertIn("/server_manager", str(caught.exception))
+
+
+class UploadOrderTests(unittest.TestCase):
+    """表單上傳的商品圖：交給服務層的順序＝使用者選的順序，不是 discord.py 給的順序。"""
+
+    @staticmethod
+    def submit(modal, selected, resolved_order):
+        """照 discord.py 處理表單送出的方式把上傳元件填好：元件帶選的順序，附件對照表是另一個順序。"""
+        from discord.app_commands.namespace import ResolveKey
+
+        components = [{"type": 18, "component": {"type": 19, "custom_id": modal.images.custom_id,
+                                                 "values": [str(i) for i in selected]}}]
+        resolved = {ResolveKey(id=str(i), type=-1): SimpleNamespace(id=i) for i in resolved_order}
+        interaction = SimpleNamespace(data={"components": components})
+        modal._refresh(interaction, components, resolved)
+        return interaction
+
+    def test_images_follow_the_selected_order(self):
+        async def check():
+            modal = shop_commands.ListingInfoModal()
+            interaction = self.submit(modal, selected=[11, 12, 13], resolved_order=[13, 12, 11])
+            return [a.id for a in shop_commands._uploaded_in_order(interaction, modal.images)]
+
+        self.assertEqual(asyncio.run(check()), [11, 12, 13])
+
+    def test_without_the_selected_order_keep_what_arrived(self):
+        async def check():
+            modal = shop_commands.ListingInfoModal()
+            self.submit(modal, selected=[11, 12], resolved_order=[12, 11])
+            bare = SimpleNamespace(data={"components": []})
+            return [a.id for a in shop_commands._uploaded_in_order(bare, modal.images)]
+
+        self.assertEqual(asyncio.run(check()), [12, 11])
+
+    def test_listing_and_editing_both_pass_the_selected_order(self):
+        from services.community.shop_listing import Listing
+
+        async def run(editing):
+            listing = Listing(thread_id=500, owner_id=1, unit="NT$", title="t", description="", variants=())
+            modal = shop_commands.ListingInfoModal(listing=listing if editing else None)
+            interaction = self.submit(modal, selected=[21, 22, 23], resolved_order=[23, 22, 21])
+            interaction.user = SimpleNamespace(id=1)
+            interaction.response = SimpleNamespace(defer=mock.AsyncMock())
+            shop = SimpleNamespace(create_listing=mock.AsyncMock(return_value=SimpleNamespace(mention="#x")),
+                                   edit_info=mock.AsyncMock(return_value=None))
+            with mock.patch.object(shop_commands, "_shop", return_value=shop), \
+                    mock.patch.object(shop_commands, "_reply", mock.AsyncMock()), \
+                    mock.patch.object(shop_commands, "_show_panel", mock.AsyncMock()):
+                await modal.on_submit(interaction)
+            called = shop.edit_info if editing else shop.create_listing
+            return [a.id for a in called.await_args.kwargs["attachments"]]
+
+        for editing in (False, True):
+            with self.subTest(editing=editing):
+                self.assertEqual(asyncio.run(run(editing)), [21, 22, 23])
 
 
 class ManageTests(ShopTestCase):

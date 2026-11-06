@@ -520,6 +520,34 @@ class VariantModal(discord.ui.Modal):
 
 # ── 商品資訊（上架、編輯） ──
 
+def _selected_ids(data: Optional[dict], custom_id: str) -> list[str]:
+    """表單送出資料裡，某個上傳元件的附件 id，照使用者選的順序（Label、ActionRow 裡的也找得到）。"""
+    pending = list((data or {}).get("components") or [])
+    while pending:
+        component = pending.pop(0)
+        if component.get("type") == 1:
+            pending[0:0] = component.get("components") or []
+        elif component.get("type") == 18:
+            pending.insert(0, component.get("component") or {})
+        elif component.get("custom_id") == custom_id:
+            return [str(value) for value in component.get("values") or []]
+    return []
+
+
+def _uploaded_in_order(interaction: discord.Interaction, upload: discord.ui.FileUpload) -> list:
+    """上傳的圖照使用者選的順序排：第一張當商品大圖，其餘照選的順序排在上面。
+
+    discord.py 的 `FileUpload.values` 是照互動資料裡附件對照表（resolved）的順序排，不看元件送來的
+    `values` 清單；照那張表排，商品圖曾整串倒過來（大圖是最後選的那張）。找不到順序清單時照收到的順序。"""
+    received = list(upload.values or [])
+    order = _selected_ids(getattr(interaction, "data", None), upload.custom_id)
+    rank = {attachment_id: index for index, attachment_id in enumerate(order)}
+    ordered = sorted(received, key=lambda attachment: rank.get(str(attachment.id), len(rank)))
+    if [a.id for a in ordered] != [a.id for a in received]:
+        logger.info("商品上架：上傳的圖照選取順序重排 選取=%s 收到=%s", order, [str(a.id) for a in received])
+    return ordered
+
+
 class ListingInfoModal(discord.ui.Modal):
     def __init__(self, *, listing: Optional[Listing] = None, default_unit: str = "NT$"):
         super().__init__(title="編輯商品資訊" if listing else "上架商品", timeout=_MODAL_TIMEOUT)
@@ -546,7 +574,7 @@ class ListingInfoModal(discord.ui.Modal):
         shop = _shop(interaction)
         if shop is None:
             return await _missing(interaction)
-        attachments = list(self.images.values or [])
+        attachments = _uploaded_in_order(interaction, self.images)
         if self.listing is not None:
             # 從管理面板打開的：更新那則面板
             await interaction.response.defer()
