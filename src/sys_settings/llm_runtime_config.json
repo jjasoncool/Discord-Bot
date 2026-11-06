@@ -6,22 +6,16 @@
   "moderation_model": "user.Qwen2.5-7B-Instruct-GGUF-Q4_K_M",
   "personality_model": "Qwen3.8-27B-GGUF-UD-Q4_K_XL",
   "ambient_model": "Qwen3.8-27B-GGUF-UD-Q4_K_XL",
+  "think": true,
+  "reasoning_effort": null,
   "backends": {
     "ollama": {
       "extra_body": {
-        "think": true,
-        "keep_alive": "10m",
-        "options": {
-          "num_ctx": 16384,
-          "repeat_penalty": 1.15
-        }
+        "keep_alive": "10m"
       }
     },
     "lemonade": {
       "extra_body": {
-        "chat_template_kwargs": {
-          "enable_thinking": true
-        },
         "cache_prompt": true
       },
       "model_load_options": {
