@@ -226,6 +226,27 @@ def _find_hardcoded_app_root(path: Path) -> list[int]:
     return hits
 
 
+#: 模型後端的名字（`LLMRuntimeConfig.backend` 可以填的值）
+_BACKEND_NAMES = {"lemonade", "ollama", "vllm"}
+#: 各家的 admin 與請求寫法：別處拿來 isinstance 判斷，就等於照廠商分支
+_BACKEND_CLASSES = {"LemonadeAdmin", "OllamaAdmin", "OllamaChatStyle", "TemplateStyle"}
+
+
+def _find_backend_branching(path: Path) -> list[int]:
+    """照後端分支的地方：字串剛好等於後端名字（`backend == "lemonade"`、以名字當 key 的表；說明文字提到廠商不算），
+    或拿各家的 admin、寫法類別做 `isinstance`／`issubclass`。哪家怎麼做只在 `llm.client.backend_admin` 決定。"""
+    hits: list[int] = []
+    for node in ast.walk(_parse(path)):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.lower() in _BACKEND_NAMES:
+            hits.append(node.lineno)
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("isinstance", "issubclass")
+              and len(node.args) == 2
+              and any((isinstance(n, ast.Name) and n.id in _BACKEND_CLASSES)
+                      or (isinstance(n, ast.Attribute) and n.attr in _BACKEND_CLASSES) for n in ast.walk(node.args[1]))):
+            hits.append(node.lineno)
+    return hits
+
+
 def _find_raw_runtime_json_io(path: Path) -> list[int]:
     """自己 `open()`／`read_text()`／`write_text()` 一個 bot 寫的檔（`settings/runtime/` 底下、舊名 `*_runtime.json`、價格表）的那幾行。
 
@@ -1113,6 +1134,19 @@ RULES = [
         pattern=r"enter_async_context\(\s*(self\.)?_?(gate|gpu_exclusive|stream_exclusive)\(",
         canonical="llm.client.gpu_gate.wait_at_most(gate, seconds)（等不到丟 GpuBusy）",
         allowed={"llm/client/gpu_gate.py"},
+    ),
+    Rule(
+        name="照後端名字分支（各家寫法散在服務層時，Ollama 那段送的思考開關與上下文長度對方根本收不到，也沒人發現）",
+        finder=_find_backend_branching,
+        canonical="llm.client.backend_admin（admin_for、chat_style_for、snapshot_probes）",
+        allowed={
+            # 哪家用哪個、各家自己的事
+            "llm/client/backend_admin.py",
+            "llm/client/lemonade_admin.py",
+            "llm/client/ollama_admin.py",
+            # 設定檔允許的後端名稱
+            "sys_settings/llm_settings.py",
+        },
     ),
 ]
 

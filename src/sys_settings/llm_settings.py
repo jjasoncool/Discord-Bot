@@ -16,6 +16,10 @@ from sys_settings.paths import LOGS_DIR, SYS_SETTINGS_DIR, prompt_file
 
 logger = logging.getLogger(__name__)
 
+#: 思考強度可以填的值（模型模板的 reasoning_effort）。模板遇到不認得的值會丟例外，所以只列實測過的；
+#: 設定檔頂層與插話開關共用這一份
+ReasoningEffort = Literal["medium", "low"]
+
 
 class LLMServiceSettings(BaseSettings):
     """LLM 服務層設定（可由 env/dotenv 覆寫；後端不限）。"""
@@ -67,8 +71,6 @@ class LLMServiceSettings(BaseSettings):
 
     default_temperature: float = 0.85
     default_top_p: float = 0.9
-    default_repeat_penalty: float = 1.15
-    default_num_ctx: int = 8192
 
     context_open_tag: str = "<context_json>"
     context_close_tag: str = "</context_json>"
@@ -202,16 +204,17 @@ class LLMContextSafetyRules(BaseModel):
 class BackendProfile(BaseModel):
     """單一後端的設定 profile。
 
-    `extra_body`：chat completion request body 的後端專屬 top-level merge 欄位
-      （Ollama 的 `think` / `keep_alive` / `options.num_ctx`、Lemonade 的
-      `chat_template_kwargs` / `cache_prompt` 等）。
+    `extra_body`：只有這家後端認得、每個對話請求都帶的欄位，原樣併進 request body
+      （例：Lemonade 的 `cache_prompt`、Ollama 的 `keep_alive`）。思考開關與強度不寫這裡，
+      寫在頂層的 `think`／`reasoning_effort`，由 `llm.client.backend_admin.chat_style_for` 翻成這家的寫法；
+      這裡寫了不會送出、記一筆警告；這家收不到的欄位（例：Ollama 的 `options`）也一樣。
 
     `model_load_options`：server admin API 用的 per-model 載入參數
       （目前只 Lemonade 有用，bot 啟動或第一次呼叫某 model 時 push 到
       `/api/v1/load`，避免每次調 ctx_size 都要去 Lemonade UI 手動設）。
       key 是 model id，value 是 Lemonade `recipe_options` dict（如
-      `{"ctx_size": 12288}`）。Ollama / vLLM 在這個欄位就空著（Ollama 走
-      per-request `extra_body.options.num_ctx`；vLLM 是 server 啟動參數）。
+      `{"ctx_size": 12288}`）。Ollama / vLLM 在這個欄位就空著（Ollama 的 OpenAI 相容端點收不到上下文長度，
+      要在 Modelfile 設；vLLM 是 server 啟動參數）。
     """
 
     extra_body: dict[str, Any] = Field(default_factory=dict)
@@ -222,7 +225,7 @@ class LLMRuntimeConfig(BaseModel):
     """LLM 執行時可熱更新設定（後端不限）。
 
     切後端的單一控制點：搭配 `.env` 的 `LLM_BASE_URL` 兩邊一起改即可。
-    `backends` 內各 profile 的 `extra_body` 是後端專屬參數的歸宿。
+    思考開關與強度只在頂層設（各家欄位名稱不同，送出前才翻）；`backends` 內各 profile 的 `extra_body` 只放那家獨有的欄位。
     """
 
     backend: Literal["ollama", "lemonade", "vllm"] = "ollama"
@@ -235,8 +238,10 @@ class LLMRuntimeConfig(BaseModel):
     # 背景插話/傾聽用的小模型（功能二）；None 代表沿用主 model
     ambient_model: str | None = None
     backends: dict[str, BackendProfile] = Field(default_factory=dict)
-    # 舊欄位：保留以避免舊 config 載入失敗；新 config 應將 think 放進 backends.ollama.extra_body
+    #: 要不要思考；呼叫端可以每次指定（例：人格萃取的收集步驟關掉）
     think: bool = True
+    #: 思考強度；None＝不送，用模型模板的預設。插話另有開關 ambient_reasoning_effort 可以只改插話
+    reasoning_effort: ReasoningEffort | None = None
 
 
 class AskAICommandSettings(BaseSettings):

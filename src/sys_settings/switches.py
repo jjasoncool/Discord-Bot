@@ -17,6 +17,7 @@ import json
 import logging
 from pathlib import Path
 
+from sys_settings.llm_settings import ReasoningEffort
 from sys_settings.paths import SETTINGS_DIR
 from typing import Literal
 
@@ -72,9 +73,9 @@ class Switches(BaseModel):
     #: 插話的語氣參考句從哪來（llm.ambient.ambient_style_lines）：off＝照舊撈被讚過的舊插話（style_refs）；
     #: on＝每次從預設句庫與學到的句子抽幾句放 user 段。要和新人格的提示詞一起切，舊人格配新句庫會兩邊打架
     ambient_seed_lines_mode: Literal["off", "on"] = "off"
-    #: 插話的思考強度（主模型模板的 reasoning_effort）：default＝模板預設的最高強度，開頭會叫模型仔細想；medium＝沒有
-    #: 那句，低一點。只影響插話。改了第一次要整段重讀提示詞，約多 40 秒
-    ambient_reasoning_effort: Literal["default", "medium", "low"] = "default"
+    #: 插話的思考強度（主模型模板的 reasoning_effort）：default＝照 llm_runtime_config.json 頂層的 reasoning_effort，
+    #: 沒設就是模板預設的最高強度，開頭會叫模型仔細想；medium＝沒有那句，低一點。只影響插話。改了第一次要整段重讀提示詞，約多 40 秒
+    ambient_reasoning_effort: Literal["default"] | ReasoningEffort = "default"
     #: 聊天向量索引用哪種形狀（sys_settings.pgvector_settings.CHAT_INDEX_PROFILES；查詢的排序表達式要和資料庫裡的索引一致）：
     #: full＝整欄 1024 維、32 位元（索引約 2.2 GB）；halfvec512＝前 512 維、16 位元（約 0.5 GB，8 GB 主機才放得進快取）。
     #: 切之前先把對應的索引建好（建法在交接檔）；對不上只是退回全表掃描變慢，不會錯

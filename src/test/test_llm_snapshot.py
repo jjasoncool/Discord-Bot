@@ -2,7 +2,7 @@
 
 驗證重點：
   1. 三條失敗路徑（no_choices / empty_content / connection / timeout）都會觸發 snapshot
-  2. backend dispatch：依 runtime.backend 從 _BACKEND_PROBES 挑要打哪些 endpoints
+  2. backend dispatch：依 runtime.backend 從 backend_admin.snapshot_probes 挑要打哪些 endpoints
   3. 未註冊的 backend 安全跳過（不打 admin_get、不影響原本 raise）
   4. snapshot 自身爆炸時要走 warning + 仍 raise 原本錯（次要診斷不能蓋主錯）
 

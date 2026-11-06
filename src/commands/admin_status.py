@@ -44,7 +44,7 @@ from typing import Any, Awaitable, Callable, Optional
 import aiohttp
 import discord
 
-from llm.client import gpu_gate
+from llm.client import gpu_gate, lemonade_admin
 from llm.retrievers.intel import prepare_intel_session
 from llm.retrievers.web import search_web, searxng
 from llm.storage import raw_message_store, store_chat
@@ -74,7 +74,8 @@ STATUS_REFRESH_ID = "owner:status:refresh"
 _ACCESS = dict(owner_only=True, allow_dm=True)
 _NO_COG = "狀態功能目前沒有在運作，請看 log。"
 #: 面板上各項的順序（照草稿）；模型後端那項由 owner_alert_commands 登記
-KIND_ORDER = ("discord_perm", "scraper", "web_search", "lemonade", "gpu_lock", "pgvector", "telegram_scraper", "intel", "settings")
+KIND_ORDER = ("discord_perm", "scraper", "web_search", lemonade_admin.ALERT_KIND, "gpu_lock", "pgvector", "telegram_scraper",
+              "intel", "settings")
 _ICON = {"alert": "🔴", "watch": "🟡", "ok": "🟢"}
 _LEVEL_WORD = {"alert": "要處理", "watch": "觀察", "ok": "正常"}
 #: 爬蟲各來源多久沒推送算有事（秒）：公告每 15 分鐘推一次（0 筆也推），其他每小時
@@ -741,7 +742,7 @@ async def retest_all(interaction: discord.Interaction, *, expanded: bool = False
     """每一項都重測一次（模型後端最後，它會拿顯示卡）；結果寫在面板最上面、整個面板重畫。"""
     await interaction.response.defer()
     rows = await collect()
-    rows.sort(key=lambda row: row[0].kind == "lemonade")
+    rows.sort(key=lambda row: row[0].kind == lemonade_admin.ALERT_KIND)
     summary: dict[str, int] = {"ok": 0, "bad": 0, "untested": 0}
     bad: list[str] = []
     cog = interaction.client.get_cog("OwnerAlertCommands")
@@ -749,7 +750,7 @@ async def retest_all(interaction: discord.Interaction, *, expanded: bool = False
         if spec.retest is None:
             continue
         try:
-            if spec.kind == "lemonade" and cog is not None:
+            if spec.kind == lemonade_admin.ALERT_KIND and cog is not None:
                 # 全部重測只是看看：模型後端只探測，不清自癒紀錄與放棄名單（那是它那一列「重測」才做的事）
                 result = await cog.probe_lemonade()
             else:

@@ -1472,7 +1472,7 @@ def _frame_latest(
 
 
 def _reasoning_effort() -> Optional[str]:
-    """開關 ambient_reasoning_effort：default 就不指定，用模型模板的預設。"""
+    """開關 ambient_reasoning_effort：default 就不指定，照設定檔頂層的 reasoning_effort（也沒設就是模型模板的預設）。"""
     effort = switches.current().ambient_reasoning_effort
     return None if effort == "default" else effort
 

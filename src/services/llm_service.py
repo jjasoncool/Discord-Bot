@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import logging
 import time
 from typing import Any, List, Optional
@@ -16,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from llm.client.gpu_gate import GpuBusy, gpu_exclusive, stream_exclusive, wait_at_most
-from llm.client.backend_admin import admin_for
+from llm.client.backend_admin import admin_for, chat_style_for, snapshot_probes
 from llm.client.embedding_client import make_safe_llm_embedding
 from llm.client.tool_calls import ToolRunner, assistant_message, call_name_and_arguments, tool_message
 from llm.preprocess.vision_image import is_universal_image, to_png_first_frame
@@ -45,27 +46,8 @@ LLM_SERVICE_SETTINGS = LLMServiceSettings()
 #: 探測等 GPU 閘門的時限：探測的時限再多這幾秒（別的工作佔著時回報「忙」，不乾等）
 _PROBE_GATE_GRACE = 30.0
 
-
-# 失敗路徑快照：各 backend 該打哪些 read-only admin / 觀測端點。
-# 加 backend 只需在此補一行；某 endpoint 不存在會被 `admin_get` 吞成 dict，不影響其他 probe。
-# 命名規則：(label_in_log, full_url_path)。label 會成為 snapshot log 的 dict key。
-_BACKEND_PROBES: dict[str, tuple[tuple[str, str], ...]] = {
-    # Lemonade：gateway 自家 admin（health 看當下載了哪些 model、system_info 看 backend recipe）
-    "lemonade": (
-        ("health", "/api/v1/health"),
-        ("system_info", "/api/v1/system-info"),
-    ),
-    # Ollama：/api/ps 是核心 — 已載 model + 各自 VRAM + TTL 倒數；/api/tags 補註冊表
-    "ollama": (
-        ("ps", "/api/ps"),
-        ("tags", "/api/tags"),
-    ),
-    # vLLM：本來就一進程一 model、沒 swap 概念，只能看活著沒 + 服務的 model id
-    "vllm": (
-        ("health", "/health"),
-        ("models", "/v1/models"),
-    ),
-}
+#: 設定檔 extra_body 裡有不會送出的欄位（思考設定改由頂層決定、這家收不到的）的警告記過了沒：(後端, 欄位)，同一組一個行程只記一次
+_stale_think_keys_warned: set[tuple[str, tuple[str, ...]]] = set()
 
 
 def log_llm_usage(trace_label: str, model: str, completion: dict[str, Any]) -> None:
@@ -296,38 +278,12 @@ class LLMService:
         return candidate or None
 
     def resolve_request_think(self, override_think: Optional[bool] = None) -> bool:
-        """對外提供本次請求最終 think 設定。
-
-        優先序：override > 當前 backend profile 的思考開關 > 舊欄位 think > True。
-        各後端表達「思考模式」的欄位不同，這裡做語意統一：
-          - ollama   → `backends.ollama.extra_body.think`
-          - lemonade → `backends.lemonade.extra_body.chat_template_kwargs.enable_thinking`
-          - 其他（vLLM）→ 無對應欄位，落到舊欄位 `think` / 預設 True
-
-        回傳的 bool 由 `_build_chat_extra_body` 轉成該後端真正的 request 欄位。
-        """
+        """這次請求要不要思考：呼叫端指定的優先，否則照設定檔頂層的 `think`（讀不到設定檔時 True）。
+        各家怎麼寫由 `_build_chat_extra_body` 交給 `backend_admin.chat_style_for` 翻。"""
         if override_think is not None:
             return bool(override_think)
-
         runtime_config = self._load_runtime_config_cached()
-        if runtime_config is None:
-            return True
-
-        backend = runtime_config.backend
-        profile = runtime_config.backends.get(backend)
-        if profile is not None:
-            if backend == "ollama":
-                think_in_profile = profile.extra_body.get("think")
-                if isinstance(think_in_profile, bool):
-                    return think_in_profile
-            elif backend == "lemonade":
-                template_kwargs = profile.extra_body.get("chat_template_kwargs")
-                if isinstance(template_kwargs, dict):
-                    enable_thinking = template_kwargs.get("enable_thinking")
-                    if isinstance(enable_thinking, bool):
-                        return enable_thinking
-
-        return runtime_config.think
+        return runtime_config.think if runtime_config is not None else True
 
     async def _ensure_model_loaded(self, model: str) -> None:
         """確認後端已用 runtime config 指定的 options 載入此 model（目前只 Lemonade 有效）。
@@ -336,14 +292,14 @@ class LLMService:
         `Context size has been exceeded` 直接 5xx。在這裡 push `recipe_options.ctx_size`
         到 `/api/v1/load`，bot 變成 ctx_size 的單一控制點，不用每次去 Lemonade UI 改。
 
-        Ollama 走 per-request `extra_body.options.num_ctx`、vLLM 是 server 啟動參數，
-        都不需要也不能透過這個路徑控制 → short-circuit。
+        Ollama 的上下文長度在 Modelfile 設（OpenAI 相容端點收不到），它的 admin 這一步不做事；vLLM 是 server 啟動參數、
+        沒有 admin，直接略過。
         """
         runtime_config = self._load_runtime_config_cached()
         if runtime_config is None:
             return
         admin = self._client.admin
-        if admin is None:   # 這家後端沒有管理 API（Ollama、vLLM）
+        if admin is None:   # 這家後端沒有管理 API（vLLM）
             return
         profile = runtime_config.backends.get(runtime_config.backend)
         if profile is None:
@@ -378,7 +334,7 @@ class LLMService:
         """
         target = model or self.resolve_request_model()
         runtime_config = self._load_runtime_config_cached()
-        backend = runtime_config.backend if runtime_config is not None else "ollama"
+        backend = runtime_config.backend if runtime_config is not None else None
         admin = self._client.admin
         if admin is None:
             logger.debug("release_model: backend=%s 不支援卸載，略過（model=%s）", backend, target)
@@ -503,81 +459,30 @@ class LLMService:
         keep_alive: Optional[str],
         reasoning_effort: Optional[str] = None,
     ) -> dict[str, Any]:
-        """依 runtime config 的 backend profile 組 extra_body。
+        """組這次對話請求的 extra_body：設定檔裡這家後端的 `extra_body`（那家獨有的欄位）打底，思考開關、強度與每次請求的
+        閒置卸載、上下文長度、重複懲罰交給 `backend_admin.chat_style_for` 翻成那家的寫法；那家收不到的記一行 debug。
 
-        切後端的單一控制點：
-          - 有 `backends[backend].extra_body` → 整包帶入；per-call Ollama-only knobs
-            （think / keep_alive / repeat_penalty / num_ctx）只在 backend == "ollama"
-            時 merge / override，其它後端忽略並 debug log。
-          - 沒設定 backends profile（舊 config）→ 沿用 Ollama-style 預設，向後相容。
+        思考開關沒指定照頂層 `think`；強度沒指定照頂層 `reasoning_effort`（也沒設就不送，用模型模板的預設）。
+        設定檔是共用的快取物件，先複製再改。
         """
         runtime_config = self._load_runtime_config_cached()
-        backend = runtime_config.backend if runtime_config is not None else "ollama"
-        profile = (
-            runtime_config.backends.get(backend) if runtime_config is not None else None
-        )
+        backend = runtime_config.backend if runtime_config is not None else None
+        profile = runtime_config.backends.get(backend) if runtime_config is not None and backend else None
+        extra_body: dict[str, Any] = copy.deepcopy(profile.extra_body) if profile is not None else {}
+        style = chat_style_for(backend)
 
-        if profile is not None:
-            extra_body: dict[str, Any] = dict(profile.extra_body)
-        else:
-            # 舊 config 後備：當 ollama 處理（think + options）
-            extra_body = {
-                "options": {
-                    "repeat_penalty": (
-                        repeat_penalty if repeat_penalty is not None
-                        else self.settings.default_repeat_penalty
-                    ),
-                    "num_ctx": num_ctx if num_ctx is not None else self.settings.default_num_ctx,
-                },
-            }
+        stale = tuple(style.dropped(extra_body))
+        if stale and (str(backend), stale) not in _stale_think_keys_warned:
+            _stale_think_keys_warned.add((str(backend), stale))
+            logger.warning("llm_runtime_config.json 的 backends.%s.extra_body 寫了 %s，不會送出：思考開關與強度改在頂層的 "
+                           "think／reasoning_effort 設，其他是這家後端收不到的欄位", backend, "、".join(stale))
 
-        if backend == "ollama":
-            if think is not None:
-                extra_body["think"] = think
-            if keep_alive is not None:
-                extra_body["keep_alive"] = keep_alive
-            if repeat_penalty is not None or num_ctx is not None:
-                options = dict(extra_body.get("options", {}))
-                if repeat_penalty is not None:
-                    options["repeat_penalty"] = repeat_penalty
-                if num_ctx is not None:
-                    options["num_ctx"] = num_ctx
-                extra_body["options"] = options
-        else:
-            if backend == "lemonade" and think is not None:
-                # Lemonade（llama.cpp）用 `chat_template_kwargs.enable_thinking` 表達思考模式，
-                # 與 Ollama 的 top-level `think` 同義 → 在此做語意轉接。
-                #
-                # 為什麼需要這段：`think` 的覆寫管線本來就完整（resolve_request_think →
-                # generate_reply → chat_raw → 這裡），但從 Ollama 遷到 Lemonade 後，
-                # 這個參數在下面被丟進 `ignored` → 形成「傳得到、卻不生效」的斷點。
-                #
-                # 只有明確傳入才覆寫：think=None 時完全沿用 profile.extra_body 的設定，
-                # 因此既有 caller（/askai、插話、人格萃取）行為不變。
-                template_kwargs = dict(extra_body.get("chat_template_kwargs", {}))
-                template_kwargs["enable_thinking"] = bool(think)
-                extra_body["chat_template_kwargs"] = template_kwargs
-
-            # 其餘 Ollama-only knobs 在非 ollama 後端一律不送，避免 vLLM 嚴格模式直接 4xx。
-            # think 已被 lemonade 分支消化，故不列入 ignored。
-            ignored = [
-                name for name, val in (
-                    ("think", None if backend == "lemonade" else think),
-                    ("keep_alive", keep_alive),
-                    ("repeat_penalty", repeat_penalty),
-                    ("num_ctx", num_ctx),
-                ) if val is not None
-            ]
-            if ignored:
-                logger.debug(
-                    "chat_raw: backend=%s 不支援 Ollama-only knobs，忽略: %s",
-                    backend, ignored,
-                )
-
-        if backend == "lemonade" and reasoning_effort:
-            # 模板預設最高強度，開頭會叫模型仔細想；只有呼叫端明確要求才換，其他功能的行為不變
-            extra_body["chat_template_kwargs"] = {**extra_body.get("chat_template_kwargs", {}),
-                                                  "reasoning_effort": reasoning_effort}
+        if reasoning_effort is None and runtime_config is not None:
+            reasoning_effort = runtime_config.reasoning_effort
+        ignored = style.apply(extra_body, think=self.resolve_request_think(think), reasoning_effort=reasoning_effort,
+                              keep_alive=keep_alive, repeat_penalty=repeat_penalty, num_ctx=num_ctx)
+        if ignored:
+            logger.debug("chat_raw: backend=%s 收不到這些參數，不送：%s", backend, ignored)
         return extra_body
 
     async def chat_raw(
@@ -612,9 +517,8 @@ class LLMService:
         參數 `timeout`：None → 沿用 `self.timeout`（settings.llm_timeout，預設 300s）。
         長任務（如人格萃取）傳較大值覆蓋。
 
-        後端專屬參數（如 Ollama 的 `think` / `keep_alive` 或 Lemonade 的
-        `chat_template_kwargs`）由 `runtime_config.backends[backend].extra_body` 提供，
-        切後端時不需動 code。Ollama-only per-call knobs 只在 backend == "ollama" 時生效。
+        思考開關與強度、閒置卸載這些參數由 `_build_chat_extra_body` 翻成那家後端的寫法；那家獨有的欄位寫在
+        `runtime_config.backends[backend].extra_body`，切後端時不需動 code。
 
         暫時性錯誤（連線層 / 5xx / rate limit）由 LlmHttpClient 內部指數退避重試。
         HTTP 4xx 與回應 content 為空不重試。
@@ -789,8 +693,8 @@ class LLMService:
         本後端（Lemonade + llama.cpp）已實測支援 `tool_calls` 往返與
         `response_format.json_schema` strict 模式。
 
-        `think` 走與 `chat_raw` 相同的轉接（Lemonade → `chat_template_kwargs.
-        enable_thinking`），讓 agent 能在收集步驟關閉思考、產出最終結果時再打開。
+        `think` 走與 `chat_raw` 相同的轉接（`_build_chat_extra_body`），讓 agent 能在收集步驟關閉思考、
+        產出最終結果時再打開。
 
         兩者共用模型載入、串流互斥閘與重試——**agent 因此自動遵守「一次只做一件事」**，
         不會與 /askai、插話 搶 GPU。
@@ -876,7 +780,7 @@ class LLMService:
     ) -> None:
         """失敗時抓 LLM backend 狀態快照寫進 anomaly log，協助事後定位。
 
-        依 ``runtime.backend`` 從 ``_BACKEND_PROBES`` registry 查當前 backend 該打哪些
+        依 ``runtime.backend`` 從 ``backend_admin.snapshot_probes`` 查當前 backend 該打哪些
         read-only admin / 觀測端點，並行 GET 後寫一行 log。
         未在 registry 的 backend 直接跳過（不打沒意義的 endpoint）。
         每個 endpoint timeout 預設 2s（``admin_get`` 預設值）；gather 並行所以總時間 ≈ 最慢者。
@@ -885,7 +789,7 @@ class LLMService:
         try:
             runtime = self._load_runtime_config_cached()
             backend = runtime.backend if runtime else None
-            probes = _BACKEND_PROBES.get(backend) if backend else None
+            probes = snapshot_probes(backend)
             if not probes:
                 return
             results = await asyncio.gather(

@@ -123,7 +123,7 @@ class SafeLLMEmbedding(BaseEmbedding):
 
     # 內部 wire client + per-instance 後端 / load options，不參與 Pydantic 驗證
     _http_client: LlmHttpClient = PrivateAttr()
-    _backend: str = PrivateAttr(default="ollama")
+    _backend: str | None = PrivateAttr(default=None)
     _load_options: dict[str, Any] | None = PrivateAttr(default=None)
     _slot_timeout: float | None = PrivateAttr(default=None)
     _load_timeout: float | None = PrivateAttr(default=None)
@@ -134,7 +134,7 @@ class SafeLLMEmbedding(BaseEmbedding):
         base_url: str,
         request_timeout: float | None = None,
         *,
-        backend: str = "ollama",
+        backend: str | None = None,
         model_load_options: dict[str, Any] | None = None,
         max_retries: int | None = None,
         slot_timeout: float | None = None,
