@@ -60,6 +60,7 @@ from services.community.shop_listing import (
     quote_order,
     render_embed,
 )
+from services.community import market_transition as transition
 from services.community.shop_trade import ListingTrades, Notified, Step
 from services.community.trade_service import NOT_READY_TEXT, WRAP_UP_GRACE, OpenedTrade, TradeService
 from services.market_db import TradeRow
@@ -158,6 +159,10 @@ class ShopService:
 
     async def can_sell(self, member: discord.Member) -> bool:
         return await check_role(member, self.settings.seller_role)
+
+    async def _check_deposit_ready(self, listing: Listing) -> None:
+        if await transition.holds_orders(self.trade, listing):
+            raise ShopError(transition.ORDERS_HELD_TEXT)
 
     async def _selling_owner(self, listing: Listing, guild) -> discord.Member:
         """這篇商品的供應方，還能接新訂單才回傳：人不在伺服器、或被拿掉觀星者身份組就擋下。
@@ -503,6 +508,9 @@ class ShopService:
             listing = await self._load_for_manage(listing_id, actor)
             pending = [trade for trade, kinds in await self._open_trades_with(listing_id)
                        if kinds & {"deposit", "preorder"} and not trade.legacy]
+            if await transition.holds_orders(self.trade, listing):
+                # 下架後管理面板按不了，就改不成定金＋尾款，上面的舊交易永遠接不上新流程
+                raise ShopError(transition.CLOSE_HELD_TEXT)
             if pending:
                 raise ShopError(
                     f"還有 {len(pending)} 筆定金或預購的交易沒做完，現在不能下架（下架後就不能延期、開始收尾款或開始交貨）。"
@@ -594,7 +602,9 @@ class ShopService:
     def _check_mix(kinds: Sequence[str]) -> None:
         if "deposit" in kinds and any(kind != "deposit" for kind in kinds):
             raise ShopError("定金＋尾款的品項不能和一次付清的品項放在同一篇商品：一起買的現貨會被拖到尾款收完才完成。"
-                            "有現貨請另開一篇。")
+                            "有現貨請另開一篇" + (
+                                "；上線前的【定金】商品要整篇改成定金＋尾款，請按管理面板的「💰 改成定金＋尾款」"
+                                "（有上線後開的交易在進行時要先完成或取消）。" if transition.enabled() else "。"))
 
     async def add_variants(self, listing_id: int, actor: discord.Member, drafts: Sequence[Draft]) -> Listing:
         async with self._lock(listing_id):
@@ -720,6 +730,7 @@ class ShopService:
         # 在確認畫面前就擋：不然需求方看完明細、按了確認才被告知不接單
         guild = getattr(buyer, "guild", None) or getattr(await self.trade.get_thread(listing_id), "guild", None)
         await self._selling_owner(listing, guild)
+        await self._check_deposit_ready(listing)
         lines = quote_order(listing, picks, self._now())
         rows, now_total, later_total = order_summary(lines, listing.unit)
         # 上線前的舊交易不會被沿用（新訂單另開對話），不能寫成「會加進還在進行的交易對話」
@@ -744,6 +755,7 @@ class ShopService:
             if thread is None:
                 raise ShopError("找不到這篇商品。")
             owner = await self._selling_owner(listing, thread.guild)
+            await self._check_deposit_ready(listing)
             rows, now_total, later_total = order_summary(lines, listing.unit)
 
             async def record(db, trade_id: int, created: bool) -> OrderRecord:
@@ -794,6 +806,7 @@ class ShopService:
             if row.post_pending:
                 # 改標題、下架時貼文還沒改好（撞到限速、做到一半重啟）：照資料庫補
                 self._sync_post_later(row.id)
+        await transition.adopt_ready(self)
         for row in await db.listings():
             for variant in await db.variants(row.id):
                 try:

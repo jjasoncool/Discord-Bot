@@ -79,6 +79,10 @@ class Switches(BaseModel):
     #: full＝整欄 1024 維、32 位元（索引約 2.2 GB）；halfvec512＝前 512 維、16 位元（約 0.5 GB，8 GB 主機才放得進快取）。
     #: 切之前先把對應的索引建好（建法在交接檔）；對不上只是退回全表掃描變慢，不會錯
     chat_vector_index: Literal["full", "halfvec512"] = "full"
+    #: 商品市集的上線銜接（services.community.market_transition）：on＝上線前的【定金】商品還沒改成定金＋尾款時，
+    #: 先不接新訂單、不能下架、上面的舊交易不能照舊流程做完，管理面板有「💰 改成定金＋尾款」；off＝照一般規則。
+    #: 那幾篇都改好之後再關（關掉不影響其他商品），確認沒問題後連程式一起刪掉
+    market_transition: Literal["off", "on"] = "on"
 
 
 def _parse(raw: str) -> Switches:

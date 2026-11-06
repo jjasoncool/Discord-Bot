@@ -1,4 +1,4 @@
-"""商品上架與商品交易（shop_service、shop_trade ＋ commands.shop_commands ＋ 交易模組），正本在市集資料庫。
+"""商品上架與商品交易（shop_service、shop_trade、market_import ＋ commands.shop_commands ＋ 交易模組），正本在市集資料庫。
 
 用真的交易模組、真的 Discord 元件與暫存的資料庫，只把 Discord 本身換成假的伺服器（沿用 test_trade_flow 的 World）。
 
@@ -23,15 +23,18 @@
   6. 截止：一次付清的預購截止時在每個對話 @ 雙方可以開始交貨，只通知一次（重啟也不重複，一個對話發不出去不影響別人）；
      定金截止只停收定金、不 @ 人；「開始交貨」提早截止；延期只能往後：還沒截止就延長收單，已截止只設預計交貨日，@ 需求方。
   7. 等待提醒：需求方沒付款 3 天後在對話裡 @ 他、記在資料庫不重發；上線前的舊交易不提醒。
-  8. 置頂上架說明：綁定時發一篇並置頂、建好「預購中」標籤；說明或按鈕改過時重綁會更新；橫幅圖換了才重傳。
-  9. 名字一律是伺服器暱稱；給群友看的字是品項、供應方、需求方，不說 thread、上架者、買家。
- 10. 分層與元件：商品模組不 import 指令層；按鈕與選單的 custom_id 解析得回同一個動作（舊貼文的管理按鈕也認得）；
+  8. 上線匯入：舊商品貼文與還開著的交易一次搬進資料庫（交付方式數位、舊交易不提醒），已下單數量不變，
+     貼文改畫成新格式；匯入完才開放按鈕；重跑不重複；失敗時按鈕維持擋住。
+  9. 置頂上架說明：綁定時發一篇並置頂、建好「預購中」標籤；說明或按鈕改過時重綁會更新；橫幅圖換了才重傳。
+ 10. 名字一律是伺服器暱稱；給群友看的字是品項、供應方、需求方，不說 thread、上架者、買家。
+ 11. 分層與元件：商品模組不 import 指令層；按鈕與選單的 custom_id 解析得回同一個動作（舊貼文的管理按鈕也認得）；
      表單都在 Discord 的上限內；管理面板最多 5 列，延期、開始收尾款或開始交貨只在用得到時出現。
 """
 
 import ast
 import asyncio
 import itertools
+import json
 import os
 import re
 import sys
@@ -51,13 +54,15 @@ import discord  # noqa: E402
 
 from commands import shop_commands  # noqa: E402
 from commands.shop_commands import DiscordShopViews  # noqa: E402
-from services.community import shop_service, shop_trade, trade_service  # noqa: E402
+from services.community import market_import, shop_service, shop_trade, trade_service  # noqa: E402
 from services.community import trade_progress as tp  # noqa: E402
 from services.community.shop_listing import ShopError, Variant, parse_batch, parse_draft  # noqa: E402
+from services.community import market_transition  # noqa: E402
 from services.community.shop_service import PriceChanged, ShopService  # noqa: E402
 import services.community.shop_listing as shop_listing_module  # noqa: E402
 from services.community.trade_service import CANCEL, CANCEL_OK, HOLD, NOTIFY, RECEIVE, TradeRef, TradeService  # noqa: E402
 from sys_settings.shop_settings import ShopSettings  # noqa: E402
+from sys_settings.switches import Switches  # noqa: E402
 from test.test_trade_flow import (  # noqa: E402  只拿假物件，不拿 TestCase（免得被重跑）
     ARCHIVE_ID, BOT, CART_ID, FORUM_ID, OUTSIDER, OWNER, REQUESTER, SUPPLIER, SUPPLIER_B,
     FakeMessage, FakeThread, MarketTestMixin, World, _make_view,
@@ -173,7 +178,11 @@ class ShopTestCase(MarketTestMixin, unittest.TestCase):
 
         self.ephemeral = mock.AsyncMock(name="safe_send_interaction_message")
         self.dms = mock.AsyncMock(name="send_dm", return_value=True)
+        exports = tempfile.TemporaryDirectory()
+        self.addCleanup(exports.cleanup)
+        self.exports = Path(exports.name)
         for p in (
+            mock.patch.object(market_import, "MARKET_BACKUP_DIR", self.exports),
             mock.patch.object(trade_service.ChannelConfig, "get_configured_id", side_effect=get_configured_id),
             mock.patch.object(shop_service.ChannelConfig, "get_configured_id", side_effect=get_configured_id),
             mock.patch.object(trade_service, "check_role", side_effect=check_role),
@@ -1173,6 +1182,16 @@ class CutoffTests(ShopTestCase):
         self.assertTrue(any("可以開始交貨" in t for t in texts))
         self.assertFalse(any("延後到" in t for t in texts))
 
+    def test_old_trades_waiting_for_deposit_get_no_cutoff_notice(self):
+        # 還在等改成定金＋尾款的舊交易：截止時不講「可以開始交貨」（照舊流程走就沒有尾款），改好接上新流程時再補發
+        self.call(self.db.db.execute(f"UPDATE trades SET legacy=1 WHERE id={self.first.id}"))
+        self.call(self.db.db.execute(f"UPDATE listings SET title='【定金】月相代儲' WHERE id={self.thread.id}"))
+        count = len(self.first.messages)
+        self.world.advance(hours=2)
+        self.call(self.shop.run_cutoffs(self.world.now))
+        self.assertFalse(any("可以開始交貨" in (m.content or "") for m in self.first.messages[count:]))
+        self.assertIn("可以開始交貨", self.second.last().content)
+
     def test_stopping_halfway_through_the_cutoff_notices(self):
         # 先停止下單、再逐一通知：通知發到一半停機，下一輪補發還沒發的，已經通知過的不再 @
         self.world.advance(hours=2)
@@ -1907,6 +1926,513 @@ class WaitingReminderTests(ShopTestCase):
         self.assertNotIn("提醒", trade_thread.last().content or "")
 
 
+class ImportTests(ShopTestCase):
+    """上線匯入：Discord 上的舊商品貼文與交易對話 → 資料庫。"""
+
+    def setUp(self):
+        super().setUp()
+        self.trade, self.shop = self.services(ready=False)
+        self.post = ForumThread(self.world, next(self.world.ids), "月相代儲", self.forum, owner_id=BOT.id)
+        embed = discord.Embed(title="月相代儲", description="說明")
+        embed.set_image(url="attachment://item_1.png")
+        starter = FakeMessage(self.world, self.post.id, BOT, "", embed=embed, thread=self.post)
+        starter.components = [SimpleNamespace(children=[
+            SimpleNamespace(custom_id=f"shop:buy:{self.post.id}", options=[
+                SimpleNamespace(label="60 月相", value="1:30:10:5::0"),
+                SimpleNamespace(label="寰宇電台", value="2:20::0::0")]),
+            SimpleNamespace(custom_id=f"shop:manage:{SELLER.id}:3:NT%24", disabled=False)])]
+        self.post.messages.append(starter)
+        self.forum.all_threads.append(self.post)
+        self.world.channels[self.post.id] = self.post
+
+        self.old_trade = self.cart_thread(TradeRef(self.post.id, BUYER.id, SELLER.id))
+        order = FakeMessage(self.world, next(self.world.ids), BOT,
+                            f"🧾 {BUYER.mention} 向 {SELLER.mention} 下單（月相代儲）：\n・60 月相 ×2（NT$30）＝NT$60",
+                            thread=self.old_trade)
+        order.components = [SimpleNamespace(children=[
+            SimpleNamespace(custom_id=f"shop:order:{self.post.id}:1x2", label="總計 NT$60")])]
+        self.old_trade.messages.append(order)
+        self.old_trade.messages.append(FakeMessage(
+            self.world, next(self.world.ids), BOT, "請領收", thread=self.old_trade,
+            view=_make_view(TradeRef(self.post.id, BUYER.id, SELLER.id), (RECEIVE, HOLD, "help"))))
+        self.forum_trade = self.cart_thread(TradeRef(7777, BUYER_B.id, SELLER.id))
+        self.forum_trade.auto_archive()
+
+    def cart_thread(self, ref):
+        thread = FakeThread(self.world, next(self.world.ids), f"【交易中】誰 與 誰 - {ref.source_id}",
+                            parent_id=CART_ID, type_=discord.ChannelType.private_thread)
+        thread.messages.append(FakeMessage(self.world, next(self.world.ids), BOT, "開單", thread=thread,
+                                           view=_make_view(ref, (NOTIFY, CANCEL, "help"))))
+        self.world.cart.all_threads.append(thread)
+        self.world.channels[thread.id] = thread
+        return thread
+
+    def test_old_deposit_trades_wait_for_the_conversion(self):
+        # 【定金】商品還沒改成定金＋尾款：舊交易不能照舊流程發領收通知（照舊流程做完就變成一次付清、沒有尾款）
+        self.post.messages[0].embed.title = "【定金】月相代儲"
+        self.call(market_import.run_import(self.shop))
+        self.assertTrue(self.trade_row(self.old_trade).legacy)
+        count = len(self.old_trade.messages)
+        self.call(self.trade.handle_button(self.interaction(SELLER, self.old_trade), NOTIFY, None))
+        self.assertIn("要先改成定金＋尾款", self.ephemeral.await_args.args[1])
+        self.assertEqual(len(self.old_trade.messages), count)
+        self.world.advance(hours=25)   # 匯入前就在等的領收通知也不會自動完成
+        self.call(self.trade.run_receipt_deadlines(self.world.now))
+        self.assertEqual(self.trade_row(self.old_trade).status, "open")
+        with self.assertRaises(ShopError):   # 也不能先下架（下架後就改不了，舊交易永遠接不上）
+            self.call(self.shop.close_listing(self.post.id, SELLER))
+        _, view = self.call(shop_commands._panel(self.shop, self.listing(self.post)))
+        embed, _ = self.call(shop_commands._panel(self.shop, self.listing(self.post)))
+        self.assertIn("目前不接新訂單", "".join(f.name for f in embed.fields))
+
+    def test_preview_lists_everything_and_writes_nothing(self):
+        # 上線前給群主核對：照正式匯入的讀法列出來，資料庫、Discord 都不寫，按鈕照樣擋著
+        edits = [list(m.edits) for m in self.post.messages]
+        text = self.call(market_import.preview_import(self.shop))
+        self.assertIn("商品 1 篇（交付方式一律實體）、進行中的交易 2 筆", text)
+        self.assertIn("「60 月相」30", text)
+        self.assertIn("舊貼文上的已下單 5 ＝ 上線前賣掉的 3 ＋ 進行中的交易 2", text)
+        self.assertIn(f"交易對話 {self.old_trade.id}　商品「月相代儲」", text)
+        self.assertIn("有一則還在等的領收通知", text)
+        self.assertIn(f"自由市場需求 7777", text)
+        self.assertEqual((self.call(self.db.listings()), self.call(self.db.trades())), ([], []))
+        self.assertEqual([list(m.edits) for m in self.post.messages], edits)
+        self.assertFalse(self.trade.ready.is_set())
+
+    def deposit_listing_imported(self):
+        """標題寫【定金】的舊商品匯入後：交易先留在舊流程。"""
+        self.post.messages[0].embed.title = "【定金】月相代儲"
+        self.call(market_import.run_import(self.shop))
+        return self.listing(self.post)
+
+    def test_a_deposit_listing_is_converted_as_a_whole(self):
+        listing = self.deposit_listing_imported()
+        self.assertTrue(self.call(market_transition.can_convert(self.trade, listing)))
+        _, view = self.call(shop_commands._panel(self.shop, listing))
+        self.assertIn(f"shop:panel:convert:{self.post.id}", [c.item.custom_id for c in view.children
+                                                              if hasattr(c, "item")])
+        # 一個一個改會被「不能跟一次付清混放」擋下，錯誤訊息指到這顆按鈕
+        with self.assertRaises(ShopError) as caught:
+            self.edit(self.post, 1, "60 月相", "30/100", "", self.cutoff_text(days=30), "deposit")
+        self.assertIn("改成定金＋尾款", str(caught.exception))
+
+        result = self.call(market_transition.convert(self.shop, self.post.id, SELLER, self.cutoff_text(days=30),
+                                                        "1. 60 月相｜100\n2. 寰宇電台｜50"))
+
+        self.assertIn("補發了 1 個交易對話", result)
+        listing = self.listing(self.post)
+        self.assertEqual([(v.kind, v.price, v.balance) for v in listing.variants],
+                         [("deposit", 30, 100), ("deposit", 20, 50)])
+        self.assertFalse(self.trade_row(self.old_trade).legacy)
+        self.assertEqual([(i.kind, i.unit_price, i.unit_balance) for i in self.call(self.db.items(self.old_trade.id))],
+                         [("deposit", 30, 100)])
+        card = self.card(self.old_trade)
+        self.assertIn("付定金 NT$60，到貨後這裡會通知付尾款", card.content)
+        self.assertIn("「我已付定金」", card.content)
+        self.assertEqual(card.pinged, [])
+        self.assertFalse(self.call(market_transition.can_convert(self.trade, listing)))   # 改好了，按鈕不再出現
+
+    def test_adopted_trades_are_reminded_from_the_conversion_not_the_old_order(self):
+        # 舊訂單是上線前下的：催款照下單時間算的話，一轉過來就 @ 需求方「第 1 次提醒」
+        self.world.advance(days=10)   # 上線時舊訂單已經下了十天
+        self.call(market_import.run_import(self.shop))
+        count = len(self.old_trade.messages)
+        self.call(self.shop.trades.run_waiting_reminders(self.world.now))
+        self.assertEqual(len(self.old_trade.messages), count)
+        self.world.advance(days=3, minutes=1)
+        self.call(self.shop.trades.run_waiting_reminders(self.world.now))
+        self.assertIn("第 1 次提醒", self.old_trade.last().content)
+
+    def test_the_opening_message_gets_the_new_flow(self):
+        self.call(market_import.run_import(self.shop))
+        flow = next(f.value for f in self.old_trade.messages[0].embed.fields if f.name == "流程")
+        self.assertIn("已寄出", flow)            # 實體交付：寄出、需求方按已收到
+        self.assertNotIn("自動視為已領收", flow)
+
+    def test_a_card_cut_short_during_conversion_is_sent_later(self):
+        # 轉成新流程寫好了、補發交易進度時 Discord 出錯：等待提醒的排程照 adopted 那筆補發，帶說明
+        self.post.messages[0].embed.title = "【定金】月相代儲"
+        self.call(market_import.run_import(self.shop))
+        with mock.patch.object(shop_trade.ListingTrades, "post_card", side_effect=discord.HTTPException(
+                mock.MagicMock(status=503), "Service Unavailable")), self.assertLogs(shop_service.logger, level="ERROR"):
+            self.call(market_transition.convert(self.shop, self.post.id, SELLER, self.cutoff_text(days=30),
+                                                   "1. 60 月相｜100\n2. 寰宇電台｜50"))
+        self.assertFalse(self.trade_row(self.old_trade).legacy)
+
+        self.call(self.shop.trades.run_waiting_reminders(self.world.now))
+
+        card = self.card(self.old_trade)
+        self.assertIn("交易功能更新了", card.content)
+        self.assertIn("付定金", card.content)
+        self.call(self.shop.trades.run_waiting_reminders(self.world.now))   # 補發過就不再發
+        cards = [m for m in self.old_trade.messages if m.embed is not None and m.embed.title == "交易進度"]
+        self.assertEqual(sum("交易功能更新了" in (m.content or "") for m in cards), 1)
+
+    def test_a_conversion_that_failed_midway_is_finished_by_the_schedule(self):
+        self.post.messages[0].embed.title = "【定金】月相代儲"
+        self.call(market_import.run_import(self.shop))
+        with mock.patch.object(shop_trade.ListingTrades, "adopt_legacy", side_effect=RuntimeError("停機")), \
+                self.assertLogs(shop_service.logger, level="ERROR"):
+            self.call(market_transition.convert(self.shop, self.post.id, SELLER, self.cutoff_text(days=30),
+                                                   "1. 60 月相｜100\n2. 寰宇電台｜50"))
+        self.assertTrue(self.trade_row(self.old_trade).legacy)   # 品項改好了、交易還沒轉
+
+        self.call(self.shop.run_cutoffs(self.world.now))
+
+        self.assertFalse(self.trade_row(self.old_trade).legacy)
+        self.assertIn("付定金", self.card(self.old_trade).content)
+
+    def test_editing_the_only_item_to_deposit_also_adopts_the_old_trades(self):
+        # 只有一個品項的【定金】舊商品，觀星者用熟悉的「編輯品項」改：舊交易一樣接上新流程
+        self.post.messages[0].embed.title = "【定金】月相代儲"
+        self.call(market_import.run_import(self.shop))
+        self.call(self.shop.delete_variant(self.post.id, SELLER, 2))   # 寰宇電台沒有交易，可以刪
+        listing, note = self.edit(self.post, 1, "60 月相", "30/100", "", self.cutoff_text(days=30), "deposit")
+        self.assertIn("上線前的 1 筆交易已接上新流程", note)
+        self.assertNotIn("照原本的金額", note)   # 舊交易的尾款就是這次填的，不是「原本的金額」
+        self.assertFalse(self.trade_row(self.old_trade).legacy)
+        self.assertEqual([(i.kind, i.unit_balance) for i in self.call(self.db.items(self.old_trade.id))],
+                         [("deposit", 100)])
+
+    def test_converting_keeps_items_that_already_closed(self):
+        # 已經截止的預購改成定金＋尾款：照樣截止，不能因為改類型就重新開放收定金
+        past = int((self.world.now - timedelta(days=3)).timestamp())
+        self.post.messages[0].components[0].children[0].options[0] = SimpleNamespace(
+            label="60 月相", value=f"1:30:10:5:{past}:1")
+        self.post.messages[0].embed.title = "【定金】月相代儲"
+        self.call(market_import.run_import(self.shop))
+        self.call(market_transition.convert(self.shop, self.post.id, SELLER, self.cutoff_text(days=30),
+                                               "1. 60 月相｜100\n2. 寰宇電台｜50"))
+        first, second = self.call(self.db.variants(self.post.id))
+        self.assertTrue(first.cutoff_done)
+        self.assertFalse(second.cutoff_done)
+
+    def test_an_old_trade_whose_listing_is_gone_does_not_stop_the_import(self):
+        lost = self.cart_thread(TradeRef(424242, BUYER_B.id, SELLER.id))
+        order = FakeMessage(self.world, next(self.world.ids), BOT, f"🧾 下單：\n・不見的品項 ×1（NT$10）＝NT$10",
+                            thread=lost)
+        order.components = [SimpleNamespace(children=[
+            SimpleNamespace(custom_id="shop:order:424242:1x1", label="總計 NT$10")])]
+        lost.messages.append(order)
+
+        self.call(market_import.run_import(self.shop))
+
+        self.assertTrue(self.trade.ready.is_set())
+        self.assertTrue(self.trade_row(lost).legacy)
+
+    def test_a_new_deposit_titled_listing_still_takes_orders(self):
+        # 上線後新開、標題剛好寫【定金】的商品沒有舊交易要等：照常接單
+        self.call(market_import.run_import(self.shop))
+        thread = self.list_item(title="【定金】新的手辦")
+        self.add(thread, "標準版｜700｜｜")
+        self.assertIsNotNone(self.order(thread, BUYER, {1: 1}))
+
+    def test_an_old_trade_without_orders_stays_on_the_old_flow(self):
+        # 沒讀到訂單的舊交易：轉過來沒有任何品項、再也完成不了，留在舊流程
+        self.old_trade.messages = [m for m in self.old_trade.messages if not m.content.startswith("🧾")]
+        self.call(market_import.run_import(self.shop))
+        self.assertTrue(self.trade_row(self.old_trade).legacy)
+
+    def test_turning_the_transition_off_goes_back_to_the_normal_rules(self):
+        # 那幾篇都改好之後把開關關掉：【定金】的規則全部不再作用，照一般規則
+        listing = self.deposit_listing_imported()
+        off = mock.patch.object(market_transition.switches, "current", lambda: Switches(market_transition="off"))
+        with off:
+            self.assertFalse(self.call(market_transition.can_convert(self.trade, listing)))
+            _, view = self.call(shop_commands._panel(self.shop, listing))
+            self.assertNotIn(f"shop:panel:convert:{self.post.id}",
+                             [c.item.custom_id for c in view.children if hasattr(c, "item")])
+            self.assertEqual(self.call(self.shop.quote(self.post.id, BUYER_B, {2: 1})).now_total, 20)
+            self.assertEqual(self.call(market_transition.adopt_ready(self.shop)), 0)
+            self.call(self.trade.handle_button(self.interaction(SELLER, self.old_trade), NOTIFY, None))
+            self.assertEqual(self.old_trade.last().view.actions, (RECEIVE, HOLD, "help"))   # 照舊流程發領收通知
+        self.assertTrue(self.trade_row(self.old_trade).legacy)
+
+    def test_converting_needs_every_balance(self):
+        self.deposit_listing_imported()
+        for text in ("1. 60 月相｜100", "1. 60 月相 100\n2. 寰宇電台｜50", "1. 60 月相｜0\n2. 寰宇電台｜50"):
+            with self.assertRaises(ShopError):
+                self.call(market_transition.convert(self.shop, self.post.id, SELLER, self.cutoff_text(days=30), text))
+        self.assertTrue(self.trade_row(self.old_trade).legacy)
+
+    def test_a_deposit_listing_takes_no_orders_until_it_is_set_up(self):
+        # 改好之前開的單會是一次付清、沒有尾款，而且一有上線後的交易，整篇就改不成定金了
+        self.deposit_listing_imported()
+        for attempt in (lambda: self.shop.quote(self.post.id, BUYER_B, {2: 1}),
+                        lambda: self.shop.place_order(self.post.id, BUYER_B, {2: 1})):
+            with self.assertRaises(ShopError) as caught:
+                self.call(attempt())
+            self.assertIn("付款方式還在設定", str(caught.exception))
+
+    def test_converting_is_refused_once_new_trades_exist(self):
+        self.deposit_listing_imported()
+        self.call(self.db.db.execute("UPDATE trades SET legacy=0"))   # 有上線後的交易：交易中不能改類型
+        with self.assertRaises(ShopError):
+            self.call(market_transition.convert(self.shop, self.post.id, SELLER, self.cutoff_text(days=30),
+                                                   "1. 60 月相｜100\n2. 寰宇電台｜50"))
+
+    def test_old_trades_keep_when_people_last_talked(self):
+        # 看板算「幾天沒動靜」直接查資料庫：舊交易在匯入時從對話讀一次最後一則真人訊息
+        said_at = self.world.now
+        self.old_trade.messages.append(FakeMessage(self.world, next(self.world.ids), BUYER, "到貨了嗎",
+                                                   thread=self.old_trade))
+        self.world.advance(days=3)
+        self.call(market_import.run_import(self.shop))
+        self.assertEqual(self.trade_row(self.old_trade).last_chat_at, said_at.isoformat())
+        self.assertIsNone(self.trade_row(self.forum_trade).last_chat_at)   # 只有 bot 講過話
+
+    def test_import_moves_everything_and_opens_the_buttons(self):
+        result = self.call(market_import.run_import(self.shop))
+
+        self.assertEqual((result.listings, result.trades), (1, 2))
+        self.assertTrue(self.trade.ready.is_set())
+        listing = self.listing(self.post)
+        self.assertEqual((listing.delivery, listing.unit, listing.owner_id), ("physical", "NT$", SELLER.id))
+        self.assertEqual([(v.key, v.taken, v.remaining) for v in listing.variants], [(1, 5, 5), (2, 0, None)])
+        self.assertEqual(self.call(self.db.get_variant(self.post.id, 1)).sold_before, 3)
+        old = self.trade_row(self.old_trade)
+        self.assertEqual(old.source_kind, "listing")
+        self.assertEqual([(i.variant_key, i.qty, i.unit_price) for i in self.call(self.db.items(self.old_trade.id))],
+                         [(1, 2, 30)])
+        self.assertEqual(self.events(self.old_trade)[:3], [tp.OPENED, tp.ORDER, tp.RECEIPT_REQUESTED])
+        self.assertEqual(self.trade_row(self.forum_trade).source_kind, "forum")
+        self.assertTrue(self.trade_row(self.forum_trade).legacy)   # 自由市場照舊流程
+        starter = self.post.messages[0]
+        self.assertEqual([o.value for o in self.buy_menu(self.post).options], ["1", "2"])   # 改畫成新格式
+        self.assertIn("shop:manage", [c.custom_id for c in starter.components[0].children])
+        self.assertEqual(self.call(self.db.listings())[0].next_key, 3)
+
+    def test_old_trades_move_to_the_new_flow_at_import(self):
+        # 上線時都還沒付：商品的舊交易轉成新流程，每個對話補發一張交易進度，不 @ 人；舊流程的領收通知作廢
+        notice = self.old_trade.messages[-1]
+        self.call(market_import.run_import(self.shop))
+        self.assertFalse(self.trade_row(self.old_trade).legacy)
+        card = self.card(self.old_trade)
+        self.assertIn("交易功能更新了", card.content)
+        self.assertIn("請需求方照供應方說的方式付款 NT$60", card.content)
+        self.assertEqual(card.pinged, [])
+        self.assertIn("trade:step:claim_paid", self.card_buttons(self.old_trade))
+        self.assertIn("作廢", notice.content)
+        self.assertEqual(notice.components, [])
+        self.assertIn(tp.RECEIPT_HELD, self.events(self.old_trade))
+        self.world.advance(hours=25)   # 舊的領收通知不會再自動完成
+        self.call(self.trade.run_receipt_deadlines(self.world.now))
+        self.assertEqual(self.trade_row(self.old_trade).status, "open")
+
+    def test_rerun_does_not_duplicate(self):
+        self.call(market_import.run_import(self.shop))
+        trade, shop = self.services(ready=False)
+
+        result = self.call(market_import.run_import(shop))
+
+        self.assertTrue(result.already_done)
+        self.assertTrue(trade.ready.is_set())
+        self.assertEqual(len(self.call(self.db.trades())), 2)
+
+    def test_failure_keeps_the_buttons_closed_and_can_be_rerun(self):
+        self.forum.fail_archived = True
+        with self.assertRaises(discord.HTTPException):
+            self.call(market_import.run_import(self.shop))
+        self.assertFalse(self.trade.ready.is_set())
+        self.assertEqual(self.call(self.db.listings()), [])
+        with self.assertRaises(ShopError):   # 留在畫面上的舊確認、舊面板也擋著
+            self.call(self.shop.place_order(self.post.id, BUYER, {1: 1}))
+
+        self.forum.fail_archived = False
+        self.call(market_import.run_import(self.shop))
+        self.assertTrue(self.trade.ready.is_set())
+
+    def test_unbound_channels_fail_instead_of_importing_nothing(self):
+        for key in ("shop_forum_channel_id", "cart_delivery_channel_id"):
+            with self.subTest(key):
+                saved = self.config.pop(key)
+                with self.assertRaises(RuntimeError) as caught:
+                    self.call(market_import.run_import(self.shop))
+                self.assertIn("重新偵測", str(caught.exception))
+                self.assertIsNone(self.call(self.db.get_meta(market_import.META_DONE)))
+                self.config[key] = saved
+
+    def test_old_text_is_exported_and_unreadable_items_are_reported(self):
+        self.post.messages[0].components[0].children[0].options.append(SimpleNamespace(label="壞掉的", value="x:y"))
+        with self.assertLogs(market_import.logger, level="WARNING") as logs:
+            self.call(market_import.run_import(self.shop))
+        self.assertTrue(any("壞掉的" in line for line in logs.output))
+        (export,) = self.exports.glob("import_source_*.json")
+        data = json.loads(export.read_text(encoding="utf-8"))
+        self.assertIn({"label": "60 月相", "value": "1:30:10:5::0"}, data["listings"][0]["options"])
+        self.assertEqual(data["listings"][0]["skipped"], ["壞掉的"])
+        self.assertEqual(len(data["trades"]), 2)
+
+    def test_redraw_failure_is_rerun_with_the_first_numbers(self):
+        with mock.patch.object(ShopService, "redraw", side_effect=discord.HTTPException(mock.MagicMock(status=500), "x")):
+            with self.assertRaises(discord.HTTPException):
+                self.call(market_import.run_import(self.shop))
+        self.assertFalse(self.trade.ready.is_set())
+
+        result = self.call(market_import.run_import(self.shop))
+
+        self.assertEqual((result.listings, result.trades), (1, 2))
+        self.assertEqual(len(self.call(self.db.trades())), 2)
+        self.assertEqual([o.value for o in self.buy_menu(self.post).options], ["1", "2"])
+
+    def test_reactions_while_starting_up_after_the_import_are_handled_too(self):
+        self.call(market_import.run_import(self.shop))
+        trade, shop = self.services(ready=False)   # 平常的重啟：連上到檢查完匯入的那幾秒
+        post = self.world.post(BUYER, "需要代練")
+        self.world.put_reaction(post, "✅", SELLER)
+        payload = SimpleNamespace(emoji="✅", guild_id=1, channel_id=post.id, message_id=post.id,
+                                  user_id=SELLER.id, member=SELLER)
+        self.assertIsNone(self.call(trade.handle_reaction(payload)))
+
+        self.call(market_import.run_import(shop))
+
+        self.assertEqual(self.trade_row(self.world.cart.all_threads[-1]).source_id, post.id)
+
+    def test_closed_old_preorders_are_not_announced_again(self):
+        # 舊商品已經截止的預購：舊程式早就 @ 過大家了，上線後不能再發一輪
+        past = int((self.world.now - timedelta(days=3)).timestamp())
+        self.post.messages[0].components[0].children[0].options[0] = SimpleNamespace(
+            label="60 月相", value=f"1:30:10:5:{past}:1")
+        self.call(market_import.run_import(self.shop))
+        count = len(self.old_trade.messages)
+
+        self.call(self.shop.run_cutoffs(self.world.now))
+
+        self.assertEqual(len(self.old_trade.messages), count)
+        self.assertTrue(self.call(self.db.get_variant(self.post.id, 1)).cutoff_noticed)
+
+    def test_quantity_warnings_reach_the_log_and_the_export(self):
+        self.post.messages[0].components[0].children[0].options[0] = SimpleNamespace(label="60 月相", value="1:30:10:1::0")
+        with self.assertLogs(market_import.logger, level="WARNING") as logs:
+            self.call(market_import.run_import(self.shop))
+        self.assertTrue(any("sold_before 記 0" in line for line in logs.output))
+        (export,) = self.exports.glob("import_source_*.json")
+        self.assertTrue(any("sold_before" in w for w in json.loads(export.read_text(encoding="utf-8"))["warnings"]))
+
+    def test_reactions_during_the_import_are_handled_afterwards(self):
+        post = self.world.post(BUYER, "需要代儲")
+        self.world.put_reaction(post, "✅", SELLER)
+        payload = SimpleNamespace(emoji="✅", guild_id=1, channel_id=post.id, message_id=post.id,
+                                  user_id=SELLER.id, member=SELLER)
+        self.assertIsNone(self.call(self.trade.handle_reaction(payload)))
+        self.assertIn("接單已經記下了", self.dms.await_args.kwargs["content"])   # 不然他看不出有沒有接到
+        self.call(self.trade.handle_reaction(payload))
+        self.assertEqual(self.dms.await_count, 1)   # 同一篇只說一次
+        before = len(self.world.cart.all_threads)
+
+        self.call(market_import.run_import(self.shop))
+
+        self.assertEqual(len(self.world.cart.all_threads), before + 1)
+        opened = self.world.cart.all_threads[-1]
+        self.assertEqual(self.trade_row(opened).source_id, post.id)
+
+
+    def test_reactions_during_a_failed_import_survive_a_restart(self):
+        # 匯入失敗、修好前重啟過：記進資料庫的接單照樣補開；這段期間拿掉表情的不開
+        kept, dropped = self.world.post(BUYER, "需要代儲"), self.world.post(BUYER_B, "需要代練")
+        for post in (kept, dropped):
+            self.world.put_reaction(post, "✅", SELLER)
+            self.call(self.trade.handle_reaction(SimpleNamespace(
+                emoji="✅", guild_id=1, channel_id=post.id, message_id=post.id, user_id=SELLER.id, member=SELLER)))
+        dropped.messages[0].reactions[0].people.clear()
+        before = len(self.world.cart.all_threads)
+        trade, shop = self.services(ready=False)   # 重啟：記憶體裡的清單沒了
+
+        self.call(market_import.run_import(shop))
+
+        self.assertEqual(len(self.world.cart.all_threads), before + 1)
+        self.assertEqual(self.trade_row(self.world.cart.all_threads[-1]).source_id, kept.id)
+        self.assertEqual(self.call(self.db.get_meta(trade_service.DEFERRED_META)), "[]")
+
+
+    def test_only_real_suppliers_are_told_their_reaction_was_kept(self):
+        # 匯入期間不能接單的人（沒有觀星者身份組）按了：不記、不私訊「接單記下了」
+        post = self.world.post(BUYER, "需要代儲")
+        self.world.put_reaction(post, "✅", OUTSIDER)
+        self.call(self.trade.handle_reaction(SimpleNamespace(
+            emoji="✅", guild_id=1, channel_id=post.id, message_id=post.id, user_id=OUTSIDER.id, member=OUTSIDER)))
+        self.dms.assert_not_awaited()
+        self.assertIn(self.call(self.db.get_meta(trade_service.DEFERRED_META)), (None, "[]"))
+
+    def test_a_reaction_that_fails_to_open_is_kept_for_next_time(self):
+        post = self.world.post(BUYER, "需要代儲")
+        self.world.put_reaction(post, "✅", SELLER)
+        payload = SimpleNamespace(emoji="✅", guild_id=1, channel_id=post.id, message_id=post.id,
+                                  user_id=SELLER.id, member=SELLER)
+        self.call(self.trade.handle_reaction(payload))
+        with mock.patch.object(TradeService, "open_trade", side_effect=RuntimeError("Discord 暫時出錯")), \
+                self.assertLogs(trade_service.logger, level="ERROR"):
+            self.call(market_import.run_import(self.shop))
+        saved = json.loads(self.call(self.db.get_meta(trade_service.DEFERRED_META)))
+        self.assertEqual([e["channel_id"] for e in saved], [post.id])   # 私訊說過不用重按：下次啟動再補
+
+
+    def test_a_hiccup_while_opening_a_replayed_reaction_keeps_it(self):
+        # 補開時第二次取需求貼文才碰到 Discord 暫時出錯：照樣留著下次再補，不能當成不符條件丟掉
+        post = self.world.post(BUYER, "需要代儲")
+        self.world.put_reaction(post, "✅", SELLER)
+        self.call(self.trade.handle_reaction(SimpleNamespace(
+            emoji="✅", guild_id=1, channel_id=post.id, message_id=post.id, user_id=SELLER.id, member=SELLER)))
+        self.world.channels.pop(post.id)
+        calls = []
+
+        async def second_fails(channel_id):
+            if channel_id == post.id:
+                calls.append(channel_id)
+                if len(calls) > 1:
+                    raise discord.HTTPException(mock.MagicMock(status=503), "Service Unavailable")
+                return post
+            raise discord.NotFound(mock.MagicMock(status=404), "unknown channel")
+
+        self.world.bot.fetch_channel = second_fails
+        with self.assertLogs(trade_service.logger, level="ERROR"):
+            self.call(market_import.run_import(self.shop))
+        saved = json.loads(self.call(self.db.get_meta(trade_service.DEFERRED_META)))
+        self.assertEqual([e["channel_id"] for e in saved], [post.id])
+
+    def test_a_member_lookup_hiccup_while_replaying_keeps_the_reaction(self):
+        # 重啟後補開時只剩資料庫裡的紀錄（沒有成員資料）：查成員碰到 Discord 暫時出錯，照樣留著下次補
+        post = self.world.post(BUYER, "需要代儲")
+        self.world.put_reaction(post, "✅", SELLER)
+        self.call(self.trade.handle_reaction(SimpleNamespace(
+            emoji="✅", guild_id=1, channel_id=post.id, message_id=post.id, user_id=SELLER.id, member=SELLER)))
+        trade, shop = self.services(ready=False)   # 重啟：記憶體裡帶成員資料的那份沒了
+        self.world.cached = {BUYER.id}
+        real = self.world.guild.fetch_member
+
+        async def hiccup(uid):
+            if uid == SELLER.id:
+                raise discord.HTTPException(mock.MagicMock(status=503), "Service Unavailable")
+            return await real(uid)
+
+        self.world.guild.fetch_member = hiccup
+        with self.assertLogs(trade_service.logger, level="ERROR"):
+            self.call(market_import.run_import(shop))
+        saved = json.loads(self.call(self.db.get_meta(trade_service.DEFERRED_META)))
+        self.assertEqual([e["channel_id"] for e in saved], [post.id])
+
+    def test_a_reaction_on_a_deleted_post_is_dropped_but_a_hiccup_is_kept(self):
+        gone, flaky = self.world.post(BUYER, "需要代儲"), self.world.post(BUYER_B, "需要代練")
+        for post in (gone, flaky):
+            self.world.put_reaction(post, "✅", SELLER)
+            self.call(self.trade.handle_reaction(SimpleNamespace(
+                emoji="✅", guild_id=1, channel_id=post.id, message_id=post.id, user_id=SELLER.id, member=SELLER)))
+        gone.messages.clear()   # 需求方把第一則訊息刪了：確定不在了，不用每次啟動再試
+        self.world.channels.pop(flaky.id)
+        real_fetch = self.world.bot.fetch_channel
+
+        async def hiccup(channel_id):
+            if channel_id == flaky.id:
+                raise discord.HTTPException(mock.MagicMock(status=503), "Service Unavailable")
+            return await real_fetch(channel_id)
+
+        self.world.bot.fetch_channel = hiccup
+        with self.assertLogs(trade_service.logger, level="ERROR"):
+            self.call(market_import.run_import(self.shop))
+        saved = json.loads(self.call(self.db.get_meta(trade_service.DEFERRED_META)))
+        self.assertEqual([e["channel_id"] for e in saved], [flaky.id])   # 暫時出錯的留著下次再補
+
+
 class GuideTests(ShopTestCase):
 
     def setUp(self):
@@ -2226,7 +2752,7 @@ class PanelTests(ShopTestCase):
 class LayeringTests(unittest.TestCase):
 
     def test_shop_modules_do_not_import_commands(self):
-        for module in (shop_service, shop_trade, sys.modules["services.community.shop_listing"]):
+        for module in (shop_service, shop_trade, market_import, sys.modules["services.community.shop_listing"]):
             tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
             names = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
             names |= {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
@@ -2312,6 +2838,17 @@ class LayeringTests(unittest.TestCase):
 
         asyncio.run(check())
 
+    def test_the_pinned_guide_is_refreshed_after_the_import(self):
+        async def check():
+            cog = shop_commands.ShopCommands(mock.MagicMock())
+            cog.shop = SimpleNamespace(refresh_guide=mock.AsyncMock())
+            with mock.patch.object(shop_commands, "run_import", mock.AsyncMock(
+                    return_value=SimpleNamespace(already_done=True))):
+                self.assertTrue(await cog._import())
+            cog.shop.refresh_guide.assert_awaited_once()
+
+        asyncio.run(check())
+
     def test_daily_backup_waits_for_its_time(self):
         # 排程最多睡 6 小時就醒一次：換日後、還沒到 03:30 的那次不做，備份時刻才不會跟著開機時間漂
         async def check():
@@ -2369,7 +2906,7 @@ class LayeringTests(unittest.TestCase):
 
     def test_cog_wires_the_listing_source_and_its_schedules(self):
         async def check():
-            # 這個測試不准碰資料庫：開放要等 bot 連上（這裡永遠不會），真的叫到就是測試寫錯
+            # 這個測試不准碰資料庫：匯入要等 bot 連上（這裡永遠不會），真的叫到就是測試寫錯
             trade = TradeService(mock.MagicMock(), make_view=_make_view,
                                  db=mock.AsyncMock(side_effect=AssertionError("測試不能開市集資料庫")))
             bot = mock.MagicMock()
@@ -2377,7 +2914,8 @@ class LayeringTests(unittest.TestCase):
             bot.wait_until_ready = lambda: asyncio.sleep(3600)
             cog = shop_commands.ShopCommands(bot)
             with mock.patch.object(shop_commands, "run_due_loop", new=mock.MagicMock(
-                    side_effect=lambda *a, **k: asyncio.sleep(3600))) as loop_call:
+                    side_effect=lambda *a, **k: asyncio.sleep(3600))) as loop_call, \
+                    mock.patch.object(shop_commands.owner_alerts, "register") as register:
                 await cog.cog_load()
                 await asyncio.sleep(0)
             try:
@@ -2389,7 +2927,8 @@ class LayeringTests(unittest.TestCase):
                 self.assertEqual(names, ["商品截止", "商品交易等待提醒", "市集資料庫備份"])
                 # 截止的排程跟著品項新增、編輯提早醒來
                 self.assertIs(loop_call.call_args_list[0].kwargs["wake"], cog.shop.cutoffs_changed)
-                self.assertFalse(trade.ready.is_set())   # bot 連上才開放
+                self.assertEqual(register.call_args.args[0], shop_commands.ALERT_KIND)
+                self.assertFalse(trade.ready.is_set())   # 匯入做完才開放
             finally:
                 await cog.cog_unload()
 
@@ -2402,7 +2941,7 @@ class WordingTests(unittest.TestCase):
     def test_source_strings(self):
         from commands import forum_monitor
 
-        modules = (shop_service, shop_trade, trade_service, shop_commands, forum_monitor,
+        modules = (shop_service, shop_trade, market_import, trade_service, shop_commands, forum_monitor,
                    sys.modules["services.community.shop_listing"])
         for module in modules:
             tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))

@@ -1,4 +1,4 @@
-"""機器人狀態面板：九項紅黃綠、每項旁邊一顆重測、全部重測、重新整理、看詳細、補跑今天的 04:00 維護；私訊與伺服器裡同一份。
+"""機器人狀態面板：每一項紅黃綠、每項旁邊一顆重測、全部重測、重新整理、看詳細、補跑今天的 04:00 維護；私訊與伺服器裡同一份。
 
 架構定位：介面層（commands）的 view、各項狀況的狀態與重測函式，沒有自己的 cog。
   上層：`commands.owner_alert_commands`（`cog_load` 呼叫 `register_kinds`、登記這裡的 DynamicItem；按鈕的重測交回它的
@@ -552,8 +552,22 @@ async def render_status(*, expanded: bool = False, headline: str = "") -> discor
     hidden = [(spec, status, key) for spec, status, key in rows if not expanded and status.level == "ok"]
     # 元件預算：容器 1＋標題 1＋分隔 2＋頁尾 1＋兩排按鈕 2＋最多 6 顆＝13，收合那列 3，每一項（Section＋文字＋按鈕）3
     fixed = 13 + (3 if hidden else 0)
-    room = max(1, (40 - fixed) // 3)
-    if len(shown) > room:
+
+    def cost(plain: set) -> int:
+        return fixed + sum(1 if spec.kind in plain else 3 for spec, _, _ in shown)
+
+    # 每項都帶重測按鈕放不下時，正常的那幾項（從後面起）改成只有一行字，按鈕留給要處理、觀察中的；
+    # 正常的照樣可以按「全部重測」
+    plain: set = set()
+    for spec, status, _ in reversed(shown):
+        if cost(plain) <= 40:
+            break
+        if status.level == "ok":
+            plain.add(spec.kind)
+    if cost(plain) > 40:
+        # 要處理的多到還是放不下：後面的收成一行「放不下，按看詳細」
+        plain = set()
+        room = max(1, (40 - fixed) // 3)
         rest, shown = shown[room - 1:], shown[:room - 1]
     else:
         rest = []
@@ -567,7 +581,7 @@ async def render_status(*, expanded: bool = False, headline: str = "") -> discor
         if len(head) + len(body) > per_row:
             body = body[:max(10, per_row - len(head) - 8)] + "…（看詳細）"
         text = head + body
-        if spec.retest is not None:
+        if spec.retest is not None and spec.kind not in plain:
             box.add_item(discord.ui.Section(discord.ui.TextDisplay(text),
                                             accessory=PanelRetestButton(spec.kind, key, expanded, label=_retest_label(status.level))))
         else:

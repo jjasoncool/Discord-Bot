@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Iterable, Optional, Sequence
 import discord
 
 from services.community import trade_progress as tp
+from services.community import market_transition as transition
 from services.community.shop_listing import Listing, Variant, format_cutoff, format_date, money
 from services.community.trade_service import NO_RECORD_TEXT, NOT_READY_TEXT, TradeRef, receipt_state
 from services.market_db import MarketDB, TradeItemRow, TradeRow
@@ -316,10 +317,11 @@ class ListingTrades:
 
     async def complete_blocker(self, trade: TradeRow) -> Optional[str]:
         """領收前的最後一道檢查：上線後的商品交易要每個品項都交付了才能完成；實體商品不走領收，要逐項按已收到。
-        上線前的舊交易照舊流程。"""
+        上線前的舊交易照舊流程（上線銜接期間【定金】商品還沒改好的除外，見 market_transition）。"""
         listing = await self.shop.load(trade.source_id)
         if trade.legacy:
-            return None
+            # 上線銜接：【定金】商品還沒改成定金＋尾款時先不能往下走（照舊流程做完就變成一次付清、沒有尾款）
+            return transition.WAITS_TEXT if transition.waits_for_deposit(listing) else None
         db = await self.trade.db()
         _, _, prog = await self._state(db, trade, listing.delivery)
         if listing.delivery == "physical":
@@ -738,7 +740,8 @@ class ListingTrades:
         count, retry = 0, False
         db = await self.trade.db()
         for trade, _ in await self.shop._open_trades_for_variant(listing.thread_id, variant.key):
-            if trade.legacy and not legacy:
+            if trade.legacy and (not legacy or transition.waits_for_deposit(listing)):
+                # 還在等整篇改成定金＋尾款的舊交易：改好接上新流程時會補發交易進度，現在講截止、交貨只會照舊流程走
                 continue
             if not delivered and not trade.legacy:
                 _, _, prog = await self._state(db, trade, listing.delivery)

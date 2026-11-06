@@ -27,6 +27,7 @@ import discord
 from discord.ext import commands
 
 from services.community import trade_progress as tp
+from services.community.market_import import run_import
 from services.community.shop_listing import (
     BUY_TEMPLATE,
     DELIVERY_LABELS,
@@ -49,12 +50,14 @@ from services.community.shop_listing import (
     select_options,
     unavailable_text,
 )
+from services.community import market_transition as transition
 from services.community.shop_service import UNIT_EXAMPLES, PriceChanged, ShopService
 from services.community.shop_trade import STEP_TEMPLATE, Step
 from services.market_db import backup_daily
 from sys_settings.paths import MARKET_BACKUP_DIR
 from sys_settings.shop_settings import ShopSettings
 from sys_settings.time_settings import APP_TZ
+from utils import owner_alerts
 from utils.background_tasks import spawn, supervise
 from utils.due_loop import run_due_loop
 from utils.utils import safe_send_interaction_message, safe_send_interaction_text
@@ -62,6 +65,8 @@ from utils.utils import safe_send_interaction_message, safe_send_interaction_tex
 logger = logging.getLogger(__name__)
 
 GUIDE_CUSTOM_ID = "shop:new"
+#: 群主通知的種類：上線匯入失敗時私訊群主，「重新偵測」＝重跑匯入
+ALERT_KIND = "market"
 NOT_READY_TEXT = "商品與交易功能更新中，請稍後再試。"
 MANAGE_CUSTOM_ID = "shop:manage"
 _CODE_BLOCK = re.compile(r"```\n?(.*?)```", re.DOTALL)
@@ -214,6 +219,7 @@ _PANEL_ACTIONS = {
     "delay": ("📅 延期", discord.ButtonStyle.secondary, 1),
     "balance": ("📦 開始收尾款（準備交貨）", discord.ButtonStyle.secondary, 1),
     "deliver": ("⏩ 開始交貨", discord.ButtonStyle.secondary, 1),
+    "convert": ("💰 改成定金＋尾款", discord.ButtonStyle.secondary, 1),
     "close": ("下架", discord.ButtonStyle.danger, 2),
     "back": ("返回", discord.ButtonStyle.secondary, None),  # 子畫面用，不放在主面板
 }
@@ -237,6 +243,8 @@ async def _panel(shop: ShopService, listing: Listing) -> tuple[discord.Embed, di
         description = "\n".join(lines)[:_PANEL_TEXT_LIMIT]
     embed = discord.Embed(title=f"⚙️ 管理商品：{listing.title}"[:256], color=discord.Color.gold(),
                           description=description or "還沒有品項，先按「新增品項」或「批次新增」。")
+    if await transition.holds_orders(shop.trade, listing):
+        embed.add_field(name="⚠️ 目前不接新訂單", inline=False, value=transition.PANEL_NOTE)
     embed.set_footer(text=f"交付方式：{DELIVERY_LABELS.get(listing.delivery, listing.delivery)}｜這個面板只有你看得到")
     view = discord.ui.View(timeout=None)
     for action in ("add", "batch", "info"):
@@ -245,8 +253,12 @@ async def _panel(shop: ShopService, listing: Listing) -> tuple[discord.Embed, di
         view.add_item(ShopPanelButton("delay", listing.thread_id))
     if listing.has_deposit():
         view.add_item(ShopPanelButton("balance", listing.thread_id))
-    elif any(v.preorder for v in listing.variants):
+    elif any(v.preorder for v in listing.variants) and not transition.waits_for_deposit(listing):
+        # 還沒改成定金的【定金】商品不放「開始交貨」：按了會記成已截止，改成定金後收定金就再也打不開
         view.add_item(ShopPanelButton("deliver", listing.thread_id))
+    if await transition.can_convert(shop.trade, listing):
+        # 上線前匯入、標題寫【定金】的商品：舊格式沒有定金＋尾款，整篇一起改（一個一個改會被「不能跟一次付清混放」擋下）
+        view.add_item(ShopPanelButton("convert", listing.thread_id))
     view.add_item(ShopPanelButton("close", listing.thread_id))
     if listing.variants:
         options = [discord.SelectOption(label=f"{n}. {v.name}"[:100], value=str(v.key))
@@ -304,7 +316,7 @@ def _confirm_view(action: str, listing_id: int, key: Optional[int] = None) -> di
 
 
 class ShopPanelButton(discord.ui.DynamicItem[discord.ui.Button],
-                      template=r"shop:panel:(?P<action>add|batch|info|delay|balance|deliver|close|back):(?P<listing>\d+)"):
+                      template=r"shop:panel:(?P<action>add|batch|info|delay|balance|deliver|convert|close|back):(?P<listing>\d+)"):
     """管理面板的按鈕。面板只有供應方看得到；真正寫入時商品服務會再檢查一次權限。"""
 
     def __init__(self, action: str, listing_id: int):
@@ -341,6 +353,9 @@ class ShopPanelButton(discord.ui.DynamicItem[discord.ui.Button],
                 # 編輯商品資訊要帶入目前的標題與說明（讀資料庫，很快）
                 listing = await shop.check_manager(self.listing_id, interaction.user)
                 return await interaction.response.send_modal(ListingInfoModal(listing=listing))
+            if self.action == "convert":
+                listing = await shop.check_manager(self.listing_id, interaction.user)
+                return await interaction.response.send_modal(DepositConvertModal(listing))
             targets = await shop.schedule_targets(self.listing_id, interaction.user, self.action)
             if not targets:
                 return await _reply(interaction, {"delay": "沒有可以延期的品項（只有預購、還沒開始收尾款的定金品項可以延期）。",
@@ -707,6 +722,41 @@ class DelayModal(discord.ui.Modal):
         await _panel_with_error(interaction, shop, self.listing_id, text)
 
 
+class DepositConvertModal(discord.ui.Modal):
+    """上線銜接（market_transition）：整篇改成定金＋尾款，原本的價格當定金；填一個收定金截止、每個品項的尾款。"""
+
+    def __init__(self, listing: Listing):
+        super().__init__(title="改成定金＋尾款", timeout=_MODAL_TIMEOUT)
+        self.listing_id = listing.thread_id
+        cutoff = next((v.cutoff for v in listing.variants if v.cutoff is not None), None)
+        self.cutoff = discord.ui.TextInput(max_length=16, placeholder="2027/02/28 23:59",
+                                           default=format_cutoff(cutoff) if cutoff and cutoff > _now() else None)
+        lines = "\n".join(f"{n}. {v.name[:60]}｜" for n, v in enumerate(listing.variants, start=1))
+        self.balances = discord.ui.TextInput(style=discord.TextStyle.paragraph, max_length=4000, default=lines[:4000])
+        self.add_item(discord.ui.Label(text="收定金截止", description="整篇一起；只寫日期＝當天 23:59",
+                                       component=self.cutoff))
+        self.add_item(discord.ui.Label(
+            text="每個品項的尾款", description="在每行的「｜」後面填尾款，例「1. 標準版｜1300」；原本的價格當定金",
+            component=self.balances))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        shop = _shop(interaction)
+        if shop is None:
+            return await _missing(interaction)
+        await interaction.response.defer()
+        try:
+            text = await transition.convert(shop, self.listing_id, interaction.user, self.cutoff.value,
+                                            self.balances.value)
+            listing = await shop.check_manager(self.listing_id, interaction.user)
+            return await _show_panel(interaction, shop, listing, text)
+        except ShopError as exc:
+            text = f"⚠️ {exc}"
+        except Exception:  # 邊界：一次表單送出
+            logger.error("商品上架：改成定金＋尾款失敗 商品=%s", self.listing_id, exc_info=True)
+            text = _ERROR_TEXT
+        await _panel_with_error(interaction, shop, self.listing_id, text)
+
+
 # ── 商品資訊（上架、編輯） ──
 
 def _selected_ids(data: Optional[dict], custom_id: str) -> list[str]:
@@ -1008,6 +1058,8 @@ class ShopCommands(commands.Cog):
         self.settings = settings or ShopSettings()
         self.shop: Optional[ShopService] = None
         self._tasks: list[asyncio.Task] = []
+        # 第一次匯入與群主按「重新偵測」不能同時跑
+        self._import_lock = asyncio.Lock()
 
     async def cog_load(self):
         # 下單要靠交易模組開對話；COMMAND_MODULES 依字母順序載入，forum_monitor 在前面
@@ -1020,8 +1072,9 @@ class ShopCommands(commands.Cog):
         trade_cog.trade.add_source_kind(self.shop.source)
         self.bot.add_dynamic_items(*_DYNAMIC_ITEMS)
         self.bot.add_view(GuideView())
+        owner_alerts.register(ALERT_KIND, title="商品市集", retest=self._retest_import, status=self._import_status)
         self._tasks = [
-            spawn(self._open(), name="market_open"),
+            spawn(self._first_import(), name="market_import"),
             supervise(lambda: run_due_loop("商品截止", self.shop.run_cutoffs, wait_ready=self.bot.wait_until_ready,
                                            max_sleep=self.settings.cutoff_check_max_sleep_seconds,
                                            wake=self.shop.cutoffs_changed),
@@ -1048,16 +1101,38 @@ class ShopCommands(commands.Cog):
         await backup_daily(await self.shop.db(), MARKET_BACKUP_DIR, today=local.date().isoformat())
         return today_at + timedelta(days=1)
 
-    async def _open(self) -> None:
-        """bot 連上就開放商品與交易按鈕（連上前按的接單表情補開）；置頂的上架說明照這一版更新
-        （新按鈕、新的流程說明），不用等群主重綁商品論壇。"""
+    async def _first_import(self) -> None:
         await self.bot.wait_until_ready()
-        self.shop.trade.ready.set()
-        await self.shop.trade.replay_deferred()
+        await self._import()
+
+    async def _import(self) -> bool:
+        """上線匯入：做完才開放商品與交易按鈕；失敗私訊群主，按鈕維持擋住，修好後「重新偵測」重跑。"""
+        async with self._import_lock:
+            try:
+                result = await run_import(self.shop)
+            except Exception as exc:  # 邊界：匯入失敗要告訴群主、按鈕擋著，不能讓 cog 的背景任務默默結束
+                logger.error("市集匯入失敗", exc_info=True)
+                owner_alerts.emit(ALERT_KIND, "import",
+                                  f"商品市集上線匯入失敗（{type(exc).__name__}: {exc}）。商品與交易的按鈕先擋著，"
+                                  "原因寫在 log；修好後按「重新偵測」重跑，已經匯好的不會重複。")
+                return False
+        if not result.already_done:
+            owner_alerts.inform(ALERT_KIND, "import", result.summary())
         try:
+            # 置頂的上架說明照這一版更新（新按鈕、新的流程說明），不用等群主重綁商品論壇
             await self.shop.refresh_guide()
         except Exception:  # 邊界：說明沒更新只影響顯示，按鈕已經開放
             logger.warning("商品上架：重啟後更新上架說明失敗", exc_info=True)
+        return True
+
+    async def _retest_import(self, key: str) -> owner_alerts.RetestResult:
+        ok = await self._import()
+        return owner_alerts.RetestResult(ok, "匯入完成，商品與交易已開放。" if ok else "還是失敗，原因寫在 log。")
+
+    def _import_status(self):
+        if self.shop is not None and self.shop.trade.ready.is_set():
+            return "商品與交易已開放"
+        return owner_alerts.Status("watch", "上線匯入還沒做完，商品與交易按鈕擋著")
 
     async def cog_unload(self):
         for task in self._tasks:

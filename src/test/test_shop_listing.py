@@ -1,4 +1,4 @@
-"""商品與品項的模型、解析、畫面（services.community.shop_listing）。
+"""商品與品項的模型、解析、畫面（services.community.shop_listing），以及舊格式的解析（上線匯入用）。
 
 守的底線：
   1. 價格欄：一個數字＝全額；「定金/尾款」（全形斜線也可以）＝定金＋尾款。類型與價格要對得上：
@@ -10,12 +10,14 @@
   4. 下單明細：現在要付（定金、全額）與到貨後再付（尾款）分開算；價格指紋在金額或份數改了就變、順序不影響。
   5. 顯示：給群友看的字是「品項」「供應方」「需求方」；狀態寫出定金、尾款、截止、預計交貨、延期次數；
      不能買的價格劃掉、接灰底標籤；選單的 value 只有品項編號；全部都不能買時選單寫出原因。
+  6. 舊格式（上線前的商品貼文、訂單按鈕）讀得回同一份資料；訂單文字讀得出單價，份數對不上就不信。
 """
 
 import os
 import sys
 import unittest
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC_DIR = os.path.dirname(HERE)
@@ -24,6 +26,7 @@ if SRC_DIR not in sys.path:
 
 from dataclasses import replace  # noqa: E402
 
+from services.community import market_import  # noqa: E402
 from services.community.shop_listing import (  # noqa: E402
     Draft,
     Listing,
@@ -222,6 +225,49 @@ class OrderTests(unittest.TestCase):
     def test_items_round_trip(self):
         self.assertEqual(decode_items(encode_items({1: 2, 25: 999})), {1: 2, 25: 999})
         self.assertEqual(decode_items("1x2,壞掉"), {})
+
+
+class LegacyFormatTests(unittest.TestCase):
+    """上線前的商品貼文與訂單：匯入時讀得回同一份資料。"""
+
+    @staticmethod
+    def message(children, *, channel_id=500, embed=None, content=""):
+        return SimpleNamespace(components=[SimpleNamespace(children=children)], channel=SimpleNamespace(id=channel_id),
+                               embeds=[embed] if embed else [], content=content)
+
+    def test_old_listing_post(self):
+        cutoff = int(LATER.timestamp())
+        options = [SimpleNamespace(label="60 月相", value="1:30:10:4::0"),
+                   SimpleNamespace(label="6480 月相", value=f"3:3000::1:{cutoff}:1"),
+                   SimpleNamespace(label="讀不懂", value="壞掉")]
+        embed = SimpleNamespace(title="月相代儲", description="說明",
+                                image=SimpleNamespace(url="https://cdn.discordapp.com/x/item_1.png?ex=1"))
+        message = self.message([SimpleNamespace(custom_id="shop:buy:500", options=options),
+                                SimpleNamespace(custom_id="shop:manage:21:4:NT%24", disabled=True)], embed=embed)
+
+        old = market_import.legacy_listing(message)
+
+        self.assertEqual((old.thread_id, old.owner_id, old.unit, old.seq, old.closed), (500, 21, "NT$", 4, True))
+        self.assertEqual((old.title, old.description, old.image), ("月相代儲", "說明", "item_1.png"))
+        self.assertEqual([(v.key, v.price, v.limit, v.taken, v.closed) for v in old.variants],
+                         [(1, 30, 10, 4, False), (3, 3000, None, 1, True)])
+        self.assertEqual(old.variants[1].cutoff, LATER)
+        self.assertIsNone(market_import.legacy_listing(self.message([SimpleNamespace(custom_id="shop:manage")])))
+
+    def test_old_order(self):
+        content = ("🧾 <@11> 向 <@21> 下單（月相代儲）：\n"
+                   "・60 月相 ×2（NT$30）＝NT$60\n"
+                   "・6480 月相 ×1（NT$3,000，預購 2026/10/20 23:59 截止）＝NT$3,000")
+        message = self.message([SimpleNamespace(custom_id="shop:order:500:1x2,3x1", label="總計 NT$3,060")],
+                               content=content)
+
+        ((listing_id, picks, total),) = market_import.legacy_orders(message)
+
+        self.assertEqual((listing_id, picks, total), (500, {1: 2, 3: 1}, 3060))
+        self.assertEqual(market_import.order_unit_prices(content, picks), {1: 30, 3: 3000})
+        self.assertEqual(market_import.order_unit_prices(content, {1: 3, 3: 1}), {})  # 份數對不上就不信
+        older = self.message([SimpleNamespace(custom_id="shop:order:500:1x2", label="訂單紀錄")])
+        self.assertEqual(market_import.legacy_orders(older), [(500, {1: 2}, None)])
 
 
 if __name__ == "__main__":
