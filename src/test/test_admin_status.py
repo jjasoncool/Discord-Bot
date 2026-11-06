@@ -2,7 +2,7 @@
 
 守的底線：
 - 燈號：error 警報＝紅、warning 警報至少黃、狀態函式只回字串＝綠、回 `Status` 照它說的；狀態函式出錯是黃不是炸
-- 面板是新版版面、是主控台的一個畫面：九項全部展開時元件不超過 40；正常的預設收成一行、按「展開」逐項列；每一項右邊一顆重測、
+- 面板是新版版面、是主控台的一個畫面：全部展開時元件不超過 40（每項都帶按鈕放不下時，正常的改成一行字）；正常的預設收成一行、按「展開」逐項列；每一項右邊一顆重測、
   custom_id 帶種類、key 與展開狀態；底下有全部重測、重新整理、展開／收合、看詳細、跑今天的 04:00 維護、回主控台
 - 每個操作都改面板這一則：看詳細是分頁的子畫面（有上一頁／下一頁與回上一層）、補跑維護先換成確認畫面（確定跑／取消）；
   不另發訊息
@@ -192,14 +192,27 @@ class RenderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(kwargs["embed"])
         self.assertIn("owner:status:collapse", ids_of(kwargs["view"]))
 
+    async def test_a_tenth_kind_keeps_the_buttons_that_matter(self):
+        """十項全部展開時每項都帶按鈕放不下：正常的那幾項改成一行字，有事的那項照樣有自己的重測按鈕。"""
+        owner_alerts.register("market", title="MARKET", status=lambda: Status("watch", "匯入還沒做完"),
+                              retest=mock.AsyncMock())
+        view = await admin_status.render_status(expanded=True)
+        self.assertLessEqual(view._total_children, 40)
+        text = layout_text(view)
+        for kind in list(admin_status.KIND_ORDER) + ["market"]:
+            self.assertIn(f"**{kind.upper()}**", text)
+        self.assertNotIn("放不下", text)
+        self.assertIn("owner:panel:1:market:*", ids_of(view))
+        assert_unique_ids(self, view)
+
     async def test_more_kinds_than_fit_are_folded_into_one_line(self):
-        """登記表是開放的：第十、十一項登記進來，面板不能炸（40 個元件上限），放不下的收成一行請按看詳細。"""
-        for extra in ("ytdlp", "loop_crash", "backup"):
+        """登記表是開放的：要處理的多到連按鈕都放不下時，面板不能炸（40 個元件上限），放不下的收成一行請按看詳細。"""
+        for extra in ("ytdlp", "loop_crash", "backup", "a1", "a2", "a3", "a4", "a5", "a6", "a7"):
             owner_alerts.register(extra, title=extra.upper(), status=lambda: Status("alert", "x"), retest=mock.AsyncMock())
         view = await admin_status.render_status(expanded=True, headline="🔁 全部重測")
         self.assertLessEqual(view._total_children, 40)
         text = layout_text(view)
-        for kind in list(admin_status.KIND_ORDER) + ["ytdlp", "loop_crash", "backup"]:
+        for kind in list(admin_status.KIND_ORDER) + ["ytdlp", "loop_crash", "backup", "a1", "a7"]:
             self.assertIn(kind.upper(), text, f"{kind} 要出現在面板上（列或收成的那行）")
         self.assertIn("放不下，按「看詳細」", text)
         view = await admin_status.render_status(expanded=False)

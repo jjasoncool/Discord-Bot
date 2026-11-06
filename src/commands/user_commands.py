@@ -639,11 +639,11 @@ class UserCommands(commands.Cog):
             seller_options.append(discord.SelectOption(label=user_name, value=user_id))
 
         if not seller_options:
-            await safe_send_interaction_message(interaction, "目前沒有賣家設定價格。", ephemeral=True)
+            await safe_send_interaction_message(interaction, "目前沒有供應方設定價格。", ephemeral=True)
             return
 
         seller_select = discord.ui.Select(
-            placeholder="選擇一位賣家...",
+            placeholder="選擇一位供應方...",
             custom_id="user_list_item_price_seller_select",
             options=seller_options
         )
@@ -676,7 +676,7 @@ class UserCommands(commands.Cog):
 
         embed = discord.Embed(
             title="查看物品價格",
-            description="請從以下選項中選擇一位賣家來查看其設定的價格。",
+            description="請從以下選項中選擇一位供應方來查看他設定的價格。",
             color=discord.Color.blue()
         )
         await safe_send_interaction_message(interaction, embed=embed, view=seller_view, ephemeral=True)

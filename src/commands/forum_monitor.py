@@ -1,7 +1,14 @@
-"""自由市場接單的 Discord 介面：表情監聽、交易按鈕、領收期限的定時檢查。
+"""交易的 Discord 介面：接單表情、交易按鈕、領收期限的定時檢查。
 
-做事的是交易模組 `services.community.trade_service`，這裡只把 Discord 事件交給它。
-檔名沿用 forum_monitor（2026-09-29 程式結構整理決定不改名），內容其實是交易。
+架構定位：介面層（`commands`）。
+  - 上層：discord.py 的事件與互動。
+  - 下層：交易模組 `services.community.trade_service`（做事的都在那裡）、`utils.due_loop`、`utils.background_tasks`。
+
+介面：`ForumMonitor`（cog，`trade` 是交易模組的實例）、`TradeButton`（交易按鈕）、`make_trade_view`。
+
+規則：這裡只把 Discord 事件交給交易模組，不判斷交易狀態。
+
+例外與決策：檔名沿用 forum_monitor（程式結構整理時決定不改名），內容其實是交易。
 """
 import asyncio
 import logging
@@ -12,9 +19,11 @@ from discord.ext import commands
 
 from services.community.trade_service import (
     CANCEL,
+    CANCEL_OK,
     CUSTOM_ID_TEMPLATE,
     HELP,
     HOLD,
+    KEEP,
     NOTIFY,
     RECEIVE,
     TradeRef,
@@ -32,6 +41,8 @@ logger = logging.getLogger(__name__)
 _BUTTON_LOOK = {
     NOTIFY: ("通知需求方領收", discord.ButtonStyle.green),
     CANCEL: ("取消交易", discord.ButtonStyle.red),
+    CANCEL_OK: ("確定取消交易", discord.ButtonStyle.red),
+    KEEP: ("返回", discord.ButtonStyle.secondary),
     RECEIVE: ("已領收", discord.ButtonStyle.green),
     HOLD: ("還沒領收", discord.ButtonStyle.secondary),
     HELP: ("請群主協助", discord.ButtonStyle.secondary),
@@ -39,7 +50,7 @@ _BUTTON_LOOK = {
 
 
 class TradeButton(discord.ui.DynamicItem[discord.ui.Button], template=CUSTOM_ID_TEMPLATE):
-    """交易按鈕：交易身分寫在 custom_id 裡，bot 重啟後按下也讀得回來。"""
+    """交易按鈕：bot 重啟後按下照樣有效；交易是誰的由交易模組照按鈕所在的對話查資料庫。"""
 
     def __init__(self, action: str, ref: TradeRef):
         label, style = _BUTTON_LOOK[action]
@@ -67,8 +78,8 @@ def make_trade_view(ref: TradeRef, actions: Sequence[str]) -> discord.ui.View:
 
 
 class LegacyTransactionView(discord.ui.View):
-    """改版前開的交易 thread 上的舊按鈕：從舊文字讀出交易身分，交給同一個交易模組。
-    舊 thread 都結束後就可以刪掉這個類別與 `legacy_ref_from_text`。"""
+    """改版前開的交易對話上的舊按鈕：交給同一個交易模組（身分照對話查資料庫）。
+    舊對話都結束後就可以刪掉這個類別與 `legacy_ref_from_text`。"""
 
     def __init__(self, cog: "ForumMonitor"):
         super().__init__(timeout=None)
@@ -76,13 +87,10 @@ class LegacyTransactionView(discord.ui.View):
 
     async def _forward(self, interaction: discord.Interaction, action: str):
         ref = legacy_ref_from_text(interaction.message.content if interaction.message else "")
-        if ref is None:
-            await safe_send_interaction_message(interaction, "無法識別這筆交易，請手動處理。", ephemeral=True)
-            return
         await self.cog.trade.handle_button(interaction, action, ref)
 
-    # 舊按鈕叫「買家領收」，由供應方按，等同新的「通知需求方領收」
-    @discord.ui.button(label="買家領收", style=discord.ButtonStyle.green, custom_id="forum_trade_confirm")
+    # 舊按鈕由供應方按，等同新的「通知需求方領收」；已經發出去的訊息上的字以訊息為準，這裡的只用來註冊
+    @discord.ui.button(label="通知需求方領收", style=discord.ButtonStyle.green, custom_id="forum_trade_confirm")
     async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._forward(interaction, NOTIFY)
 
@@ -96,6 +104,8 @@ class ForumMonitor(commands.Cog):
         self.bot = bot
         self.settings = settings or TradeSettings()
         self.trade = TradeService(bot, make_view=make_trade_view, settings=self.settings)
+        # 新開的接單對話附上供應方的物品價格（匯入期間記下、做完才補開的也一樣）
+        self.trade.on_reaction_opened = self._send_prices
         self._deadline_task: Optional[asyncio.Task] = None
 
     async def cog_load(self):
@@ -118,14 +128,30 @@ class ForumMonitor(commands.Cog):
         self.bot.remove_dynamic_items(TradeButton)
 
     @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        try:
+            await self.trade.note_chat(message)
+        except Exception:  # 邊界：每則訊息；記不到只影響「幾天沒動靜」的天數
+            logger.warning("交易：記錄交易對話的動靜失敗 channel=%s", getattr(message.channel, "id", None),
+                           exc_info=True)
+
+    @commands.Cog.listener()
+    async def on_raw_thread_delete(self, payload: discord.RawThreadDeleteEvent):
+        try:
+            await self.trade.handle_thread_deleted(payload.thread_id)
+        except Exception:  # 邊界：每個刪除事件；沒處理到的，下次啟動時的檢查會補
+            logger.error("交易：處理交易對話被刪掉失敗 thread=%s", payload.thread_id, exc_info=True)
+
+    @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
         try:
-            opened = await self.trade.handle_reaction(payload)
-            if opened is not None and opened.created:
-                await opened.thread.send(embed=await self._price_embed(opened.supplier))
+            await self.trade.handle_reaction(payload)
         except Exception:
             logger.error("交易：處理接單表情失敗 channel=%s message=%s user=%s",
                          payload.channel_id, payload.message_id, payload.user_id, exc_info=True)
+
+    async def _send_prices(self, opened) -> None:
+        await opened.thread.send(embed=await self._price_embed(opened.supplier))
 
     async def _price_embed(self, supplier: discord.Member) -> discord.Embed:
         """新開的交易 thread 附上供應方在 /set_item_prices 設的價格。"""

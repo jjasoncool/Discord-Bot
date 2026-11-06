@@ -1,7 +1,7 @@
 """管理主控台（commands/admin_console.py）、各 cog 配合主控台的畫面（角色管理、伺服器資訊、文章、AI）、共用的畫面工具。
 
 守的底線：
-- 主控台是一則訊息、幾個畫面：主選單列七組（機器人狀態、頻道設定、角色管理、伺服器資訊、文章轉發、幽靈點名、AI），每組一顆按鈕，
+- 主控台是一則訊息、幾個畫面：主選單列八組（機器人狀態、頻道設定、角色管理、伺服器資訊、文章轉發、幽靈點名、AI、交易看板），每組一顆按鈕，
   custom_id `console:<畫面>[:<動作>[:<頁碼>]]` 重啟後解析得回；是新版版面、元件不超過 40
 - 每個操作都改主控台這一則（沒有 send_message、沒有 followup）：子畫面有「回主控台」或「回上一層」、結果寫在標題下那一行、
   要等的先切「處理中」（按鈕全灰）；做壞了換回主選單並標錯誤
@@ -518,6 +518,26 @@ class ScreenTests(ConsoleTestBase):
         self.assertIn("https://x/9001", layout_text(view))
         self.assertFalse(buttons_of(view)["console:rollcall"].disabled, "做完按鈕要回來")
         self.assertNoNewMessages(interaction)
+
+    # ── 交易看板 ──
+
+    async def test_market_dashboard_and_one_supplier(self):
+        shop = SimpleNamespace(dashboard=mock.AsyncMock(side_effect=[
+            ("還沒結束 3 筆", [(21, "供應者甲"), (22, "供應者乙")]), ("📋 我的交易：2 筆還沒結束", [])]))
+        self.cogs["ShopCommands"] = shop
+        interaction = await self.press("console:market")
+        self.assertBusy(interaction, "整理中")
+        view = self.view(interaction)
+        self.assertIn("還沒結束 3 筆", layout_text(view))
+        self.assertIn("console:market:seller:21", buttons_of(view))
+        self.assertIn("console:home", buttons_of(view))
+        self.assertNoNewMessages(interaction)
+
+        interaction = await self.press("console:market:seller:21")
+        shop.dashboard.assert_awaited_with(21)
+        view = self.view(interaction)
+        self.assertIn("2 筆還沒結束", layout_text(view))
+        self.assertIn("console:market", buttons_of(view))   # 回交易看板
 
     async def test_find_member_by_id_mention_or_name(self):
         with mock.patch.object(admin_console, "resolve_member", mock.AsyncMock(side_effect=lambda g, uid: g.get_member(uid))):

@@ -2,8 +2,9 @@
 
 守的底線：
   1. 順序：先把 raw 備份寫進資料庫 → 停掉爬蟲通知、Telegram 轉發 → discord.py 的關閉（卸載 cog、斷語音、關 Discord 連線）
-     → 停掉還在跑的工作 → 關共用的 StateDB（要在用它的工作都停了之後；不關的話行程退不出去）→ 再補寫一次 raw。
-  2. Docker 只給 10 秒：每一步（包括 discord.py 的關閉）卡住、失敗都不擋後面，關 StateDB 一定會做；
+     → 停掉還在跑的工作 → 同時關共用的 StateDB 與市集資料庫（要在用它們的工作都停了之後；不關的話行程退不出去）
+     → 再補寫一次 raw。
+  2. Docker 只給 10 秒：每一步（包括 discord.py 的關閉）卡住、失敗都不擋後面，兩個資料庫一定會關；
      各步的時限加起來還留得下 asyncio.run 收尾的時間。第一次寫 raw 就逾時的話不再寫第二次（那批還在執行緒裡寫）。
   3. 只收尾一次：discord.py 之後再呼叫 close 時直接交給它，不重做一遍。
 
@@ -27,7 +28,7 @@ from discord.ext import commands  # noqa: E402
 import discord_bot  # noqa: E402
 from music import player as music_player  # noqa: E402
 
-FULL_ORDER = ["raw", "notify", "relay", "discord", "tasks", "statedb", "raw"]
+FULL_ORDER = ["raw", "notify", "relay", "discord", "tasks", "statedb", "marketdb", "raw"]
 
 
 async def hang():
@@ -76,10 +77,14 @@ class BotCloseTests(unittest.IsolatedAsyncioTestCase):
         async def close_shared_state_db():
             self.order.append("statedb")
 
+        async def close_shared_market_db():
+            self.order.append("marketdb")
+
         with mock.patch.object(commands.Bot, "close", new=discord_close or default_discord_close), \
              mock.patch.object(discord_bot, "cancel_other_tasks", new=cancel_other_tasks), \
              mock.patch("llm.storage.raw_message_store.flush_raw_buffer", new=flush), \
-             mock.patch("services.state_db.close_shared_state_db", new=close_shared_state_db):
+             mock.patch("services.state_db.close_shared_state_db", new=close_shared_state_db), \
+             mock.patch("services.market_db.close_shared_market_db", new=close_shared_market_db):
             yield
 
     async def _flush(self):
@@ -112,7 +117,7 @@ class BotCloseTests(unittest.IsolatedAsyncioTestCase):
                 self.assertLogs("discord_bot", level="WARNING") as logs:
             await asyncio.wait_for(bot.close(), timeout=5)
 
-        self.assertEqual(self.order, ["raw", "notify", "relay", "discord", "tasks", "statedb"],
+        self.assertEqual(self.order, ["raw", "notify", "relay", "discord", "tasks", "statedb", "marketdb"],
                          "第一次寫 raw 就逾時：那批還在執行緒裡寫，不再排第二次")
         warnings = "\n".join(logs.output)
         for step in ("raw 訊息備份寫入", "停止 Notify Server", "連不上", "discord.py 的關閉"):
@@ -129,7 +134,7 @@ class BotCloseTests(unittest.IsolatedAsyncioTestCase):
                 self.assertLogs("discord_bot", level="WARNING"):
             await asyncio.wait_for(bot.close(), timeout=5)
 
-        self.assertEqual(self.order, ["raw", "discord", "tasks", "statedb", "raw"])
+        self.assertEqual(self.order, ["raw", "discord", "tasks", "statedb", "marketdb", "raw"])
 
     async def test_without_notify_server_or_relay_the_rest_still_runs(self):
         bot = discord_bot.MyBot()   # 還沒連上 Discord 就停機：on_ready 沒跑，兩個入口都沒開
@@ -137,7 +142,7 @@ class BotCloseTests(unittest.IsolatedAsyncioTestCase):
         with self._patched(self._flush):
             await asyncio.wait_for(bot.close(), timeout=5)
 
-        self.assertEqual(self.order, ["raw", "discord", "tasks", "statedb", "raw"])
+        self.assertEqual(self.order, ["raw", "discord", "tasks", "statedb", "marketdb", "raw"])
 
     async def test_second_close_goes_straight_to_discord(self):
         bot = discord_bot.MyBot()

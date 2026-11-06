@@ -71,13 +71,14 @@ _TEXT_LIMIT = 3600
 _DM_SCAN_LIMIT = 25
 #: 選單上的每一組：畫面代號、名稱、說明、按鈕文字
 ACTIONS: tuple[tuple[str, str, str, str], ...] = (
-    ("status", "機器人狀態", "九項紅黃綠：模型後端、資料庫、爬蟲、Discord 權限…，每項可重測", "開啟"),
+    ("status", "機器人狀態", "每一項紅黃綠：模型後端、資料庫、爬蟲、Discord 權限、商品市集…，每項可重測", "開啟"),
     ("channels", "頻道設定", "每一項功能綁在哪個頻道、改綁、解除", "開啟"),
     ("roles", "角色管理", "Trader、Moderator 對應哪些身份組", "開啟"),
     ("info", "伺服器資訊", "列出頻道與身份組的 ID（一頁一頁翻）", "開啟"),
     ("articles", "文章轉發", "監控狀態、測 API、重送一篇、同步巴哈最近 3 天", "開啟"),
     ("rollcall", "幽靈點名", "管理面板私訊給你：開關、手動點名、身份組、點名範圍", "私訊面板"),
     ("ai", "AI", "立即寫今天的日記、對一個人跑人格 agent", "開啟"),
+    ("market", "交易看板", "還沒結束的交易、每位觀星者要處理幾筆、週報沒送到的", "開啟"),
 )
 _RESEND_KINDS = (("article", "官網公告（文章 ID）"), ("fb", "FB 貼文（資料庫 ID）"),
                  ("it_article", "IT 文章（hkepc_id）"), ("telegram", "Telegram（db id 或 msg #id）"))
@@ -414,9 +415,50 @@ async def _open_ai(interaction, guild, action, page) -> None:
         await edit_screen(interaction, view=render_ai())
 
 
+#: 交易看板一頁幾位觀星者（兩列「查看」；一則最多 5 列，另外留翻頁與回去的按鈕）
+MARKET_PAGE_SIZE = 10
+
+
+def render_market(text: str, sellers: Sequence[tuple[int, str]] = (), *, title: str = "## 交易看板",
+                  notice: Optional[str] = None, busy: bool = False, detail: bool = False,
+                  page: int = 0) -> discord.ui.LayoutView:
+    """交易看板：總表＋每位觀星者一顆「查看」（照名字排、一頁 MARKET_PAGE_SIZE 位、超過就翻頁）；
+    清單畫面多一顆回看板。"""
+    box = screen_box(title, notice=notice)
+    box.add_item(discord.ui.TextDisplay(_clip(text)))
+    ordered = sorted(sellers, key=lambda seller: seller[1])
+    shown, page, pages = paginate(ordered, page, MARKET_PAGE_SIZE)
+    buttons = [ConsoleButton("market", "seller", supplier_id, label=f"查看 {name}"[:80], disabled=busy)
+               for supplier_id, name in shown]
+    rows = [buttons[i:i + 5] for i in range(0, len(buttons), 5)]
+    if pages > 1:
+        # 只有一頁時不放：兩顆的 custom_id 會撞
+        rows.append([ConsoleButton("market", "page", max(page - 1, 0), label="◀ 上一頁", disabled=busy or page == 0),
+                     ConsoleButton("market", "page", min(page + 1, pages - 1), label=f"下一頁 ▶（{page + 1}/{pages}）",
+                                   disabled=busy or page == pages - 1)])
+    last = [ConsoleButton("market", label="↩️ 回交易看板", disabled=busy)] if detail else []
+    rows.append(last + [back_button(disabled=busy)])
+    return screen_view(box, *rows)
+
+
+async def _open_market(interaction, guild, action, page) -> None:
+    cog = _cog(interaction, "ShopCommands")
+    if cog is None:
+        await _no_cog(interaction)
+        return
+    # 每筆進行中的交易都要整理一次，交易多時要幾秒：先切成「處理中」
+    await edit_screen(interaction, view=render_market("⏳ 整理中…", busy=True))
+    if action == "seller":
+        text, _ = await cog.dashboard(page)
+        await edit_screen(interaction, view=render_market(text, title="## 交易看板・觀星者的清單", detail=True))
+    else:
+        text, sellers = await cog.dashboard()
+        await edit_screen(interaction, view=render_market(text, sellers, page=page if action == "page" else 0))
+
+
 _SCREENS: dict[str, Callable[..., Awaitable[None]]] = {
     "home": _open_home, "status": _open_status, "channels": _open_channels, "roles": _open_roles, "info": _open_info,
-    "articles": _open_articles, "rollcall": _open_rollcall, "ai": _open_ai,
+    "articles": _open_articles, "rollcall": _open_rollcall, "ai": _open_ai, "market": _open_market,
 }
 
 

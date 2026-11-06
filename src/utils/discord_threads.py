@@ -41,9 +41,12 @@ async def fetch_thread(
     return channel if hasattr(channel, "archived") else None
 
 
-async def reopen_thread(thread: discord.Thread) -> bool:
-    """封存的 thread 先解封；回傳現在是不是可以編輯的狀態。"""
-    if not getattr(thread, "archived", False):
+async def reopen_thread(thread: discord.Thread, *, force: bool = False) -> bool:
+    """封存的 thread 先解封；回傳現在是不是可以編輯的狀態。
+
+    force=True：不看手上這份 thread 的 archived，一律送一次解封。`Thread.edit` 回傳新的物件、不改原本那份，
+    剛在別處封存回去的 thread（例：重畫完封存回去的商品貼文）手上那份可能還寫著沒封存。"""
+    if not force and not getattr(thread, "archived", False):
         return True
     try:
         await thread.edit(archived=False)

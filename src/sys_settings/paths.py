@@ -12,6 +12,7 @@
 - `settings_file(name)`、`runtime_path(name)`、`prompt_file(name)`：`settings/`、`settings/runtime/`、`settings/prompts/` 下某個檔的
   路徑字串，給型別是 `str` 的設定欄位當預設值。
 - `ARTICLES_DB`、`sqlite_readonly_uri(path)`：scraper 資料庫的位置，與 SQLite 檔的唯讀連線字串（bot 這邊只能唯讀開 articles.db）。
+- `MARKET_DB`、`MARKET_BACKUP_DIR`：商品市集資料庫（商品、品項、交易的正本，bot 寫）與它的每日備份資料夾。
 
 規則：
 - 程式裡不再寫死 `"/app/..."`、`"/logs/..."`（守衛 `test_shared_conventions` 擋）；要路徑就從這裡拿。
@@ -62,6 +63,11 @@ def prompt_file(name: str) -> str:
 
 #: scraper 的資料庫（原始資料，不能刪）；bot 這邊只能唯讀開：`sqlite_readonly_uri(ARTICLES_DB)`
 ARTICLES_DB = SCRAPER_DIR / "articles.db"
+
+#: 商品市集資料庫（商品、品項、交易的正本，不能刪）；跟轉發的 sent_articles.db 放同一個目錄、各自一個檔
+MARKET_DB = APP_ROOT / "services" / "market.db"
+#: 市集資料庫的每日備份（一天一個檔、留 14 份）；放在資料庫旁邊，跟它在同一個掛載點
+MARKET_BACKUP_DIR = APP_ROOT / "services" / "market_backup"
 
 
 def sqlite_readonly_uri(path: os.PathLike | str) -> str:

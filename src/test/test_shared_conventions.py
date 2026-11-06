@@ -583,6 +583,41 @@ def _find_handwritten_savepoints(path: Path) -> list[int]:
     return _find_handwritten_savepoints_in_tree(_parse(path))
 
 
+def _find_hand_rolled_shared_resources_in_tree(tree: ast.Module) -> list[int]:
+    """自己寫「全程式共用一份」：`get_shared_*`／`close_shared_*` 裡用 `global` 改模組變數。只開一次、
+    關了不再開這兩件各自寫，總有一份漏掉「關了不再開」，停機時又開一條沒人關的連線，行程退不出去。"""
+    return sorted(
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name.startswith(("get_shared_", "close_shared_"))
+        and any(isinstance(inner, ast.Global) for inner in ast.walk(node))
+    )
+
+
+def _find_hand_rolled_shared_resources(path: Path) -> list[int]:
+    return _find_hand_rolled_shared_resources_in_tree(_parse(path))
+
+
+def _find_market_db_opens_in_tree(tree: ast.Module) -> list[int]:
+    """自己開市集資料庫：用到 `MARKET_DB` 這個名字，或程式裡寫了 `market.db` 這個檔名。商品與交易的正本只能經
+    `services.market_db` 讀寫：共用一條連線排隊寫入，自己另開一條的話兩邊的寫入會互相等、讀到寫一半的資料。"""
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == "MARKET_DB":
+            found.add(node.lineno)
+        elif isinstance(node, ast.Attribute) and node.attr == "MARKET_DB":
+            found.add(node.lineno)
+        elif isinstance(node, ast.alias) and node.name == "MARKET_DB":
+            found.add(getattr(node, "lineno", 0))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.endswith("market.db"):
+            found.add(node.lineno)
+    return sorted(found)
+
+
+def _find_market_db_opens(path: Path) -> list[int]:
+    return _find_market_db_opens_in_tree(_parse(path))
+
+
 def _find_user_date_parsing(path: Path) -> list[int]:
     """指令層（接使用者輸入的地方）自己用 strptime／fromisoformat 解析日期。使用者在視窗打的日期一律走
     `utils.user_dates`，全形、各種分隔符號、只寫日期這些寬鬆規則才只有一份（2026-10-04 社群稽查與預購截止合併）。
@@ -976,6 +1011,18 @@ RULES = [
         allowed={"sys_settings/llm_settings.py", "scraper/", "telegram_scraper/"},
     ),
     Rule(
+        name="全程式共用一份的資源（資料庫連線）：只開一次、停機關掉後不再開，機制只有一份",
+        finder=_find_hand_rolled_shared_resources,
+        canonical="utils.shared_resource.SharedResource(name, open, close)（對外照舊包成 get_shared_*／close_shared_*）",
+        allowed={"utils/shared_resource.py", "scraper/", "telegram_scraper/"},
+    ),
+    Rule(
+        name="市集資料庫（商品與交易的正本）只經一個模組讀寫",
+        finder=_find_market_db_opens,
+        canonical="services.market_db（MarketDB、get_shared_market_db）",
+        allowed={"services/market_db.py", "sys_settings/paths.py"},
+    ),
+    Rule(
         name="指令的管理員限制：has_permissions 擋下時回英文錯誤還記一筆 ERROR",
         pattern=r"checks\.has_permissions\(",
         canonical="utils.discord_members.require_access(interaction, admin_only=True)（或 permission=…）",
@@ -995,8 +1042,6 @@ RULES = [
         allowed={
             "utils/discord_threads.py",
             "commands/community_lookup_commands.py",
-            "services/community/trade_service.py",
-            "services/community/shop_service.py",
             "services/relay/bahamut_monitor.py",
         },
     ),
@@ -1266,6 +1311,55 @@ class LinkOnlyFinderTests(unittest.TestCase):
 
     def test_ignores_plain_url_validation(self):
         src = "def ok(url):\n    return url.startswith('https://') and 'x' in url\n"
+        self.assertEqual(self._scan(src), [])
+
+
+class SharedResourceFinderTests(unittest.TestCase):
+    """「共用一份的資源只有一套機制」規則的偵測器：抓 get_shared_*／close_shared_* 裡的 global，放過包一層的寫法。"""
+
+    def _scan(self, src):
+        return _find_hand_rolled_shared_resources_in_tree(ast.parse(src))
+
+    def test_catches_hand_rolled_accessors(self):
+        src = (
+            "_db = None\n"
+            "async def get_shared_db():\n"
+            "    global _db\n"
+            "    return _db\n"
+            "def close_shared_db():\n"
+            "    global _db\n"
+        )
+        self.assertEqual(self._scan(src), [2, 5])
+
+    def test_allows_wrapping_the_shared_resource(self):
+        src = (
+            "_shared = SharedResource('db', _open, _close)\n"
+            "async def get_shared_db():\n"
+            "    return await _shared.get()\n"
+            "def helper():\n"
+            "    global _other\n"
+        )
+        self.assertEqual(self._scan(src), [])
+
+
+class MarketDBFinderTests(unittest.TestCase):
+    """「市集資料庫只經一個模組」規則的偵測器：名字、import、檔名字串都抓，說明文字裡提到不算。"""
+
+    def _scan(self, src):
+        return _find_market_db_opens_in_tree(ast.parse(src))
+
+    def test_catches_name_import_and_file_name(self):
+        src = (
+            "from sys_settings.paths import MARKET_DB\n"
+            "import aiosqlite\n"
+            "db = aiosqlite.connect(str(MARKET_DB))\n"
+            "other = aiosqlite.connect('services/market.db')\n"
+            "x = paths.MARKET_DB\n"
+        )
+        self.assertEqual(self._scan(src), [1, 3, 4, 5])
+
+    def test_ignores_docstrings_and_other_names(self):
+        src = '"""市集資料庫在 market.db 以外的說明。"""\nfrom sys_settings.paths import MARKET_BACKUP_DIR\n'
         self.assertEqual(self._scan(src), [])
 
 

@@ -24,6 +24,11 @@ src/telegram_scraper/media/
 src/services/sent_articles.db
 src/services/sent_articles.db-shm
 src/services/sent_articles.db-wal
+# 商品市集資料庫（商品、品項、交易的正本）與它的每日備份
+src/services/market.db
+src/services/market.db-shm
+src/services/market.db-wal
+src/services/market_backup/
 # bot 執行時寫的資料（透過 Discord 設的值＋它自己的紀錄：面板、點名、音樂、價格表、關鍵字監控）：整個資料夾不進版控
 src/settings/runtime/
 src/services/search/eval/private/

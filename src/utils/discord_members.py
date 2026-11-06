@@ -2,7 +2,7 @@
 
 架構定位：基礎層（utils）裡的 Discord 工具（登記在 `test_layering.DISCORD_HELPERS_IN_BASE`），只依賴 discord.py 與
   `utils.utils`（安全回覆、config.json 的位置）。
-  上層：各指令模組（權限檢查）、交易與商品（身分組、顯示暱稱）、關鍵字清單、賣家清單、論壇貼文擁有者、私訊通知、插話的被罵應對（群主 id）。
+  上層：各指令模組（權限檢查）、交易與商品（身分組、顯示暱稱）、關鍵字清單、供應方的價格表、論壇貼文擁有者、私訊通知、插話的被罵應對（群主 id）。
   下層：discord.py 的快取與 REST；`config.json` 的 `role_mapping`。
 
 介面：
@@ -42,8 +42,9 @@ from utils.utils import CONFIG_FILE, safe_send_interaction_message
 logger = logging.getLogger(__name__)
 
 
-async def resolve_member(guild, user_id) -> discord.Member | None:
-    """伺服器成員：先查快取、沒有再向 API 查；不在、沒權限、出錯都回 None。"""
+async def resolve_member(guild, user_id, *, raise_errors: bool = False) -> discord.Member | None:
+    """伺服器成員：先查快取、沒有再向 API 查；不在、沒權限、出錯都回 None。
+    raise_errors=True：只有「不在伺服器」回 None，沒權限與 5xx 往外丟（呼叫端要分得出「不在了」和「晚點再試」時用）。"""
     if guild is None or not user_id:
         return None
     member = guild.get_member(int(user_id))
@@ -54,8 +55,12 @@ async def resolve_member(guild, user_id) -> discord.Member | None:
     except discord.NotFound:
         logger.warning("成員 %s 不在伺服器（可能已離開）", user_id)
     except discord.Forbidden:
+        if raise_errors:
+            raise
         logger.warning("沒有權限查成員 %s", user_id)
     except discord.HTTPException as exc:
+        if raise_errors:
+            raise
         logger.warning("向 API 查成員 %s 失敗：%s", user_id, exc)
     return None
 

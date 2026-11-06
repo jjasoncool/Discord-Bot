@@ -9,11 +9,24 @@ import sys
 
 os.environ.setdefault("APP_TEST_LOG_FILE", "test_run.log")
 
+
+
+def _is_test_run(modules, argv) -> bool:
+    """這次是不是在跑單元測試。手動與 discover 會先 import unittest 才 import 這個套件；啟動 gate
+    （`python -m test.gate`）與直接跑一個測試模組（`python -m test.test_xxx`）是先 import 這個套件、
+    模組本體才 import unittest，只能從命令列認出來。手動抽查腳本（`python -m test.integration.it_*`）不算。"""
+    if "unittest" in modules:
+        return True
+    return any(arg.startswith("test.") and not arg.startswith("test.integration") for arg in argv)
+
+
+_TEST_RUN = _is_test_run(sys.modules, getattr(sys, "orig_argv", ()))
+
 # 跑單元測試時（啟動 gate、手動 unittest），GPU 閘門的跨行程鎖檔換成這次專用的暫存檔：
 # 用正式的鎖檔會跟執行中的 bot 互相排隊。手動抽查腳本（test/integration/it_*.py）
 # 不經過 unittest，照樣用正式的鎖檔跟 bot 一起排隊（手動抽查也該和 bot 排隊，不然會互搶 GPU）。
 # 要蓋掉、不能 setdefault：容器的環境變數已經把 LEMONADE_GPU_LOCK_PATH 指到和 search-mcp 共用的正式鎖檔
-if "unittest" in sys.modules:
+if _TEST_RUN:
     import atexit
     import shutil
     import tempfile
@@ -32,6 +45,15 @@ if _SRC_DIR not in sys.path:
 from utils.logger_config import configure_logging  # noqa: E402
 
 configure_logging()
+
+if _TEST_RUN:
+    # 市集資料庫（商品與交易的正本）的共用連線也換成這次專用的暫存檔：測試漏了注入資料庫時，
+    # 寫到的是暫存檔，不會在正式的 services/market.db 開出一個新檔或寫進假交易
+    from pathlib import Path  # noqa: E402
+
+    from services import market_db as _market_db  # noqa: E402
+
+    _market_db.MARKET_DB = Path(_lock_dir) / "market.db"
 
 #: 靠真實時間、又換不成假時鐘的測試（流程裡夾著真的執行緒 IO，假時鐘沒辦法知道該什麼時候撥時間）掛這個：
 #: 啟動 gate（compose 設 APP_STARTUP_GATE=1）跳過，手動跑與 CI 照跑。容器啟動時其他服務在搶 CPU，
