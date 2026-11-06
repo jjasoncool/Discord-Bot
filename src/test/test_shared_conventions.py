@@ -1021,8 +1021,6 @@ RULES = [
         allowed={
             "utils/discord_threads.py",
             "commands/community_lookup_commands.py",
-            "services/community/trade_service.py",
-            "services/community/shop_service.py",
             "services/relay/bahamut_monitor.py",
         },
     ),

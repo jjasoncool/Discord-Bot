@@ -226,16 +226,16 @@ class TradeCommands(commands.Cog):
         await safe_send_interaction_message(interaction, embed=embed, ephemeral=True)
 
 
-    @app_commands.command(name="set_item_prices", description="設定物品價格（賣家專用）")
+    @app_commands.command(name="set_item_prices", description="設定物品價格（供應方專用）")
     async def set_item_prices_cmd(self, interaction: discord.Interaction):
-        """斜線命令：允許賣家設定物品價格，使用分頁功能"""
+        """斜線命令：讓供應方（觀星者）設定物品價格，使用分頁功能"""
         logger.info(f'收到來自 {interaction.user} 的 /set_item_prices 斜線命令')
 
         from utils.discord_members import require_access
         if not await require_access(interaction, required_role="Trader"):
             return
 
-        # 這位賣家現有的價格（讀寫都走 item_prices，別的賣家的那幾組不會被動到）
+        # 這位供應方現有的價格（讀寫都走 item_prices，別的供應方的那幾組不會被動到）
         user_id = str(interaction.user.id)
         seller_prices = {user_id: item_prices.user_prices(user_id)}
 
