@@ -110,14 +110,16 @@ class MyBot(commands.Bot):
         """停機收尾：docker stop 送 SIGINT 後由 discord.py 呼叫。
 
         順序：先把 raw 備份寫進資料庫（資料最要緊）→ 停掉接新工作的入口（爬蟲通知、Telegram 轉發）→ discord.py 的關閉
-        （卸載 cog、斷語音、關 Discord 連線）→ 停掉還在跑的工作 → 關共用的 StateDB（aiosqlite 的執行緒不關，行程退不出去）
-        → 補寫這段期間進來的 raw。前面幾步共用一個總期限、每步各有上限，卡住或失敗的那步不擋後面；關 StateDB 另外保留時間。
+        （卸載 cog、斷語音、關 Discord 連線）→ 停掉還在跑的工作 → 同時關共用的 StateDB 與市集資料庫（aiosqlite 的執行緒
+        不關，行程退不出去）→ 補寫這段期間進來的 raw。前面幾步共用一個總期限、每步各有上限，卡住或失敗的那步不擋後面；
+        關資料庫另外保留時間。
         聊天記憶的緩衝不在這裡寫（要算 embedding，停機的時間不夠），由 `chat_index_backfill` 從 raw 補寫（開關切到 on 才補）。
         """
         if self._shutdown_started:
             return await super().close()
         self._shutdown_started = True
         from llm.storage.raw_message_store import flush_raw_buffer
+        from services.market_db import close_shared_market_db
         from services.state_db import close_shared_state_db
 
         loop = asyncio.get_running_loop()
@@ -135,7 +137,9 @@ class MyBot(commands.Bot):
             await _shutdown_step("停止 Telegram Relay Worker", self.telegram_relay_worker.stop(), limit("intake"))
         await _shutdown_step("discord.py 的關閉（卸載 cog、斷語音、關 Discord 連線）", super().close(), limit("discord"))
         stopped = await cancel_other_tasks(limit("tasks"))
-        await _shutdown_step("關閉 StateDB", close_shared_state_db(), _SHUTDOWN_TIMEOUTS["statedb"])
+        # 兩個資料庫同時關：共用同一段保留時間，一個卡住或失敗不擋另一個
+        databases = asyncio.gather(close_shared_state_db(), close_shared_market_db(), return_exceptions=True)
+        await _shutdown_step("關閉共用資料庫（StateDB、市集）", databases, _SHUTDOWN_TIMEOUTS["statedb"])
         # 第一次逾時的話那批還在執行緒裡寫，再排一次只會多卡一條執行緒
         if raw_done and limit("raw") > 0:
             await _shutdown_step("raw 訊息備份補寫", flush_raw_buffer(), limit("raw"))

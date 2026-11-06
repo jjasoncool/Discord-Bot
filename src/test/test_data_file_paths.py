@@ -29,6 +29,31 @@ class DataFileLocationTests(unittest.TestCase):
         from services import state_db
         self.assertLocation(state_db.DEFAULT_DB_PATH, "services", "sent_articles.db")
 
+    def test_startup_gate_counts_as_a_test_run(self):
+        """啟動 gate（`python -m test.gate`）也要換掉正式的資料庫與鎖檔：它先 import test 套件、才 import unittest。"""
+        import test
+        self.assertTrue(test._is_test_run({}, ["python", "-m", "test.gate"]))
+        self.assertTrue(test._is_test_run({}, ["python", "-m", "test.test_data_file_paths"]))
+        self.assertTrue(test._is_test_run({"unittest": object()}, ["python", "-m", "unittest", "discover"]))
+        self.assertFalse(test._is_test_run({}, ["python", "-m", "test.integration.it_ai_insults_sql"]))
+
+    def test_market_db(self):
+        """商品市集的正本：搬到別處的話會默默開一個空的新檔，商品與交易全部「不見」。"""
+        import ast
+
+        from services import market_db
+        from sys_settings import paths
+        self.assertLocation(paths.MARKET_DB, "services", "market.db")
+        tree = ast.parse(Path(market_db.__file__).read_text(encoding="utf-8"))
+        self.assertTrue(any(isinstance(node, ast.ImportFrom) and node.module == "sys_settings.paths"
+                            and any(alias.name == "MARKET_DB" for alias in node.names) for node in ast.walk(tree)),
+                        "市集資料庫的預設位置要用 sys_settings.paths.MARKET_DB")
+        # 跑測試時共用連線換成暫存檔（test/__init__.py），漏注入資料庫的測試才不會寫到正式檔
+        self.assertNotEqual(market_db.MARKET_DB, paths.MARKET_DB)
+        self.assertEqual(market_db.MarketDB().path, market_db.MARKET_DB)
+        # 備份要跟資料庫在同一個掛載點：先寫暫存檔再換名，跨掛載點換名會失敗
+        self.assertLocation(paths.MARKET_BACKUP_DIR, "services", "market_backup")
+
     def test_article_relay_config(self):
         from services.relay import base_monitor
         self.assertLocation(base_monitor._ARTICLE_RUNTIME_PATH, "settings", "article_relay.json")
