@@ -31,12 +31,10 @@ from services import state_db  # noqa: E402
 class SharedStateDBTests(unittest.TestCase):
 
     def setUp(self):
-        self._saved = (state_db._shared_state_db, state_db._shared_state_db_closed)
-        state_db._shared_state_db = None
-        state_db._shared_state_db_closed = False
+        self._saved = state_db._shared.reset()
 
     def tearDown(self):
-        state_db._shared_state_db, state_db._shared_state_db_closed = self._saved
+        state_db._shared.restore(self._saved)
 
     def test_concurrent_calls_share_one_connection(self):
         async def scenario():
@@ -71,7 +69,7 @@ class SharedStateDBTests(unittest.TestCase):
 
         self.assertTrue(alive_before)
         self.assertFalse(alive_after, "關掉之後 aiosqlite 的工作執行緒要停下來")
-        self.assertIsNone(state_db._shared_state_db)
+        self.assertIsNone(state_db._shared.current)
 
     def test_after_closing_no_new_connection_is_opened(self):
         async def scenario():
@@ -86,7 +84,7 @@ class SharedStateDBTests(unittest.TestCase):
         connect, close = asyncio.run(scenario())
         close.assert_awaited_once()
         connect.assert_awaited_once()   # 關掉之後沒有再連一次
-        self.assertIsNone(state_db._shared_state_db)
+        self.assertIsNone(state_db._shared.current)
 
     def test_accessor_is_defined_only_in_state_db(self):
         defined_in = []

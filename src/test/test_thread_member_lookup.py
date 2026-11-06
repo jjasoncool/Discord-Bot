@@ -7,6 +7,8 @@
   2. resolve_member：快取有就不打 API；快取沒有再問 API；API 說不存在、沒權限、5xx 都回 None 不丟。
      resolve_user 也先走它（快取優先），不再先問 API。
   3. 巴哈、社群查詢用 raise_errors=True；PTT 改用 fetch_thread（封存串的新推文送得到）。
+  4. reopen_thread：手上這份看起來沒封存就不送請求；force=True 一律送一次解封（剛在別處封存回去的 thread，
+     手上那份看不出來）。
 """
 
 import asyncio
@@ -22,7 +24,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 import discord  # noqa: E402
 
 from utils import discord_members  # noqa: E402
-from utils.discord_threads import fetch_thread  # noqa: E402
+from utils.discord_threads import fetch_thread, reopen_thread  # noqa: E402
 
 SRC = os.path.dirname(HERE)
 
@@ -79,6 +81,15 @@ class FetchThreadTests(unittest.TestCase):
             asyncio.run(fetch_thread(client, 7, raise_errors=True))
         with self.assertRaises(discord.Forbidden):
             asyncio.run(fetch_thread(_client(fetched=_forbidden()), 7, raise_errors=True))
+
+
+class ReopenThreadTests(unittest.TestCase):
+    def test_force_unarchives_even_when_the_copy_looks_open(self):
+        thread = SimpleNamespace(id=1, archived=False, edit=mock.AsyncMock())
+        self.assertTrue(asyncio.run(reopen_thread(thread)))
+        thread.edit.assert_not_awaited()
+        self.assertTrue(asyncio.run(reopen_thread(thread, force=True)))
+        thread.edit.assert_awaited_once_with(archived=False)
 
 
 class ResolveMemberTests(unittest.TestCase):
