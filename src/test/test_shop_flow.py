@@ -54,7 +54,7 @@ import discord  # noqa: E402
 
 from commands import shop_commands  # noqa: E402
 from commands.shop_commands import DiscordShopViews  # noqa: E402
-from services.community import market_import, shop_service, shop_trade, trade_service  # noqa: E402
+from services.community import market_import, market_report, shop_service, shop_trade, trade_service  # noqa: E402
 from services.community import trade_progress as tp  # noqa: E402
 from services.community.shop_listing import ShopError, Variant, parse_batch, parse_draft  # noqa: E402
 from services.community import market_transition  # noqa: E402
@@ -1386,6 +1386,9 @@ class RecoveryTests(ShopTestCase):
         trade_thread = self.delivered(thread)
         notice = trade_thread.last()
         self.call(self.trade.handle_button(self.interaction(BUYER, trade_thread, notice), HOLD, None))
+        summary = next(s for s in self.call(market_report.summarize(self.shop, self.world.now))
+                       if s.trade_id == trade_thread.id)
+        self.assertIn("還沒領收", "；".join(summary.todo))
         self.call(self.shop.trades.run_waiting_reminders(self.world.now))   # 不會自己再發一次領收通知
         self.assertEqual(self.events(trade_thread).count(tp.RECEIPT_REQUESTED), 1)
 
@@ -1848,6 +1851,30 @@ class RecoveryTests(ShopTestCase):
         self.assertGreater(len(sent), 1)
         self.assertTrue(all(len(text) <= 2000 for text in sent))
 
+    def test_my_trades_is_for_sellers_and_reads_only_theirs(self):
+        thread = self.digital()
+        self.order(thread, BUYER, {1: 1})
+        summaries = self.call(market_report.summarize(self.shop, self.world.now, supplier_id=SUPPLIER_B.id))
+        self.assertEqual(summaries, [])
+
+        async def press(user):
+            view = shop_commands.GuideView()
+            interaction = SimpleNamespace(client=SimpleNamespace(get_cog=lambda name: SimpleNamespace(shop=self.shop)),
+                                          user=user, response=SimpleNamespace(defer=mock.AsyncMock()))
+            with mock.patch.object(shop_commands, "_reply", mock.AsyncMock()) as reply, \
+                    mock.patch.object(shop_commands, "safe_send_interaction_text", mock.AsyncMock()) as text:
+                await view.my_trades.callback(interaction)
+            return reply, text
+
+        reply, text = self.call(press(BUYER))
+        self.assertIn("只有觀星者", reply.await_args.args[1])
+        reply, text = self.call(press(SELLER))
+        self.assertIn("1 筆還沒結束", text.await_args.args[1])
+        # 被拿掉觀星者身份組、手上還有交易的：週報會叫他來按，照樣給看自己的
+        with mock.patch.object(ShopService, "can_sell", mock.AsyncMock(return_value=False)):
+            reply, text = self.call(press(SELLER))
+        self.assertIn("1 筆還沒結束", text.await_args.args[1])
+
     def test_buttons_wait_for_the_import(self):
         thread = self.digital()
         trade, shop = self.services(ready=False)
@@ -2043,6 +2070,14 @@ class ImportTests(ShopTestCase):
         self.call(self.shop.trades.run_waiting_reminders(self.world.now))
         self.assertIn("第 1 次提醒", self.old_trade.last().content)
 
+    def test_adopted_trades_are_not_idle_right_after_going_live(self):
+        # 舊訂單是上線前好一陣子下的：接上新流程那一刻重新算，不會一上線就被週報算成超過 14 天沒動靜
+        self.world.advance(days=20)
+        self.call(market_import.run_import(self.shop))
+        summary = next(s for s in self.call(market_report.summarize(self.shop, self.world.now))
+                       if s.trade_id == self.old_trade.id)
+        self.assertEqual(summary.days_idle, 0)
+
     def test_the_opening_message_gets_the_new_flow(self):
         self.call(market_import.run_import(self.shop))
         flow = next(f.value for f in self.old_trade.messages[0].embed.fields if f.name == "流程")
@@ -2107,6 +2142,14 @@ class ImportTests(ShopTestCase):
         self.assertTrue(first.cutoff_done)
         self.assertFalse(second.cutoff_done)
 
+    def test_weekly_report_says_to_set_up_the_deposit_first(self):
+        self.post.messages[0].embed.title = "【定金】月相代儲"
+        self.call(market_import.run_import(self.shop))
+        summaries = self.call(market_report.summarize(self.shop, self.world.now))
+        text = market_report.my_trades_text(summaries, SELLER.id)
+        self.assertIn("改成定金＋尾款", text)
+        self.assertNotIn("交付了請按「通知需求方領收」", text.split(f"<#{self.forum_trade.id}>")[0])
+
     def test_an_old_trade_whose_listing_is_gone_does_not_stop_the_import(self):
         lost = self.cart_thread(TradeRef(424242, BUYER_B.id, SELLER.id))
         order = FakeMessage(self.world, next(self.world.ids), BOT, f"🧾 下單：\n・不見的品項 ×1（NT$10）＝NT$10",
@@ -2132,6 +2175,14 @@ class ImportTests(ShopTestCase):
         self.old_trade.messages = [m for m in self.old_trade.messages if not m.content.startswith("🧾")]
         self.call(market_import.run_import(self.shop))
         self.assertTrue(self.trade_row(self.old_trade).legacy)
+
+    def test_weekly_report_with_only_old_trades_lists_each_todo(self):
+        self.post.messages[0].embed.title = "【定金】月相代儲"
+        self.call(market_import.run_import(self.shop))
+        summaries = self.call(market_report.summarize(self.shop, self.world.now))
+        text = market_report.weekly_text(summaries, SELLER.id, self.world.now)
+        self.assertIn("都是新功能上線前開的", text)
+        self.assertIn("改成定金＋尾款", text)
 
     def test_turning_the_transition_off_goes_back_to_the_normal_rules(self):
         # 那幾篇都改好之後把開關關掉：【定金】的規則全部不再作用，照一般規則
@@ -2749,6 +2800,177 @@ class PanelTests(ShopTestCase):
         choosing.response.send_modal.assert_awaited_once()
 
 
+class ReportTests(ShopTestCase):
+    """週報、📋 我的交易、群主的交易看板：讀同一份整理。"""
+
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(market_report, "send_dm", self.dms)
+        p.start()
+        self.addCleanup(p.stop)
+        thread = self.list_item()
+        self.add(thread, "60 月相｜30｜｜")
+        self.waiting = self.order(thread, BUYER, {1: 1})          # 等需求方付款：不用供應方處理
+        self.claimed = self.order(thread, BUYER_B, {1: 1})
+        self.step(self.claimed, BUYER_B, tp.CLAIM_PAID)          # 需求方說付了：要供應方確認
+        other = self.list_item(seller=SUPPLIER_B, title="代練")
+        self.add(other, "一條龍｜40｜｜", actor=SUPPLIER_B)
+        self.order(other, BUYER, {1: 1})                          # 另一位觀星者只有等付款的：不發週報
+
+    def summaries(self):
+        return self.call(market_report.summarize(self.shop, self.world.now))
+
+    def test_my_trades_lists_what_needs_me(self):
+        text = market_report.my_trades_text(self.summaries(), SELLER.id)
+        self.assertIn("2 筆還沒結束", text)
+        todo, rest = text.split("**不用你處理**")
+        self.assertIn(f"<#{self.claimed.id}>", todo)
+        self.assertIn("需求方表示已付款，等你確認", todo)
+        self.assertIn(f"<#{self.waiting.id}>", rest)
+        self.assertIn("等需求方付款", rest)
+        self.assertEqual(market_report.my_trades_text(self.summaries(), OUTSIDER.id), "你目前沒有還沒結束的交易。")
+
+    def test_each_todo_says_how_long_it_has_waited(self):
+        # 寫這一步等了幾天，不是交易開了幾天（定金交易一開就是好幾個月，看不出哪筆是剛卡住的）
+        self.world.advance(days=30)
+        self.step(self.waiting, BUYER, tp.CLAIM_PAID)   # 開單 30 天後才說付了：等確認從這時候算
+        self.world.advance(days=2)
+        text = market_report.my_trades_text(self.summaries(), SELLER.id)
+        self.assertIn("需求方表示已付款，等你確認（2 天）", text)
+        self.assertNotIn("開了 32 天", text)
+
+    def test_waiting_for_goods_is_not_idle(self):
+        # 定金收了、在等貨：本來就會安靜好幾個月，不算沒動靜，也不算要供應方處理（不然每週都被週報催）
+        thread = self.list_item(seller=SUPPLIER_B, title="座姿玩偶", delivery="physical")
+        self.add(thread, f"玩偶A｜500/1300｜10｜{self.cutoff_text(days=60)}", actor=SUPPLIER_B)
+        waiting = self.order(thread, BUYER, {1: 1})
+        self.step(waiting, SUPPLIER_B, tp.CONFIRM_DEPOSIT)
+        self.world.advance(days=20)
+        summary = next(s for s in self.summaries() if s.trade_id == waiting.id)
+        self.assertEqual(summary.waiting, "等貨中")
+        self.assertFalse(summary.needs_supplier)
+        self.assertNotIn(f"<#{waiting.id}>", market_report.my_trades_text(self.summaries(), SUPPLIER_B.id).split(
+            "不用你處理")[0])
+
+    def test_the_owner_sees_whose_list_it_is(self):
+        text = market_report.my_trades_text(self.summaries(), SELLER.id, name="觀星者小舖")
+        self.assertIn("📋 **觀星者小舖 的交易", text)
+        self.assertIn("**要他處理**", text)
+        self.assertIn("等他確認", text)
+        self.assertNotIn("要你", text)
+        cog = shop_commands.ShopCommands(mock.MagicMock())
+        cog.shop = self.shop
+        text, _ = self.call(cog.dashboard(SELLER.id))
+        self.assertIn(f"{SELLER.display_name} 的交易", text)
+
+    def test_weekly_report_goes_out_once_on_monday(self):
+        # T0 是週六晚上；週一中午才發
+        due = self.call(market_report.run_weekly(self.shop, self.world.now))
+        self.assertEqual((due.astimezone(shop_service.APP_TZ).weekday(), due.astimezone(shop_service.APP_TZ).hour),
+                         (0, 12))
+        self.dms.assert_not_awaited()
+
+        self.world.now = due + timedelta(hours=3)
+        self.call(market_report.run_weekly(self.shop, self.world.now))
+        self.call(market_report.run_weekly(self.services()[1], self.world.now))   # 重啟後同一週不重發
+
+        (call,) = self.dms.await_args_list
+        self.assertEqual(call.args[0].id, SELLER.id)
+        self.assertIn(f"<#{self.claimed.id}>", call.kwargs["embed"].description)
+        self.assertIn("📋 我的交易", call.kwargs["embed"].description)
+        week = market_report.week_key(due.astimezone(shop_service.APP_TZ).date())
+        self.assertIsNotNone(self.call(self.db.weekly_report(week, SELLER.id))[0])
+        self.assertIsNone(self.call(self.db.weekly_report(week, SUPPLIER_B.id)))   # 沒有待辦就不發
+
+    def test_missed_monday_waits_for_next_week_and_failures_are_recorded(self):
+        monday = self.call(market_report.run_weekly(self.shop, self.world.now))
+        self.world.now = monday + timedelta(days=1)   # 週二才開機：等下週
+        self.assertEqual(self.call(market_report.run_weekly(self.shop, self.world.now)), monday + timedelta(days=7))
+        self.dms.assert_not_awaited()
+
+        self.world.now = monday + timedelta(days=7, hours=1)
+        self.dms.return_value = None   # 私訊關閉
+        self.call(market_report.run_weekly(self.shop, self.world.now))
+        week = market_report.week_key((monday + timedelta(days=7)).astimezone(shop_service.APP_TZ).date())
+        self.assertEqual(self.call(self.db.weekly_report(week, SELLER.id))[1], "私訊沒送到")
+        board = self.call(market_report.dashboard_text(self.shop, self.summaries(), self.world.now))
+        self.assertIn("這週週報沒送到：1 位", board)
+
+    def test_dashboard_counts_per_supplier(self):
+        board = self.call(market_report.dashboard_text(self.shop, self.summaries(), self.world.now))
+        self.assertIn("還沒結束 3 筆", board)
+        self.assertIn(f"**{SELLER.display_name}**　還沒結束 2｜要他處理 1", board)
+        self.assertIn(f"**{SUPPLIER_B.display_name}**　還沒結束 1｜要他處理 0", board)
+        self.assertIn("認不出身分的舊交易：0 筆", board)
+
+    def test_idle_trades_count_only_people_and_records(self):
+        self.world.advance(days=15)
+        self.call(self.shop.trades.run_waiting_reminders(self.world.now))   # bot 的提醒不算動靜
+        summary = next(s for s in self.summaries() if s.trade_id == self.waiting.id)
+        self.assertGreaterEqual(summary.days_idle, 14)
+        self.assertTrue(summary.needs_supplier)
+        # bot 自己的訊息不算
+        self.call(self.trade.note_chat(FakeMessage(self.world, next(self.world.ids), BOT, "提醒", thread=self.waiting)))
+        self.assertGreaterEqual(next(s for s in self.summaries() if s.trade_id == self.waiting.id).days_idle, 14)
+        said = FakeMessage(self.world, next(self.world.ids), BUYER, "我明天付", thread=self.waiting)
+        self.waiting.messages.append(said)
+        self.call(self.trade.note_chat(said))   # 有人講話時 bot 收到訊息就記下，整理清單時不用回頭翻對話
+        with mock.patch.object(TradeService, "read", side_effect=AssertionError("清單不該去讀交易對話")):
+            summary = next(s for s in self.summaries() if s.trade_id == self.waiting.id)
+        self.assertEqual(summary.days_idle, 0)
+
+    def test_delayed_preorder_waits_for_goods(self):
+        thread = self.list_item(title="吊飾")
+        self.add(thread, f"吊飾C｜300｜｜{self.cutoff_text(hours=1)}")
+        trade_thread = self.order(thread, BUYER_B, {1: 1})
+        self.step(trade_thread, SELLER, tp.CONFIRM_FULL)
+        self.world.advance(hours=2)
+        self.call(self.shop.run_cutoffs(self.world.now))
+        self.call(self.shop.delay(thread.id, SELLER, 1, self.cutoff_text(days=10), "原廠延後"))
+
+        summary = next(s for s in self.summaries() if s.trade_id == trade_thread.id)
+
+        self.assertEqual((summary.todo, summary.waiting), ([], "等貨中"))   # 跟等待提醒一樣，預計交貨日前不催
+
+    def test_handled_unrecognized_trades_drop_off_the_board(self):
+        kept = FakeThread(self.world, next(self.world.ids), "交易確認 - ? - 1", parent_id=CART_ID)
+        handled = FakeThread(self.world, next(self.world.ids), "交易確認 - ? - 2", parent_id=CART_ID)
+        handled.locked = True
+        for thread in (kept, handled):
+            self.world.channels[thread.id] = thread
+
+        async def remember():
+            async with self.db.transaction():
+                await self.db.set_meta(market_import.UNRECOGNIZED_META, json.dumps([kept.id, handled.id, 424242]))
+        self.call(remember())
+
+        board = self.call(market_report.dashboard_text(self.shop, self.summaries(), self.world.now))
+        self.assertIn(f"認不出身分的舊交易：1 筆（<#{kept.id}>）", board)
+
+    def test_console_screen(self):
+        from commands import admin_console
+
+        async def build():
+            return admin_console.render_market("總表", [(SELLER.id, "供應者甲"), (SUPPLIER_B.id, "供應者乙")])
+
+        view = self.call(build())
+        ids = [getattr(getattr(c, "item", c), "custom_id", None) for c in view.walk_children()]
+        self.assertIn(f"console:market:seller:{SELLER.id}", ids)
+        self.assertIn("console:home", ids)
+        self.assertIn("market", [screen for screen, *_ in admin_console.ACTIONS])
+
+        async def crowded(page):
+            many = [(1000 + n, f"觀星者{n:02d}") for n in range(17)]
+            view = admin_console.render_market("總表", many, page=page)
+            return [getattr(getattr(c, "item", c), "custom_id", None) for c in view.walk_children()]
+
+        first, second = self.call(crowded(0)), self.call(crowded(1))
+        self.assertIn("console:market:page:1", first)            # 超過一頁就翻頁，每一位都點得到
+        self.assertIn("console:market:seller:1000", first)
+        self.assertIn("console:market:seller:1016", second)
+        self.assertNotIn("console:market:seller:1016", first)
+
+
 class LayeringTests(unittest.TestCase):
 
     def test_shop_modules_do_not_import_commands(self):
@@ -2924,7 +3146,7 @@ class LayeringTests(unittest.TestCase):
                 bot.add_dynamic_items.assert_called_once()
                 bot.add_view.assert_called_once()
                 names = [c.args[0] for c in loop_call.call_args_list]
-                self.assertEqual(names, ["商品截止", "商品交易等待提醒", "市集資料庫備份"])
+                self.assertEqual(names, ["商品截止", "商品交易等待提醒", "市集資料庫備份", "市集週報"])
                 # 截止的排程跟著品項新增、編輯提早醒來
                 self.assertIs(loop_call.call_args_list[0].kwargs["wake"], cog.shop.cutoffs_changed)
                 self.assertEqual(register.call_args.args[0], shop_commands.ALERT_KIND)

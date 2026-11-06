@@ -26,6 +26,7 @@ from typing import Optional, Sequence
 import discord
 from discord.ext import commands
 
+from services.community import market_report
 from services.community import trade_progress as tp
 from services.community.market_import import run_import
 from services.community.shop_listing import (
@@ -65,6 +66,7 @@ from utils.utils import safe_send_interaction_message, safe_send_interaction_tex
 logger = logging.getLogger(__name__)
 
 GUIDE_CUSTOM_ID = "shop:new"
+MINE_CUSTOM_ID = "shop:mine"
 #: 群主通知的種類：上線匯入失敗時私訊群主，「重新偵測」＝重跑匯入
 ALERT_KIND = "market"
 NOT_READY_TEXT = "商品與交易功能更新中，請稍後再試。"
@@ -1047,6 +1049,27 @@ class GuideView(discord.ui.View):
             return await _reply(interaction, "只有觀星者可以上架商品。")
         await interaction.response.send_modal(ListingInfoModal(default_unit=shop.settings.default_unit))
 
+    @discord.ui.button(label="我的交易", emoji="📋", style=discord.ButtonStyle.secondary, custom_id=MINE_CUSTOM_ID)
+    async def my_trades(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """只列按的人當供應方、還沒結束的交易；要讀每個交易對話看有沒有動靜，先回應再查。"""
+        shop = _shop(interaction)
+        if shop is None:
+            return await _missing(interaction)
+        if not shop.trade.ready.is_set():
+            return await _reply(interaction, NOT_READY_TEXT)
+        # 被拿掉觀星者身份組的人手上可能還有交易（週報也會叫他來按）：有自己當供應方的交易就給看
+        if not await shop.can_sell(interaction.user) and not await shop.trade.has_open_trades(interaction.user.id):
+            return await _reply(interaction, "只有觀星者有自己的交易清單。")
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            # 只整理自己當供應方的：每一筆都要讀交易對話看有沒有動靜，不必把別人的也讀一遍
+            summaries = await market_report.summarize(shop, _now(), supplier_id=interaction.user.id)
+            text = market_report.my_trades_text(summaries, interaction.user.id)
+        except Exception:  # 邊界：一次按鈕互動
+            logger.error("商品上架：我的交易清單失敗", exc_info=True)
+            text = _ERROR_TEXT
+        await safe_send_interaction_text(interaction, text, ephemeral=True)
+
 
 _DYNAMIC_ITEMS = (ShopBuySelect, ShopManageButton, ShopPanelButton, ShopScheduleSelect, ShopPickSelect,
                   ShopConfirmButton, ShopBatchButton, ShopConfirmOrder, ShopAbort, ShopStepButton, ShopStepSelect)
@@ -1086,7 +1109,28 @@ class ShopCommands(commands.Cog):
             supervise(lambda: run_due_loop("市集資料庫備份", self._backup, wait_ready=self.bot.wait_until_ready,
                                            max_sleep=6 * 3600),
                       name="market_backup"),
+            supervise(lambda: run_due_loop("市集週報", lambda now: market_report.run_weekly(self.shop, now),
+                                           wait_ready=self.bot.wait_until_ready, max_sleep=6 * 3600),
+                      name="market_weekly"),
         ]
+
+    async def dashboard(self, supplier_id: Optional[int] = None) -> tuple[str, list[tuple[int, str]]]:
+        """主控台的交易看板（群主）：(總表, 可以點進去看的觀星者 [(id, 名字)])；給 supplier_id 就是那一位的清單。"""
+        if self.shop is None:
+            return "商品市集沒有載入。", []
+        if not self.shop.trade.ready.is_set():
+            return NOT_READY_TEXT, []
+        if supplier_id is not None:
+            # 群主看的是別人的清單：標題寫是誰、說「他」不說「你」
+            summaries = await market_report.summarize(self.shop, _now(), supplier_id=supplier_id)
+            names = await self.shop.trade.display_names(await market_report.guild_of(self.shop), (supplier_id,))
+            return market_report.my_trades_text(summaries, supplier_id,
+                                                name=names.get(supplier_id, f"已離開的成員 {supplier_id}")), []
+        summaries = await market_report.summarize(self.shop, _now())
+        ids = sorted({s.supplier_id for s in summaries})
+        names = await self.shop.trade.display_names(await market_report.guild_of(self.shop), ids)
+        return (await market_report.dashboard_text(self.shop, summaries, _now()),
+                [(i, names.get(i, str(i))) for i in ids])
 
     async def _backup(self, now: datetime) -> datetime:
         """每天固定時刻一份備份（今天已經有就不做）；開機時已經過了今天的時刻就先補。
