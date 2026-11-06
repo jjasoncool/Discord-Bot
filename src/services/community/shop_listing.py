@@ -2,7 +2,7 @@
 
 架構定位：功能層（`services.community`）。
   - 上層（誰呼叫）：商品服務 `shop_service`（從資料庫讀出來轉成這裡的模型、檢查下單、畫貼文）、
-    介面 `commands.shop_commands`（選單、表單的長相與解析）、上線匯入 `shop_import`。
+    介面 `commands.shop_commands`（選單、表單的長相與解析）、上線匯入 `market_import`、上線銜接 `market_transition`。
   - 下層（呼叫誰）：discord（只用 Embed、SelectOption 畫畫面）、`utils.user_dates`（日期寫法）、時區設定。
 
 介面：
