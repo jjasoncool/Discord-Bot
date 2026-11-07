@@ -410,3 +410,4 @@ a_pic_frog19 = 垂涎、想吃 | think
 god = 低頭、無奈 | negative
 eso_mbape = 大笑、開心 | laugh
 WW_CamellyaThumb = 指指你、注意 | neutral
+koharu = 開心、興奮 | laugh
