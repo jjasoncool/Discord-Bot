@@ -808,16 +808,17 @@ class ListingInfoModal(discord.ui.Modal):
             discord.SelectOption(label="數位（帳號、代儲、道具，交付後就到手）", value="digital",
                                  default=delivery == "digital"),
         ])
+        # 短的、必選的放前面，長篇的說明放最後
         self.add_item(self.title_input)
-        self.add_item(self.description)
         self.add_item(discord.ui.Label(
             text="幣別",
             description=f"金額前面的符號，例：{UNIT_EXAMPLES}（金額在品項裡填）",
             component=self.unit))
+        self.add_item(discord.ui.Label(text="交付方式", description="有交易在進行時不能改", component=self.delivery))
         self.add_item(discord.ui.Label(
             text="換商品圖（不上傳就沿用原本的圖）" if listing else "商品圖（最多 10 張，可不傳）",
             component=self.images))
-        self.add_item(discord.ui.Label(text="交付方式", description="有交易在進行時不能改", component=self.delivery))
+        self.add_item(self.description)
 
     async def on_submit(self, interaction: discord.Interaction):
         shop = _shop(interaction)

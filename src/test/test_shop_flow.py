@@ -5,7 +5,8 @@
 守的底線：
   1. 上架：只有觀星者；bot 代發商品貼文（標題、說明、供應方暱稱、商品圖換固定檔名並由 embed 引用第一張），
      資料庫記下這篇（交付方式預設實體）；幣別有數字、太長、不是圖、圖太大、論壇沒綁都在發文前擋下並說明；
-     寫資料庫失敗就把貼文刪掉。商品圖照使用者選的順序（第一張當大圖）。
+     寫資料庫失敗就把貼文刪掉。商品圖照使用者選的順序（第一張當大圖）。上架與編輯視窗的欄位順序是
+     標題、幣別、交付方式、商品圖、說明。
   2. 管理：只有供應方或管理員（含群主）；購買選單的選項只帶品項編號；有預購或收定金就掛「預購中」；最多 25 個；
      品項編號不重用；編輯時數量是「剩餘數量」；定金品項不能和一次付清的放同一篇；交易中的品項不能改類型、
      改價格只影響之後的新訂單（回覆說已下單的照原金額）；有人下單後截止時間鎖住；有交易時不能改交付方式、
@@ -369,6 +370,17 @@ class UploadOrderTests(unittest.TestCase):
             return [a.id for a in shop_commands._uploaded_in_order(bare, modal.images)]
 
         self.assertEqual(asyncio.run(check()), [12, 11])
+
+    def test_fields_are_title_unit_delivery_images_description(self):
+        from services.community.shop_listing import Listing
+
+        listing = Listing(thread_id=500, owner_id=1, unit="NT$", title="t", description="", variants=())
+        expected = {"上架商品": ["標題", "幣別", "交付方式", "商品圖", "說明"],
+                    "編輯商品資訊": ["標題", "幣別", "交付方式", "換商品圖", "說明"]}
+        for modal in (shop_commands.ListingInfoModal(), shop_commands.ListingInfoModal(listing=listing)):
+            labels = [row.get("label") or row["components"][0]["label"] for row in modal.to_components()]
+            with self.subTest(modal.title):
+                self.assertEqual([label.split("（")[0] for label in labels], expected[modal.title])
 
     def test_listing_and_editing_both_pass_the_selected_order(self):
         from services.community.shop_listing import Listing
