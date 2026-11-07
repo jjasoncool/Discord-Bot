@@ -345,7 +345,8 @@ class ShopService:
         listing = Listing(thread_id=0, owner_id=owner.id, unit=unit, title=title, description=description,
                           image=files[0].filename if files else None, delivery=delivery)
         message = await post_to_channel(
-            forum, embed=render_embed(listing, owner.display_name, now), files=files,
+            forum, embed=render_embed(listing, owner.display_name, now, owner_avatar=owner.display_avatar.url),
+            files=files,
             thread_title=title, view=self.views.listing(listing, now))
         thread = message.channel
         saved = False
@@ -436,7 +437,7 @@ class ShopService:
         if owner is None:
             embed = render_embed(listing, str(listing.owner_id), now)
         else:
-            embed = render_embed(listing, owner.display_name, now)
+            embed = render_embed(listing, owner.display_name, now, owner_avatar=owner.display_avatar.url)
         if files is None:
             await message.edit(embed=embed, view=self.views.listing(listing, now))
         else:

@@ -73,7 +73,8 @@ T0 = datetime(2026, 10, 3, 12, 0, tzinfo=timezone.utc)
 
 
 def _member(uid, name, *, bot=False):
-    return SimpleNamespace(id=uid, display_name=name, mention=f"<@{uid}>", bot=bot, roles=[])
+    return SimpleNamespace(id=uid, display_name=name, mention=f"<@{uid}>", bot=bot, roles=[],
+                           display_avatar=SimpleNamespace(url=f"https://cdn.example/avatars/{uid}.png"))
 
 
 BOT = _member(9, "bot", bot=True)

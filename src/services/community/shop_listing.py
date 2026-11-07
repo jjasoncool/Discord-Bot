@@ -60,6 +60,8 @@ PRICE_FIELD_LIMIT = 19    # 表單價格欄：「999999999/999999999」
 LIMIT_MAX = 999_999       # 數量上限（6 位）
 TITLE_LIMIT = 90   # 貼文標題上限 100，留空間給【已下架】
 UNIT_LIMIT = 10
+#: 商品貼文作者欄掛的連結：點供應方的名字開他的 Discord 個人檔案
+PROFILE_URL = "https://discord.com/users/{user_id}"
 #: 論壇標籤的種類（標籤名字在 ShopSettings）：預購中、現貨
 PREORDER_TAG = "preorder"
 INSTOCK_TAG = "instock"
@@ -350,9 +352,13 @@ def embed_image_name(embed) -> Optional[str]:
 EMBED_TOTAL_LIMIT = 5800
 
 
-def render_embed(listing: Listing, owner_name: str, now: datetime) -> discord.Embed:
+def render_embed(listing: Listing, owner_name: str, now: datetime, *,
+                 owner_avatar: Optional[str] = None) -> discord.Embed:
     """商品貼文。說明寫滿、品項放滿 25 個又名稱很長時，合計會超過 embed 上限、貼文就改不了：
-    先把品項狀態改成不加樣式的短版，還不夠再截短說明。"""
+    先把品項狀態改成不加樣式的短版，還不夠再截短說明。
+
+    供應方放在作者欄，名字連到他的 Discord 個人檔案、旁邊是頭像（作者欄不能 @ 人，只能掛網址）；
+    名字與頭像是畫的那時候的，換了要等下次重畫。"""
     description = listing.description or None
     statuses = [variant.status(listing.unit, now, rich=True) for variant in listing.variants]
     names = [f"{number}. {variant.name}" for number, variant in enumerate(listing.variants, start=1)]
@@ -364,7 +370,8 @@ def render_embed(listing: Listing, owner_name: str, now: datetime) -> discord.Em
         if description and len(description) > room:
             description = description[:max(room - 1, 0)] + "…"
     embed = discord.Embed(title=listing.title, description=description, color=discord.Color.gold())
-    embed.set_author(name=f"供應方：{owner_name}")
+    embed.set_author(name=f"供應方：{owner_name}", url=PROFILE_URL.format(user_id=listing.owner_id),
+                     icon_url=owner_avatar)
     for name, status in zip(names, statuses):
         embed.add_field(name=name, value=status, inline=False)
     if not listing.variants:

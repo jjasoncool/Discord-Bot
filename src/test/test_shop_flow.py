@@ -9,7 +9,7 @@
      標題、幣別、交付方式、商品圖、說明。
   2. 管理：只有供應方或管理員（含群主）；購買選單的選項只帶品項編號；論壇標籤跟著現在能不能買（買得到的預購或
      收定金掛「預購中」、買得到的立即購買掛「現貨」，下架、供應方不能賣、付款方式還在設定都不掛，別人掛的標籤不動，
-     連著建兩個標籤不互相蓋掉，查不到供應方是一時出錯時標籤不動）；最多 25 個；
+     連著建兩個標籤不互相蓋掉，查不到供應方是一時出錯時標籤不動）；商品貼文的供應方連到他的個人檔案、帶頭像；最多 25 個；
      品項編號不重用；編輯時數量是「剩餘數量」；定金品項不能和一次付清的放同一篇；交易中的品項不能改類型、
      改價格只影響之後的新訂單（回覆說已下單的照原金額）；有人下單後截止時間鎖住；有交易時不能改交付方式、
      不能刪那個品項；還有定金或預購的交易沒做完不能下架；下架後選單與按鈕停用、標題【已下架】、鎖定。
@@ -787,6 +787,15 @@ class ForumTagTests(ShopTestCase):
         edits, fetches = self.forum.tag_edits, self.forum.fetches
         self.call(self.shop.redraw(other.id))
         self.assertEqual((self.forum.tag_edits, self.forum.fetches), (edits, fetches))   # 快取齊了就不多打 API
+
+    def test_seller_name_links_to_the_profile_with_the_avatar(self):
+        posted = self.thread.messages[0].embed
+        self.add(self.thread, "60 月相｜30｜｜")
+        for when, embed in (("上架時", posted), ("重畫後", self.thread.messages[0].embed)):
+            with self.subTest(when):
+                self.assertEqual(embed.author.name, f"供應方：{SELLER.display_name}")
+                self.assertEqual(embed.author.url, f"https://discord.com/users/{SELLER.id}")
+                self.assertEqual(embed.author.icon_url, SELLER.display_avatar.url)
 
 
 class OrderTests(ShopTestCase):

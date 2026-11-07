@@ -10,6 +10,7 @@
   4. 下單明細：現在要付（定金、全額）與到貨後再付（尾款）分開算；價格指紋在金額或份數改了就變、順序不影響。
   5. 顯示：給群友看的字是「品項」「供應方」「需求方」；狀態寫出定金、尾款、截止、預計交貨、延期次數；
      不能買的價格劃掉、接灰底標籤；選單的 value 只有品項編號；全部都不能買時選單寫出原因。
+     供應方的名字連到他的 Discord 個人檔案。
   6. 舊格式（上線前的商品貼文、訂單按鈕）讀得回同一份資料；訂單文字讀得出單價，份數對不上就不信。
   7. 論壇標籤：買得到的預購或定金掛「預購中」、買得到的立即購買掛「現貨」（截止、開始收尾款、賣完都算買不到，
      截止時間到了但排程還沒處理也算）；下架或整篇不接單都不掛。
@@ -163,6 +164,7 @@ class ModelTests(unittest.TestCase):
         model = listing(doll(1), doll(2, taken=10), image="item_1.png")
         embed = render_embed(model, "觀星者小舖", NOW)
         self.assertEqual(embed.author.name, "供應方：觀星者小舖")
+        self.assertEqual(embed.author.url, "https://discord.com/users/21")
         self.assertEqual(embed.image.url, "attachment://item_1.png")
         self.assertIn("交付方式：實體", embed.footer.text)
         self.assertIn("品項", embed.footer.text)
