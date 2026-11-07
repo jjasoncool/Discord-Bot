@@ -2246,7 +2246,8 @@ class ImportTests(ShopTestCase):
 
     def test_converting_needs_every_balance(self):
         self.deposit_listing_imported()
-        for text in ("1. 60 月相｜100", "1. 60 月相 100\n2. 寰宇電台｜50", "1. 60 月相｜0\n2. 寰宇電台｜50"):
+        for text in ("1. 60 月相｜100", "1. 60 月相 100\n2. 寰宇電台｜50", "1. 60 月相｜0\n2. 寰宇電台｜50",
+                     "1. 60 月相｜100\n2. 寰宇電台｜,"):
             with self.assertRaises(ShopError):
                 self.call(market_transition.convert(self.shop, self.post.id, SELLER, self.cutoff_text(days=30), text))
         self.assertTrue(self.trade_row(self.old_trade).legacy)

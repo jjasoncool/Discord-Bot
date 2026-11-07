@@ -87,9 +87,10 @@ def parse_balances(text: str, variants: Sequence[Variant]) -> dict[int, int]:
         if not line.strip():
             continue
         match = _BALANCE_LINE.match(line)
-        if match is None:
+        digits = match.group(2).replace(",", "").replace("，", "") if match else ""
+        if match is None or not digits:   # 只打了逗號也算看不懂
             raise ShopError(f"「{line.strip()[:40]}」看不懂，每行寫成「1. 品項名稱｜尾款」，例「1. 標準版｜1300」。")
-        number, amount = int(match.group(1)), int(match.group(2).replace(",", "").replace("，", ""))
+        number, amount = int(match.group(1)), int(digits)
         if not 1 <= number <= len(variants):
             raise ShopError(f"沒有第 {number} 個品項。")
         if not 1 <= amount <= PRICE_MAX:
