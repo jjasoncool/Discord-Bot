@@ -22,8 +22,9 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
   新增的測試要故意改壞一次程式，確認它會紅。
 - 回寫 `AI_HANDOFF_AND_TODO.md`：已定案的決定與理由、**還沒定案的問題（選項＋建議）**、狀態、盤點紀錄。討論或 grill 的**每一輪**都回寫，不只定案時。寫法規則在該檔開頭。
 - 等使用者明說才 commit。訊息用英文 conventional commits，body 3～5 點 `- ` 條列，不加 Co-Authored-By。
+- 程式的 commit 要小：一個 commit 只做一件事（功能、重構、修錯各自分開），讓人一個一個讀得懂。不要等一整批做完才塞成一個大 commit，事後再拆很花時間。文件（交接檔、`dev/`、`AGENTS.md`）可以一次 commit；表情與貼圖字典另外一個 commit。
 
-追查過去的決定、找已完成或過時的項目：`TODO-completed.md`（開頭有依日期的索引）。
+追查過去的決定、找已完成或過時的項目：`dev/`（`dev/README.md` 有依領域與依日期的索引；交接檔各區塊 `@meta` 的 `history:` 指向該主題的歷史檔；每輪的流水帳在 `dev/journal/`，一個月一檔）。
 
 ## 與使用者溝通
 
