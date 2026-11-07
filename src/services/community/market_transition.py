@@ -10,7 +10,8 @@
   - `waits_for_deposit(listing)`：標題寫【定金】、品項還不是定金＋尾款。
   - `holds_orders(trade, listing)`：那種商品還掛著上線前的舊交易：先不接新訂單、不能下架。
   - `can_convert(trade, listing)`：管理面板要不要放「💰 改成定金＋尾款」。
-  - `convert(shop, listing_id, actor, cutoff_text, balances_text)`：整篇改成定金＋尾款，上面的舊交易接上新流程。
+  - `convert(shop, listing_id, actor, cutoff_text, balances)`：整篇改成定金＋尾款，上面的舊交易接上新流程。
+    尾款是 {品項編號: 填的字}（表單每個品項一格，`FIELD_LIMIT` 個以內）或一段多行文字（品項太多時）。
   - `adopt_ready(shop)`：商品準備好了的舊交易接上新流程（匯入時、截止排程每一輪；做到一半中斷也補得完）。
   - 給人看的句子：`WAITS_TEXT`（舊交易先不能往下走）、`ORDERS_HELD_TEXT`、`CLOSE_HELD_TEXT`、`TODO_TEXT`。
 
@@ -22,6 +23,8 @@
 
 例外與決策：
   - 【定金】從標題認（觀星者自己的命名習慣）：上線時 5 篇都是這樣寫，舊格式沒有別的欄位分得出來。
+  - 表單每個品項一格、格子底下寫出定金：觀星者最容易把總價當尾款，寫進舊交易後他自己改不回來。
+    表單最多 5 格、扣掉截止剩 4 格，超過才退回一格多行（「編號. 名稱｜尾款」）。
   - 兩個品項以上的商品不能一個一個改：定金品項不能跟一次付清的放同一篇（一起買的現貨會被拖到尾款收完才完成），
     所以按鈕整篇一起改；原本的價格當定金，每個品項填尾款、整篇一個收定金截止。
 """
@@ -30,7 +33,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import timedelta
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Mapping, Sequence
 
 import discord
 
@@ -49,6 +52,8 @@ WAITS_TEXT = ("這篇商品要先改成定金＋尾款（供應方在商品的�
               "改好後這筆交易會接上新的交易進度再繼續。")
 ORDERS_HELD_TEXT = "這篇商品的付款方式還在設定（定金＋尾款），暫時不能下單，請稍後再試。"
 CLOSE_HELD_TEXT = "這篇還有上線前的定金交易，請先按「💰 改成定金＋尾款」，改好後再下架。"
+#: 表單最多 5 格，扣掉收定金截止，品項這麼多個以內才每個品項一格
+FIELD_LIMIT = 4
 TODO_TEXT = "上線前開的定金交易：先在商品的管理面板按「💰 改成定金＋尾款」填尾款與截止"
 PANEL_NOTE = ("上線前的定金交易還在等：按「💰 改成定金＋尾款」填好收定金截止與尾款，就會開放下單、"
               "舊交易也會接上新的交易進度。")
@@ -102,8 +107,29 @@ def parse_balances(text: str, variants: Sequence[Variant]) -> dict[int, int]:
     return found
 
 
+def parse_balance_fields(values: Mapping[int, str], variants: Sequence[Variant]) -> dict[int, int]:
+    """每個品項一格的尾款：{品項編號: 填的字}。只收數字（可以有千分位逗號）；每個品項都要有。
+    表單打開後品項被改過（新增、刪除）就整張退回，免得尾款對到別的品項。"""
+    if set(values) != {v.key for v in variants}:
+        raise ShopError("表單打開之後品項有變動，請重新按「💰 改成定金＋尾款」再填一次。")
+    found: dict[int, int] = {}
+    for number, variant in enumerate(variants, start=1):
+        text = (values[variant.key] or "").strip()
+        digits = text.replace(",", "").replace("，", "")
+        if not digits:
+            raise ShopError(f"「{number}. {variant.name}」還沒填尾款。")
+        try:
+            amount = int(digits)   # 跟其他金額欄一樣：全形數字也收
+        except ValueError:
+            raise ShopError(f"「{number}. {variant.name}」的尾款「{text[:20]}」看不懂，只填數字，例 1300。") from None
+        if not 1 <= amount <= PRICE_MAX:
+            raise ShopError(f"「{number}. {variant.name}」的尾款要是 1～{PRICE_MAX:,} 的整數。")
+        found[variant.key] = amount
+    return found
+
+
 async def convert(shop: "ShopService", listing_id: int, actor: discord.Member, cutoff_text: str,
-                  balances_text: str) -> str:
+                  balances: str | Mapping[int, str]) -> str:
     """整篇改成定金＋尾款：原本的價格當定金，每個品項填尾款、整篇一個收定金截止（已經截止的照樣截止）；
     改好後這篇上的舊交易接上新流程（品項換成定金＋尾款、補發交易進度，不 @ 人）。"""
     now = shop.now()
@@ -119,17 +145,20 @@ async def convert(shop: "ShopService", listing_id: int, actor: discord.Member, c
         if not await can_convert(shop.trade, listing):
             raise ShopError("這篇商品現在不能整篇改成定金＋尾款（只給標題寫【定金】、品項還不是定金＋尾款的商品；"
                             "上線後開的交易要先完成或取消）。")
-        balances = parse_balances(balances_text, listing.variants)
+        if isinstance(balances, str):
+            amounts = parse_balances(balances, listing.variants)
+        else:
+            amounts = parse_balance_fields(balances, listing.variants)
         db = await shop.db()
         async with db.transaction():
             for variant in listing.variants:
                 if variant.cutoff_done:
                     # 已經截止的照樣截止（不能因為改類型就重新開放收定金）
                     await db.update_variant(listing_id, variant.key, now=shop.stamp(), kind="deposit",
-                                            balance=balances[variant.key])
+                                            balance=amounts[variant.key])
                 else:
                     await db.update_variant(listing_id, variant.key, now=shop.stamp(), kind="deposit",
-                                            balance=balances[variant.key], cutoff=moment.isoformat(),
+                                            balance=amounts[variant.key], cutoff=moment.isoformat(),
                                             cutoff_noticed=False, expected_at=None, delivery_started_at=None)
         await shop.refresh_listing(listing_id)
     adopted = await shop.adopt_legacy_on(listing_id)

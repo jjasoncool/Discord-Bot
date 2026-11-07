@@ -724,8 +724,18 @@ class DelayModal(discord.ui.Modal):
         await _panel_with_error(interaction, shop, self.listing_id, text)
 
 
+def _balance_label(number: int, name: str) -> str:
+    """尾款格的標題「1. 名稱的尾款」，名稱太長就截短（欄位標題最多 45 字）。"""
+    head, tail = f"{number}. ", "的尾款"
+    room = 45 - len(head) - len(tail)
+    return head + (name if len(name) <= room else name[:room - 1] + "…") + tail
+
+
 class DepositConvertModal(discord.ui.Modal):
-    """上線銜接（market_transition）：整篇改成定金＋尾款，原本的價格當定金；填一個收定金截止、每個品項的尾款。"""
+    """上線銜接（market_transition）：整篇改成定金＋尾款，原本的價格當定金；填一個收定金截止、每個品項的尾款。
+
+    品項不多（`transition.FIELD_LIMIT` 個以內）就每個品項一格，格子底下寫出定金是多少、要填總價減掉它：
+    觀星者最容易把總價當尾款，寫進舊交易後他自己改不回來。品項太多才退回一格多行。"""
 
     def __init__(self, listing: Listing):
         super().__init__(title="改成定金＋尾款", timeout=_MODAL_TIMEOUT)
@@ -733,13 +743,32 @@ class DepositConvertModal(discord.ui.Modal):
         cutoff = next((v.cutoff for v in listing.variants if v.cutoff is not None), None)
         self.cutoff = discord.ui.TextInput(max_length=16, placeholder="2027/02/28 23:59",
                                            default=format_cutoff(cutoff) if cutoff and cutoff > _now() else None)
-        lines = "\n".join(f"{n}. {v.name[:60]}｜" for n, v in enumerate(listing.variants, start=1))
-        self.balances = discord.ui.TextInput(style=discord.TextStyle.paragraph, max_length=4000, default=lines[:4000])
         self.add_item(discord.ui.Label(text="收定金截止", description="整篇一起；只寫日期＝當天 23:59",
                                        component=self.cutoff))
+        #: 品項編號 → 那個品項的尾款格；品項太多時是空的，改用 self.balances 一格多行
+        self.fields: dict[int, discord.ui.TextInput] = {}
+        self.balances: Optional[discord.ui.TextInput] = None
+        if len(listing.variants) <= transition.FIELD_LIMIT:
+            for number, variant in enumerate(listing.variants, start=1):
+                field = discord.ui.TextInput(max_length=13, placeholder="例 1300")
+                self.fields[variant.key] = field
+                self.add_item(discord.ui.Label(
+                    text=_balance_label(number, variant.name),
+                    description=f"定金 {money(listing.unit, variant.price)}（原本標的價格）；"
+                                f"這格填總價減掉 {variant.price:,}，只填數字",
+                    component=field))
+            return
+        lines = "\n".join(f"{n}. {v.name[:60]}｜" for n, v in enumerate(listing.variants, start=1))
+        self.balances = discord.ui.TextInput(style=discord.TextStyle.paragraph, max_length=4000, default=lines[:4000])
         self.add_item(discord.ui.Label(
-            text="每個品項的尾款", description="在每行的「｜」後面填尾款，例「1. 標準版｜1300」；原本的價格當定金",
+            text="每個品項的尾款", description="在每行的「｜」後面填尾款（總價減掉定金），例「1. 標準版｜1300」；原本的價格當定金",
             component=self.balances))
+
+    def submitted_balances(self) -> str | dict[int, str]:
+        """送出的尾款：每個品項一格時是 {品項編號: 填的字}，一格多行時是那段文字。"""
+        if self.balances is not None:
+            return self.balances.value
+        return {key: field.value for key, field in self.fields.items()}
 
     async def on_submit(self, interaction: discord.Interaction):
         shop = _shop(interaction)
@@ -748,7 +777,7 @@ class DepositConvertModal(discord.ui.Modal):
         await interaction.response.defer()
         try:
             text = await transition.convert(shop, self.listing_id, interaction.user, self.cutoff.value,
-                                            self.balances.value)
+                                            self.submitted_balances())
             listing = await shop.check_manager(self.listing_id, interaction.user)
             return await _show_panel(interaction, shop, listing, text)
         except ShopError as exc:

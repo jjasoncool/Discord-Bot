@@ -26,7 +26,8 @@
   7. 等待提醒：需求方沒付款 3 天後在對話裡 @ 他、記在資料庫不重發；上線前的舊交易不提醒。
   8. 上線匯入：舊商品貼文與還開著的交易一次搬進資料庫（交付方式一律實體），已下單數量不變，貼文改畫成新格式；
      商品的舊交易接上新流程、補發交易進度（不 @ 人、舊的領收通知作廢），【定金】商品的等整篇改成定金＋尾款才接，
-     自由市場的照舊流程；匯入完才開放按鈕；重跑不重複；失敗時按鈕維持擋住。
+     自由市場的照舊流程；匯入完才開放按鈕；重跑不重複；失敗時按鈕維持擋住。改成定金＋尾款的表單品項不多時每個品項一格、
+     格子底下寫出定金；填錯的整張不存。
   9. 置頂上架說明：綁定時發一篇並置頂、建好「預購中」標籤；說明或按鈕改過時重綁會更新；橫幅圖換了才重傳。
  10. 名字一律是伺服器暱稱；給群友看的字是品項、供應方、需求方，不說 thread、上架者、買家。
  11. 分層與元件：商品模組不 import 指令層；按鈕與選單的 custom_id 解析得回同一個動作（舊貼文的管理按鈕也認得）；
@@ -2104,6 +2105,75 @@ class ImportTests(ShopTestCase):
         self.assertEqual(card.pinged, [])
         self.assertFalse(self.call(market_transition.can_convert(self.trade, listing)))   # 改好了，按鈕不再出現
 
+    def convert_interaction(self):
+        return SimpleNamespace(
+            client=SimpleNamespace(get_cog=lambda name: SimpleNamespace(shop=self.shop)),
+            user=SELLER, guild=self.world.guild, channel=self.post, message=None,
+            response=SimpleNamespace(defer=mock.AsyncMock(), is_done=lambda: True),
+            edit_original_response=mock.AsyncMock())
+
+    def submit_convert_form(self, balances, cutoff=None):
+        """像觀星者在「改成定金＋尾款」表單裡填：balances 照格子的順序。"""
+        async def run():
+            modal = shop_commands.DepositConvertModal(await self.shop.load(self.post.id))
+            modal.cutoff._value = cutoff or self.cutoff_text(days=30)
+            for field, value in zip(modal.fields.values(), balances):
+                field._value = value
+            interaction = self.convert_interaction()
+            await modal.on_submit(interaction)
+            return interaction.edit_original_response.await_args.kwargs["content"]
+        return self.call(run())
+
+    def test_the_convert_form_has_one_field_per_item_showing_the_deposit(self):
+        modal = shop_commands.DepositConvertModal(self.deposit_listing_imported())
+        rows = modal.to_components()
+        self.assertEqual([row["label"] for row in rows], ["收定金截止", "1. 60 月相的尾款", "2. 寰宇電台的尾款"])
+        self.assertIn("定金 NT$30", rows[1]["description"])
+        self.assertIn("總價減掉 30", rows[1]["description"])
+        self.assertIn("定金 NT$20", rows[2]["description"])
+        self.assertIsNone(modal.balances)
+
+    def test_the_convert_form_saves_each_field_to_its_item(self):
+        self.deposit_listing_imported()
+
+        text = self.submit_convert_form(["1,300", "50"])
+
+        self.assertIn("已把「【定金】月相代儲」改成定金＋尾款", text)
+        self.assertEqual([(v.kind, v.price, v.balance) for v in self.listing(self.post).variants],
+                         [("deposit", 30, 1300), ("deposit", 20, 50)])
+        self.assertEqual([(i.unit_price, i.unit_balance) for i in self.call(self.db.items(self.old_trade.id))],
+                         [(30, 1300)])
+
+    def test_a_wrong_field_saves_nothing(self):
+        self.deposit_listing_imported()
+        for balances in (["100", ""], ["100", "五十"], ["100", "0"], ["100", ",,"], ["100", "NT$50"]):
+            with self.subTest(balances=balances):
+                self.assertIn("⚠️", self.submit_convert_form(balances))
+                self.assertEqual([v.kind for v in self.listing(self.post).variants], ["instant", "instant"])
+        self.assertTrue(self.trade_row(self.old_trade).legacy)
+
+    def test_items_changed_after_opening_the_form_save_nothing(self):
+        listing = self.deposit_listing_imported()
+        for values in ({1: "100"}, {1: "100", 2: "50", 99: "10"}):
+            with self.subTest(values=values), self.assertRaises(ShopError) as caught:
+                self.call(market_transition.convert(self.shop, self.post.id, SELLER, self.cutoff_text(days=30), values))
+            self.assertIn("重新按", str(caught.exception))
+        self.assertEqual(self.listing(self.post), listing)
+
+    def test_many_items_fall_back_to_one_box(self):
+        from dataclasses import replace
+
+        from services.community.shop_listing import Listing
+
+        many = Listing(thread_id=500, owner_id=SELLER.id, unit="NT$", title="【定金】t", description="",
+                       variants=tuple(Variant(n, f"品項{n}", 100) for n in range(1, 6)))
+        modal = shop_commands.DepositConvertModal(many)
+        self.assertEqual(modal.fields, {})
+        self.assertEqual([row["label"] for row in modal.to_components()], ["收定金截止", "每個品項的尾款"])
+        self.assertEqual(modal.balances.default.splitlines()[0], "1. 品項1｜")
+        four = shop_commands.DepositConvertModal(replace(many, variants=many.variants[:4]))   # 4 個還是每個一格
+        self.assertEqual((len(four.fields), four.balances), (4, None))
+
     def test_adopted_trades_are_reminded_from_the_conversion_not_the_old_order(self):
         # 舊訂單是上線前下的：催款照下單時間算的話，一轉過來就 @ 需求方「第 1 次提醒」
         self.world.advance(days=10)   # 上線時舊訂單已經下了十天
@@ -3066,6 +3136,7 @@ class LayeringTests(unittest.TestCase):
 
     def test_modals_stay_within_discord_limits(self):
         """欄位標題 45 字、欄位描述 100 字、一張 modal 最多 5 個欄位；超過的話 Discord 直接拒絕，modal 打不開。"""
+        from dataclasses import replace
         from datetime import datetime, timezone
 
         from services.community.shop_listing import Listing
@@ -3075,7 +3146,13 @@ class LayeringTests(unittest.TestCase):
             variant = Variant(1, "6480 月相", 3000, limit=3)
             deposit = Variant(2, "玩偶A", 500, kind="deposit", balance=1300, limit=3, cutoff=cutoff)
             listing = Listing(thread_id=500, owner_id=21, unit="NT$", title="t", description="", variants=(variant,))
+            long_names = tuple(Variant(n, "【定金】鳴潮共鳴者主題尤諾1/7手辦宛如水中月Ver. 典藏限定版附特典", 700_000_000)
+                               for n in range(1, 5))
+            convert = Listing(thread_id=500, owner_id=21, unit="HK$$$$$$$$", title="【定金】t", description="",
+                              variants=long_names)
             modals = [shop_commands.BatchModal(500, "a｜1"), shop_commands.VariantModal(500),
+                      shop_commands.DepositConvertModal(convert),
+                      shop_commands.DepositConvertModal(replace(convert, variants=long_names + (variant,))),
                       shop_commands.VariantModal(500, variant), shop_commands.VariantModal(500, deposit, cutoff_locked=True),
                       shop_commands.ListingInfoModal(), shop_commands.ListingInfoModal(listing=listing),
                       shop_commands.QuantityModal(500, [variant]), shop_commands.DelayModal(500, [deposit])]
