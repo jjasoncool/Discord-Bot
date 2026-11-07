@@ -10,6 +10,7 @@
   - `waits_for_deposit(listing)`：標題寫【定金】、品項還不是定金＋尾款。
   - `holds_orders(trade, listing)`：那種商品還掛著上線前的舊交易：先不接新訂單、不能下架。
   - `can_convert(trade, listing)`：管理面板要不要放「💰 改成定金＋尾款」。
+  - `check_title(trade, listing, title)`：「編輯商品資訊」要拿掉標題開頭的【定金】時擋下（還掛著舊交易的那幾篇）。
   - `convert(shop, listing_id, actor, cutoff_text, balances)`：整篇改成定金＋尾款，上面的舊交易接上新流程。
     尾款是 {品項編號: 填的字}（表單每個品項一格，`FIELD_LIMIT` 個以內）或一段多行文字（品項太多時）。
   - `adopt_ready(shop)`：商品準備好了的舊交易接上新流程（匯入時、截止排程每一輪；做到一半中斷也補得完）。
@@ -25,6 +26,8 @@
   - 【定金】從標題認（觀星者自己的命名習慣）：上線時 5 篇都是這樣寫，舊格式沒有別的欄位分得出來。
   - 表單每個品項一格、格子底下寫出定金：觀星者最容易把總價當尾款，寫進舊交易後他自己改不回來。
     表單最多 5 格、扣掉截止剩 4 格，超過才退回一格多行（「編號. 名稱｜尾款」）。
+  - 改好之前不能拿掉標題開頭的【定金】：這裡只從標題認，拿掉後按鈕消失、改不成定金＋尾款，
+    舊交易還會被當成一次付清接上新流程（原本的定金變全額），收不回來。
   - 兩個品項以上的商品不能一個一個改：定金品項不能跟一次付清的放同一篇（一起買的現貨會被拖到尾款收完才完成），
     所以按鈕整篇一起改；原本的價格當定金，每個品項填尾款、整篇一個收定金截止。
 """
@@ -52,6 +55,8 @@ WAITS_TEXT = ("這篇商品要先改成定金＋尾款（供應方在商品的�
               "改好後這筆交易會接上新的交易進度再繼續。")
 ORDERS_HELD_TEXT = "這篇商品的付款方式還在設定（定金＋尾款），暫時不能下單，請稍後再試。"
 CLOSE_HELD_TEXT = "這篇還有上線前的定金交易，請先按「💰 改成定金＋尾款」，改好後再下架。"
+TITLE_HELD_TEXT = ("這篇還沒改成定金＋尾款，標題開頭的【定金】先不能拿掉：先按「💰 改成定金＋尾款」，"
+                   "改好之後標題就能隨你改。")
 #: 表單最多 5 格，扣掉收定金截止，品項這麼多個以內才每個品項一格
 FIELD_LIMIT = 4
 TODO_TEXT = "上線前開的定金交易：先在商品的管理面板按「💰 改成定金＋尾款」填尾款與截止"
@@ -76,6 +81,13 @@ async def holds_orders(trade: "TradeService", listing: Listing) -> bool:
     if not waits_for_deposit(listing):
         return False
     return any(t.legacy for t in await trade.open_trades_for_source(listing.thread_id))
+
+
+async def check_title(trade: "TradeService", listing: Listing, title: str) -> None:
+    """還掛著舊交易、還沒改成定金＋尾款的商品，標題開頭的【定金】不能拿掉（這裡只從標題認這幾篇）。
+    上線後新開、沒有舊交易的【定金】商品不擋：拿掉只是變成一般商品。"""
+    if not title.startswith(DEPOSIT_TITLE) and await holds_orders(trade, listing):
+        raise ShopError(TITLE_HELD_TEXT)
 
 
 async def can_convert(trade: "TradeService", listing: Listing) -> bool:

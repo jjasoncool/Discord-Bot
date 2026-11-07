@@ -464,6 +464,7 @@ class ShopService:
         files = await self._image_files(attachments, getattr(actor, "guild", None)) if attachments else None
         async with self._lock(listing_id):
             listing = await self._load_for_manage(listing_id, actor)
+            await transition.check_title(self.trade, listing, title)
             delivery = listing.delivery if delivery is None else self._clean_delivery(delivery)
             trading = [t for t in await self.trade.open_trades_for_source(listing_id) if not t.legacy]
             if delivery != listing.delivery and trading:

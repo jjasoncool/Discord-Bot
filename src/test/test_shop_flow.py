@@ -27,7 +27,7 @@
   8. 上線匯入：舊商品貼文與還開著的交易一次搬進資料庫（交付方式一律實體），已下單數量不變，貼文改畫成新格式；
      商品的舊交易接上新流程、補發交易進度（不 @ 人、舊的領收通知作廢），【定金】商品的等整篇改成定金＋尾款才接，
      自由市場的照舊流程；匯入完才開放按鈕；重跑不重複；失敗時按鈕維持擋住。改成定金＋尾款的表單品項不多時每個品項一格、
-     格子底下寫出定金；填錯的整張不存。
+     格子底下寫出定金；填錯的整張不存；改好之前不能拿掉標題開頭的【定金】。
   9. 置頂上架說明：綁定時發一篇並置頂、建好「預購中」標籤；說明或按鈕改過時重綁會更新；橫幅圖換了才重傳。
  10. 名字一律是伺服器暱稱；給群友看的字是品項、供應方、需求方，不說 thread、上架者、買家。
  11. 分層與元件：商品模組不 import 指令層；按鈕與選單的 custom_id 解析得回同一個動作（舊貼文的管理按鈕也認得）；
@@ -2173,6 +2173,30 @@ class ImportTests(ShopTestCase):
         self.assertEqual(modal.balances.default.splitlines()[0], "1. 品項1｜")
         four = shop_commands.DepositConvertModal(replace(many, variants=many.variants[:4]))   # 4 個還是每個一格
         self.assertEqual((len(four.fields), four.balances), (4, None))
+
+    def test_the_deposit_prefix_stays_until_converted(self):
+        # 只從標題認這幾篇：拿掉【定金】按鈕就不見、舊交易會被當成一次付清接上，收不回來
+        self.deposit_listing_imported()
+        with self.assertRaises(ShopError) as caught:
+            self.call(self.shop.edit_info(self.post.id, SELLER, title="月相代儲", description="說明", unit="NT$"))
+        self.assertIn("【定金】先不能拿掉", str(caught.exception))
+        self.assertEqual(self.listing(self.post).title, "【定金】月相代儲")
+        self.assertTrue(self.call(market_transition.can_convert(self.trade, self.listing(self.post))))
+        # 標題後面的字、說明照樣能改
+        self.call(self.shop.edit_info(self.post.id, SELLER, title="【定金】月相代儲 新版", description="新說明",
+                                      unit="NT$"))
+        self.assertEqual(self.listing(self.post).title, "【定金】月相代儲 新版")
+
+        self.call(market_transition.convert(self.shop, self.post.id, SELLER, self.cutoff_text(days=30),
+                                            {1: "100", 2: "50"}))
+        self.call(self.shop.edit_info(self.post.id, SELLER, title="月相代儲", description="說明", unit="NT$"))
+        self.assertEqual(self.listing(self.post).title, "月相代儲")   # 改好之後隨他改
+
+    def test_a_new_deposit_titled_listing_can_drop_the_prefix(self):
+        self.call(market_import.run_import(self.shop))
+        thread = self.list_item(title="【定金】新的手辦")
+        self.call(self.shop.edit_info(thread.id, SELLER, title="新的手辦", description="", unit="NT$"))
+        self.assertEqual(self.listing(thread).title, "新的手辦")
 
     def test_adopted_trades_are_reminded_from_the_conversion_not_the_old_order(self):
         # 舊訂單是上線前下的：催款照下單時間算的話，一轉過來就 @ 需求方「第 1 次提醒」
