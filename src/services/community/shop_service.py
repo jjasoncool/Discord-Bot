@@ -127,6 +127,10 @@ class ShopViews(Protocol):
         """交易進度上這一步能按的按鈕；沒有就回 None。"""
 
 
+#: 開始收尾款、開始交貨時沒人下單（還沒截止）：按下去只是提早停收，告訴他暫停販售有可以改回來的做法
+_NO_ORDERS_WARNING = "⚠️ 此操作無法復原。若只想暫停販售，請改用「編輯品項」將剩餘數量設為 0，之後可以再改回來。"
+
+
 class ShopService:
     def __init__(
         self,
@@ -1019,14 +1023,26 @@ class ShopService:
         return adopted
 
     async def delivery_preview(self, listing_id: int, actor: discord.Member, key: int) -> str:
+        """「⏩ 開始交貨」的確認畫面：會發生什麼、通知幾個對話，最後一行講收不回（停止下單、通知馬上發出去）。"""
         listing = await self._load_for_manage(listing_id, actor)
         variant = self._schedule_variant(listing, key, "deliver")
         count = len(await self._open_trades_for_variant(listing_id, key))
+        lines = [f"**⏩ 開始交貨「{discord.utils.escape_markdown(variant.name)}」**"]
+        if not count:
+            lines.append("・目前沒有人下單，不會發送任何通知")
         if variant.cutoff_done:
-            first = f"・已經截止、不會重新開放下單；預計交貨日（{format_date(variant.expected_at)}）改成今天，現在就可以交貨"
+            was = f"由 {format_date(variant.expected_at)} " if variant.expected_at else ""
+            lines.append(f"・已截止，不會重新開放下單；預計交貨日{was}改為今天")
         else:
-            first = f"・現在就停止下單（原本 {format_cutoff(variant.cutoff)} 截止）"
-        return f"開始交貨「{variant.name}」：\n{first}\n・會通知 {count} 個交易對話可以開始交貨"
+            was = f"（原訂 {format_cutoff(variant.cutoff)} 截止）" if variant.cutoff else ""
+            lines.append(f"・立即停止下單{was}")
+        if count:
+            lines.append(f"・將通知 {count} 個交易對話可以開始交貨")
+            warning = ("⚠️ 此操作無法復原：送出後會立即通知雙方" + ("" if variant.cutoff_done else "，此品項也不會再開放下單")
+                       + "。請確認貨品已到再執行。")
+        else:
+            warning = _NO_ORDERS_WARNING if not variant.cutoff_done else "⚠️ 此操作無法復原。"
+        return "\n".join(lines + ["", warning])
 
     async def start_delivery(self, listing_id: int, actor: discord.Member, key: int) -> str:
         """一次付清的預購提早開始交貨：還沒截止就現在截止、停止下單；截止後延期過的就把預計交貨日改成現在。
@@ -1061,25 +1077,36 @@ class ShopService:
         return f"已開始交貨「{variant.name}」：{done}，通知了 {count} 個交易對話。"
 
     async def balance_preview(self, listing_id: int, actor: discord.Member, key: int) -> str:
+        """「📦 開始收尾款」的確認畫面：每份尾款、通知幾個對話，最後一行講收不回（停收定金、不能再延期、通知馬上發出去）。"""
         listing = await self._load_for_manage(listing_id, actor)
         variant = self._schedule_variant(listing, key, "balance")
         plan = await self.trades.balance_plan(listing_id, key)
-        units = sorted({unit for row in plan for unit in row.units})
-        if len(units) > 5:
-            # 收定金期間改過很多次尾款：全列會超過一則的上限，只寫範圍
-            each = f"{money(listing.unit, units[0])}～{money(listing.unit, units[-1])}，共 {len(units)} 種"
+        lines = [f"**📦 開始收「{discord.utils.escape_markdown(variant.name)}」的尾款**"]
+        if plan:
+            units = sorted({unit for row in plan for unit in row.units})
+            if len(units) > 5:
+                # 收定金期間改過很多次尾款：全列會超過一則的上限，只寫範圍
+                each = f"{money(listing.unit, units[0])}～{money(listing.unit, units[-1])}，共 {len(units)} 種"
+            else:
+                each = "、".join(money(listing.unit, unit) for unit in units)
+            lines.append(f"每份尾款 {each}（依下單時約定的金額）")
         else:
-            each = "、".join(money(listing.unit, unit) for unit in units) or money(listing.unit, variant.balance or 0)
-        lines = [f"開始收「{variant.name}」的尾款，金額照每筆下單時說好的（這次是每份 {each}）："]
-        if not variant.cutoff_passed(self._now()):
-            lines.append(f"・收定金原本到 {format_cutoff(variant.cutoff)} 截止，現在開始會提早停收定金，之後不能再下單")
+            lines.append("・目前沒有人下單，不會發送任何通知")
+        cut = variant.cutoff_passed(self._now())
+        until = format_cutoff(variant.cutoff) if variant.cutoff else None
+        if not cut:
+            lines.append("・立即停收定金，不再接受下單" + (f"（原訂收至 {until}）" if until else ""))
         else:
-            lines.append("・這個品項從現在起停收定金")
-        lines.append(f"・會通知 {len(plan)} 個交易對話，共 {sum(row.qty for row in plan)} 份")
-        unconfirmed = sum(row.unconfirmed for row in plan)
-        if unconfirmed:
-            lines.append(f"・其中 {unconfirmed} 份你還沒按「已收到定金」，那個對話會請你先確認")
-        return "\n".join(lines)
+            lines.append(f"・收定金已於 {until} 截止" if until else "・收定金已截止")
+        if plan:
+            lines.append(f"・將通知 {len(plan)} 個交易對話的需求方付尾款，共 {sum(row.qty for row in plan)} 份")
+            unconfirmed = sum(row.unconfirmed for row in plan)
+            if unconfirmed:
+                lines.append(f"・其中 {unconfirmed} 份尚未確認收到定金，該對話會先請你確認")
+            warning = "⚠️ 此操作無法復原：送出後會立即通知需求方付尾款，此品項也無法再延期收定金。請確認貨品已到再執行。"
+        else:
+            warning = _NO_ORDERS_WARNING if not cut else "⚠️ 此操作無法復原。"
+        return "\n".join(lines + ["", warning])
 
     async def start_balance(self, listing_id: int, actor: discord.Member, key: int) -> str:
         """貨到了：這個品項停收定金，在每個買了它的交易對話照下單時說好的金額請款。

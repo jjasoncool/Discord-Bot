@@ -1045,6 +1045,23 @@ class DepositFlowTests(ShopTestCase):
 
         self.assertFalse(any("請付尾款" in (m.content or "") for m in self.mine.messages[count:]))
 
+    def test_balance_preview_without_orders_says_so(self):
+        # 沒人下單：按下去只是提早停收，告訴他只想暫停有改得回來的做法
+        self.add(self.thread, f"玩偶*C*｜500/1300｜10｜{self.cutoff_text(days=20)}")
+        preview = self.call(self.shop.balance_preview(self.thread.id, SELLER, 3))
+        self.assertTrue(preview.startswith("**📦 開始收「玩偶\\*C\\*」的尾款**"))   # 名稱裡的 Markdown 不弄壞粗體
+        self.assertIn("目前沒有人下單，不會發送任何通知", preview)
+        self.assertIn("剩餘數量設為 0", preview)
+        self.assertNotIn("將通知", preview)
+        self.assertNotIn("每份尾款", preview)
+
+    def test_balance_preview_after_the_cutoff(self):
+        self.world.advance(days=21)
+        preview = self.call(self.shop.balance_preview(self.thread.id, SELLER, 1))
+        self.assertIn("收定金已於", preview)
+        self.assertNotIn("立即停收定金", preview)
+        self.assertIn("此操作無法復原", preview)
+
     def test_many_balance_prices_are_shown_as_a_range(self):
         # 收定金期間改過很多次尾款：確認畫面全列會超過一則的上限，只寫範圍
         for n in range(6):
@@ -1075,9 +1092,13 @@ class DepositFlowTests(ShopTestCase):
         self.assertEqual(self.card(self.mine).components, [])  # 等貨中沒有按鈕
 
         preview = self.call(self.shop.balance_preview(self.thread.id, SELLER, 1))
-        self.assertIn("會通知 2 個交易對話，共 2 份", preview)
-        self.assertIn("其中 1 份你還沒按「已收到定金」", preview)
-        self.assertIn("提早停收定金", preview)
+        self.assertTrue(preview.startswith("**📦 開始收「玩偶A」的尾款**"))
+        self.assertIn("每份尾款 NT$1,300（依下單時約定的金額）", preview)
+        self.assertIn("立即停收定金，不再接受下單", preview)
+        self.assertIn("將通知 2 個交易對話的需求方付尾款，共 2 份", preview)
+        self.assertIn("其中 1 份尚未確認收到定金", preview)
+        self.assertTrue(preview.endswith("此品項也無法再延期收定金。請確認貨品已到再執行。"))
+        self.assertIn("⚠️ 此操作無法復原", preview)
         result = self.call(self.shop.start_balance(self.thread.id, SELLER, 1))
         self.assertIn("已通知 2 個交易對話", result)
 
@@ -1208,6 +1229,22 @@ class CutoffTests(ShopTestCase):
         for trade_thread in (self.first, self.second):
             self.assertIn("已截止", trade_thread.last().content)
             self.assertFalse(any("提早" in (m.content or "") for m in trade_thread.messages))
+
+    def test_delivery_preview_after_a_delay_moves_the_date(self):
+        self.world.advance(hours=2)
+        self.call(self.shop.run_cutoffs(self.world.now))
+        self.call(self.shop.delay(self.thread.id, SELLER, 1, self.cutoff_text(days=10), ""))
+        preview = self.call(self.shop.delivery_preview(self.thread.id, SELLER, 1))
+        self.assertIn("已截止，不會重新開放下單；預計交貨日由", preview)
+        self.assertIn("改為今天", preview)
+        self.assertTrue(preview.endswith("⚠️ 此操作無法復原：送出後會立即通知雙方。請確認貨品已到再執行。"))
+
+    def test_delivery_preview_without_orders_says_so(self):
+        self.add(self.thread, f"預購品｜100｜｜{self.cutoff_text(days=3)}")
+        preview = self.call(self.shop.delivery_preview(self.thread.id, SELLER, 3))
+        self.assertIn("目前沒有人下單，不會發送任何通知", preview)
+        self.assertIn("剩餘數量設為 0", preview)
+        self.assertNotIn("將通知", preview)
 
     def test_a_second_early_start_still_reaches_everyone(self):
         # 截止後延期 → 貨到了開始交貨 → 發現還沒到又延期 → 真的到了再開始交貨：第二次也要通知到
@@ -1387,7 +1424,11 @@ class CutoffTests(ShopTestCase):
 
     def test_start_delivery_early(self):
         preview = self.call(self.shop.delivery_preview(self.thread.id, SELLER, 1))
-        self.assertIn("會通知 2 個交易對話", preview)
+        self.assertTrue(preview.startswith("**⏩ 開始交貨「6480 月相」**"))
+        self.assertIn("立即停止下單（原訂", preview)
+        self.assertIn("將通知 2 個交易對話可以開始交貨", preview)
+        self.assertTrue(preview.endswith(
+            "⚠️ 此操作無法復原：送出後會立即通知雙方，此品項也不會再開放下單。請確認貨品已到再執行。"))
 
         self.call(self.shop.start_delivery(self.thread.id, SELLER, 1))
 
