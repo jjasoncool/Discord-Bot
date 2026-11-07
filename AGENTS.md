@@ -68,6 +68,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 描述品質規則 | `persona_description_rules.txt`（各處讀同一個檔） |
 | 人格素描的角色設定 | 疊在 `personality_extraction_prompt.json` 的 `system_prompt` 之上 |
 | 發文到頻道 | `utils.discord_content.post_to_channel`（論壇／文字頻道自動分流、附件分批、失敗退純文字） |
+| 論壇標籤：找、沒有就建 | `utils.discord_content.find_forum_tags(forum, names)`（照快取找）／`ensure_forum_tags(forum, names)`（缺的先向 Discord 讀最新清單、一次建好；同一個論壇排隊）；守衛擋直接 `create_tag`：它拿快取的清單整份覆寫、建完不更新快取，連著建兩個後一個會把前一個蓋掉 |
 | Discord 上傳單檔上限（離上限留一點餘裕；每次從伺服器讀） | `utils.discord_content.upload_limit(channel 或 guild)`；守衛擋自己算 `filesize_limit - 512…` |
 | FB 貼文要新的圖片或影片網址（檔案網址約 4.4 天過期，文章網址不會；重發、影片貼文） | `services.relay.fb_monitor.FBMonitor.refresh_media`（打爬蟲 `POST /api/fb_posts/{id}/refresh`，爬蟲 `refetch_post` 重開文章，不寫資料）；影片只從這篇自己的附件讀（`extract_post_videos`），不可整頁搜尋：留言與別篇的影片也在頁面裡 |
 | 把長文切成 Discord 放得下的多段 | `utils.discord_content.split_message`（不丟內容、優先換行與空白切、不切壞暴雷 `||`；上限常數 `DISCORD_MESSAGE_LIMIT`） |
