@@ -25,6 +25,9 @@
 
 例外與決策：
   - 截止只看資料庫，不再靠論壇標籤「預購中」找商品；標籤留著給群友篩選。
+  - 論壇標籤（預購中、現貨）不另外跑排程：每次重畫貼文時照 `forum_tags` 對一次，不同才改；
+    「預購中」在截止那一刻跟著截止排程的重畫拿掉。供應方被拿掉觀星者身份組不會觸發重畫，
+    標籤留到那篇下次有變動（不監聽身份組變動：很少發生，下單時本來就會擋並說明）。
   - 改價格只影響之後的新訂單：交易品項記著下單當時的金額。
 """
 from __future__ import annotations
@@ -43,6 +46,8 @@ import discord
 from services.community import trade_progress as tp
 from services.community.shop_listing import (
     DELIVERIES,
+    INSTOCK_TAG,
+    PREORDER_TAG,
     TITLE_LIMIT,
     UNIT_LIMIT,
     Draft,
@@ -52,6 +57,7 @@ from services.community.shop_listing import (
     embed_image_name,
     format_cutoff,
     format_date,
+    forum_tags,
     listing_from_rows,
     money,
     order_summary,
@@ -224,10 +230,13 @@ class ShopService:
                 await guide.edit(pinned=True)
             note = f"🛒 置頂的上架說明已經在了：{guide.jump_url}"
             note += await self._refresh_guide(guide)
-        # 先把「預購中」標籤建好：有預購或收定金的商品掛它，群友才篩得出來
-        if await self._preorder_tag(forum, create=True) is None:
-            note += (f"\n⚠️ 建不了「{self.settings.preorder_tag_name}」標籤（bot 需要這個論壇的「管理頻道」權限），"
-                     "預購的商品不會掛標籤。")
+        # 先把標籤建好，群友才篩得出來
+        names = self._tag_names()
+        tags = await ensure_forum_tags(forum, names.values())
+        missing = [name for name in names.values() if name not in tags]
+        if missing:
+            note += (f"\n⚠️ 建不了{'、'.join(f'「{name}」' for name in missing)}標籤"
+                     "（bot 需要這個論壇的「管理頻道」權限），商品不會掛這些標籤。")
         return note
 
     async def _refresh_guide(self, guide: discord.Thread) -> str:
@@ -416,13 +425,27 @@ class ShopService:
             return
         message = await thread.fetch_message(listing_id)
         now = self._now()
-        names = await self.trade.display_names(thread.guild, (listing.owner_id,))
-        embed = render_embed(listing, names.get(listing.owner_id) or str(listing.owner_id), now)
+        try:
+            owner = await self.trade.member(thread.guild, listing.owner_id, raise_errors=True)
+            owner_known = True
+        except discord.HTTPException:
+            # 沒權限或 Discord 一時出錯：查不到不代表人不在，這次照畫貼文、標籤先不動（不然會被當成不接單拿掉）
+            logger.warning("商品上架：重畫時查不到供應方 %s，標籤這次不動 商品=%s", listing.owner_id, listing_id,
+                           exc_info=True)
+            owner, owner_known = None, False
+        if owner is None:
+            embed = render_embed(listing, str(listing.owner_id), now)
+        else:
+            embed = render_embed(listing, owner.display_name, now)
         if files is None:
             await message.edit(embed=embed, view=self.views.listing(listing, now))
         else:
             await message.edit(embed=embed, view=self.views.listing(listing, now), attachments=files)
-        await self._sync_tag(thread, listing)
+        if owner_known:
+            # 標籤跟下單用同一套檢查：供應方還在、還能賣、付款方式不在設定中（品項本身買不買得到由 forum_tags 看）
+            taking_orders = (owner is not None and await self.can_sell(owner)
+                             and not await transition.holds_orders(self.trade, listing))
+            await self._sync_tags(thread, forum_tags(listing, now, taking_orders=taking_orders))
         if was_archived:
             await thread.edit(archived=True)
 
@@ -435,26 +458,25 @@ class ShopService:
         except (ShopError, discord.HTTPException):
             logger.warning("商品上架：重畫商品貼文失敗 商品=%s", listing_id, exc_info=True)
 
-    async def _sync_tag(self, thread: discord.Thread, listing: Listing) -> None:
-        """還有沒截止的預購或收定金就掛「預購中」，沒有就拿掉。"""
-        want = listing.has_open_cutoff()
-        forum = getattr(thread, "parent", None)
-        tag = await self._preorder_tag(forum, create=want)
-        if tag is None:
-            return
-        current = list(thread.applied_tags)
-        has = any(t.id == tag.id for t in current)
-        if want and not has:
-            await thread.edit(applied_tags=current + [tag])
-        elif has and not want:
-            await thread.edit(applied_tags=[t for t in current if t.id != tag.id])
+    def _tag_names(self) -> dict[str, str]:
+        """bot 管的論壇標籤：種類 → 名字（順序就是掛上去的順序）。"""
+        return {PREORDER_TAG: self.settings.preorder_tag_name, INSTOCK_TAG: self.settings.instock_tag_name}
 
-    async def _preorder_tag(self, forum, *, create: bool) -> Optional[discord.ForumTag]:
+    async def _sync_tags(self, thread: discord.Thread, wanted: set[str]) -> None:
+        """照這次算的結果掛上或拿掉 bot 管的標籤；別的標籤（管理員手動掛的）不動，跟現在一樣就不改。
+        要掛的標籤論壇上還沒有就先建（建不了就不掛）。"""
+        forum = getattr(thread, "parent", None)
         if forum is None:
-            return None
-        name = self.settings.preorder_tag_name
-        tags = await ensure_forum_tags(forum, [name]) if create else find_forum_tags(forum, [name])
-        return tags.get(name)
+            return
+        names = self._tag_names()
+        wanted_names = [names[kind] for kind in names if kind in wanted]
+        created = await ensure_forum_tags(forum, wanted_names) if wanted_names else {}
+        tags = {**find_forum_tags(forum, names.values()), **created}
+        ours = {tag.id for tag in tags.values()}
+        current = list(thread.applied_tags)
+        want = [tag for tag in current if tag.id not in ours] + [tags[name] for name in wanted_names if name in tags]
+        if {tag.id for tag in want} != {tag.id for tag in current}:
+            await thread.edit(applied_tags=want)
 
     async def edit_info(self, listing_id: int, actor: discord.Member, *, title: str, description: str, unit: str,
                         delivery: Optional[str] = None,

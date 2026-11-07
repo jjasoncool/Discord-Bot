@@ -7,7 +7,9 @@
      資料庫記下這篇（交付方式預設實體）；幣別有數字、太長、不是圖、圖太大、論壇沒綁都在發文前擋下並說明；
      寫資料庫失敗就把貼文刪掉。商品圖照使用者選的順序（第一張當大圖）。上架與編輯視窗的欄位順序是
      標題、幣別、交付方式、商品圖、說明。
-  2. 管理：只有供應方或管理員（含群主）；購買選單的選項只帶品項編號；有預購或收定金就掛「預購中」；最多 25 個；
+  2. 管理：只有供應方或管理員（含群主）；購買選單的選項只帶品項編號；論壇標籤跟著現在能不能買（買得到的預購或
+     收定金掛「預購中」、買得到的立即購買掛「現貨」，下架、供應方不能賣、付款方式還在設定都不掛，別人掛的標籤不動，
+     連著建兩個標籤不互相蓋掉，查不到供應方是一時出錯時標籤不動）；最多 25 個；
      品項編號不重用；編輯時數量是「剩餘數量」；定金品項不能和一次付清的放同一篇；交易中的品項不能改類型、
      改價格只影響之後的新訂單（回覆說已下單的照原金額）；有人下單後截止時間鎖住；有交易時不能改交付方式、
      不能刪那個品項；還有定金或預購的交易沒做完不能下架；下架後選單與按鈕停用、標題【已下架】、鎖定。
@@ -28,7 +30,7 @@
      商品的舊交易接上新流程、補發交易進度（不 @ 人、舊的領收通知作廢），【定金】商品的等整篇改成定金＋尾款才接，
      自由市場的照舊流程；匯入完才開放按鈕；重跑不重複；失敗時按鈕維持擋住。改成定金＋尾款的表單品項不多時每個品項一格、
      格子底下寫出定金；填錯的整張不存；改好之前不能拿掉標題開頭的【定金】。
-  9. 置頂上架說明：綁定時發一篇並置頂、建好「預購中」標籤；說明或按鈕改過時重綁會更新；橫幅圖換了才重傳。
+  9. 置頂上架說明：綁定時發一篇並置頂、建好「預購中」「現貨」標籤；說明或按鈕改過時重綁會更新；橫幅圖換了才重傳。
  10. 名字一律是伺服器暱稱；給群友看的字是品項、供應方、需求方，不說 thread、上架者、買家。
  11. 分層與元件：商品模組不 import 指令層；按鈕與選單的 custom_id 解析得回同一個動作（舊貼文的管理按鈕也認得）；
      表單都在 Discord 的上限內；管理面板最多 5 列，延期、開始收尾款或開始交貨只在用得到時出現。
@@ -139,12 +141,14 @@ class ForumThread(FakeThread):
         self.parent = forum
         self.owner_id = owner_id
         self.applied_tags = []
+        self.tag_edits = 0
         self.flags = SimpleNamespace(pinned=False)
 
     async def edit(self, **kwargs):
         self.check_editable(kwargs)
         if "applied_tags" in kwargs:
             self.applied_tags = list(kwargs.pop("applied_tags"))
+            self.tag_edits += 1
         if "pinned" in kwargs:
             self.flags.pinned = kwargs.pop("pinned")
         if "auto_archive_duration" in kwargs:
@@ -451,14 +455,14 @@ class ManageTests(ShopTestCase):
         self.add(self.thread, "60 月相｜30｜10｜", actor=OWNER)  # 群主可以
         self.assertEqual(len(self.listing(self.thread).variants), 1)
 
-    def test_variants_show_the_buy_menu_and_preorder_tag(self):
+    def test_variants_show_the_buy_menu_and_tags(self):
         self.add(self.thread, "60 月相｜30｜10｜", f"6480 月相｜3000｜3｜{self.cutoff_text(days=1)}")
 
         select = self.buy_menu(self.thread)
         self.assertEqual([(o.label, o.value) for o in select.options], [("60 月相", "1"), ("6480 月相", "2")])
         self.assertEqual(select.max_values, 2)
         self.assertEqual(len(self.thread.messages[0].embed.fields), 2)
-        self.assertEqual(self.thread.tag_names(), ["預購中"])
+        self.assertEqual(self.thread.tag_names(), ["預購中", "現貨"])
         # 一般更新不傳附件清單：傳了（就算是空的）Discord 會把 embed 引用的商品圖刪掉
         self.assertEqual(self.thread.messages[0].edits[-1]["attachments"], "unchanged")
 
@@ -689,6 +693,100 @@ class ManageTests(ShopTestCase):
         listing = self.call(self.shop.edit_info(self.thread.id, SELLER, title="新標題", description="", unit="NT$",
                                                 delivery="digital"))
         self.assertEqual((listing.title, listing.delivery, self.thread.name), ("新標題", "digital", "新標題"))
+
+
+class ForumTagTests(ShopTestCase):
+    """論壇標籤跟著「現在能不能買」，每次重畫貼文時對一次。"""
+
+    def setUp(self):
+        super().setUp()
+        self.thread = self.list_item()
+
+    def test_in_stock_follows_what_can_be_bought(self):
+        self.add(self.thread, "60 月相｜30｜2｜")
+        self.assertEqual(self.thread.tag_names(), ["現貨"])
+        self.order(self.thread, BUYER, {1: 2})          # 賣完
+        self.assertEqual(self.thread.tag_names(), [])
+        self.edit(self.thread, 1, "60 月相", "30", "3", "", "instant")   # 補貨
+        self.assertEqual(self.thread.tag_names(), ["現貨"])
+
+    def test_a_sold_out_preorder_is_not_listed_as_preorder(self):
+        self.add(self.thread, f"6480 月相｜3000｜1｜{self.cutoff_text(days=3)}")
+        self.assertEqual(self.thread.tag_names(), ["預購中"])
+        self.order(self.thread, BUYER, {1: 1})
+        self.assertEqual(self.thread.tag_names(), [])
+
+    def test_preorder_tag_leaves_at_the_cutoff(self):
+        self.add(self.thread, f"6480 月相｜3000｜3｜{self.cutoff_text(minutes=20)}", "60 月相｜30｜｜")
+        self.assertEqual(self.thread.tag_names(), ["預購中", "現貨"])
+        self.world.advance(minutes=21)
+        self.call(self.shop.run_cutoffs(self.world.now))
+        self.assertEqual(self.thread.tag_names(), ["現貨"])
+
+    def test_closing_takes_off_our_tags_but_keeps_others(self):
+        self.add(self.thread, f"6480 月相｜3000｜3｜{self.cutoff_text(days=3)}", "60 月相｜30｜｜")
+        manual = discord.ForumTag(name="管理員掛的")
+        manual.id = 1
+        self.thread.applied_tags.append(manual)
+
+        self.call(self.shop.close_listing(self.thread.id, SELLER))
+
+        self.assertEqual(self.thread.tag_names(), ["管理員掛的"])
+
+    def test_a_seller_who_cannot_sell_gets_no_tags_on_the_next_redraw(self):
+        self.add(self.thread, "60 月相｜30｜｜")
+        TRADERS.discard(SELLER.id)
+        self.addCleanup(TRADERS.add, SELLER.id)
+        self.call(self.shop.redraw(self.thread.id))
+        self.assertEqual(self.thread.tag_names(), [])
+
+    def test_a_failed_seller_lookup_leaves_the_tags_alone(self):
+        # 查不到供應方是 Discord 一時出錯，不是人不在：貼文照畫，標籤不拿掉
+        self.add(self.thread, "60 月相｜30｜｜")
+        self.world.cached = set()
+
+        async def unavailable(uid):
+            raise discord.HTTPException(mock.MagicMock(status=503), "Service Unavailable")
+
+        self.world.guild.fetch_member = unavailable
+        edits = len(self.thread.messages[0].edits)
+        with self.assertLogs(shop_service.logger, level="WARNING"):
+            self.call(self.shop.redraw(self.thread.id))
+        self.assertEqual(len(self.thread.messages[0].edits), edits + 1)
+        self.assertEqual(self.thread.tag_names(), ["現貨"])
+
+    def test_a_seller_who_left_gets_no_tags(self):
+        self.add(self.thread, "60 月相｜30｜｜")
+        self.world.cached = set()
+        self.world.members.pop(SELLER.id)
+        self.call(self.shop.redraw(self.thread.id))
+        self.assertEqual(self.thread.tag_names(), [])
+        self.assertEqual(self.thread.messages[0].embed.author.name, f"供應方：{SELLER.id}")
+
+    def test_unchanged_tags_are_not_sent_again(self):
+        self.add(self.thread, "60 月相｜30｜｜")
+        self.assertEqual(self.thread.tag_edits, 1)
+        self.call(self.shop.redraw(self.thread.id))
+        self.assertEqual(self.thread.tag_edits, 1)
+
+    def test_tags_made_back_to_back_do_not_overwrite_each_other(self):
+        # discord.py 建完標籤不更新快取：快取還沒跟上就建第二個，要把剛建的那個一起送，不然會被蓋掉
+        self.forum.stale_cache = True
+        self.add(self.thread, f"6480 月相｜3000｜3｜{self.cutoff_text(days=3)}")
+        other = self.list_item(title="現貨小舖")
+        self.add(other, "60 月相｜30｜｜")
+
+        self.assertEqual([t.name for t in self.forum.server_tags], ["預購中", "現貨"])
+        self.assertEqual((self.thread.tag_names(), other.tag_names()), (["預購中"], ["現貨"]))
+        self.assertEqual({t.id for t in self.thread.applied_tags + other.applied_tags},
+                         {t.id for t in self.forum.server_tags})
+        self.call(self.shop.redraw(self.thread.id))      # 快取還沒跟上：問過 Discord 發現已經有了，不再建
+        self.assertEqual([t.name for t in self.forum.server_tags], ["預購中", "現貨"])
+        self.assertEqual(self.thread.tag_names(), ["預購中"])
+        self.forum.sync_cache()
+        edits, fetches = self.forum.tag_edits, self.forum.fetches
+        self.call(self.shop.redraw(other.id))
+        self.assertEqual((self.forum.tag_edits, self.forum.fetches), (edits, fetches))   # 快取齊了就不多打 API
 
 
 class OrderTests(ShopTestCase):
@@ -2198,6 +2296,14 @@ class ImportTests(ShopTestCase):
         self.call(self.shop.edit_info(thread.id, SELLER, title="新的手辦", description="", unit="NT$"))
         self.assertEqual(self.listing(thread).title, "新的手辦")
 
+    def test_a_held_deposit_listing_has_no_tags_until_converted(self):
+        # 現在是立即購買、也還有貨，但暫時不接單：不掛「現貨」；改好後是收定金，掛「預購中」
+        self.deposit_listing_imported()
+        self.assertEqual(self.post.tag_names(), [])
+        self.call(market_transition.convert(self.shop, self.post.id, SELLER, self.cutoff_text(days=30),
+                                            {1: "100", 2: "50"}))
+        self.assertEqual(self.post.tag_names(), ["預購中"])
+
     def test_adopted_trades_are_reminded_from_the_conversion_not_the_old_order(self):
         # 舊訂單是上線前下的：催款照下單時間算的話，一轉過來就 @ 需求方「第 1 次提醒」
         self.world.advance(days=10)   # 上線時舊訂單已經下了十天
@@ -2708,7 +2814,7 @@ class GuideTests(ShopTestCase):
 
         self.assertEqual(len(self.posts), 1)
         self.assertFalse(guide.archived)
-        self.assertEqual([t.name for t in self.forum.available_tags], ["預購中"])
+        self.assertEqual([t.name for t in self.forum.available_tags], ["預購中", "現貨"])
 
     def test_rebinding_refreshes_outdated_guide_text(self):
         self.call(self.shop.ensure_guide(self.forum))
@@ -2734,7 +2840,7 @@ class GuideTests(ShopTestCase):
         self.forum.edit = refuse
         note = self.call(self.shop.ensure_guide(self.forum))
         self.assertIn("⚠️", note)
-        self.assertIn("預購中", note)
+        self.assertIn("「預購中」、「現貨」", note)
 
 
 class ServerNicknameTests(ShopTestCase):

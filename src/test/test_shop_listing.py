@@ -11,6 +11,8 @@
   5. 顯示：給群友看的字是「品項」「供應方」「需求方」；狀態寫出定金、尾款、截止、預計交貨、延期次數；
      不能買的價格劃掉、接灰底標籤；選單的 value 只有品項編號；全部都不能買時選單寫出原因。
   6. 舊格式（上線前的商品貼文、訂單按鈕）讀得回同一份資料；訂單文字讀得出單價，份數對不上就不信。
+  7. 論壇標籤：買得到的預購或定金掛「預購中」、買得到的立即購買掛「現貨」（截止、開始收尾款、賣完都算買不到，
+     截止時間到了但排程還沒處理也算）；下架或整篇不接單都不掛。
 """
 
 import os
@@ -32,8 +34,11 @@ from services.community.shop_listing import (  # noqa: E402
     Listing,
     ShopError,
     Variant,
+    INSTOCK_TAG,
+    PREORDER_TAG,
     decode_items,
     encode_items,
+    forum_tags,
     listing_from_rows,
     order_summary,
     parse_batch,
@@ -165,6 +170,26 @@ class ModelTests(unittest.TestCase):
         empty = render_embed(listing(), "觀星者小舖", NOW)
         self.assertIn("供應方還沒加入品項", empty.fields[0].value)
         self.assertEqual([o.value for o in select_options(model, NOW)], ["1", "2"])
+
+    def test_forum_tags(self):
+        instant = doll(3, kind="instant", balance=None, cutoff=None, limit=None)
+        cases = {
+            "收定金中": (listing(doll(1)), {PREORDER_TAG}),
+            "預購賣完": (listing(doll(1, kind="preorder", balance=None, limit=2, taken=2)), set()),
+            "定金賣完": (listing(doll(1, limit=2, taken=2)), set()),
+            "開始收尾款": (listing(doll(1, balance_started=True)), set()),
+            "已截止": (listing(doll(1, cutoff_done=True)), set()),
+            "截止時間到了、排程還沒處理": (listing(doll(1, cutoff=NOW - timedelta(minutes=1))), set()),
+            "現貨": (listing(instant), {INSTOCK_TAG}),
+            "現貨賣完": (listing(replace(instant, limit=2, taken=2)), set()),
+            "兩種都有": (listing(doll(1, kind="preorder", balance=None), instant), {PREORDER_TAG, INSTOCK_TAG}),
+            "已下架": (listing(doll(1), instant, closed=True), set()),
+            "沒有品項": (listing(), set()),
+        }
+        for name, (model, expected) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(forum_tags(model, NOW, taking_orders=True), expected)
+        self.assertEqual(forum_tags(listing(doll(1), instant), NOW, taking_orders=False), set())
 
     def test_menu_reason_when_nothing_can_be_bought(self):
         self.assertIsNone(unavailable_text(listing(doll(1), doll(2, taken=10)), NOW))

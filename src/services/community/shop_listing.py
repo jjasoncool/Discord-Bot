@@ -9,6 +9,7 @@
   - 模型：`Listing`、`Variant`、`Draft`；`listing_from_rows(商品列, 品項列, 已下單)` 把資料庫的列轉成模型。
   - 解析：`parse_price`（「500/1300」＝定金/尾款）、`parse_draft`、`parse_batch`、`parse_cutoff`。
   - 畫面：`render_embed`、`select_options`、`unavailable_text`、`Variant.status`、`money`、`format_cutoff`。
+  - 論壇標籤：`forum_tags(商品, now, taking_orders=)` 回這篇該掛哪些（`PREORDER_TAG`、`INSTOCK_TAG`）。
   - 下單：`quote_order`、`order_summary`（現在要付、到貨後再付）、`price_signature`（確認畫面的價格指紋）、
     `encode_items`／`decode_items`（確認按鈕上的「編號x數量」）。
 
@@ -59,6 +60,9 @@ PRICE_FIELD_LIMIT = 19    # 表單價格欄：「999999999/999999999」
 LIMIT_MAX = 999_999       # 數量上限（6 位）
 TITLE_LIMIT = 90   # 貼文標題上限 100，留空間給【已下架】
 UNIT_LIMIT = 10
+#: 論壇標籤的種類（標籤名字在 ShopSettings）：預購中、現貨
+PREORDER_TAG = "preorder"
+INSTOCK_TAG = "instock"
 _SEPARATORS = re.compile(r"[｜|]")
 _PRICE_SPLIT = re.compile(r"\s*[/／]\s*")
 
@@ -293,9 +297,22 @@ class Listing:
     def has_deposit(self) -> bool:
         return any(v.deposit for v in self.variants)
 
-    def has_open_cutoff(self) -> bool:
-        """還有沒截止的預購或定金品項（論壇「預購中」標籤看它）。"""
-        return any(v.cutoff is not None and not v.cutoff_done and not v.balance_started for v in self.variants)
+
+def forum_tags(listing: Listing, now: datetime, *, taking_orders: bool) -> set[str]:
+    """這篇商品該掛哪些論壇標籤，跟著「現在能不能買」，群友篩出來的才都買得到。
+
+    taking_orders：下單那一關會不會擋整篇（供應方不在或不是觀星者、付款方式還在設定），由呼叫端照下單的檢查算。
+    下架或整篇不接單就都不掛；有現在買得到的預購或收定金品項掛「預購中」、立即購買品項掛「現貨」
+    （截止、開始收尾款、賣完都算買不到；有人取消、份數還回來就掛回去）。截止後等交貨的兩個都不掛。"""
+    if listing.closed or not taking_orders:
+        return set()
+    open_kinds = {v.kind for v in listing.variants if v.unavailable_reason(now) is None}
+    tags = set()
+    if open_kinds & {"preorder", "deposit"}:
+        tags.add(PREORDER_TAG)
+    if "instant" in open_kinds:
+        tags.add(INSTOCK_TAG)
+    return tags
 
 
 def _moment(text: Optional[str]) -> Optional[datetime]:
