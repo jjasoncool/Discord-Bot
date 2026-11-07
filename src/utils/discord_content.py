@@ -1,13 +1,31 @@
-"""
-Discord 相關共用工具函式
+"""Discord 的共用工具：發文、切長文、換畫面、論壇標籤、上傳上限這類各功能都要用、跟功能本身無關的寫法。
 
-供 article_monitor / bahamut_monitor 等多個來源共用。
+架構定位：基礎層（`utils/`），列在分層守衛的 `DISCORD_HELPERS_IN_BASE`，可以 import discord，不依賴其他層。
+  - 上層（誰呼叫）：轉發來源（官網、巴哈、PTT、FB、Telegram）、交易與商品市集、AI 插話與日記、
+    主控台與各種面板（`commands/`）、面板置底（`utils.panel_bump`）。
+  - 下層（呼叫誰）：discord.py。
+
+介面：
+  - 發文：`post_to_channel`（論壇／文字頻道自動分流、附件分批、失敗退純文字）、`send_model_text`（模型寫的文字：切段、不 @ 任何人，要 @ 的人由呼叫端指定）。
+  - 長文：`split_message`、`DISCORD_MESSAGE_LIMIT`。
+  - 畫面：`edit_screen`、`guarded_screen`、`layout_text`、`message_custom_ids`。
+  - 論壇標籤：`find_forum_tags`（照快取找）、`ensure_forum_tags`（沒有就建）、`get_forum_tags`（找一個，舊介面）。
+  - 其他：`upload_limit`、`chunk_discord_files`、`sanitize_forum_thread_title`、`linkify_image_urls`、`content_hash`。
+
+規則：
+  - 這裡只放機制，訊息長什麼樣子由呼叫端決定。
+  - 建論壇標籤只走 `ensure_forum_tags`（守衛擋直接 `create_tag`）。
+
+例外與決策：
+  - 論壇標籤不用 `ForumChannel.create_tag`：它拿快取的標籤清單整份覆寫，建完又不更新快取（要等 Discord 推送頻道更新），
+    連著建兩個，後一個會把前一個蓋掉。`ensure_forum_tags` 在快取缺標籤時先向 Discord 讀一次最新的清單，缺的一次送出；
+    快取齊全時不多打 API。
 """
 import asyncio
 import hashlib
 import logging
 import re
-from typing import Any, Awaitable, Callable, List, Optional, Sequence
+from typing import Any, Awaitable, Callable, Iterable, List, Optional, Sequence
 
 import discord
 
@@ -192,11 +210,46 @@ def chunk_discord_files(files: List[discord.File], chunk_size: int = 10) -> List
 
 
 async def get_forum_tags(channel: discord.ForumChannel, tag_name: str) -> List[discord.ForumTag]:
-    """從 forum channel 取得指定名稱的 tag。"""
-    for tag in channel.available_tags:
-        if tag.name == tag_name:
-            return [tag]
-    return []
+    """從 forum channel 取得指定名稱的 tag（找不到回空的，不建）。"""
+    return list(find_forum_tags(channel, [tag_name]).values())
+
+
+def find_forum_tags(forum: discord.ForumChannel, names: Iterable[str]) -> dict[str, discord.ForumTag]:
+    """論壇上這幾個名字的標籤（照 discord.py 的快取）；沒有的不在結果裡。"""
+    wanted = set(names)
+    return {tag.name: tag for tag in forum.available_tags if tag.name in wanted}
+
+
+#: 每個論壇一把：建標籤是整份清單覆寫，同時建的兩次要排隊
+_TAG_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+async def ensure_forum_tags(forum: discord.ForumChannel, names: Iterable[str]) -> dict[str, discord.ForumTag]:
+    """論壇上這幾個名字的標籤，還沒有的先建；建不了（多半缺「管理頻道」權限）的不在結果裡、記 WARNING。
+
+    快取裡都有就直接回；缺的話先向 Discord 讀一次最新的標籤清單（剛建好的快取可能還沒有），再把缺的一次送出。"""
+    names = list(dict.fromkeys(names))
+    found = find_forum_tags(forum, names)
+    if len(found) == len(names):
+        return found
+    async with _TAG_LOCKS.setdefault(forum.id, asyncio.Lock()):
+        try:
+            fresh = await forum.guild.fetch_channel(forum.id)
+        except discord.HTTPException:
+            logger.warning("論壇標籤：讀不到論壇 %s 最新的標籤清單", forum.id, exc_info=True)
+            return found
+        found = find_forum_tags(fresh, names)
+        missing = [name for name in names if name not in found]
+        if not missing:
+            return found
+        try:
+            edited = await fresh.edit(available_tags=[*fresh.available_tags,
+                                                      *(discord.ForumTag(name=name) for name in missing)])
+        except discord.HTTPException:
+            logger.warning("論壇標籤：在論壇 %s 建 %s 失敗（缺「管理頻道」權限？）", forum.id, missing, exc_info=True)
+            return found
+        logger.info("論壇標籤：在論壇 %s 建了 %s", forum.id, missing)
+        return find_forum_tags(edited, names) if edited is not None else found
 
 
 async def post_to_channel(

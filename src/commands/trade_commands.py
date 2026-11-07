@@ -5,6 +5,7 @@ from discord.ext import commands
 import traceback
 # 從 constants.py 導入物品選項配置
 from constants import ITEMS
+from utils.discord_content import ensure_forum_tags
 from utils.utils import safe_send_interaction_message
 from services.community import item_prices
 from sys_settings.paths import STATIC_DIR
@@ -72,19 +73,8 @@ class SelectItemFinalConfirmView(discord.ui.View):
                     thread_title = f"{interaction.user.display_name} - 需要購買多件物品"
                 thread_content = f"群友 {interaction.user.mention} ({interaction.user.name}) 需要購買：\n" + "\n".join(purchase_summary)
 
-                # 嘗試找到名為「代儲」的標籤，如果找不到則嘗試創建
-                applied_tags = []
-                for tag in forum_channel.available_tags:
-                    if tag.name == "代儲":
-                        applied_tags.append(tag)
-                        break
-                if not applied_tags:
-                    try:
-                        new_tag = await forum_channel.create_tag(name="代儲")
-                        applied_tags.append(new_tag)
-                        logger.info("已創建新標籤「代儲」並應用到貼文")
-                    except Exception as tag_error:
-                        logger.error(f"創建新標籤「代儲」時發生錯誤: {str(tag_error)}")
+                # 貼文掛「代儲」標籤，論壇上還沒有就建（建不了就不掛，照樣發文）
+                applied_tags = list((await ensure_forum_tags(forum_channel, ["代儲"])).values())
 
                 await forum_channel.create_thread(name=thread_title, content=thread_content, applied_tags=applied_tags)
                 logger.info(f"在論壇頻道 {forum_channel_id} 新增貼文: {thread_title}，使用標籤: {applied_tags if applied_tags else '無'}")

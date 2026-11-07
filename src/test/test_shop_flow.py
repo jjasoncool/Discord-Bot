@@ -78,11 +78,19 @@ TRADERS = {SUPPLIER.id, SUPPLIER_B.id}
 
 
 class ShopForum:
+    """商品論壇。標籤照真的 discord.py：`edit(available_tags=)` 整份覆寫 Discord 上的清單，
+    本地的 `available_tags` 是快取，要等 Discord 推送頻道更新才跟上（stale_cache 時不自動跟上，用 sync_cache）；
+    `guild.fetch_channel` 拿到的是 Discord 上最新的。"""
+
     def __init__(self, world):
         self.world = world
         self.id = SHOP_ID
         self.guild = world.guild
         self.available_tags = []
+        self.server_tags = []      # Discord 上真正的標籤清單
+        self.stale_cache = False
+        self.tag_edits = 0
+        self.fetches = 0
         self.all_threads = []
         self._tag_ids = itertools.count(900)
         self.fail_archived = False
@@ -99,9 +107,27 @@ class ShopForum:
             yield thread
 
     async def create_tag(self, *, name):
-        tag = SimpleNamespace(id=next(self._tag_ids), name=name)
-        self.available_tags.append(tag)
-        return tag
+        raise AssertionError("create_tag 拿快取整份覆寫、建完不更新快取，連著建會互相蓋掉，要用 edit 一次送")
+
+    async def edit(self, *, available_tags):
+        self.tag_edits += 1
+        tags = []
+        for tag in available_tags:
+            if not tag.id:
+                tag = discord.ForumTag(name=tag.name)
+                tag.id = next(self._tag_ids)
+            tags.append(tag)
+        self.server_tags = tags
+        if not self.stale_cache:
+            self.sync_cache()
+        return SimpleNamespace(available_tags=list(tags))
+
+    def sync_cache(self):
+        self.available_tags = list(self.server_tags)
+
+    async def fetch(self):
+        self.fetches += 1
+        return SimpleNamespace(id=self.id, guild=self.guild, available_tags=list(self.server_tags), edit=self.edit)
 
 
 class ForumThread(FakeThread):
@@ -150,6 +176,12 @@ class ShopTestCase(MarketTestMixin, unittest.TestCase):
         self.start_market()
         self.forum = ShopForum(self.world)
         self.world.channels[SHOP_ID] = self.forum
+
+        async def fetch_channel(channel_id):
+            assert channel_id == SHOP_ID, channel_id
+            return await self.forum.fetch()
+
+        self.world.guild.fetch_channel = fetch_channel
         self.config = {
             "trade_forum_channel_id": FORUM_ID,
             "cart_delivery_channel_id": CART_ID,
@@ -2604,7 +2636,7 @@ class GuideTests(ShopTestCase):
         async def refuse(**kwargs):
             raise discord.Forbidden(mock.MagicMock(status=403), "Missing Permissions")
 
-        self.forum.create_tag = refuse
+        self.forum.edit = refuse
         note = self.call(self.shop.ensure_guide(self.forum))
         self.assertIn("⚠️", note)
         self.assertIn("預購中", note)

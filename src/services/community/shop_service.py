@@ -68,7 +68,7 @@ from sys_settings.paths import APP_ROOT
 from sys_settings.shop_settings import ShopSettings
 from sys_settings.time_settings import APP_TZ
 from utils.background_tasks import spawn
-from utils.discord_content import post_to_channel, sanitize_forum_thread_title
+from utils.discord_content import ensure_forum_tags, find_forum_tags, post_to_channel, sanitize_forum_thread_title
 from utils.discord_members import check_role
 from utils.discord_threads import reopen_thread
 from utils.utils import ChannelConfig
@@ -452,22 +452,9 @@ class ShopService:
     async def _preorder_tag(self, forum, *, create: bool) -> Optional[discord.ForumTag]:
         if forum is None:
             return None
-        for tag in forum.available_tags:
-            if tag.name == self.settings.preorder_tag_name:
-                return tag
-        if not create:
-            return None
-        # create_tag 會拿快取的標籤清單整份覆寫，同時建兩次後一次會蓋掉前一次，所以排隊
-        async with self._lock(("tag", forum.id)):
-            for tag in forum.available_tags:
-                if tag.name == self.settings.preorder_tag_name:
-                    return tag
-            try:
-                return await forum.create_tag(name=self.settings.preorder_tag_name)
-            except discord.HTTPException:
-                logger.warning("商品上架：建立「%s」標籤失敗（缺 Manage Channels 權限？）",
-                               self.settings.preorder_tag_name, exc_info=True)
-                return None
+        name = self.settings.preorder_tag_name
+        tags = await ensure_forum_tags(forum, [name]) if create else find_forum_tags(forum, [name])
+        return tags.get(name)
 
     async def edit_info(self, listing_id: int, actor: discord.Member, *, title: str, description: str, unit: str,
                         delivery: Optional[str] = None,

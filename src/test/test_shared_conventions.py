@@ -859,7 +859,15 @@ RULES = [
             # 取的是文字頻道不是 thread：Telegram 轉發的主頻道、搬隔離區的一次性腳本
             "services/relay/telegram_relay_service.py",
             "scripts/telegram_move_to_quarantine.py",
+            # 取的是論壇頻道本身：建標籤前要最新的標籤清單（快取可能還沒跟上）
+            "utils/discord_content.py",
         },
+    ),
+    Rule(
+        name="建論壇標籤（create_tag 或自己拿快取的清單 edit(available_tags=…) 都是整份覆寫，快取沒跟上時後一次會把前一次蓋掉）",
+        pattern=r"\.create_tag\(|\bavailable_tags\s*=",
+        canonical="utils.discord_content.ensure_forum_tags(forum, names)（找標籤用 find_forum_tags）",
+        allowed={"utils/discord_content.py"},
     ),
     Rule(
         name="取伺服器成員：先查快取、沒有再向 API 查（快取偶爾漏人，接單曾因此失敗）",
