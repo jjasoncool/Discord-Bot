@@ -9,6 +9,7 @@
 > 【索引】每個主題區塊開頭有 `@meta` 註解：`id`（跨區塊引用）、`type`（STATE／CONTRACT／DECISION／RISK／TODO）、`status`（confirmed／draft／deprecated／blocked）、`depends_on`／`affects`、`last_confirmed`。只讀與任務相關的區塊即可。
 
 最後盤點紀錄（每輪一行、只留最近約 10 筆；更舊的在 `dev/journal/`，一個月一檔）：
+- 2026-11-09 連結轉址與 AI 讀預覽：討論定案後實作（bilibili 轉 vxbilibili、轉貼長出預覽才壓原預覽、預檢換服務、暴雷照包、轉貼用回覆、回覆轉貼不算叫它、聊天行加 `[預覽：…]` 與自動轉貼標記），新檔 `services/relay/link_repost.py`、`test/test_link_fix.py`，守衛加兩條；實作時發現 fixupx 的影片在 Mastodon 相容 API，更正第一輪「fixupx 做不出那篇影片」的推論。完整測試 2555 項全過、突變全紅；拆成 4 個 commit（未推送），未重啟。
 - 2026-11-07 10:xx～12:xx 市集介面四題定案（TR-Q86＝A、Q87＝C、Q88＝A、Q89＝A，使用者看了畫面草稿後「全部依照你的建議」）並連同 TR-Q85 標籤實作：每個品項一格的尾款表單、作者欄連到個人檔案、改好前不能拿掉【定金】、「現貨」標籤；建標籤收成 `utils.discord_content.ensure_forum_tags`（`create_tag` 連建兩個會互相蓋掉）並加守衛。使用者另定 TR-Q90＝A（賣完的預購也拿掉「預購中」）。四個子 agent 複查＋各一個反駁：成立 2 條已修（重畫時查供應方一時出錯不再把標籤拿掉；`TRADE_FLOW.md` 補「還掛著舊交易時」），其餘 7 條不成立或只是加固（另把守衛加寬到手動組 `available_tags=`）。之後再定 TR-Q91～Q94（開始收尾款、開始交貨的確認畫面寫不能復原、改正式語氣）並實作。完整測試 2511 項全過、突變全紅；拆成 8 個 commit（程式 `1eb8574`～`459d782`、文件另一個），每個中間版本都跑過完整測試；未推送、未重啟。
 - 2026-11-07 09:3x `dev/` 改成給人看的版型：25 個主題檔加上半部（一頁看懂＋歸檔時狀態勾選清單、時間線、定案與理由、踩過的坑），原文摺進 `<details>`、逐行核對沒少；流水帳改成每月重點（約 420 筆篩到 92 筆，時間、commit、測試數字、狀態不留）；新增 `dev/check.py`；`AGENTS.md` 加「commit 要小」；本檔待做改勾選框、「歸檔放哪」定案（交接檔給 AI、`dev/` 給人）。規則候選 10 條等使用者挑。已 commit（`eecfca1`，字典另一個 `c94262a`）、未推送。
 - 2026-11-07 07:1x～08:4x 市集上線核對：07:43 使用者重啟、上線匯入完成且數字與預覽一致，08:14 又重啟一次沒重匯；討論 TR-Q85～Q89（標籤定案未實作，其餘等使用者）；上架視窗欄位順序 `8d760e7`（已生效、未推送）；給觀星者的「改成定金＋尾款」說明經四個子 agent 對照程式核對後定稿，還沒傳。交易區塊已更新，未 commit。
@@ -76,6 +77,7 @@ history: dev/architecture/docs.md
 | LLM 推論：KV cache 與 prompt 快取 | `llm_usage` 已上線、prompt 擺放規則已定（11-04 量過）、/askai 決策輪已拿掉；剩 `--parallel` 實驗 | [詳見](#llm-推論kv-cacheprompt-快取與-gpu) |
 | Hermes 串接 | bot 的 `/v1` 模型端點已上線、Hermes 端到端打通（10-26）；使用者 11-04 說先不管 Hermes 的架構與容器，其餘全部暫停 | [詳見](#hermes-串接暫停) |
 | Telegram 過濾＋隔離區 | 上線中（含別款遊戲名單、右鍵搬移、下載防壞檔）；剩送失敗重試、頻道 0 自動寫入、TM-Q1／Q3／Q4／Q7 待使用者 | [詳見](#telegram-訊息過濾隔離區) |
+| 連結轉址與 AI 讀預覽 | bilibili 轉 vxbilibili、轉貼長出預覽才壓原預覽、替代網址預檢、暴雷照包、轉貼用回覆送出、回覆轉貼不算叫它、AI 讀連結預覽都已實作並 commit（11-09，未推送）；未重啟 | [詳見](#連結轉址xbilibili與-ai-讀連結預覽) |
 | 巴哈／PTT 轉發：刪文與亂改 | 編輯限速 10-02 修好後沒再出現巴哈的 429；刪文與亂改的防禦 DF-Q1～Q3 待使用者 | [詳見](#巴哈ptt-轉發刪文與亂改的防禦) |
 | scraper 抓網頁與 FB 爬蟲 | FB 走 IPv6、:05 排程、跳過已確認、影片轉發都已上線；剩巴哈每輪超時、FB-Q3／Q5／Q7／Q8②／Q11／Q18／Q19 待使用者、分享貼文讀錯文字等已知問題 | [詳見](#scraper-抓網頁機制與-fb-爬蟲) |
 | 週期活動提醒 | 已上線（深塔、海墟、矩陣）；只剩自介面板置底待有人送自介時驗證 | [詳見](#週期活動提醒深塔海墟矩陣) |
@@ -554,6 +556,50 @@ history: dev/relay/bahamut.md
 - 建議順序 Q1 → Q2 → Q3。
 
 （經過見 [dev/relay/bahamut.md](dev/relay/bahamut.md)）
+
+---
+
+## 連結轉址（X、bilibili）與 AI 讀連結預覽
+
+<!-- @meta
+id: link-fix-previews
+type: DECISION
+status: confirmed
+last_confirmed: 2026-11-09
+affects: utils/link_fix.py、services/relay/link_repost.py、discord_bot.py（on_message）、llm/preprocess/chat_line.py、llm/preprocess/emoji_text_utils.py（預覽標記）、llm/storage/store_chat.py、llm/ambient/ambient_reply.py、settings/prompts/llm_context_safety_rules.json
+history: dev/relay/news-and-links.md
+-->
+
+**現況**：11-09 實作完、完整測試全過、已 commit（未推送），**未重啟**（重啟 discord-bot 後生效；提示詞那句也是啟動時讀）。
+- 轉貼：`on_message` 丟背景跑 `services.relay.link_repost.repost_fixed_links`。`utils.link_fix.select_fixed_links` 挑網址（X 查 syndication 只留影片、bilibili 直接轉）並預檢，回覆原訊息送出（不 @），等轉貼長出影片、圖片或縮圖的預覽才壓原訊息的預覽，`PREVIEW_WAIT_SECONDS`（10）內沒長出就刪掉轉貼、原預覽留著。
+- 給模型看：聊天行（插話、/askai、日記共用 `chat_line.format_chat_line`）在群友的字後面接 `[預覽：標題 - 描述]`；bot 的自動轉貼標「（自動轉貼 #N 的連結）」、不加 ↩；bot 自己組的 embed、有暴雷的訊息不給預覽。插話的被回覆那則、最新那則另外補縮圖（`_link_preview_context`，最多 `link_preview_max_images` 張），原訊息預覽被壓掉就拿轉貼上的；最新那則有連結卻還沒預覽時最多等 `link_preview_wait_seconds`（3）秒。標記的意思寫在 `system_safety_prompt`。
+- 插話：回 bot 的自動轉貼不算在叫它（`_is_directed`），內文真的打 @ 才算；降溫閘掃字前先拿掉預覽。
+- 存法不動：聊天庫照舊存 `[預覽：…]`（組法收進 `emoji_text_utils.preview_text`／`preview_marker`，輸出一字不差）；markdown 清理、方括號換全形只做在聊天行。
+- 守衛：別處寫 `suppress=True`、自組 `[預覽：` 標記會擋（`test_shared_conventions`）。測試在 `test_link_fix.py`。
+
+**已定案（11-09）**
+- bilibili 只轉 `bilibili.com/video/BV…`（含 www.、m.、/en/ 這類路徑），**b23.tv 短網址不轉**；保留 `p`、`t`，其他追蹤參數拿掉；不加語言前綴；已經是 vx 的不轉。
+- 不加固定延遲，改成「轉貼長出預覽才壓原預覽、等不到就收回」：查過的轉貼原預覽都壓成功、log 沒有限流。
+- 貼之前預檢替代網址：X 先 fixupx、不行換 vxtwitter，都不行就不轉；bilibili 只有 vxbilibili。
+- 原連結在 `||…||` 裡，轉貼也包 `||`。
+- 轉貼用回覆送出、不 @ 原貼者；資料庫不改（bot 的訊息不進聊天庫與 raw 表，raw 的 `reply_to_id` 照舊記轉貼的 id，目前沒有功能讀這欄）。
+- 回覆轉貼不算在叫它，走一般插話判斷；內文真的打 @ 才算。
+- 被轉的原訊息不另外主動存預覽；上線後看比例，還是很低再改成轉址時把手上的標題、描述寫進那一列。舊的 51 則不補。
+- AI 讀預覽：群友的字一字不改、同一行加標記（跟聊天庫既有的格式一致）；預覽放在 Discord 實際顯示它的那一則；轉貼行保留並標明是轉貼，不併進原訊息、不改回覆箭頭。
+
+**規則與坑**
+- bilibili 自家 API 對我們主機回 412（風控），不能照 X 自己查；要內容就讀 Discord 抓好的預覽。
+- `suppress=True` 之後 Discord 會把那則的 embeds 清空，預覽只剩在 bot 的轉貼上。
+- fixupx 的頁面標籤只有標題，影片放在 Mastodon 相容 API（頁面上的 `application/activity+json` 連結 → `/api/v1/statuses/<id>` 的 `media_attachments`），Discord 讀的是那份；只看頁面標籤會誤判成做不出影片。vxtwitter 的標籤用 `name=`、`twitter:player:stream`。11-04 WutheringNews 那次轉貼沒預覽的原因查不到了（現在那份 API 有影片）。
+- fixupx 頁面只有作者沒有內文，要 X 的內文用 syndication。fixupx 轉貼的預覽描述夾著按讚、轉推的 markdown 連結（聊天庫裡群友自己貼 fixupx／fxtwitter 的有 115 列這樣存著，那幾列的 `]` 也會讓 `strip_preview_markers` 切錯位置；沒處理）。
+- 被轉的原訊息在聊天庫幾乎沒有預覽（11-09 查最近 57 則只有 6 則有，沒轉的 143 則有 137 則）：壓預覽比 Discord 抓好還早。/askai 相關訊息、插話回想、聊天搜尋三處判斷「只有網址」時會先去掉預覽文字，所以只貼網址的訊息有沒有預覽都會被跳過。
+- 人格萃取會去掉網址但保留 `[預覽：…]`（9922 列、61 人）；69 份人格描述沒看到把預覽當成本人說的話，都被讀成分享行為，先不動。
+
+**待做**
+- [ ] 使用者重啟 discord-bot（避開 04:00～07:30）
+- [ ] 上線後實測：bilibili 轉貼能播、原預覽在轉貼長出預覽後才消失；X 影片轉貼；暴雷的轉貼 Discord 會不會連預覽一起遮；回覆轉貼時插話不再必回；回覆連結問「這是什麼」模型看得到標題與縮圖
+- [ ] 上線一週後查被轉原訊息在聊天庫有預覽的比例（11-09 是 6／57）
+- [x] commit（11-09，未推送）
 
 ---
 

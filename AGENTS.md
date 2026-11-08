@@ -119,6 +119,8 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | prompt 裡認人的錨點（名字#尾碼） | `llm.preprocess.person_anchor.label()`／`suffix()`（撞號自動加長；`refresh()` 由 `discord_bot` 在啟動與成員進出時呼叫） |
 | 群友的名字（Discord 顯示名稱、伺服器暱稱、全域名稱＋自介／印象暱稱） | `llm.persona.member_names`（`member_names_from_guild`、`merge_names`、`names_member`、`name_map_lines`） |
 | 查 X 貼文／給 AI 看貼文內容與縮圖 | `utils.link_fix.fetch_tweet`（syndication CDN）；給模型看用 `llm.preprocess.tweet_context.expand_tweets` |
+| 把播不了的影片連結（X、bilibili）換成能播的網址轉貼 | `services.relay.link_repost.repost_fixed_links`（回覆原訊息、不 @；轉貼長出影片或圖片預覽才壓原訊息的預覽，等不到就刪掉轉貼；守衛擋別處寫 `suppress=True`）；挑網址、預檢、暴雷照包在 `utils.link_fix`（`select_fixed_links`；`probe_preview` 照 Discord 的讀法：頁面標籤，或 fixupx 的 Mastodon 相容 API）；認出 bot 的自動轉貼用 `chat_line.is_link_repost` |
+| 連結預覽給模型看、存進向量庫（`[預覽：…]`） | 標記只有一份：`llm.preprocess.emoji_text_utils.preview_text`／`preview_marker`／`strip_preview_markers`（守衛擋自組 `[預覽：`）；聊天行用 `chat_line.link_previews`／`preview_image_urls`（bot 只收自動轉貼、有暴雷的不給）；判斷「有沒有可聊的字」、掃降溫字詞前先拿掉標記 |
 | 讀寫自訂表情字典（`settings/emoji_dictionary.txt`） | `llm.preprocess.emoji_dictionary.entries()`；AI 補描述用 `fill()`（不覆寫人寫的描述） |
 | 讀寫別的伺服器的貼圖描述（`settings/sticker_dictionary.txt`） | `llm.preprocess.sticker_dictionary.lookup()`／`add()`；本伺服器的貼圖描述在 Discord 上，走 `sticker_cache` |
 | 沒描述的表情／貼圖讓 AI 看圖補字典 | `llm.preprocess.emoji_autofill.observe`（`on_message` 呼叫；設定 `EmojiAutofillSettings`） |
