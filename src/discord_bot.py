@@ -346,24 +346,11 @@ async def on_message(message):
     if message.guild is None:
         return
 
-    # 偵測 x.com / twitter.com 貼文連結，只在「影片貼文」時貼出 fixupx 可預覽版本。
-    # 圖片貼文 Discord 原生預覽就正常，不轉。格式擋掉/類型查詢/開 session 都收在
-    # select_video_links 內：非 x.com 訊息只付一次 regex 成本，命中才連網。
+    # X 影片、bilibili 影片貼出能播的版本（背景跑：要查類型、預檢、等預覽，不能卡住這則後面的處理）。
+    # 沒有可轉的連結時只付一次 regex 成本、不連網。
     if message.content:
-        from utils.link_fix import select_video_links
-        fixed_links = await select_video_links(message.content)
-        if fixed_links:
-            try:
-                await message.channel.send(fixed_links)
-            except Exception as exc:
-                logger.warning(f'發送 fixupx 預覽連結失敗: {exc}')
-            # 壓掉原訊息的失敗/破圖預覽卡（需 Manage Messages 權限，缺權限則略過）
-            try:
-                await message.edit(suppress=True)
-            except discord.Forbidden:
-                logger.warning('壓制原訊息預覽失敗：缺少 Manage Messages 權限')
-            except Exception as exc:
-                logger.warning(f'壓制原訊息預覽失敗: {exc}')
+        from services.relay.link_repost import repost_fixed_links
+        spawn(repost_fixed_links(bot, message), name="連結轉貼")
 
     # 記錄接收到的訊息
     if message.content:

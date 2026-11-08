@@ -937,6 +937,12 @@ RULES = [
         allowed={"utils/link_fix.py"},
     ),
     Rule(
+        name="壓掉訊息的連結預覽（壓了 Discord 就清空那則的預覽；替代網址還沒長出預覽就壓，群友什麼都看不到）",
+        pattern=r"\bsuppress\s*=\s*True",
+        canonical="services.relay.link_repost.repost_fixed_links（轉貼長出預覽才壓原訊息的）",
+        allowed={"services/relay/link_repost.py"},
+    ),
+    Rule(
         name="連結預覽的標記 `[預覽：…]`（存進向量庫、給模型看、判斷前拿掉要同一個寫法）",
         finder=_find_preview_markers,
         canonical="llm.preprocess.emoji_text_utils.preview_text／preview_marker／strip_preview_markers",
