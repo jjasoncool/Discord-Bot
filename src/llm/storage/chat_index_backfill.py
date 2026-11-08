@@ -33,6 +33,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+from llm.preprocess.emoji_text_utils import preview_text
 from llm.preprocess.sticker_cache import get_sticker_text
 from llm.storage import store_chat
 from sys_settings import switches
@@ -115,7 +116,7 @@ def build_items(rows: list[dict]) -> tuple[list[dict], list[str]]:
             for s in _json_list(row.get("stickers"))
         ]
         previews = [
-            p for p in (store_chat.preview_text(g.get("title"), g.get("description"))
+            p for p in (preview_text(g.get("title"), g.get("description"))
                         for g in _json_list(row.get("tenor_gifs")))
             if p
         ]

@@ -1,17 +1,21 @@
-"""自訂表情的語意化（`<:name:id>` → `:描述:`），以及「一則訊息有沒有可聊的文字」的判斷。
+"""自訂表情的語意化（`<:name:id>` → `:描述:`）、連結預覽標記的格式，以及「一則訊息有沒有可聊的文字」的判斷。
 
 架構定位：技術層（`llm/preprocess`），只依賴 `llm.preprocess.emoji_dictionary`。上層：聊天記憶寫入（`llm.storage.store_chat`、
-`chat_index_backfill`）、插話的內容閘與回憶（`llm.ambient.ambient_reply`）、/askai 的相關名額（`llm.retrievers.context_retriever`）。
-下層：表情字典（檔案改了就重讀）。
+`chat_index_backfill`）、組聊天行（`llm.preprocess.chat_line`）、插話的內容閘、降溫閘與回憶（`llm.ambient.ambient_reply`）、
+/askai 的相關名額（`llm.retrievers.context_retriever`）。下層：表情字典（檔案改了就重讀）。
 
 介面：
 - `replace_custom_emoji_with_description(text)`：`<:name:id>`／`<a:name:id>` 換成 `:描述:`（規則見函式說明）。
+- `preview_text(title, description)`：一個連結預覽要寫的文字（標題 - 描述前 100 字）。
+- `preview_marker(previews)`：幾個預覽組成 `[預覽：…]` 標記；`strip_preview_markers(text)`：把標記拿掉。
 - `is_emoji_or_symbol_only(text)`：整則只有表情、貼圖或符號（沒有任何字詞）。
 - `is_link_only(text)`：整則只有網址。
 - `reload_descriptions()`：字典重寫後強制重讀，回有描述的筆數。
 
 規則：
 - 兩種格式都認：Discord 原文（`<:name:id>`）與寫進向量庫後的文字（`:描述:`、`[貼圖：…]`），三個呼叫端才會用同一套標準。
+- `[預覽：…]` 是 Discord 抓到的網頁標題與簡介，不是發話者打的字：存進向量庫與給模型看的聊天行用同一個標記，
+  判斷「有沒有可聊的字」、找「叫它閉嘴」這類字之前都要先拿掉。
 - 只做表情替換，不動 URL、mention、空白；人格萃取的深度清理在 `personality_extractor._clean_text_for_extraction`。
 """
 from __future__ import annotations
@@ -111,11 +115,31 @@ def is_emoji_or_symbol_only(text: str) -> bool:
 _PREVIEW_TEXT_PATTERN = re.compile(r"\[預覽：[^\]]*\]")
 
 
+def preview_text(title: str | None, description: str | None) -> str | None:
+    """一個連結預覽要寫進去的文字（標題 - 描述前 100 字）；兩個都沒有回 None。"""
+    parts = []
+    if title:
+        parts.append(title)
+    if description:
+        parts.append(description[:100])
+    return " - ".join(parts) if parts else None
+
+
+def preview_marker(previews: list[str]) -> str:
+    """幾個預覽組成 `[預覽：…] [預覽：…]`；沒有就空字串。"""
+    return " ".join(f"[預覽：{p}]" for p in previews)
+
+
+def strip_preview_markers(text: str) -> str:
+    """拿掉 `[預覽：…]`（換成空白）：剩下的才是發話者自己打的字。"""
+    return _PREVIEW_TEXT_PATTERN.sub(" ", text or "")
+
+
 def is_link_only(text: str) -> bool:
     """整則只有連結（每個空白分開的片段都是 http(s) 網址），沒有可聊、可當回憶的文字。
 
     寫進向量庫的純連結訊息後面接著 Discord 抓到的 `[預覽：標題 - 描述]`（store_chat.compose_persist_text），判斷前先去掉：
     「某人貼過一篇文章」不是值得當回憶注入的內容，預覽標題也不是他說的話。
     """
-    tokens = _PREVIEW_TEXT_PATTERN.sub(" ", text or "").split()
+    tokens = strip_preview_markers(text).split()
     return bool(tokens) and all(t.startswith("http://") or t.startswith("https://") for t in tokens)

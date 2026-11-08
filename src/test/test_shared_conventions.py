@@ -386,6 +386,22 @@ def _find_syndication_urls(path: Path) -> list[int]:
     })
 
 
+def _find_preview_markers(path: Path) -> list[int]:
+    """找自己寫的連結預覽標記 `[預覽：`（說明文字不算）。存進向量庫、給模型看的聊天行、判斷前拿掉都要同一個寫法：
+    標記一變，`is_link_only` 認不出只貼網址的訊息、降溫閘會把影片標題當成群友在嫌它吵。字串裡的寫法 regex 看不到，走 AST。"""
+    tree = _parse(path)
+    docstrings = {
+        id(node.body[0].value) for node in ast.walk(tree)
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body
+        and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant)
+    }
+    return sorted({
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and "[預覽：" in node.value
+        and id(node) not in docstrings
+    })
+
+
 def _find_think_block_parsing(path: Path) -> list[int]:
     """找自己去掉 `<think>` 區塊、取模型最後一行的寫法。一律走 `llm.prompt.answer_line.final_line`：
     模型會在結論前多寫「第二行：」這類前綴，各寫一份就會有一份沒處理（看圖補字典曾把前綴寫進字典）。
@@ -919,6 +935,12 @@ RULES = [
         finder=_find_syndication_urls,
         canonical="utils.link_fix.fetch_tweet / llm.preprocess.tweet_context.expand_tweets",
         allowed={"utils/link_fix.py"},
+    ),
+    Rule(
+        name="連結預覽的標記 `[預覽：…]`（存進向量庫、給模型看、判斷前拿掉要同一個寫法）",
+        finder=_find_preview_markers,
+        canonical="llm.preprocess.emoji_text_utils.preview_text／preview_marker／strip_preview_markers",
+        allowed={"llm/preprocess/emoji_text_utils.py"},
     ),
     Rule(
         name="讀寫自訂表情字典",

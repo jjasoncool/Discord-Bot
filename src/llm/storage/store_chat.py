@@ -8,8 +8,8 @@
     `llm.preprocess`（表情描述、貼圖描述）、`llm.retrievers.context_retriever`（共用的已寫入 id 集合）、LlamaIndex 的 pgvector 索引。
 
 介面：`enqueue_message(msg)`、`enqueue_message_edit(after)`、`should_flush_now()`、`flush_buffer()`；
-  從 raw 備份補寫用的 `compose_persist_text`、`preview_text`（組文字的規則）、`backfill_candidates`／`enqueue_backfill`
-  （哪些會排、排進 buffer）。
+  從 raw 備份補寫用的 `compose_persist_text`（組文字的規則；預覽的文字與標記是 `emoji_text_utils.preview_text`／
+  `preview_marker`，給模型看的聊天行也用同一份）、`backfill_candidates`／`enqueue_backfill`（哪些會排、排進 buffer）。
 
 規則：
   - 寫入時拿著 GPU 閘門（算 embedding 要用顯示卡），插話與 /askai 都在後面排隊，所以一次 flush 最多寫
@@ -34,7 +34,7 @@ from typing import Optional
 import discord
 
 from llm.client.http_client import is_backend_fault, is_unreachable
-from llm.preprocess.emoji_text_utils import replace_custom_emoji_with_description
+from llm.preprocess.emoji_text_utils import preview_marker, preview_text, replace_custom_emoji_with_description
 from llm.client.gpu_gate import stream_exclusive
 from llm.preprocess.sticker_cache import get_sticker_text
 
@@ -116,19 +116,9 @@ def compose_persist_text(content: str, sticker_texts: list[str], previews: list[
         sticker_part = " ".join(sticker_texts)
         text = f"{text} {sticker_part}" if text else sticker_part
     if previews:
-        embed_text = " ".join(f"[預覽：{p}]" for p in previews)
+        embed_text = preview_marker(previews)
         text = f"{text} {embed_text}" if text else embed_text
     return text
-
-
-def preview_text(title: Optional[str], description: Optional[str]) -> Optional[str]:
-    """一個連結預覽要寫進去的文字（標題 - 描述前 100 字）；兩個都沒有回 None。"""
-    parts = []
-    if title:
-        parts.append(title)
-    if description:
-        parts.append(description[:100])
-    return " - ".join(parts) if parts else None
 
 
 def _build_persist_text(msg: discord.Message) -> str:
