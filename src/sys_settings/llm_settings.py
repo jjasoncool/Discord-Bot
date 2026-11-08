@@ -572,6 +572,9 @@ class AmbientChatSettings(BaseSettings):
     # ── 看圖（ambient 模型需具 vision）──
     image_max_count: int = 9             # 一次請求最多帶幾張圖（含動圖拆出來的幀），硬上限
     image_max_bytes: int = 5 * 1024 * 1024
+    # 連結預覽（最新那則、被回覆那則的 [預覽：…] 與縮圖；見 _link_preview_context）
+    link_preview_wait_seconds: float = 3.0   # 最新那則有連結卻還沒預覽時最多等幾秒（Discord 抓預覽要一兩秒）
+    link_preview_max_images: int = 2         # 一則訊息最多附幾張預覽縮圖（跟群友貼的圖共用 image_max_count）
 
     # ── Phase C 記憶寫入（preference_fact）──
     extractor_prompt_path: str = prompt_file("preference_extractor_prompt.txt")

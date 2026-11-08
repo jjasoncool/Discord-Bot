@@ -1,15 +1,27 @@
-"""Discord 聊天行的統一格式化層。
+"""Discord 訊息組成給模型看的聊天行：「[時間] 顯示名#XXXX: 內容」。
 
-askai（context_retriever）、ambient（ambient_reply）與日記（ambient_diary）三條路徑
-共用這裡，確保「[時間] 顯示名#XXXX: 內容」的組行邏輯只有一份：名字錨點、自訂 emoji
-語意化、貼圖描述、空白壓縮、時間戳。各 caller 的差異（要不要日期、單則長度上限）以
-參數控制，不再各自維護一套。
+架構定位：技術層（`llm/preprocess`），只吃 Discord 訊息物件的欄位（執行時不 import discord）。
+  - 上層（誰呼叫）：/askai 的上下文（`llm.retrievers.context_retriever`）、插話（`llm.ambient.ambient_reply`）、
+    日記（`llm.ambient.ambient_diary`）、看圖補字典（`llm.preprocess.emoji_autofill`）。
+  - 下層（呼叫誰）：`person_anchor`（名字錨點）、`emoji_text_utils`（表情語意化、預覽標記）、`sticker_cache`、
+    `vision_image.is_vision_image`、`utils.link_fix`（認出 bot 的自動轉貼與 X 的預覽）。
 
-歷史背景：原本 askai 在 context_retriever 內聯組行（且未做 emoji 語意化，prompt 會出現
-raw `<:name:id>`），ambient / diary 又各有 `_name_with_anchor` / `_semantic_msg_text`，
-三處重複又有 drift。收斂到此模組後，askai 也順帶吃到 emoji 語意化。
+介面：
+- `format_chat_line(msg, tz, …)`：一行聊天紀錄（參數見函式說明）；`fetch_recent_lines(channel, …)`：抓近期訊息組成行。
+- `semantic_message_text(msg)`：發話者自己的內容（文字、表情、@、貼圖），不含預覽與標記。
+- `name_with_anchor(author)`、`resolve_user_mentions(text, msg)`、`image_marker(msg)`。
+- `is_link_repost(msg)`、`repost_note(target)`：bot 的自動轉貼與它的標記。
+- `link_previews(msg, skip_tweets=)`、`preview_image_urls(msg, …)`：Discord 抓到的連結預覽文字與縮圖網址。
+
+規則：
+- 發話者打的字一字不改；圖、自動轉貼、連結預覽都用標記接在後面（`(圖)`、`（自動轉貼 #N 的連結）`、`[預覽：…]`），
+  模型靠標記分得出哪些不是他說的。標記的意思寫在共用的 `system_safety_prompt`。
+- 預覽放在 Discord 實際顯示它的那一則：被 bot 轉過的原訊息預覽已被壓掉，預覽在轉貼那行。
+- 群友的訊息全部預覽都收；bot 自己的訊息只收自動轉貼的（其他是 bot 自己組的 embed，不是連結預覽）。
+- 有暴雷 `||…||` 的訊息不給預覽與縮圖：群友遮起來的東西不先講給模型聽。
+- 預覽裡的 markdown 連結只留文字、方括號換成全形：fixupx 的描述夾著一串按讚轉推的連結，`[`、`]` 也會讓
+  `strip_preview_markers` 切錯位置。存進向量庫的預覽不做這些（`store_chat` 的寫法不動）。
 """
-
 from __future__ import annotations
 
 import logging
@@ -18,9 +30,10 @@ from datetime import tzinfo
 from typing import TYPE_CHECKING, Callable, Optional
 
 from llm.preprocess import person_anchor
-from llm.preprocess.emoji_text_utils import replace_custom_emoji_with_description
+from llm.preprocess.emoji_text_utils import preview_marker, preview_text, replace_custom_emoji_with_description
 from llm.preprocess.sticker_cache import get_sticker_text
 from llm.preprocess.vision_image import is_vision_image
+from utils.link_fix import TWEET_LINK_RE, is_repost_text
 
 if TYPE_CHECKING:  # 僅型別註解用；runtime 不依賴 discord（保持 leaf 輕量）
     import discord
@@ -99,6 +112,76 @@ def image_marker(msg) -> str:
     return "(圖)" if n == 1 else f"(圖×{n})"
 
 
+# markdown 連結 `[文字](網址)`：fixupx 的描述用它放按讚、轉推的連結
+_MD_LINK_RE = re.compile(r"\[([^\]]*)\]\(https?://[^)\s]*\)")
+
+
+def is_link_repost(msg) -> bool:
+    """bot 的自動轉貼：bot 發的、內文只有替代網址（fixupx、vxtwitter、vxbilibili）。"""
+    author = getattr(msg, "author", None)
+    return bool(getattr(author, "bot", False)) and is_repost_text(getattr(msg, "content", "") or "")
+
+
+def repost_note(target: Optional[str] = None) -> str:
+    """自動轉貼那行的標記；`target` 是原訊息的編號（`#15`）或原貼者（`名字#尾碼`），不知道就不寫。"""
+    return f"（自動轉貼 {target} 的連結）" if target else "（自動轉貼的連結）"
+
+
+def _preview_source_ok(msg) -> bool:
+    """這則的預覽能不能給模型看：bot 的只收自動轉貼，有暴雷的不給。"""
+    author = getattr(msg, "author", None)
+    if getattr(author, "bot", False) and not is_link_repost(msg):
+        return False
+    return "||" not in (getattr(msg, "content", "") or "")
+
+
+def _plain(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return text
+    text = _MD_LINK_RE.sub(r"\1", text).replace("**", "")
+    text = " ".join(text.split())
+    return text.replace("[", "［").replace("]", "］")
+
+
+def _is_tweet_embed(embed) -> bool:
+    return bool(TWEET_LINK_RE.match(getattr(embed, "url", None) or ""))
+
+
+def link_previews(msg, *, skip_tweets: bool = False) -> list[str]:
+    """Discord 抓到的連結預覽（標題 - 描述前 100 字），一個 embed 一筆。
+
+    `skip_tweets=True` 跳過 X 的預覽：被回覆的、最新那則另外用 `tweet_context` 查 X，內容比預覽完整，不重複給。
+    """
+    if not _preview_source_ok(msg):
+        return []
+    out: list[str] = []
+    for embed in getattr(msg, "embeds", None) or []:
+        if skip_tweets and _is_tweet_embed(embed):
+            continue
+        text = preview_text(_plain(getattr(embed, "title", None)), _plain(getattr(embed, "description", None)))
+        if text:
+            out.append(text)
+    return out
+
+
+def preview_image_urls(msg, *, limit: int, skip_tweets: bool = True) -> list[str]:
+    """連結預覽的縮圖網址（優先 Discord 的媒體代理，一個 embed 取一張），最多 `limit` 張；X 預設跳過（理由同上）。"""
+    if not _preview_source_ok(msg):
+        return []
+    urls: list[str] = []
+    for embed in getattr(msg, "embeds", None) or []:
+        if skip_tweets and _is_tweet_embed(embed):
+            continue
+        for part in (getattr(embed, "thumbnail", None), getattr(embed, "image", None)):
+            url = getattr(part, "proxy_url", None) or getattr(part, "url", None)
+            if url:
+                urls.append(url)
+                break
+        if len(urls) >= limit:
+            break
+    return urls
+
+
 def format_chat_line(
     msg: discord.Message,
     tz: tzinfo,
@@ -110,6 +193,8 @@ def format_chat_line(
     prefix: str = "",
     suffix: str = "",
     empty_placeholder: str | None = None,
+    repost_target: str | None = None,
+    previews: list[str] | None = None,
 ) -> str:
     """組一行聊天紀錄：`[時間] 顯示名#XXXX: 內容`。
 
@@ -128,6 +213,9 @@ def format_chat_line(
       是哪一行的」。
     - empty_placeholder：內容為空（純附件等）時改用此字串當內容，讓「被回覆的空訊息」也能
       成行被 ↩#N 指到（caller 仍可選擇對非目標的空訊息直接跳過、不傳此參數）。
+    - bot 的自動轉貼接「（自動轉貼 {repost_target} 的連結）」（見 `repost_note`）。
+    - 連結預覽接在最後 `[預覽：…]`（見 `link_previews`）；`previews` 給了就用它（呼叫端已經另外處理預覽時給空 list）。
+      標記都接在截斷之後：內容再長也不能把它們截掉。
     """
     name = name_with_anchor(msg.author)
     if self_id is not None and getattr(msg.author, "id", None) == self_id:
@@ -141,6 +229,11 @@ def format_chat_line(
     marker = image_marker(msg)
     if marker:
         text = f"{text} {marker}" if text else marker
+    if is_link_repost(msg):
+        text = f"{text}{repost_note(repost_target)}"
+    shown = link_previews(msg) if previews is None else previews
+    if shown:
+        text = f"{text} {preview_marker(shown)}" if text else preview_marker(shown)
     if not text and empty_placeholder is not None:
         text = empty_placeholder
     fmt = "%H:%M" if time_only else "%Y-%m-%d %H:%M"
@@ -196,6 +289,7 @@ def _thread_render(
       舊版只編「被回覆過」的訊息，但多數人聊天不按 reply → 大部分行沒編號；模型要表態
       「我這句在接哪一條線」時無錨可指。多組人各聊各的時，這個編號就是唯一的指線方式。
     - 是回覆的行加後綴 ` ↩#M`（M＝被回那則的編號）；被回的在視窗外 → ` ↩(較早)`。
+      bot 的自動轉貼也是用回覆送出的，但它不是在回話：改標「（自動轉貼 #M 的連結）」、不加 ↩。
     - 空訊息（純圖等）照舊跳過、不佔編號；但「被回覆過的空訊息」要成行顯示 `(圖)` 才指得到。
     回覆只會指向更早的訊息 → 目標必在其回覆者之前出現，編號無前向引用問題。
     """
@@ -217,7 +311,10 @@ def _thread_render(
     for m in rendered:
         rid = _ref_id(m)
         suffix = ""
-        if rid is not None:
+        target = None
+        if is_link_repost(m):
+            target = f"#{thread_no[rid]}" if rid is not None and rid in thread_no else None
+        elif rid is not None:
             suffix = f" ↩#{thread_no[rid]}" if rid in thread_no else " ↩(較早)"
         lines.append(
             format_chat_line(
@@ -225,6 +322,7 @@ def _thread_render(
                 prefix=f"#{thread_no[m.id]} ",
                 suffix=suffix,
                 empty_placeholder=(None if texts[m.id] else _reply_target_placeholder(m)),
+                repost_target=target,
             )
         )
     return lines, {thread_no[m.id]: m for m in rendered}

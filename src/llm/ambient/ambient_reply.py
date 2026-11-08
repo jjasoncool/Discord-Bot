@@ -28,6 +28,8 @@
   （system 段一變整份快取都可能重讀）。輸出夾著工具呼叫的原文一律當 [PASS]，不會貼進群裡。
 - 被 @ 時給輸出上限，想太久撞到就關掉思考再答一次（點名的人一定收得到回覆）；自發插話逾時就略過。
 - 回覆超過 Discord 上限只送第一段；用回覆送出時也不 @ 任何人。
+- 回 bot 的自動轉貼不算在叫它（那是群友對影片、對原貼者的反應）；內文真的打了 @ 它才算。
+- 被回覆的那則、最新那則有連結時補上 Discord 抓到的預覽與縮圖；被轉過的原訊息預覽在轉貼上，從 bot 的訊息快取找。
 
 例外與決策：靜默期依對話節奏切換（熱聊等不到安靜，而且插話本來就不需要空檔）；純機率的減壓閥已被鉤子閘取代
 （隨機丟棄會丟掉好時機、留下爛時機，鉤子有判斷依據）。
@@ -62,22 +64,32 @@ from llm.ambient.ambient_memory import enqueue_for_memory, recall_lines, recall_
 from llm.preprocess.chat_line import (
     fetch_recent_lines,
     format_chat_line,
+    is_link_repost,
+    link_previews,
     name_with_anchor,
+    preview_image_urls,
+    repost_note,
     semantic_message_text,
 )
 from llm.preprocess import person_anchor
 from llm.preprocess.external_emoji import external_emoji_context
 from llm.preprocess.tweet_context import expand_tweets
-from llm.preprocess.emoji_text_utils import is_emoji_or_symbol_only, is_link_only
+from llm.preprocess.emoji_text_utils import (
+    is_emoji_or_symbol_only,
+    is_link_only,
+    preview_marker,
+    strip_preview_markers,
+)
 from llm.client.gpu_gate import foreground_recently_active, stream_busy
 from sys_settings import switches
 from sys_settings.time_settings import APP_TZ
-from llm.preprocess.vision_image import DEFAULT_MAX_FRAMES, extract_key_frames, is_vision_image
+from llm.preprocess.vision_image import DEFAULT_MAX_FRAMES, download_images, extract_key_frames, is_vision_image
 from llm.logger_factory import get_or_create_file_logger
 from services.llm_service import LLMService, TRUNCATED_NOTE
 from sys_settings.llm_settings import AmbientChatSettings
 from utils.utils import ChannelConfig
 from utils.background_tasks import spawn
+from utils.link_fix import TWEET_LINK_RE
 from utils.discord_content import DISCORD_MESSAGE_LIMIT, send_model_text, split_message
 
 logger = logging.getLogger(__name__)
@@ -154,20 +166,42 @@ def _is_command_like(stripped: str) -> bool:
     return stripped.startswith("!") or stripped.startswith("/")
 
 
-def _replied_bot_message_id(bot, message: discord.Message) -> Optional[str]:
-    """這則訊息用 Discord 回覆功能回了機器人的哪一則；回的不是機器人就是 None。"""
+def _replied_bot_message(bot, message: discord.Message) -> Optional[discord.Message]:
+    """這則訊息用 Discord 回覆功能回了機器人的哪一則；回的不是機器人（或解析不到）就是 None。"""
     ref = message.reference
     resolved = getattr(ref, "resolved", None) if ref is not None else None
     if isinstance(resolved, discord.Message) and bot.user is not None and resolved.author.id == bot.user.id:
-        return str(resolved.id)
+        return resolved
     return None
 
 
+def _replied_bot_message_id(bot, message: discord.Message) -> Optional[str]:
+    replied = _replied_bot_message(bot, message)
+    return str(replied.id) if replied is not None else None
+
+
+def _mentions_bot_in_text(bot, message: discord.Message) -> bool:
+    """內文真的打了 @ 機器人（`<@id>`）。"""
+    uid = bot.user.id
+    content = message.content or ""
+    return f"<@{uid}>" in content or f"<@!{uid}>" in content
+
+
 def _is_directed(bot, message: discord.Message) -> bool:
-    """是否被點名：@ 機器人，或 reply 機器人的訊息。"""
-    if bot.user is not None and bot.user in message.mentions:
+    """是否被點名：內文 @ 機器人，或用回覆功能回它自己講的話。
+
+    回它的自動轉貼不算：那是群友對影片、對原貼者的反應，以前一律被當成在叫它、每次都回，還回成像是它自己貼的。
+    Discord 回覆預設會把被回覆的人放進 mentions，所以回轉貼時只看內文有沒有真的打 @。
+    被回覆的訊息解析不到時照舊看 mentions。
+    """
+    if bot.user is None:
+        return False
+    if _mentions_bot_in_text(bot, message):
         return True
-    return _replied_bot_message_id(bot, message) is not None
+    replied = _replied_bot_message(bot, message)
+    if replied is not None:
+        return not is_link_repost(replied)
+    return bot.user in message.mentions
 
 
 def _get_tracker(bot, channel_id: int) -> dict:
@@ -690,6 +724,98 @@ async def _media_context(msg: discord.Message) -> tuple[list[str], list[str]]:
     return tweet_notes + emoji_notes, tweet_imgs + emoji_imgs
 
 
+_URL_RE = re.compile(r"https?://\S+")
+#: 等最新那則長出預覽時，多久看一次（訊息物件會被 Discord 的更新事件就地改掉，只要重看）
+_LINK_PREVIEW_POLL_SECONDS = 0.5
+_async_sleep = asyncio.sleep
+
+
+def _cached_message(bot, message_id: int) -> Optional[discord.Message]:
+    for m in reversed(getattr(bot, "cached_messages", None) or ()):
+        if m.id == message_id:
+            return m
+    return None
+
+
+def _repost_of(bot, msg: discord.Message) -> Optional[discord.Message]:
+    """bot 對這則的自動轉貼（還在訊息快取裡的）。原訊息的預覽被壓掉之後，預覽只剩在轉貼上。"""
+    me = getattr(bot, "user", None)
+    if me is None:
+        return None
+    for m in reversed(getattr(bot, "cached_messages", None) or ()):
+        ref = getattr(m, "reference", None)
+        if (getattr(ref, "message_id", None) == msg.id and getattr(m.author, "id", None) == me.id
+                and is_link_repost(m)):
+            return m
+    return None
+
+
+async def _repost_origin(bot, repost: discord.Message) -> Optional[discord.Message]:
+    """自動轉貼的原訊息（轉貼是回覆原訊息送出的）；舊的轉貼沒有回覆關係、或原訊息不見了就回 None。"""
+    ref = getattr(repost, "reference", None)
+    mid = getattr(ref, "message_id", None)
+    if mid is None:
+        return None
+    resolved = getattr(ref, "resolved", None)
+    if isinstance(resolved, discord.Message):
+        return resolved
+    cached = _cached_message(bot, mid)
+    if cached is not None:
+        return cached
+    try:
+        return await repost.channel.fetch_message(mid)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+        logger.debug("ambient 補抓轉貼的原訊息失敗：%s", exc)
+    return None
+
+
+def _waits_for_previews(bot, msg: discord.Message) -> bool:
+    """這則有（X 以外的）連結、Discord 卻還沒長出預覽，轉貼也還沒出來。暴雷的不等：本來就不給預覽。"""
+    content = msg.content or ""
+    if "||" in content or getattr(msg, "embeds", None):
+        return False
+    urls = _URL_RE.findall(content)
+    if not urls or all(TWEET_LINK_RE.match(u) for u in urls):
+        return False
+    return _repost_of(bot, msg) is None
+
+
+async def _await_link_previews(bot, msg: discord.Message) -> None:
+    """最新那則有連結卻還沒有預覽時等一下：Discord 抓預覽要一兩秒，被 @ 時不等的話模型只看得到網址。"""
+    waited = 0.0
+    while waited < _SETTINGS.link_preview_wait_seconds and _waits_for_previews(bot, msg):
+        await _async_sleep(_LINK_PREVIEW_POLL_SECONDS)
+        waited += _LINK_PREVIEW_POLL_SECONDS
+
+
+async def _link_preview_context(bot, msg: discord.Message) -> tuple[str, list[str]]:
+    """這則訊息上的連結 → (接在它文字後面的標記, 縮圖 base64)。
+
+    - bot 的自動轉貼標「（自動轉貼 原貼者 的連結）」：被回覆的是轉貼時，模型才知道影片是誰貼的、不是它自己分享的。
+    - 預覽用 `[預覽：…]`（跟聊天行同一個標記）；原訊息的預覽被壓掉了就拿 bot 轉貼上的。
+    - X 的預覽跳過：`_media_context` 另外查 X，內容比預覽完整。縮圖最多 `link_preview_max_images` 張。
+    下載失敗只是少一張圖，不擋回覆。
+    """
+    note = ""
+    if is_link_repost(msg):
+        origin = await _repost_origin(bot, msg)
+        note = repost_note(name_with_anchor(origin.author) if origin is not None else None)
+    source = msg
+    if not is_link_repost(msg) and not link_previews(msg, skip_tweets=True):
+        source = _repost_of(bot, msg) or msg
+    previews = link_previews(source, skip_tweets=True)
+    suffix = note + (f" {preview_marker(previews)}" if previews else "")
+    urls = preview_image_urls(source, limit=_SETTINGS.link_preview_max_images)
+    images: list[str] = []
+    if urls:
+        import aiohttp
+
+        async with aiohttp.ClientSession() as session:
+            images = await download_images(session, urls, limit=_SETTINGS.link_preview_max_images,
+                                           max_bytes=_SETTINGS.image_max_bytes)
+    return suffix, images
+
+
 async def _resolve_replied_to(
     message: discord.Message,
 ) -> Optional[discord.Message]:
@@ -977,7 +1103,8 @@ def _has_chime_backoff_signal(message: discord.Message, chat_context: Optional[l
     """近期對話是否出現對『插話本身』的不滿 → 自發插話該收手。掃觸發訊息 + 近期 chat_history。"""
     blob = message.content or ""
     if chat_context:
-        blob += " " + " ".join(chat_context)
+        # 連結預覽是網頁上的標題，不是群友說的話：影片標題裡有「閉嘴」不代表有人嫌它吵
+        blob += " " + strip_preview_markers(" ".join(chat_context))
     return any(w in blob for w in _CHIME_BACKOFF_WORDS)
 
 
@@ -1372,6 +1499,7 @@ async def _gather_inputs(
     replied_to_from: Optional[str] = None
     replied_to_text: Optional[str] = None
     replied_msg = await _resolve_replied_to(message)
+    reply_link_imgs: list[str] = []
     if replied_msg is not None:
         rtext = semantic_message_text(replied_msg)
         if not rtext and _has_image(replied_msg):
@@ -1379,8 +1507,10 @@ async def _gather_inputs(
         if rtext:
             if len(rtext) > 200:
                 rtext = rtext[:200] + "…"
+            # 連結預覽、自動轉貼的標記接在截斷之後：網址再長也不能把影片內容截掉
+            reply_link_note, reply_link_imgs = await _link_preview_context(bot, replied_msg)
             replied_to_from = name_with_anchor(replied_msg.author)
-            replied_to_text = rtext
+            replied_to_text = rtext + reply_link_note
         # 帶圖：被回覆訊息的圖也補進 vision payload（trigger 自己的圖優先，整體受 image_max_count 上限）
         if _has_image(replied_msg):
             ref_imgs = await _prepare_images(replied_msg)
@@ -1392,11 +1522,16 @@ async def _gather_inputs(
     latest_notes, latest_imgs = await _media_context(message)
     if reply_notes and replied_to_text is not None:
         replied_to_text = replied_to_text + "\n" + "\n".join(reply_notes)
-    if latest_imgs or reply_imgs:   # 群友自己貼的圖優先，整體受 image_max_count 上限
-        image_payload = ((image_payload or []) + latest_imgs + reply_imgs)[:_SETTINGS.image_max_count]
+    # 最新那則的連結預覽（被 @ 時常常還沒長出來，先等一下）
+    await _await_link_previews(bot, message)
+    latest_link_note, latest_link_imgs = await _link_preview_context(bot, message)
+    if latest_imgs or reply_imgs or latest_link_imgs or reply_link_imgs:   # 群友自己貼的圖優先，整體受 image_max_count 上限
+        image_payload = ((image_payload or []) + latest_imgs + latest_link_imgs + reply_imgs
+                         + reply_link_imgs)[:_SETTINGS.image_max_count]
 
     prompt_text, chat_context, asker_for_bundle = _frame_latest(
         message, directed, stripped, image_payload, latest_notes, chat_context, thread_map, asker_display_name,
+        latest_link_note,
     )
 
     # 認得人——召回在場成員 persona card（best-effort；用真正的觸發文字當檢索 query）
@@ -1431,7 +1566,7 @@ async def _gather_inputs(
 
 def _frame_latest(
     message, directed: bool, stripped: str, image_payload: Optional[list], latest_notes: list,
-    chat_context: Optional[list], thread_map: dict, asker_display_name: str,
+    chat_context: Optional[list], thread_map: dict, asker_display_name: str, link_note: str = "",
 ) -> tuple[str, Optional[list], Optional[str]]:
     """「最新訊息」怎麼包：被點名與自發分開。回 (prompt_text, chat_context, asker_for_bundle)。
 
@@ -1441,7 +1576,7 @@ def _frame_latest(
     """
     if directed:
         if stripped:
-            prompt_text = stripped
+            prompt_text = stripped + link_note
         elif image_payload:
             prompt_text = "(對方貼了一張圖)"
         else:
@@ -1457,7 +1592,9 @@ def _frame_latest(
     if stripped:
         # 觸發訊息本體不截斷（time_only 不帶日期，與近期視窗一致）；compact=False 保留原貌
         chat_context = (chat_context or []) + [
-            format_chat_line(message, APP_TZ, time_only=True, compact=False, prefix=f"#{next_no} ")
+            # 預覽由 link_note 給（原訊息的預覽被壓掉時，那份是從轉貼拿的），這裡不再自己讀
+            format_chat_line(message, APP_TZ, time_only=True, compact=False, prefix=f"#{next_no} ", previews=[])
+            + link_note
             + "".join(f" {n}" for n in latest_notes)
         ]
         thread_map[next_no] = message
