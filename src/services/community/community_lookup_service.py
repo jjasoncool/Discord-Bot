@@ -20,6 +20,7 @@ import aiosqlite
 from services.source_urls import bahamut_floor_url
 from services.state_db import StateDB
 from sys_settings.paths import ARTICLES_DB, sqlite_readonly_uri
+from utils.discord_content import channel_url
 
 
 # ── 預設常數 ──
@@ -220,7 +221,7 @@ class CommunityLookupService:
         thread_id = state.get("thread_id") if state else None
         if not thread_id:
             return None
-        return f"https://discord.com/channels/{guild_id}/{thread_id}"
+        return channel_url(guild_id, thread_id)
 
     # ══════════════════════════════════════════════════
     # 巴哈
@@ -383,9 +384,9 @@ class CommunityLookupService:
         post_state = posts.get(sn) if sn else None
         msg_id = (post_state or {}).get("msg_id")
         if msg_id:
-            return f"https://discord.com/channels/{guild_id}/{thread_id}/{msg_id}"
+            return channel_url(guild_id, thread_id, msg_id)
         # 退回 thread 首
-        return f"https://discord.com/channels/{guild_id}/{thread_id}"
+        return channel_url(guild_id, thread_id)
 
     async def search_bahamut_candidates(
         self, keyword: str, limit: int = FUZZY_CANDIDATE_LIMIT

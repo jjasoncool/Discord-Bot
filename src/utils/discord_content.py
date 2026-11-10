@@ -1,7 +1,7 @@
 """Discord 的共用工具：發文、切長文、換畫面、論壇標籤、上傳上限這類各功能都要用、跟功能本身無關的寫法。
 
 架構定位：基礎層（`utils/`），列在分層守衛的 `DISCORD_HELPERS_IN_BASE`，可以 import discord，不依賴其他層。
-  - 上層（誰呼叫）：轉發來源（官網、巴哈、PTT、FB、Telegram）、交易與商品市集、AI 插話與日記、
+  - 上層（誰呼叫）：轉發來源（官網、巴哈、PTT、FB、Telegram）、交易與商品市集、社群查詢、AI 插話與日記、
     主控台與各種面板（`commands/`）、面板置底（`utils.panel_bump`）。
   - 下層（呼叫誰）：discord.py。
 
@@ -10,11 +10,17 @@
   - 長文：`split_message`、`DISCORD_MESSAGE_LIMIT`。
   - 畫面：`edit_screen`、`guarded_screen`、`layout_text`、`message_custom_ids`。
   - 論壇標籤：`find_forum_tags`（照快取找）、`ensure_forum_tags`（沒有就建）、`get_forum_tags`（找一個，舊介面）。
+  - 連結：`channel_url(guild_id, channel_id, message_id=)`（只有 id 時組頻道、thread、訊息的網址）、
+    `masked_link(label, url)`（`[字](網址)`，字裡的方括號與 markdown 符號先處理掉）。
   - 其他：`upload_limit`、`chunk_discord_files`、`sanitize_forum_thread_title`、`linkify_image_urls`、`content_hash`。
 
 規則：
   - 這裡只放機制，訊息長什麼樣子由呼叫端決定。
   - 建論壇標籤只走 `ensure_forum_tags`（守衛擋直接 `create_tag`）。
+  - Discord 網址只由 `channel_url` 組（守衛擋別處寫 `discord.com/channels/`）；手上有物件就用它的 `jump_url`。
+  - 給人點的 thread 連結，讀的地方在私訊裡、或那個 thread 可能已封存（交易對話、論壇貼文）時，用網址不用 `<#id>`：
+    用戶端只認得自己載入過的頻道，封存的 thread 不會載入，`<#id>` 會顯示成「# 不明」而且點不進去；
+    網址點下去用戶端會向伺服器要那個頻道，讀者有權限就進得去。
 
 例外與決策：
   - 論壇標籤不用 `ForumChannel.create_tag`：它拿快取的標籤清單整份覆寫，建完又不更新快取（要等 Discord 推送頻道更新），
@@ -60,6 +66,25 @@ def linkify_image_urls(text: str) -> str:
             return f"[🖼 圖片]({url})"
         return url
     return re.sub(r'https?://[^\s<>"]+', _replace, text)
+
+
+#: 遮罩連結的字裡要拿掉的網址開頭
+_URL_SCHEME = re.compile(r"https?://", re.IGNORECASE)
+
+
+def channel_url(guild_id: int, channel_id: int, message_id: Optional[int] = None) -> str:
+    """頻道、thread 或其中一則訊息的網址。只有 id、手上沒有物件時用（例：資料庫裡記的交易對話）。"""
+    url = f"https://discord.com/channels/{guild_id}/{channel_id}"
+    return f"{url}/{message_id}" if message_id else url
+
+
+def masked_link(label: str, url: str) -> str:
+    """`[字](網址)`。字通常是群友取的名字或商品標題：方括號換成全形、markdown 符號跳脫，
+    不然名字裡有 `]` 連結就斷在那裡、有 `*` `_` 會把後面的字變粗體或斜體。
+    字裡的網址拿掉 `http(s)://`：Discord 為了防釣魚，不顯示字裡帶網址的遮罩連結。"""
+    text = _URL_SCHEME.sub("", label)
+    text = discord.utils.escape_markdown(text).replace("[", "［").replace("]", "］")
+    return f"[{text}]({url})"
 
 
 def layout_text(view: "discord.ui.LayoutView") -> str:

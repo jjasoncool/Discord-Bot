@@ -25,6 +25,7 @@ from utils.discord_content import (
     linkify_image_urls,
     content_hash,
     get_forum_tags,
+    channel_url,
 )
 from services.relay.base_monitor import BaseContentMonitor, content_send_lock, get_article_runtime_config
 
@@ -71,7 +72,7 @@ BAHAMUT_PROFILE_URL = "https://home.gamer.com.tw/profile/index.php?owner={user_i
 
 def _continuation_nav(guild_id: int, thread_id: int, next_msg_id: int) -> str:
     """接在續文底部、連到下一則續文的導航連結。"""
-    return f"\n\n⬇️ [更多內文...](https://discord.com/channels/{guild_id}/{thread_id}/{next_msg_id})"
+    return f"\n\n⬇️ [更多內文...]({channel_url(guild_id, thread_id, next_msg_id)})"
 
 
 def _author_link(name: str, user_id: str) -> str:
@@ -735,7 +736,7 @@ class BahamutMonitor(BaseContentMonitor):
                     if i == COMMENT_SLOTS_COUNT - 1 and len(all_comment_slots) > COMMENT_SLOTS_COUNT:
                         overflow_slots = post_state.get("overflow_slots", [])
                         if overflow_slots:
-                            nav_link = f"https://discord.com/channels/{guild_id}/{thread.id}/{overflow_slots[0]['msg_id']}"
+                            nav_link = channel_url(guild_id, thread.id, overflow_slots[0]['msg_id'])
                             lines = [self._format_single_comment(c) for c in all_comment_slots[i]]
                             lines.append("")
                             lines.append(f"⬇️ [更多留言...]({nav_link})")
@@ -777,7 +778,7 @@ class BahamutMonitor(BaseContentMonitor):
                             next_msg_id = overflow_slots[next_overflow_idx]["msg_id"]
                             lines = [self._format_single_comment(c) for c in all_comment_slots[data_idx]]
                             lines.append("")
-                            lines.append(f"⬇️ [更多留言...](https://discord.com/channels/{guild_id}/{thread.id}/{next_msg_id})")
+                            lines.append(f"⬇️ [更多留言...]({channel_url(guild_id, thread.id, next_msg_id)})")
                             description = "\n".join(lines)
                             if len(description) > EMBED_DESC_LIMIT:
                                 description = description[:EMBED_DESC_LIMIT - 20] + "\n\n⋯（已截斷）"
@@ -829,7 +830,7 @@ class BahamutMonitor(BaseContentMonitor):
                         overflow_slots.append(overflow_slot)
 
                         # edit 前一格加導航連結
-                        nav_link = f"https://discord.com/channels/{guild_id}/{thread.id}/{overflow_msg.id}"
+                        nav_link = channel_url(guild_id, thread.id, overflow_msg.id)
                         lines = [self._format_single_comment(c) for c in last_comments]
                         lines.append("")
                         lines.append(f"⬇️ [更多留言...]({nav_link})")
@@ -1124,7 +1125,7 @@ class BahamutMonitor(BaseContentMonitor):
                 post_state["overflow_slots"].append(overflow_slot)
 
                 # edit 前一格，在底部 append 導航連結
-                nav_link = f"https://discord.com/channels/{guild_id}/{thread.id}/{overflow_msg.id}"
+                nav_link = channel_url(guild_id, thread.id, overflow_msg.id)
                 lines = [self._format_single_comment(c) for c in prev_comments]
                 lines.append("")
                 lines.append(f"⬇️ [更多留言...]({nav_link})")

@@ -303,6 +303,22 @@ def _find_hardcoded_bahamut_floor_urls(path: Path) -> list[int]:
     return hits
 
 
+def _find_hand_built_discord_urls(path: Path) -> list[int]:
+    """找自己拼的 Discord 網址（`discord.com/channels`、舊網域 `discordapp.com`；說明文字不算）。網址只活在字串裡，走 AST。
+
+    起因：巴哈轉發、社群查詢各自用 f-string 拼了八處，市集週報又要一處；收成 `channel_url` 一份，
+    要給人點的連結時也順便看到旁邊的 `masked_link` 與「私訊裡、封存的 thread 不要用 `<#id>`」的規則。
+    """
+    return _find_hand_built_discord_urls_in_tree(_parse(path))
+
+
+_DISCORD_CHANNEL_URL = re.compile(r"discord(?:app)?\.com/channels")
+
+
+def _find_hand_built_discord_urls_in_tree(tree: ast.Module) -> list[int]:
+    return sorted({line for line, text in _code_strings_in_tree(tree) if _DISCORD_CHANNEL_URL.search(text)})
+
+
 _CONTENT_LIKE = re.compile(r"\b(?:article_content|article_title|content|title|text)\s+LIKE\b", re.IGNORECASE)
 
 
@@ -1107,6 +1123,12 @@ RULES = [
         allowed={"services/source_urls.py"},
     ),
     Rule(
+        name="Discord 頻道、thread、訊息的網址（自己拼的網址各寫一份，格式一改就要找遍全專案）",
+        finder=_find_hand_built_discord_urls,
+        canonical="utils.discord_content.channel_url（只有 id 時）／物件的 jump_url；連結字用 masked_link",
+        allowed={"utils/discord_content.py"},
+    ),
+    Rule(
         name="讀交易 thread 的歷史",
         finder=_find_trade_thread_reads,
         canonical="TradeService.read（services.community.trade_service.TradeThreadLog）",
@@ -1396,6 +1418,26 @@ class MarketDBFinderTests(unittest.TestCase):
 
     def test_ignores_docstrings_and_other_names(self):
         src = '"""市集資料庫在 market.db 以外的說明。"""\nfrom sys_settings.paths import MARKET_BACKUP_DIR\n'
+        self.assertEqual(self._scan(src), [])
+
+
+class DiscordUrlFinderTests(unittest.TestCase):
+    """「Discord 網址只由 channel_url 組」規則的偵測器：一般字串與 f-string 都抓，說明文字與註解不算。"""
+
+    def _scan(self, src):
+        return _find_hand_built_discord_urls_in_tree(ast.parse(src))
+
+    def test_catches_plain_and_f_strings(self):
+        src = (
+            "a = 'https://discord.com/channels/1/2'\n"
+            "b = f'[看]( https://discord.com/channels/{g}/{t})'\n"
+            "c = channel_url(g, t)\n"
+            "d = 'https://discordapp.com/channels' + f'/{g}/{t}'\n"
+        )
+        self.assertEqual(self._scan(src), [1, 2, 4])
+
+    def test_ignores_docstrings_and_comments(self):
+        src = '"""網址長得像 https://discord.com/channels/g/t。"""\n# https://discord.com/channels/x/y\nx = 1\n'
         self.assertEqual(self._scan(src), [])
 
 
