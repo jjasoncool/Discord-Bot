@@ -5,6 +5,7 @@
 回覆 bot 轉貼的 8 次都被當成在叫它、一定回，有一次還回成像是它自己貼的連結。
 
 守的底線：
+- 平台的差異都在 `RULES`：加一條規則就能轉，認自動轉貼的網域跟著規則表走；X 的替代網址 `tweet_context` 認得
 - bilibili 只轉 bilibili.com/video/BV…（www.、m.、語言路徑都認），b23.tv 與已經是 vx 的不轉；只留 p、t 參數
 - X 只轉影片；fixupx 做不出預覽換 vxtwitter，都做不出來就不轉；圖片貼文不轉也不預檢
 - 預檢照 Discord 的讀法：頁面標籤（vxtwitter 用 name=）或 fixupx 的 Mastodon 相容 API 有影片或圖片才算
@@ -24,6 +25,7 @@
 import asyncio
 import json
 import os
+import re
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -130,7 +132,8 @@ class FindLinksTests(unittest.TestCase):
             "https://fixupx.com/WutheringNews/status/2117883410727547031",
             "https://vxtwitter.com/WutheringNews/status/2117883410727547031",
         ))
-        self.assertEqual(links[0].tweet_id, "2117883410727547031")
+        self.assertEqual(links[0].rule.name, "x")
+        self.assertEqual(links[0].match.group("id"), "2117883410727547031")
 
     def test_spoilered_links_are_reposted_inside_spoilers(self):
         links = link_fix.find_fixable_links("||https://x.com/a/status/2?s=20|| 和 https://www.bilibili.com/video/BV1eF4e6sEra")
@@ -138,6 +141,32 @@ class FindLinksTests(unittest.TestCase):
         text = link_fix.repost_text([FixedLink("https://fixupx.com/a/status/2", True),
                                      FixedLink("https://www.vxbilibili.com/video/BV1eF4e6sEra", False)])
         self.assertEqual(text, "||https://fixupx.com/a/status/2||\nhttps://www.vxbilibili.com/video/BV1eF4e6sEra")
+
+    def test_every_replacement_host_is_recognised_as_a_repost(self):
+        for rule in link_fix.RULES:
+            for host in rule.hosts():
+                with self.subTest(rule=rule.name, host=host):
+                    self.assertTrue(link_fix.is_repost_text(f"https://{host}/a/1"))
+                    self.assertTrue(link_fix.is_repost_text(f"https://www.{host}/a/1"))
+
+    def test_x_replacements_are_still_read_as_x_posts(self):
+        """群友回覆轉貼時，`tweet_context` 要認得出那是哪一篇 X 貼文。"""
+        (x_rule,) = [r for r in link_fix.RULES if r.name == "x"]
+        for url in x_rule.candidates(link_fix.TWITTER_STATUS_RE.search("https://x.com/a/status/2")):
+            with self.subTest(url=url):
+                self.assertEqual(link_fix.tweet_ids(url), ["2"])
+
+    def test_a_new_platform_is_one_rule(self):
+        demo = link_fix.LinkRule("demo", re.compile(r"https://demo\.example/v/(?P<vid>\d+)"),
+                                 ("https://fixdemo.example/v/{vid}",))
+        with mock.patch.object(link_fix, "RULES", link_fix.RULES + (demo,)):
+            links = link_fix.find_fixable_links("看 https://demo.example/v/42")
+            self.assertEqual([lk.candidates for lk in links], [("https://fixdemo.example/v/42",)])
+            self.assertTrue(link_fix.is_repost_text("https://fixdemo.example/v/42"))
+            session = _Session({"https://fixdemo.example/v/42": (200, VIDEO_PAGE)})
+            self.assertEqual(_select("https://demo.example/v/42", session),
+                             [FixedLink("https://fixdemo.example/v/42", False)])
+        self.assertFalse(link_fix.is_repost_text("https://fixdemo.example/v/42"), "拿掉規則就不認")
 
     def test_repost_text_is_recognised_and_chat_is_not(self):
         self.assertTrue(link_fix.is_repost_text("||https://fixupx.com/a/status/2||\nhttps://www.vxbilibili.com/video/BV1"))

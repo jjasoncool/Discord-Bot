@@ -7,6 +7,7 @@
   - 下層（呼叫誰）：X 的 syndication CDN（查貼文類型）、替代網址本身（預檢）。
 
 介面：
+- `RULES`：每個平台一條 `LinkRule`（認哪種網址、換成哪些替代網址、轉之前要不要再判斷）。
 - `find_fixable_links(content)`：訊息裡可以轉的連結與它們的替代網址（純字串，不連網）。
 - `select_fixed_links(content, session=None)`：真的要轉貼的替代網址（X 只留影片；每個都預檢過）。
 - `repost_text(fixed)`：轉貼訊息的內文（原連結在暴雷裡就照包 `||`）。
@@ -15,11 +16,13 @@
 - `fetch_tweet(session, tweet_id)`、`tweet_ids(text)`、`get_token(tweet_id)`：查 X 貼文。
 
 規則：
+- 流程不分平台：認網址、組替代網址、轉之前的判斷、預檢、認自動轉貼都照 `RULES` 跑。加一個平台＝加一條 `LinkRule`
+  （加測試）；認自動轉貼的網域清單從各條規則的替代網址組出來，不另外維護。
 - X 只轉 `/status/<id>` 的貼文，而且確定是影片（含 GIF）或查詢服務問不到時才轉；圖片貼文 Discord 原生預覽就正常，
   轉了還會把原生預覽一起壓掉。確定不存在（404、tombstone）不轉。
 - bilibili 只轉 `bilibili.com/video/BV…`（www.、m.、/en/ 這類語言路徑都認）；短網址 b23.tv 不轉。保留分 P（`p`）與
   時間點（`t`），其他追蹤參數拿掉；不加語言前綴（vxbilibili 已經把標題轉成繁體）。
-- 已經是替代網域的連結不轉（比對時要求 `https://` 後面直接接原網域）。
+- 已經是替代網域的連結不轉（各條規則的正規式要求 `https://` 後面直接接原網域）。
 - 替代網址依序預檢，第一個過的才用；全部不過就不轉，群友保留 Discord 原生的預覽。
 
 例外與決策：
@@ -34,10 +37,12 @@
 """
 
 import asyncio
+import functools
 import logging
 import math
 import re
 from dataclasses import dataclass
+from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 logger = logging.getLogger(__name__)
@@ -57,10 +62,6 @@ BILIBILI_VIDEO_RE = re.compile(
     re.IGNORECASE,
 )
 
-#: X 的替代網域，依序預檢
-X_FIX_DOMAINS = ("fixupx.com", "vxtwitter.com")
-#: bilibili 的替代網址前綴
-BILIBILI_FIX_BASE = "https://www.vxbilibili.com/video/"
 #: bilibili 網址裡要留下來的參數：分 P、時間點
 _BILIBILI_KEEP_PARAMS = ("p", "t")
 
@@ -71,9 +72,6 @@ TWEET_LINK_RE = re.compile(
     r"[A-Za-z0-9_]+/status/(?P<id>\d+)",
     re.IGNORECASE,
 )
-
-# bot 轉貼用到的替代網址（認自動轉貼用）
-_REPOST_URL_RE = re.compile(r"https?://(?:www\.)?(?:fixupx|vxtwitter|vxbilibili)\.com/\S+", re.IGNORECASE)
 
 _SPOILER_RE = re.compile(r"\|\|(.+?)\|\|", re.DOTALL)
 
@@ -100,13 +98,38 @@ _BASE36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 
 
 @dataclass(frozen=True)
+class LinkRule:
+    """一個平台的轉址規則。平台之間只差這幾樣，流程照 `RULES` 跑。
+
+    - `pattern`：認原網址的正規式（命名群組給 `targets` 用）。
+    - `targets`：替代網址的範本（`str.format`），依序預檢、第一個做得出預覽的才用。
+    - `fields`：範本要的值；不給就用正規式的命名群組（沒對到的當空字串）。
+    - `should_fix`：轉之前的額外判斷（會連網）；不給就是都轉。
+    """
+
+    name: str
+    pattern: re.Pattern[str]
+    targets: tuple[str, ...]
+    fields: Callable[[re.Match[str]], dict[str, str]] | None = None
+    should_fix: Callable[[Any, re.Match[str]], Awaitable[bool]] | None = None
+
+    def candidates(self, match: re.Match[str]) -> tuple[str, ...]:
+        values = self.fields(match) if self.fields else {k: v or "" for k, v in match.groupdict().items()}
+        return tuple(t.format(**values) for t in self.targets)
+
+    def hosts(self) -> tuple[str, ...]:
+        """替代網址的網域（不含 www.），認自動轉貼用。"""
+        return tuple(urlsplit(t).netloc.removeprefix("www.") for t in self.targets)
+
+
+@dataclass(frozen=True)
 class FixableLink:
     """訊息裡一個可以轉的連結。"""
 
-    kind: str                     # "x" 或 "bilibili"
+    rule: LinkRule
+    match: re.Match[str]
     candidates: tuple[str, ...]   # 依序預檢的替代網址
     spoiler: bool                 # 原連結在 `||…||` 裡
-    tweet_id: str = ""            # X 才有：查貼文類型用
 
 
 @dataclass(frozen=True)
@@ -154,12 +177,32 @@ def _spoiler_spans(content: str) -> list[tuple[int, int]]:
     return [(m.start(1), m.end(1)) for m in _SPOILER_RE.finditer(content)]
 
 
-def _bilibili_query(query: str | None) -> str:
+def _bilibili_fields(match: re.Match[str]) -> dict[str, str]:
     """只留分 P 與時間點，其他（spm_id_from、vd_source、trackid、share_*）都是追蹤用的。"""
-    if not query:
-        return ""
-    kept = [(k, v) for k, v in parse_qsl(query.lstrip("?"), keep_blank_values=False) if k in _BILIBILI_KEEP_PARAMS]
-    return f"?{urlencode(kept)}" if kept else ""
+    kept = [(k, v) for k, v in parse_qsl((match.group("query") or "").lstrip("?")) if k in _BILIBILI_KEEP_PARAMS]
+    return {"bv": match.group("bv"), "query": f"?{urlencode(kept)}" if kept else ""}
+
+
+async def _is_video_tweet(session, match: re.Match[str]) -> bool:
+    """X 只在「確定有影片」或「服務掛掉問不到」時才轉；圖片、純文字、確定不存在都放生。"""
+    return await _classify_tweet(session, match.group("id")) in ("video", "unknown")
+
+
+RULES: tuple[LinkRule, ...] = (
+    # 範本只用 path：追蹤用的 query string 拿掉，連結比較乾淨，也不影響預覽
+    LinkRule("x", TWITTER_STATUS_RE, ("https://fixupx.com/{path}", "https://vxtwitter.com/{path}"),
+             should_fix=_is_video_tweet),
+    LinkRule("bilibili", BILIBILI_VIDEO_RE, ("https://www.vxbilibili.com/video/{bv}{query}",),
+             fields=_bilibili_fields),
+)
+
+
+
+@functools.lru_cache(maxsize=4)
+def _repost_url_re(rules: tuple[LinkRule, ...]) -> re.Pattern[str]:
+    """bot 的自動轉貼只會用到這些網域：從規則表組出來，加平台時不用另外記。"""
+    hosts = "|".join(re.escape(h) for rule in rules for h in rule.hosts())
+    return re.compile(rf"https?://(?:www\.)?(?:{hosts})/\S+", re.IGNORECASE)
 
 
 def find_fixable_links(content: str) -> list[FixableLink]:
@@ -172,13 +215,9 @@ def find_fixable_links(content: str) -> list[FixableLink]:
         return any(start <= pos < end for start, end in spans)
 
     found: list[tuple[int, FixableLink]] = []
-    for m in TWITTER_STATUS_RE.finditer(content):
-        # 去掉追蹤用的 query string：連結比較乾淨，也不影響預覽
-        candidates = tuple(f"https://{domain}/{m.group('path')}" for domain in X_FIX_DOMAINS)
-        found.append((m.start(), FixableLink("x", candidates, in_spoiler(m.start()), m.group("id"))))
-    for m in BILIBILI_VIDEO_RE.finditer(content):
-        url = f"{BILIBILI_FIX_BASE}{m.group('bv')}{_bilibili_query(m.group('query'))}"
-        found.append((m.start(), FixableLink("bilibili", (url,), in_spoiler(m.start()))))
+    for rule in RULES:
+        for m in rule.pattern.finditer(content):
+            found.append((m.start(), FixableLink(rule, m, rule.candidates(m), in_spoiler(m.start()))))
 
     out: list[FixableLink] = []
     seen: set[str] = set()
@@ -198,7 +237,8 @@ def repost_text(fixed: list[FixedLink]) -> str:
 def is_repost_text(text: str) -> bool:
     """這段文字是不是只有替代網址（暴雷的 `||` 不算內容）——bot 的自動轉貼就長這樣。"""
     tokens = (text or "").replace("||", " ").split()
-    return bool(tokens) and all(_REPOST_URL_RE.fullmatch(t) for t in tokens)
+    pattern = _repost_url_re(RULES)
+    return bool(tokens) and all(pattern.fullmatch(t) for t in tokens)
 
 
 def has_media_meta(html: str) -> bool:
@@ -341,7 +381,7 @@ async def select_fixed_links(content: str, session=None) -> list[FixedLink]:
     """挑出真的要轉貼的替代網址。
 
     先用 regex 擋格式（本地、免網路），沒有可轉的連結就直接回空、不開 session（多數訊息走這條）；
-    X 再查類型，只留影片或問不到的；最後每個連結的替代網址依序預檢，第一個做得出預覽的才用。
+    規則有 `should_fix` 的再判斷一次（X 只留影片或問不到的）；最後每個連結的替代網址依序預檢，第一個做得出預覽的才用。
 
     session 可由呼叫端注入（方便測試、共用連線池）；不給就自開自關。
     """
@@ -357,11 +397,8 @@ async def select_fixed_links(content: str, session=None) -> list[FixedLink]:
     try:
         fixed: list[FixedLink] = []
         for link in links:
-            if link.kind == "x":
-                decision = await _classify_tweet(session, link.tweet_id)
-                # 只在「確定有影片」或「服務掛掉問不到」時才轉；非影片／不存在一律放生
-                if decision not in ("video", "unknown"):
-                    continue
+            if link.rule.should_fix is not None and not await link.rule.should_fix(session, link.match):
+                continue
             for url in link.candidates:
                 if await probe_preview(session, url):
                     fixed.append(FixedLink(url, link.spoiler))
