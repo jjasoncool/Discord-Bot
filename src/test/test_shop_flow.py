@@ -2480,6 +2480,20 @@ class ImportTests(ShopTestCase):
         self.assertIn("都是新功能上線前開的", text)
         self.assertIn("改成定金＋尾款", text)
 
+    def test_old_trades_are_listed_once_not_again_as_idle(self):
+        # 舊交易的待辦已經寫了要完成或取消：不再列進「沒動靜」（天數從開單那時算，幾百天也看不出什麼）
+        self.post.messages[0].embed.title = "【定金】月相代儲"
+        self.call(market_import.run_import(self.shop))
+        self.world.advance(days=300)
+        summaries = self.call(market_report.summarize(self.shop, self.world.now))
+        old = next(s for s in summaries if s.trade_id == self.forum_trade.id)
+        self.assertTrue(old.legacy and old.needs_supplier)
+        self.assertFalse(old.idle)
+        for text in (market_report.weekly_text(summaries, SELLER.id, self.world.now),
+                     market_report.my_trades_text(summaries, SELLER.id)):
+            self.assertEqual(text.count(self.forum_trade.jump_url), 1)
+            self.assertNotIn("沒動靜", text)
+
     def test_turning_the_transition_off_goes_back_to_the_normal_rules(self):
         # 那幾篇都改好之後把開關關掉：【定金】的規則全部不再作用，照一般規則
         listing = self.deposit_listing_imported()

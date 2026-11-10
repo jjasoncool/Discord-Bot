@@ -19,7 +19,8 @@
     `<#id>` 在那裡顯示成「# 不明」點不進去；同一篇商品有好幾位需求方時，靠名字分得出是哪一筆。
   - 週報太長時從換行處截掉，結尾照樣留「全部清單」那句（太長時最需要指路去看全部）。
   - 週報只給有待辦的觀星者，群主不收；每週一份、記在資料庫，重啟不重發；週一 23:59 前開機會補發，過了等下週。
-  - 上線前的舊交易算待辦（沒有交易進度，只能請供應方自己完成或取消）。第一版不統計金額。
+  - 上線前的舊交易算待辦（沒有交易進度，只能請供應方自己完成或取消），不列進「沒動靜」：待辦已經寫了要完成或取消，
+    再列一次只是重複，天數從開單那時算（幾百天）也看不出什麼。第一版不統計金額。
 """
 from __future__ import annotations
 
@@ -77,7 +78,7 @@ class TradeSummary:
 
     @property
     def idle(self) -> bool:
-        return self.days_idle >= IDLE_DAYS and not self.waiting_for_goods
+        return self.days_idle >= IDLE_DAYS and not self.waiting_for_goods and not self.legacy
 
     @property
     def needs_supplier(self) -> bool:
