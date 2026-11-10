@@ -36,9 +36,10 @@ import discord
 from services.community import trade_progress as tp
 from services.community import market_transition as transition
 from services.community.shop_listing import Listing, Variant, format_cutoff, format_date, money
-from services.community.trade_service import NO_RECORD_TEXT, NOT_READY_TEXT, TradeRef, receipt_state
+from services.community.trade_service import NO_RECORD_TEXT, NOT_READY_TEXT, TradeRef, receipt_state, thread_link
 from services.market_db import MarketDB, TradeItemRow, TradeRow
 from sys_settings.time_settings import APP_TZ
+from utils.discord_content import masked_link
 
 if TYPE_CHECKING:
     from services.community.shop_service import ShopService
@@ -337,7 +338,7 @@ class ListingTrades:
         只留在私人交易對話裡。成功就不說，沒保存到才請大家通知管理員，原因寫在 log。"""
         try:
             db = await self.trade.db()
-            guild = getattr(thread, "guild", None) or getattr(await self.shop._forum(), "guild", None)
+            guild = getattr(thread, "guild", None) or await self.shop.guild()
             names = await self.trade.display_names(guild, (trade.requester_id, trade.supplier_id))
             requester = names.get(trade.requester_id) or str(trade.requester_id)
             supplier = names.get(trade.supplier_id) or str(trade.supplier_id)
@@ -353,11 +354,13 @@ class ListingTrades:
                         + "）" + (f"，取消還回 {i.returned} 份" if i.returned else "")
                         for i in items if i.order_event_id == event.id]
                 orders.append(f"🧾 {when:%Y-%m-%d %H:%M} 下單：\n" + "\n".join(rows))
-            summary = (f"商品：{title}（<#{trade.source_id}>）\n"
+            # 留底時交易對話已經鎖定封存、商品貼文也可能封存了：給連結，<#id> 會顯示成「# 不明」點不進去。
+            # 交易對話是私人的，沒參與的人點了進不去，管理員可以直接點進去看
+            conversation = masked_link("點這裡查看", thread.jump_url)
+            summary = (f"商品：{thread_link(guild, trade.source_id, title)}\n"
                        f"需求方：{requester}　供應方：{supplier}\n"
                        f"完成時間：{self.trade.finished_at(trade).astimezone(APP_TZ):%Y-%m-%d %H:%M}\n"
-                       # 沒參與的人點了進不去（私人對話），管理員可以直接點進去看
-                       f"交易對話：<#{trade.id}>\n\n" + "\n\n".join(orders))
+                       f"交易對話：{conversation}\n\n" + "\n\n".join(orders))
             posted = await self.trade.post_archive(
                 title=f"【市集】{title}｜{requester} 與 {supplier}"[:100], summary=summary, transcript="",
                 filename=f"shop_{trade.source_id}_{trade.id}.txt")

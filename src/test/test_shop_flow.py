@@ -515,7 +515,7 @@ class ManageTests(ShopTestCase):
         with self.assertRaises(ShopError) as caught:
             self.edit(self.thread, 1, "60 月相", "30", "8", self.cutoff_text(days=3), "preorder")
         self.assertIn("交易中不能改類型", str(caught.exception))
-        self.assertIn(f"<#{trade_thread.id}>", str(caught.exception))
+        self.assertIn(masked_link(BUYER.display_name, trade_thread.jump_url), str(caught.exception))
         _, note = self.edit(self.thread, 1, "60 月相", "35", "8", "", "instant")
         self.assertIn("已下單的 2 份照原本的金額", note)
         (item,) = self.call(self.db.items(trade_thread.id))
@@ -669,10 +669,16 @@ class ManageTests(ShopTestCase):
             self.call(self.shop.edit_info(self.thread.id, SELLER, title="月相代儲", description="", unit="USD$"))
 
     def test_a_long_list_of_blocking_trades_still_fits(self):
-        trades = [SimpleNamespace(id=10 ** 18 + n) for n in range(40)]
-        text = shop_service._thread_list(trades)
+        # 每一筆是網址加需求方名字（名字最長 32 字、伺服器與對話 id 各 19 位）：列到上限，
+        # 加上前面最長約 150 字的說明，還要放得進一則訊息（2000 字）
+        self.world.guild.id = 10 ** 18
+        trades = [SimpleNamespace(id=10 ** 18 + n, requester_id=10 ** 18 + n) for n in range(40)]
+        for trade in trades:
+            self.world.members[trade.requester_id] = SimpleNamespace(id=trade.requester_id, display_name="名" * 32)
+        text = self.call(self.shop._thread_list(trades))
         self.assertIn("等 40 筆", text)
-        self.assertLess(len(text), 500)
+        self.assertEqual(text.count("https://discord.com/channels/"), shop_service._THREAD_LIST_MAX)
+        self.assertLess(len(text), 1500)
 
     def test_unfinished_preorder_or_deposit_trades_block_closing(self):
         self.add(self.thread, f"6480 月相｜3000｜3｜{self.cutoff_text(days=3)}")
@@ -681,7 +687,7 @@ class ManageTests(ShopTestCase):
         with self.assertRaises(ShopError) as caught:
             self.call(self.shop.close_listing(self.thread.id, SELLER))
 
-        self.assertIn(f"<#{trade_thread.id}>", str(caught.exception))
+        self.assertIn(masked_link(BUYER.display_name, trade_thread.jump_url), str(caught.exception))
         self.assertFalse(self.listing(self.thread).closed)
 
     def test_delivery_cannot_change_while_trading(self):
@@ -955,7 +961,10 @@ class OneTimeFlowTests(ShopTestCase):
         self.assertEqual([m.components for m in self.trade_thread.messages if m.components], [])
         (_, record), = self.world.archived_posts
         self.assertIn("60 月相 ×2（NT$30）", record["content"])
-        self.assertIn(f"<#{self.trade_thread.id}>", record["content"])
+        # 留底時交易對話已經封存：給網址，<#id> 會顯示成「# 不明」點不進去
+        self.assertIn(masked_link("點這裡查看", self.trade_thread.jump_url), record["content"])
+        self.assertIn(masked_link("月相代儲", self.thread.jump_url), record["content"])
+        self.assertNotIn("<#", record["content"])
         self.assertNotIn("對話紀錄", record["content"])   # 私人對話的內容不複製進封存頻道
         self.assertFalse(self.thread.locked)          # 商品保留，可以賣給別人
 
@@ -2379,6 +2388,8 @@ class ImportTests(ShopTestCase):
         flow = next(f.value for f in self.old_trade.messages[0].embed.fields if f.name == "流程")
         self.assertIn("已寄出", flow)            # 實體交付：寄出、需求方按已收到
         self.assertNotIn("自動視為已領收", flow)
+        source = next(f.value for f in self.old_trade.messages[0].embed.fields if f.name == "商品貼文")
+        self.assertEqual(source, masked_link(self.post.name, self.post.jump_url))   # 商品貼文封存後也點得進去
 
     def test_a_card_cut_short_during_conversion_is_sent_later(self):
         # 轉成新流程寫好了、補發交易進度時 Discord 出錯：等待提醒的排程照 adopted 那筆補發，帶說明

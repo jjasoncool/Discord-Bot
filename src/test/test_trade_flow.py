@@ -468,6 +468,8 @@ class OpenTradeTests(TradeFlowTestCase):
         self.assertEqual(first.pinged, sorted([REQUESTER.id, SUPPLIER.id]))
         self.assertEqual(first.view.actions, (NOTIFY, CANCEL, HELP))
         self.assertIn("供應方和群主可以取消", first.embed.fields[-1].value)
+        # 需求貼文一小時沒人講話就封存：給網址，<#id> 封存後會顯示成「# 不明」點不進去
+        self.assertEqual(first.embed.fields[0].value, f"[{post.name}]({post.jump_url})")
         self.assertEqual(self.ref_of(thread), TradeRef(post.id, REQUESTER.id, SUPPLIER.id))
         trade = self.trade_row(thread)
         self.assertEqual((trade.source_kind, trade.source_id, trade.requester_id, trade.supplier_id, trade.status),

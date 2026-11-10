@@ -639,7 +639,7 @@ class TradeService:
                 await thread.add_user(supplier)
                 opening = await thread.send(
                     content=f"{requester.mention} {supplier.mention}",
-                    embed=self._opening_embed(ref, kind, description, flow),
+                    embed=self._opening_embed(ref, kind, description, flow, source),
                     view=self._make_view(ref, (NOTIFY, CANCEL, HELP)),
                     allowed_mentions=mention_only(requester.id, supplier.id),
                 )
@@ -1511,16 +1511,21 @@ class TradeService:
             return
         ref = TradeRef(trade.source_id, trade.requester_id, trade.supplier_id)
         description, flow = await kind.opening(ref)
+        source = await self.get_thread(trade.source_id)
         try:
             await reopen_thread(thread)
             message = await thread.fetch_message(opened.message_id)
-            await message.edit(embed=self._opening_embed(ref, kind, description, flow))
+            await message.edit(embed=self._opening_embed(ref, kind, description, flow, source))
         except discord.HTTPException:
             logger.warning("交易：更新開單訊息的流程說明失敗 thread=%s", thread.id, exc_info=True)
 
-    def _opening_embed(self, ref: TradeRef, kind: Optional[SourceKind], description: str, flow: str) -> discord.Embed:
+    def _opening_embed(self, ref: TradeRef, kind: Optional[SourceKind], description: str, flow: str,
+                       source: Optional[discord.Thread]) -> discord.Embed:
         embed = discord.Embed(title="交易確認", description=description, color=discord.Color.gold())
-        embed.add_field(name=kind.label if kind else "需求貼文", value=f"<#{ref.source_id}>", inline=False)
+        # 需求貼文一小時沒人講話就封存、商品貼文七天：封存後 <#id> 顯示成「# 不明」點不進去，給網址；
+        # 來源已經不在（被刪）時網址也點不進去，留 <#id> 就好
+        value = masked_link(source.name, source.jump_url) if source is not None else f"<#{ref.source_id}>"
+        embed.add_field(name=kind.label if kind else "需求貼文", value=value, inline=False)
         embed.add_field(name="流程", value=flow, inline=False)
         return embed
 

@@ -68,7 +68,8 @@ from services.community.shop_listing import (
 )
 from services.community import market_transition as transition
 from services.community.shop_trade import ListingTrades, Notified, Step
-from services.community.trade_service import NOT_READY_TEXT, WRAP_UP_GRACE, OpenedTrade, TradeService
+from services.community.trade_service import (NOT_READY_TEXT, WRAP_UP_GRACE, OpenedTrade, TradeService, party_name,
+                                              thread_link)
 from services.market_db import TradeRow
 from sys_settings.paths import APP_ROOT
 from sys_settings.shop_settings import ShopSettings
@@ -497,13 +498,15 @@ class ShopService:
             if delivery != listing.delivery and trading:
                 # 交易做到一半換一套按鈕（已寄出、已收到 ↔ 已交付、領收），對話會接不上；
                 # 上線前的舊交易沒有交易進度、照舊流程，不受影響
-                raise ShopError("有交易在進行時不能改交付方式，等那些交易完成或取消後再改。" + _thread_list(trading))
+                raise ShopError("有交易在進行時不能改交付方式，等那些交易完成或取消後再改。"
+                                + await self._thread_list(trading))
             if unit != listing.unit:
                 # 金額存的是數字、幣別在商品上：已收的錢、說好的尾款會整批換成新幣別顯示；
                 # 上線前的舊交易也存了下單金額（完成時的留底照商品幣別寫），一起算
                 every = await self.trade.open_trades_for_source(listing_id)
                 if every:
-                    raise ShopError("有交易在進行時不能改幣別，等那些交易完成或取消後再改。" + _thread_list(every))
+                    raise ShopError("有交易在進行時不能改幣別，等那些交易完成或取消後再改。"
+                                    + await self._thread_list(every))
             db = await self.db()
             async with db.transaction():
                 await db.update_listing(listing_id, now=self.stamp(), title=title, description=description,
@@ -529,7 +532,7 @@ class ShopService:
             if pending:
                 raise ShopError(
                     f"還有 {len(pending)} 筆定金或預購的交易沒做完，現在不能下架（下架後就不能延期、開始收尾款或開始交貨）。"
-                    "要停止接單可以等截止，或把品項的剩餘數量改成 0。\n" + _thread_list(pending))
+                    "要停止接單可以等截止，或把品項的剩餘數量改成 0。\n" + await self._thread_list(pending))
             db = await self.db()
             async with db.transaction():
                 await db.update_listing(listing_id, now=self.stamp(), closed=True)
@@ -653,7 +656,7 @@ class ShopService:
             trading = [trade for trade, _ in trades if not trade.legacy]
             if draft.kind != variant.kind and trading:
                 raise ShopError(f"「{variant.name}」還有 {len(trading)} 筆交易在進行，交易中不能改類型。"
-                                f"要改請先取消這些交易：{_thread_list(trading)}\n名稱、數量可以照常改。")
+                                f"要改請先取消這些交易：{await self._thread_list(trading)}\n名稱、數量可以照常改。")
             self._check_mix([v.kind for v in listing.variants if v.key != key] + [draft.kind])
             fields = dict(name=draft.name, kind=draft.kind, price=draft.price, balance=draft.balance,
                           limit_qty=None if draft.limit is None else variant.taken + draft.limit)
@@ -688,7 +691,7 @@ class ShopService:
             trades = await self._open_trades_for_variant(listing_id, key)
             if trades:
                 raise ShopError(f"還有進行中的交易買了「{variant.name}」，請先完成或取消那些交易："
-                                + _thread_list([t for t, _ in trades]))
+                                + await self._thread_list([t for t, _ in trades]))
             db = await self.db()
             async with db.transaction():
                 await db.update_variant(listing_id, key, now=self.stamp(), deleted=True)
@@ -1177,12 +1180,19 @@ class ShopService:
         cart = await self.trade._channel(self.trade.settings.cart_channel_key)
         return getattr(cart, "guild", None)
 
+    async def _thread_list(self, trades: Sequence[TradeRow]) -> str:
+        """擋下操作時列出那些交易對話：每筆一個連結、字寫需求方（都是同一篇商品，寫需求方就分得出是哪一筆）。"""
+        shown = trades[:_THREAD_LIST_MAX]
+        guild = await self.guild()
+        if guild is None:
+            links = [f"<#{trade.id}>" for trade in shown]   # 查不到名字，只能給 id
+        else:
+            names = await self.trade.display_names(guild, (trade.requester_id for trade in shown))
+            links = [thread_link(guild, trade.id, party_name(names, trade.requester_id)) for trade in shown]
+        rest = len(trades) - _THREAD_LIST_MAX
+        return "、".join(links) + (f" 等 {len(trades)} 筆" if rest > 0 else "")
 
-#: 擋下操作時列出的交易對話最多幾個（每個連結約 23 字；全列的話交易一多，訊息超過上限、面板就卡住）
-_THREAD_LIST_MAX = 15
 
-
-def _thread_list(trades: Sequence[TradeRow]) -> str:
-    shown = " ".join(f"<#{trade.id}>" for trade in trades[:_THREAD_LIST_MAX])
-    rest = len(trades) - _THREAD_LIST_MAX
-    return shown + (f" 等 {len(trades)} 筆" if rest > 0 else "")
+#: 擋下操作時列出的交易對話最多幾個：每個連結約 80～110 字（網址加名字），十個加上前後的說明還在一則訊息 2000 字以內；
+#: 全列的話交易一多，訊息超過上限、面板就卡住
+_THREAD_LIST_MAX = 10
