@@ -4,6 +4,8 @@
   - 四種來源都搜得到，每筆結果的 id 與連結固定（巴哈以「樓層」為單位，用 sn；串號＋樓層會重複）
   - 公告存的是 HTML，要當純文字搜；兩個字的角色名也要搜得到；回覆樓層靠討論串標題也找得到
   - 每種來源有筆數上限，論壇的量不能把官方公告擠掉；含全部關鍵字的排前面
+  - 歷年的舊文把候選名額佔滿時，最近幾天的文章照樣進得了重排：放進重排範圍的最後幾格，其他文章的名次不動
+    （不替新文章加分）；這份「近期」名單也守呼叫端給的日期範圍
   - 新文章、改過的、刪掉的，下一次搜尋前都會跟上；只被「看過」（時間戳變了、內容沒變）的不重建
   - **絕不寫 scraper 的資料庫**（articles.db 是使用者資料，只能唯讀開）
   - 讀全文時帶上 PTT 推文、巴哈留言，並分頁
@@ -25,6 +27,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import date
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -225,6 +228,51 @@ class RankingTests(SearchIndexTestBase):
         index = self.make_index(per_source_limit=10)
 
         self.assertEqual(len(index.search("鳴潮演唱會", limit=4)), 4)
+
+
+class RecentTests(SearchIndexTestBase):
+    """問「這次的前瞻兌換碼」：歷年每次前瞻都有兌換碼文章，舊文的關鍵字比較密時，撈候選的上限會把最新那篇擋在外面。"""
+
+    TODAY = date(2026, 11, 9)
+
+    def setUp(self):
+        super().setUp()
+        for i in range(6):
+            self.db.ptt(f"M.1.A.{i:03d}", f"[鳴潮] 2.{i} 前瞻兌換碼", "前瞻兌換碼前瞻兌換碼前瞻兌換碼",
+                        published=f"2025-0{i + 1}-10 20:00:00.000000")
+        self.db.ptt("M.9.A.001", "[鳴潮] 3.8 版本前瞻特別通訊", "很長的整理。" * 30 + "本次前瞻兌換碼：TRAINOFSOULS",
+                    published="2026-11-06 20:46:41.000000")
+
+    def search(self, rerank_candidates=30, **kwargs):
+        options = dict(candidate_pool=3, per_source_limit=10, today=lambda: self.TODAY)
+        options.update({k: kwargs.pop(k) for k in ("recent_days", "candidate_pool") if k in kwargs})
+        index = self.make_index(**options)
+        index.rerank_candidates = rerank_candidates
+        return self.ids(index.search("前瞻 兌換碼", **kwargs))
+
+    def test_latest_post_gets_in_even_when_older_posts_fill_the_candidate_pool(self):
+        self.assertNotIn("ptt:M.9.A.001", self.search(recent_days=0))   # 沒有近期名單：被舊文擠掉
+        self.assertIn("ptt:M.9.A.001", self.search())
+
+    def test_recent_post_comes_right_after_the_rerank_range_without_moving_the_others(self):
+        plain = self.search(recent_days=0, rerank_candidates=2)
+
+        self.assertEqual(self.search(rerank_candidates=2), [*plain[:2], "ptt:M.9.A.001", *plain[2:]])
+        # 重排範圍比結果還大時就排在最後：沒有重排（顯示卡忙）時，原本的名次一個都不動
+        self.assertEqual(self.search(), [*plain, "ptt:M.9.A.001"])
+
+    def test_recent_post_already_in_the_rerank_range_stays_where_it_was(self):
+        self.db.ptt("M.9.A.002", "[鳴潮] 3.8 前瞻兌換碼", "前瞻兌換碼前瞻兌換碼前瞻兌換碼前瞻兌換碼",
+                    published="2026-11-07 10:00:00.000000")
+        plain = self.search(recent_days=0, rerank_candidates=4)
+
+        self.assertEqual(plain[0], "ptt:M.9.A.002")
+        self.assertEqual(self.search(rerank_candidates=4), [*plain[:4], "ptt:M.9.A.001", *plain[4:]])
+
+    def test_recent_list_keeps_the_callers_date_range(self):
+        # 上限落在近期那段時間裡（最新那篇是 11-06 發的）
+        self.assertNotIn("ptt:M.9.A.001", self.search(until="2026-11-05"))
+        self.assertEqual(self.search(since="2026-11-01"), ["ptt:M.9.A.001"])
 
 
 class FilterTests(SearchIndexTestBase):

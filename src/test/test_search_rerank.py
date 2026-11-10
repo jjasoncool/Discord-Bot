@@ -2,6 +2,8 @@
 
 守的底線：
   - 前 N 篇照 reranker 的分數重排，第 N 篇之後照原本的名次接在後面；同分照原本的名次
+  - 問「這次、最新、現在」時，分數差不多的新的在前（歷年的兌換碼文章分數都在 0.99 以上）；明顯比較相關的舊文照樣在前；
+    沒這麼問（問過去某件事）就照分數排，不偏向新文
   - 重排在「每種來源最多幾筆」之前：先決定誰最相關，再套上限
   - reranker 壞掉、GPU 等太久、回傳筆數不對、開關關著：都照原本的名次，搜尋不能失敗
   - 每篇送給 reranker 的是標題＋和問題最相關的那一段，不是整篇
@@ -18,6 +20,7 @@
 import os
 import sys
 import unittest
+from datetime import date
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -120,6 +123,76 @@ class RerankInSearchTests(SearchIndexTestBase):
         self.make_index(reranker=stub).search("深塔海墟", question="  ")
 
         self.assertEqual(stub.queries, [normalize("深塔海墟")])
+
+
+class ScoreTable:
+    """段落裡有表上的字就給那個分數，沒有給 0。"""
+
+    def __init__(self, table):
+        self.table = table
+
+    def rerank(self, query, passages, max_wait_seconds=None):
+        return [next((score for word, score in self.table.items() if word in p), 0.0) for p in passages]
+
+
+class RerankRecencyTests(SearchIndexTestBase):
+    def setUp(self):
+        super().setUp()
+        # 關鍵字排名：舊的 2.8 那篇關鍵字比較密，排第一
+        self.db.ptt("M.1.A.001", "[鳴潮] 2.8 前瞻兌換碼", "前瞻兌換碼前瞻兌換碼：ENDLESSSUMMER",
+                    published="2025-11-07 18:00:00.000000")
+        self.db.ptt("M.1.A.002", "[鳴潮] 3.8 前瞻特別通訊", "本次前瞻兌換碼：TRAINOFSOULS",
+                    published="2026-11-06 20:46:41.000000")
+
+    def search(self, table, question="這次前瞻兌換碼是什麼", **options):
+        index = self.make_index(reranker=ScoreTable(table), today=lambda: date(2026, 11, 9), **options)
+        return self.ids(index.search("前瞻 兌換碼", question=question))
+
+    def test_nearly_equal_scores_put_the_newer_post_first(self):
+        table = {"ENDLESSSUMMER": 0.9994, "TRAINOFSOULS": 0.9992}
+
+        self.assertEqual(self.search(table, rerank_recency_per_year=0)[0], "ptt:M.1.A.001")   # 只看分數：舊的在前
+        self.assertEqual(self.search(table), ["ptt:M.1.A.002", "ptt:M.1.A.001"])
+        self.assertEqual(self.search(table, question="現在的前瞻兌換碼")[0], "ptt:M.1.A.002")
+
+    def test_question_about_a_past_event_is_not_tilted_toward_newer_posts(self):
+        # 問「2.8 那次」：正確答案就是舊文，提到同一件事的新文分數只差一點點，不能因為比較新就排到前面
+        table = {"ENDLESSSUMMER": 0.9994, "TRAINOFSOULS": 0.9992}
+
+        self.assertEqual(self.search(table, question="2.8 前瞻的兌換碼是什麼")[0], "ptt:M.1.A.001")
+
+    def test_clearly_more_relevant_older_post_stays_first(self):
+        self.assertEqual(self.search({"ENDLESSSUMMER": 0.999, "TRAINOFSOULS": 0.95}),
+                         ["ptt:M.1.A.001", "ptt:M.1.A.002"])
+
+    def add_denser_old_posts(self):
+        # 舊文的關鍵字比較密，把候選與重排範圍佔滿；最新那篇（3.8）只能靠近期名單進重排
+        for i in range(2, 8):
+            self.db.ptt(f"M.2.A.{i:03d}", f"[鳴潮] 2.{i} 前瞻兌換碼", "前瞻兌換碼前瞻兌換碼前瞻兌換碼",
+                        published=f"2025-0{i}-10 20:00:00.000000")
+
+    def ids_with_three_reranked(self, table, question, **options):
+        index = self.make_index(reranker=ScoreTable(table), today=lambda: date(2026, 11, 9), candidate_pool=3,
+                                **options)
+        index.rerank_candidates = 3
+        return self.ids(index.search("前瞻 兌換碼", question=question))
+
+    def test_latest_post_outside_the_candidates_still_comes_first(self):
+        self.add_denser_old_posts()
+        table = {"TRAINOFSOULS": 0.9992, "前瞻兌換碼": 0.9994}
+
+        self.assertNotEqual(self.ids_with_three_reranked(table, "這次前瞻兌換碼是什麼", recent_days=0)[0],
+                            "ptt:M.1.A.002")
+        self.assertEqual(self.ids_with_three_reranked(table, "這次前瞻兌換碼是什麼")[0], "ptt:M.1.A.002")
+
+    def test_recent_post_does_not_push_a_candidate_out_of_the_rerank_range(self):
+        # 排在重排範圍最後一格的舊文才是答案：近期那篇要另外多讀一篇，不能占它的位置讓 reranker 讀不到它
+        self.add_denser_old_posts()
+        plain = self.ids_with_three_reranked({}, "前瞻兌換碼是什麼", recent_days=0)
+        last = plain[2]
+        version = "2.8" if last == "ptt:M.1.A.001" else f"2.{int(last[-3:])}"
+
+        self.assertEqual(self.ids_with_three_reranked({f"{version} 前瞻": 0.99}, "前瞻兌換碼是什麼")[0], last)
 
 
 class GpuBudgetTests(SearchIndexTestBase):

@@ -1,18 +1,36 @@
-"""搜尋索引：從 scraper 的 articles.db 唯讀增量同步到自己的 SQLite FTS5 索引，再做關鍵字搜尋。
+"""情報搜尋的索引：從 scraper 的 articles.db 唯讀增量同步到自己的 SQLite FTS5 索引，再搜尋、讀全文。
 
-為什麼另開一個索引檔、不在 articles.db 上建 FTS：articles.db 是 scraper 的資料（使用者資料），
-這裡**只准唯讀開**；索引是可以刪掉重建的衍生資料，放在容器的 `/search_data`（主機端是 repo 的 `cache/search-mcp/`，
-見 `SEARCH_SETTINGS.index_path`）。
+架構定位：服務層（`services/search`），不 import discord。
+  - 上層：search-mcp 行程裡的 MCP 工具（`llm.mcp_server`）、背景同步與每日維護（`services.search.background`）、
+    搜尋評估（`services.search.eval`）
+  - 下層：scraper 的 articles.db（唯讀）、自己的索引檔、向量那一路（`vectors.py`，pgvector＋embedding）、
+    重新排序（`rerank.py`，reranker 模型）
 
-搜尋分兩段（常見的「召回＋重排」）：
-  1. 召回：全詞（三字組索引，含全部長關鍵字）、兩字組 BM25（整句或關鍵字切成兩字一組）、
-     一個字的關鍵字（走 LIKE）三路各撈一批
-  2. 重排：先比「含了幾個關鍵字」，同分再比兩字組那一路的 BM25 名次，最後新的在前
-  3. 有向量（P3）時，關鍵字的名次再和向量（語意）的名次用 RRF 合併，見 `vectors.py`
-  4. 有 reranker（P4）時，合併後的前幾十篇再讓 reranker 逐篇讀過、重新排序，見 `rerank.py`；
-     呼叫端給了使用者的原句（`question`）就用原句判斷，不用拆成關鍵字的查詢字
-兩份索引分工：三字組（trigram）擅長整段比對長詞；兩字組讓沒有空格的中文句子也能靠 BM25
-自動壓低常見詞、拉高少見詞（兩字組加進來之後，原句模式的命中率才開始上升）。
+介面：
+  - `SearchIndex.search(query, sources=, since=, until=, limit=, question=)`：搜尋，回 `SearchHit` 清單
+  - `SearchIndex.fetch(doc_id, page=)`：直接從 articles.db 讀一份文件的最新全文（附推文、留言），分頁
+  - `SearchIndex.sync(force=)`：增量同步；`resolve_sources(sources)`：檢查來源名稱
+  - `default_index()`：照設定建的共用索引
+
+規則：
+  - articles.db 是 scraper 的資料（使用者資料），**只准唯讀開**；索引是可以刪掉重建的衍生資料，放在容器的
+    `/search_data`（主機端是 repo 的 `cache/search-mcp/`，見 `SEARCH_SETTINGS.index_path`）
+  - 向量、reranker 壞掉或等不到 GPU，都退回關鍵字的名次：搜尋本身不能因此失敗
+
+例外與決策：
+  - 搜尋的步驟（常見的「召回＋重排」）：
+    1. 召回：全詞（三字組索引，含全部長關鍵字）、兩字組 BM25（整句或關鍵字切成兩字一組）、
+       一個字的關鍵字（走 LIKE）三路各撈一批，再照「含了幾個關鍵字」、兩字組那一路的 BM25 名次、新的在前排好
+    2. 合併：關鍵字的名次和向量（語意）的名次用 RRF 合併
+    3. 重排：合併後的前幾十篇讓 reranker 逐篇讀過、重新排序；呼叫端給了使用者的原句（`question`）就用原句判斷
+  - 新舊：關鍵字和 reranker 只看「像不像」，每次前瞻都有兌換碼文章，問「這次的」時舊版本的會把最新那篇擠出前幾十名。
+    所以同一組關鍵字在最近 `recent_days` 天內再找一次，前 `recent_slots` 篇接在重排範圍後面、一起重排
+    （不加分、不占原本候選的位置）；
+    問句帶「這次、最新」這類字（`latest_cue_words`）時，重排分數每舊一年扣 `rerank_recency_per_year`，
+    幾乎同分時新的在前；沒這麼問就不扣（問過去某件事時正確答案就是舊文）。reranker 讀到日期也判斷不了「這次」，
+    不靠它分新舊
+  - 兩份索引分工：三字組（trigram）擅長整段比對長詞；兩字組讓沒有空格的中文句子也能靠 BM25
+    自動壓低常見詞、拉高少見詞（兩字組加進來之後，原句模式的命中率才開始上升）
 """
 from __future__ import annotations
 
@@ -23,7 +41,7 @@ import threading
 import time
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -34,6 +52,7 @@ from services.search.rerank import Reranker, best_passage
 from services.search.vectors import VectorSearcher
 from sys_settings.paths import sqlite_readonly_uri
 from sys_settings.search_settings import SEARCH_SETTINGS
+from sys_settings.time_settings import APP_TZ
 from utils.rank_fusion import fuse_rankings
 from utils.user_dates import parse_user_date
 
@@ -86,6 +105,8 @@ DROP TABLE IF EXISTS docs_fts; DROP TABLE IF EXISTS docs_bigram; DROP TABLE IF E
 _TERM_SPLIT = re.compile(r"[\s,，。、！？!?;；:：「」『』（）()\[\]【】\"'“”‘’|/]+")
 #: 兩字組那一路最多用幾組；一整段話丟進來時不讓查詢無限長
 _MAX_GRAMS = 64
+#: 搜尋時從 docs 讀的欄位（關鍵字、向量兩路共用）
+_COLUMNS = "id, doc_id, source, title, url, published_at, search_text"
 
 
 class DocumentNotFound(LookupError):
@@ -152,6 +173,15 @@ def _like_pattern(term: str) -> str:
     return "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 
+def _age_years(published_at: str, today: date) -> float:
+    """發文到今天幾年（未來的日期算 0）；日期讀不懂也算 0，不因此扣分。"""
+    try:
+        published = date.fromisoformat(str(published_at)[:10])
+    except ValueError:
+        return 0.0
+    return max(0, (today - published).days) / 365
+
+
 class SearchIndex:
     """情報搜尋的索引。每次搜尋前自動做增量同步（有最短間隔），也可以手動 `sync()`。"""
 
@@ -175,6 +205,9 @@ class SearchIndex:
         rerank_enabled: Callable[[], bool] = lambda: True,
         gpu_wait_seconds: Optional[float] = None,
         slow_search_seconds: Optional[float] = None,
+        recent_days: Optional[int] = None,
+        rerank_recency_per_year: Optional[float] = None,
+        today: Optional[Callable[[], date]] = None,
     ):
         s = SEARCH_SETTINGS
         self.index_path = Path(index_path or s.index_path)
@@ -198,6 +231,14 @@ class SearchIndex:
         self.rrf_k = s.rrf_k
         self.fusion_weights = {"關鍵字": s.lexical_weight,
                                "向量": s.vector_weight if vector_weight is None else vector_weight}
+        #: 「近期」名單看最近幾天、保留幾格重排名額（0＝不加）；今天幾號問 `today`（測試換成固定日期）
+        self.recent_days = s.recent_days if recent_days is None else recent_days
+        self.recent_slots = s.recent_slots
+        self.today = today or (lambda: datetime.now(APP_TZ).date())
+        #: 問句帶「這次、最新」這類字時，重排分數每舊一年扣多少，幾乎同分時新的在前（0＝不扣）
+        self.rerank_recency_per_year = (s.rerank_recency_per_year if rerank_recency_per_year is None
+                                        else rerank_recency_per_year)
+        self.latest_cue_words = s.latest_cue_words
         self.vector_max_distance = s.vector_max_distance if vector_max_distance is None else vector_max_distance
         #: 重新排序；None＝不重排。開關每次搜尋都問（正式環境接 switches.json 的 search_rerank_mode）
         self.reranker = reranker
@@ -411,81 +452,24 @@ class SearchIndex:
         if gpu_busy:
             notes.append("顯示卡忙：向量、重排都略過，只用關鍵字")
 
-        long_terms = [t for t in terms if len(t) >= 3]
-        # 兩個字的詞本身就是一組兩字組，交給兩字組索引；只有一個字的才走 LIKE
-        single_chars = [t for t in terms if len(t) == 1]
-        grams = list(dict.fromkeys(bigram_tokens(normalize(query))))[:_MAX_GRAMS]
-        marks = ",".join("?" * len(keys))
-        where = f"d.source IN ({marks}) AND d.published_at >= ? AND d.published_at < ?"
-        params = [*keys, start, end]
-        pool = self.candidate_pool
-
-        # 沒有篩來源、日期時（最常見），全文索引自己排出前幾名就好，不必每個命中都回 docs 表看來源與日期：
-        # 常見的字會命中幾千篇，一篇一次隨機讀，冷快取時要十幾到幾十秒（2026-10-09「今汐 配隊」命中 5,174 篇，
-        # 回 docs 表讀 16 MB、只查全文索引 1.3 MB）。條件全都成立時兩種寫法的結果相同
-        unfiltered = set(keys) == set(self.sources) and not start and end == _NO_UPPER_BOUND
-
+        recent_start = self._recent_start(start, end)
         with _timed(timings, "關鍵字"), closing(self._open_index()) as con:
-            candidate_ids: dict[int, None] = {}
-            fuzzy_rank: dict[int, int] = {}
-
-            def fts(table: str, match: str) -> list[int]:
-                if unfiltered:
-                    return [r[0] for r in con.execute(
-                        f"SELECT rowid FROM {table} WHERE {table} MATCH ? ORDER BY bm25({table}) LIMIT ?",
-                        (match, pool))]
-                # 有篩來源、日期時：先用 (source, published_at) 這個小索引挑出符合的文章編號，再讓全文索引的命中
-                # 跟這份清單比對——不要每個命中都回 docs 大表讀一列（冷快取時「只查官方」一次要 35 秒，2026-10-09）。
-                # rowid 前面的 + 是讓這個條件不交給全文索引逐筆查找（那樣快取熱時反而要 1 秒多），改成先全文再比對
-                return [r[0] for r in con.execute(
-                    f"SELECT rowid FROM {table} WHERE {table} MATCH ? AND +rowid IN"
-                    f" (SELECT id FROM docs WHERE source IN ({marks}) AND published_at >= ? AND published_at < ?)"
-                    f" ORDER BY bm25({table}) LIMIT ?",
-                    (match, *params, pool))]
-
-            if long_terms:
-                # 全詞：每個長關鍵字都要整段出現（三字組索引）
-                candidate_ids.update(dict.fromkeys(fts("docs_fts", " AND ".join(_phrase(t) for t in long_terms))))
-            if grams:
-                # 兩字組：任一組命中就進來，BM25 依命中多寡與稀有程度排名（常見詞權重自動變低）
-                for rank, doc_pk in enumerate(fts("docs_bigram", " OR ".join(_phrase(g) for g in grams))):
-                    fuzzy_rank[doc_pk] = rank
-                    candidate_ids.setdefault(doc_pk, None)
-            for term in single_chars:
-                # 一個字的詞兩字組查不到（例如角色名「椿」），改用 LIKE（掃整張表，十萬列約一秒內）
-                candidate_ids.update(dict.fromkeys(r[0] for r in con.execute(
-                    f"SELECT d.id FROM docs d WHERE d.search_text LIKE ? ESCAPE '\\' AND {where}"
-                    f" ORDER BY d.published_at DESC LIMIT ?", (_like_pattern(term), *params, pool))))
-            if not candidate_ids and not vector_ids:
+            ordered = self._keyword_ranking(con, query, terms, keys, start, end)
+            # 近期：同一組關鍵字只在最近幾天裡再排一次。常見的詞（前瞻、兌換碼）在整個範圍裡命中上千篇，
+            # 撈候選的上限會讓最新那篇根本進不了上面那份名單
+            recent = self._keyword_ranking(con, query, terms, keys, recent_start, end) if recent_start else []
+            if not ordered and not vector_ids:
                 return []
-
-            rows = []
-            columns = "id, doc_id, source, title, url, published_at, search_text"
-            ids = list(candidate_ids)
-            for i in range(0, len(ids), 500):
-                chunk = ids[i:i + 500]
-                # 只讀候選（最多幾百篇），順便篩來源：沒篩選時全文索引那步沒看來源，索引裡若有這個行程
-                # 不認得的來源（新版程式加了來源、這個行程還沒重開），在這裡濾掉，不讓整次搜尋失敗
-                rows += con.execute(
-                    f"SELECT {columns} FROM docs WHERE id IN ({','.join('?' * len(chunk))}) AND source IN ({marks})",
-                    (*chunk, *keys)).fetchall()
             vector_rows = []
+            marks = ",".join("?" * len(keys))
             for i in range(0, len(vector_ids), 500):
                 chunk = vector_ids[i:i + 500]
                 # 向量那邊理應已照來源、日期篩過；這裡再篩一次，不讓範圍外的文件混進結果
                 vector_rows += con.execute(
-                    f"SELECT {columns} FROM docs d WHERE doc_id IN ({','.join('?' * len(chunk))}) AND {where}",
-                    (*chunk, *params)).fetchall()
+                    f"SELECT {_COLUMNS} FROM docs WHERE doc_id IN ({','.join('?' * len(chunk))})"
+                    f" AND source IN ({marks}) AND published_at >= ? AND published_at < ?",
+                    (*chunk, *keys, start, end)).fetchall()
 
-        lowered = [t.lower() for t in terms]
-        scored = []
-        for row in rows:
-            text = row["search_text"].lower()
-            scored.append((row, sum(t in text for t in lowered)))
-        # 新的在前當最後的決勝，所以先依日期排，再用穩定排序依主要條件排
-        scored.sort(key=lambda item: item[0]["published_at"], reverse=True)
-        scored.sort(key=lambda item: (-item[1], fuzzy_rank.get(item[0]["id"], pool)))
-        ordered = [row for row, _ in scored]
         if vector_ids:
             # 關鍵字與向量各自的名次用 RRF 合併：兩邊都排前面的浮上來，只有一邊找到的也不會被埋掉
             by_doc = {row["doc_id"]: row for row in [*ordered, *vector_rows]}
@@ -493,9 +477,10 @@ class SearchIndex:
                 {"關鍵字": [row["doc_id"] for row in ordered], "向量": [d for d in vector_ids if d in by_doc]},
                 weights=self.fusion_weights, k=self.rrf_k)
             ordered = [by_doc[doc_id] for doc_id in fused]
+        ordered, head_size = self._with_recent_slots(ordered, recent)
         # 重排在來源上限之前：先決定誰最相關，再每種來源取前幾筆
         with _timed(timings, "重排"):
-            ordered = self._rerank(query, ordered, question=question, max_wait_seconds=gpu_left)
+            ordered = self._rerank(query, ordered, question=question, max_wait_seconds=gpu_left, head_size=head_size)
 
         hits: list[SearchHit] = []
         per_source: dict[str, int] = {}
@@ -513,9 +498,96 @@ class SearchIndex:
                 break
         return hits
 
+    def _recent_start(self, start: str, end: str) -> str:
+        """「近期」那份名單從哪天起算；呼叫端的範圍本來就只在最近幾天內、或整個在那之前，回空字串（不加這份名單）。"""
+        if self.recent_days <= 0:
+            return ""
+        cutoff = (self.today() - timedelta(days=self.recent_days)).isoformat()
+        return cutoff if start < cutoff < end else ""
+
+    def _with_recent_slots(self, ordered: list, recent: list) -> tuple[list, int]:
+        """近期名單的前 `recent_slots` 篇還不在重排範圍（前 `rerank_candidates` 篇）的，接在範圍後面一起重排；
+        回傳（名單, 重排幾篇）。只保證 reranker 讀得到它們、由它決定排哪：不加分，也不占原本候選的位置。
+        占掉範圍最後幾格的話，排在那幾格的舊題目答案就讀不到；當成第三份名單一起 RRF 合併的話，新文章會把舊題目的
+        答案擠下去，沒有重排時（顯示卡忙）更明顯（考卷量過，記在交接檔 `mcp-search-tools`）。"""
+        head = ordered[:self.rerank_candidates]
+        head_ids = {row["doc_id"] for row in head}
+        extra = [row for row in recent if row["doc_id"] not in head_ids][:self.recent_slots]
+        if not extra:
+            return ordered, len(head)
+        extra_ids = {row["doc_id"] for row in extra}
+        rest = [row for row in ordered[len(head):] if row["doc_id"] not in extra_ids]
+        return head + extra + rest, len(head) + len(extra)
+
+    def _keyword_ranking(self, con: sqlite3.Connection, query: str, terms: list[str], keys: list[str],
+                         start: str, end: str) -> list[sqlite3.Row]:
+        """關鍵字那一路：在 [start, end) 裡撈候選，照「含了幾個關鍵字」、兩字組的 BM25 名次、新的在前排好。"""
+        long_terms = [t for t in terms if len(t) >= 3]
+        # 兩個字的詞本身就是一組兩字組，交給兩字組索引；只有一個字的才走 LIKE
+        single_chars = [t for t in terms if len(t) == 1]
+        grams = list(dict.fromkeys(bigram_tokens(normalize(query))))[:_MAX_GRAMS]
+        marks = ",".join("?" * len(keys))
+        where = f"d.source IN ({marks}) AND d.published_at >= ? AND d.published_at < ?"
+        params = [*keys, start, end]
+        pool = self.candidate_pool
+        # 沒有篩來源、日期時（最常見），全文索引自己排出前幾名就好，不必每個命中都回 docs 表看來源與日期：
+        # 常見的字會命中幾千篇，一篇一次隨機讀，冷快取時要十幾到幾十秒（2026-10-09「今汐 配隊」命中 5,174 篇，
+        # 回 docs 表讀 16 MB、只查全文索引 1.3 MB）。條件全都成立時兩種寫法的結果相同
+        unfiltered = set(keys) == set(self.sources) and not start and end == _NO_UPPER_BOUND
+        candidate_ids: dict[int, None] = {}
+        fuzzy_rank: dict[int, int] = {}
+
+        def fts(table: str, match: str) -> list[int]:
+            if unfiltered:
+                return [r[0] for r in con.execute(
+                    f"SELECT rowid FROM {table} WHERE {table} MATCH ? ORDER BY bm25({table}) LIMIT ?",
+                    (match, pool))]
+            # 有篩來源、日期時：先用 (source, published_at) 這個小索引挑出符合的文章編號，再讓全文索引的命中
+            # 跟這份清單比對——不要每個命中都回 docs 大表讀一列（冷快取時「只查官方」一次要 35 秒，2026-10-09）。
+            # rowid 前面的 + 是讓這個條件不交給全文索引逐筆查找（那樣快取熱時反而要 1 秒多），改成先全文再比對
+            return [r[0] for r in con.execute(
+                f"SELECT rowid FROM {table} WHERE {table} MATCH ? AND +rowid IN"
+                f" (SELECT id FROM docs WHERE source IN ({marks}) AND published_at >= ? AND published_at < ?)"
+                f" ORDER BY bm25({table}) LIMIT ?",
+                (match, *params, pool))]
+
+        if long_terms:
+            # 全詞：每個長關鍵字都要整段出現（三字組索引）
+            candidate_ids.update(dict.fromkeys(fts("docs_fts", " AND ".join(_phrase(t) for t in long_terms))))
+        if grams:
+            # 兩字組：任一組命中就進來，BM25 依命中多寡與稀有程度排名（常見詞權重自動變低）
+            for rank, doc_pk in enumerate(fts("docs_bigram", " OR ".join(_phrase(g) for g in grams))):
+                fuzzy_rank[doc_pk] = rank
+                candidate_ids.setdefault(doc_pk, None)
+        for term in single_chars:
+            # 一個字的詞兩字組查不到（例如角色名「椿」），改用 LIKE（掃整張表，十萬列約一秒內）
+            candidate_ids.update(dict.fromkeys(r[0] for r in con.execute(
+                f"SELECT d.id FROM docs d WHERE d.search_text LIKE ? ESCAPE '\\' AND {where}"
+                f" ORDER BY d.published_at DESC LIMIT ?", (_like_pattern(term), *params, pool))))
+
+        rows = []
+        ids = list(candidate_ids)
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            # 只讀候選（最多幾百篇），順便篩來源：沒篩選時全文索引那步沒看來源，索引裡若有這個行程
+            # 不認得的來源（新版程式加了來源、這個行程還沒重開），在這裡濾掉，不讓整次搜尋失敗
+            rows += con.execute(
+                f"SELECT {_COLUMNS} FROM docs WHERE id IN ({','.join('?' * len(chunk))}) AND source IN ({marks})",
+                (*chunk, *keys)).fetchall()
+
+        lowered = [t.lower() for t in terms]
+        scored = []
+        for row in rows:
+            text = row["search_text"].lower()
+            scored.append((row, sum(t in text for t in lowered)))
+        # 新的在前當最後的決勝，所以先依日期排，再用穩定排序依主要條件排
+        scored.sort(key=lambda item: item[0]["published_at"], reverse=True)
+        scored.sort(key=lambda item: (-item[1], fuzzy_rank.get(item[0]["id"], pool)))
+        return [row for row, _ in scored]
+
     def _rerank(self, query: str, rows: list, *, question: Optional[str] = None,
-                max_wait_seconds: Optional[float] = None) -> list:
-        """前 `rerank_candidates` 篇照 reranker 的分數重排，其餘照舊接在後面。
+                max_wait_seconds: Optional[float] = None, head_size: Optional[int] = None) -> list:
+        """前 `head_size` 篇（預設 `rerank_candidates`，近期名單補進來的另外加）照 reranker 的分數重排，其餘照舊接在後面。
         有原句就讓 reranker 讀原句；每篇挑哪一段還是看查詢字（關鍵字就是要找的詞，原句多了「是什麼」這類虛字）。
         `max_wait_seconds` 是這次搜尋剩下的等 GPU 額度，用完（≤ 0）就不重排。
         reranker 壞掉、GPU 等太久、回傳筆數不對，都照原本的名次（搜尋本身不能因此失敗）。"""
@@ -524,7 +596,8 @@ class SearchIndex:
         if max_wait_seconds is not None and max_wait_seconds <= 0:
             logger.info("這次搜尋等 GPU 的額度已用完，不重排、照原本的名次")
             return rows
-        head, tail = rows[:self.rerank_candidates], rows[self.rerank_candidates:]
+        size = self.rerank_candidates if head_size is None else head_size
+        head, tail = rows[:size], rows[size:]
         passages = [best_passage(query, row["search_text"], self.rerank_passage_chars) for row in head]
         try:
             scores = self.reranker.rerank(normalize((question or "").strip() or query), passages,
@@ -535,9 +608,21 @@ class SearchIndex:
         if len(scores) != len(head):
             logger.warning("重新排序回傳 %d 個分數、送了 %d 篇，這次照原本的名次", len(scores), len(head))
             return rows
-        # 同分照原本的名次（sorted 是穩定排序）
+        # reranker 判得出相關、判不出新舊：答得到的分數都擠在 0.99 以上。問的是「這次、最新」時每舊一年扣一點，
+        # 差不多的就新的在前，明顯比較相關的舊文照樣在前；沒這麼問就不扣——問過去某件事（「2022 年那次展覽」）時，
+        # 正確答案本來就是舊文，一律扣會讓提到同一件事的新文排到前面（考卷量過，記在交接檔 `mcp-search-tools`）。
+        # 扣完還同分照原本的名次（sorted 是穩定排序）
+        if self._asks_latest(f"{question or ''} {query}"):
+            today = self.today()
+            scores = [score - self.rerank_recency_per_year * _age_years(row["published_at"], today)
+                      for score, row in zip(scores, head)]
         order = sorted(range(len(head)), key=lambda i: -scores[i])
         return [head[i] for i in order] + tail
+
+    def _asks_latest(self, text: str) -> bool:
+        """問句或查詢字裡有沒有「這次、最新、現在」這類字（`SEARCH_SETTINGS.latest_cue_words`）。"""
+        normalized = normalize(text)
+        return any(normalize(word) in normalized for word in self.latest_cue_words)
 
     def _vector_doc_ids(self, query: str, keys: list[str], start: str, end: str, *,
                         max_wait_seconds: Optional[float] = None) -> tuple[list[str], bool]:
