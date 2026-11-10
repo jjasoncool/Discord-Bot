@@ -65,7 +65,7 @@
 
 | 月份 | 重點數 | 這個月的主題 |
 |---|---|---|
-| [2026-11](journal/2026-11.md) | 18 | Discord、工作方式、爬蟲、Telegram、測試 |
+| [2026-11](journal/2026-11.md) | 19 | Discord、工作方式、爬蟲、Telegram、測試 |
 | [2026-10](journal/2026-10.md) | 45 | 工作方式、commit、測試、LLM 呼叫、Discord |
 | [2026-09](journal/2026-09.md) | 12 | 工作方式、架構、轉發、commit、部署 |
 | [2026-08](journal/2026-08.md) | 6 | Telegram、插話 |

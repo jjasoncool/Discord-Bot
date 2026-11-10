@@ -9,15 +9,13 @@
 > 【索引】每個主題區塊開頭有 `@meta` 註解：`id`（跨區塊引用）、`type`（STATE／CONTRACT／DECISION／RISK／TODO）、`status`（confirmed／draft／deprecated／blocked）、`depends_on`／`affects`、`last_confirmed`。只讀與任務相關的區塊即可。
 
 最後盤點紀錄（每輪一行、只留最近約 10 筆；更舊的在 `dev/journal/`，一個月一檔）：
+- 2026-11-09 23:4x～11-10 08:4x 觀星者回報週報私訊裡 4 筆交易顯示「# 不明」點不進去：`<#交易對話>` 指向封存的私人 thread；再查出那 4 筆自由市場舊交易的按鈕全部失效（02-17 前的隨機代碼、或更舊的 ✅ 流程），沒有路可以結束。連結改成網址（新共用元件 `channel_url`／`masked_link`＋守衛，收掉 8 處自己拼的網址），留底、開單訊息、擋操作清單、主控台截斷一起改；使用者定 TR-Q95＝C（4 筆直接在資料庫標成 ended，已備份後寫入）、TR-Q96＝A（舊交易不列進沒動靜）。兩個子 agent 唯讀調查、兩個複查（沒有出錯的正確性問題；收了重複的三份退路與伺服器查法、已離開的需求方帶 id、週報截斷留指路、看板一行一條、字裡網址）。完整測試全過、突變全紅；拆成 4 個 commit（`e8e02d3`～`3b18231`，每個中間版本都跑過完整測試）、文件另一個，未推送，要重啟才生效。
 - 2026-11-09 連結轉址與 AI 讀預覽：討論定案後實作（bilibili 轉 vxbilibili、轉貼長出預覽才壓原預覽、預檢換服務、暴雷照包、轉貼用回覆、回覆轉貼不算叫它、聊天行加 `[預覽：…]` 與自動轉貼標記），新檔 `services/relay/link_repost.py`、`test/test_link_fix.py`，守衛加兩條；實作時發現 fixupx 的影片在 Mastodon 相容 API，更正第一輪「fixupx 做不出那篇影片」的推論。完整測試 2555 項全過、突變全紅；拆成 4 個 commit（未推送），未重啟。
 - 2026-11-07 10:xx～12:xx 市集介面四題定案（TR-Q86＝A、Q87＝C、Q88＝A、Q89＝A，使用者看了畫面草稿後「全部依照你的建議」）並連同 TR-Q85 標籤實作：每個品項一格的尾款表單、作者欄連到個人檔案、改好前不能拿掉【定金】、「現貨」標籤；建標籤收成 `utils.discord_content.ensure_forum_tags`（`create_tag` 連建兩個會互相蓋掉）並加守衛。使用者另定 TR-Q90＝A（賣完的預購也拿掉「預購中」）。四個子 agent 複查＋各一個反駁：成立 2 條已修（重畫時查供應方一時出錯不再把標籤拿掉；`TRADE_FLOW.md` 補「還掛著舊交易時」），其餘 7 條不成立或只是加固（另把守衛加寬到手動組 `available_tags=`）。之後再定 TR-Q91～Q94（開始收尾款、開始交貨的確認畫面寫不能復原、改正式語氣）並實作。完整測試 2511 項全過、突變全紅；拆成 8 個 commit（程式 `1eb8574`～`459d782`、文件另一個），每個中間版本都跑過完整測試；未推送、未重啟。
 - 2026-11-07 09:3x `dev/` 改成給人看的版型：25 個主題檔加上半部（一頁看懂＋歸檔時狀態勾選清單、時間線、定案與理由、踩過的坑），原文摺進 `<details>`、逐行核對沒少；流水帳改成每月重點（約 420 筆篩到 92 筆，時間、commit、測試數字、狀態不留）；新增 `dev/check.py`；`AGENTS.md` 加「commit 要小」；本檔待做改勾選框、「歸檔放哪」定案（交接檔給 AI、`dev/` 給人）。規則候選 10 條等使用者挑。已 commit（`eecfca1`，字典另一個 `c94262a`）、未推送。
 - 2026-11-07 07:1x～08:4x 市集上線核對：07:43 使用者重啟、上線匯入完成且數字與預覽一致，08:14 又重啟一次沒重匯；討論 TR-Q85～Q89（標籤定案未實作，其餘等使用者）；上架視窗欄位順序 `8d760e7`（已生效、未推送）；給觀星者的「改成定金＋尾款」說明經四個子 agent 對照程式核對後定稿，還沒傳。交易區塊已更新，未 commit。
 - 2026-11-07 08:5x 使用者要歸檔以人好讀為主、兼顧 AI 修改：提案上半部重點＋原文摺起來的版型，樣本套在 `dev/admin/console.md`；開頭給 AI 的維護備註、整理到標記、摺疊、檢查腳本列成 DV-Q5～Q8，等使用者。未 commit。
 - 2026-11-07 08:3x `TODO-completed.md` 拆進 `dev/` 後刪除：26 個主題檔（relay／ai／community／admin／architecture）＋ `journal/` 六個月份＋ `README.md`（依領域、依日期）；各段原文照搬，只改連到程式與其他段落的路徑；交接檔區塊 `@meta` 加 `history:`、「經過見」改連主題檔，維護規則改成「歸檔放哪」；`AGENTS.md` 與記憶改指 `dev/`。市集的 commit 編號改成推送後的 `65394b7`／`c310be2`，現況改成已推送、08:14 已重啟。未 commit。
-- 2026-11-07 07:1x 使用者問給 AI 與給人的文件差在哪：AI 每次從零開始、照字面做、分不出新舊，要寫「什麼情況→做什麼→為什麼」且只寫仍成立的事；人要全貌與經過。DV-Q0 補一點：歸檔開頭要寫明是歷史（不論拆不拆）。接著解釋 DV-Q0～Q4 與盤點流水帳的用途；提案的 `dev/logs/` 改叫 `dev/journal/`（避開根目錄的 `logs/`）。未動其他檔。
-- 2026-11-07 05:0x 討論把 `TODO-completed.md` 拆進使用者新開的 `dev/`：提出資料夾結構與 DV-Q0～Q4（見「本檔維護規則」的「未定案」），等使用者回；未動檔。使用者接著要整理記憶（「直接做」）：刪掉 15 個和交接檔重複或過時的 project 類記憶，只記在記憶裡的事實先補進交接檔（巴哈刪文三種情境、不做好感度分數、persona 圖解頁、RAG 評估的坑、`send_embed_to_channels` 沒人用）；交易區塊的 commit 編號改成另一個 session 拆分後的 `e3ed09e`～`65394b7`／`c310be2`。
-- 2026-11-07 04:2x～04:xx 交接檔瘦身：各區塊只留現況、規則與坑、未定案、待做，原文搬到 `TODO-completed.md`（標「歸檔 2026-11-07」的各段）；舊盤點紀錄裡沒記進區塊的事項補進各區塊，新增 `hermes-integration`；撞號的題目改成 CB-Q8、RG-Q25；維護規則加「區塊寫什麼」與盤點一行制。未 commit。
 - 2026-11-06～11-07 市集資料庫版（定金＋尾款、分品項收款與交付）實作並合進 master（合併 `c310be2`，拆成六個 commit `e3ed09e`～`65394b7`；舊的一串留在 `backup/market-before-split`），未推送、未重啟；重啟後的上線匯入與核對見 `trade-revamp`。
 - 2026-11-07 03:1x～03:5x 琇紫第八、九版人格（多輪守線、放寬調情）上線；思考設定改到 runtime config 頂層、由 `backend_admin` 翻成各後端寫法；都已推送。第九版去留等 08:00 對照測試，見 `ambient-chat`。
 
@@ -153,7 +151,7 @@ history: dev/admin/console.md
 id: trade-revamp
 type: TODO
 status: draft
-last_confirmed: 2026-11-07
+last_confirmed: 2026-11-10
 depends_on: TRADE_FLOW.md（現況與流程）
 affects: commands/shop_commands.py、commands/forum_monitor.py、commands/trade_commands.py、utils/discord_content.py（論壇標籤）、services/community/（trade_service、shop_listing、shop_service、shop_trade、trade_progress、market_import、market_report、market_transition、item_prices）、services/market_db.py、settings/switches.json（market_transition）
 history: dev/community/trade.md
@@ -170,6 +168,8 @@ history: dev/community/trade.md
 - 新版內容：品項分立即購買／預購／定金＋尾款；交付方式每篇商品設（實體／數位）；每筆商品交易一張交易進度卡（每個品項各自收款、交付）；等待提醒、週一週報、置頂說明的「📋 我的交易」、主控台「交易看板」；每天 03:30 備份到 `src/services/market_backup/market_YYYY-MM-DD.db`，留 14 份。
 - 上線銜接：開關 `market_transition`（switches.json，預設 on）與 `services/community/market_transition.py`。11-07 只讀預覽的正式資料：商品 8 篇（1 篇是已下架的測試商品）、進行中交易 14 筆。預售 2 篇（小乖、絨絨相伴）的 2 筆匯入時直接轉新流程；標題寫【定金】的 5 篇（長離 1/6、茶歇時光 Q 版、卡提希婭 1/6、尤諾 1/7、琳奈 1/7）照一次付清匯入，上面 8 筆舊交易先留在舊流程，觀星者在管理面板按「💰 改成定金＋尾款」（只有一個品項的也可用編輯品項）填尾款與收定金截止後接上新流程、補發交易進度不 @ 人；改好前這幾篇不接新訂單、不能下架、舊交易不能照舊流程完成（擋新訂單要那篇掛著舊交易；5 篇各掛 1～2 筆，所以 5 篇都擋）。自由市場 4 筆照舊流程。系統裡還沒有任何定金紀錄（舊流程不記收款，改版前有沒有私下付過看不出來）。匯入的商品交付方式一律實體。
 - 商品圖照選取順序排（`61a7709`，已上線）：discord.py 的 `FileUpload.values` 照 resolved 附件表排、不照選取順序，`shop_commands._uploaded_in_order` 依元件的 `values` 重排，順序不同時記一行 INFO「上傳的圖照選取順序重排」。
+- 市集連結（11-10 實作，`e8e02d3`～`3b18231`，未推送，要重啟才生效）：週報、「📋 我的交易」、看板、完成留底、開單訊息的來源欄位、擋操作時的交易清單，交易對話與貼文一律寫成網址（`utils.discord_content.channel_url`＋`masked_link`；交易與市集的清單走 `trade_service.thread_link`／`party_name`，市集所在的伺服器收成 `ShopService.guild()`、拿掉 `market_report.guild_of`），清單上每筆的字是標題加需求方名字（已離開的寫 id）；週報太長時從換行處切、結尾留「全部清單」那句；主控台太長時從換行處切，看板「認不出身分的舊交易」一行一條。這週（W46）的週報已記成送過，不補發；下一份是 11-16 週一 12:00。
+- 11-10 08:35 照 TR-Q95 把 4 筆自由市場舊交易（1386328014790463559、1459245685118341270、1467825208206430463、1469546974880469157，供應方是同一位觀星者）在資料庫標成 `ended`、`wrapped_up=1`，各記一筆 `ended` 事件（`source='manual'`）；Discord 沒動、沒通知任何人，對話標題與失效的舊按鈕照舊。改之前的備份 `src/services/market_backup/market_before_end_legacy_20261110.db`（不在每日輪替的檔名裡，不會被刪）；回復用反向 SQL（改回 open、清 `closed_at`、`wrapped_up` 改 0、刪這 4 筆 manual 事件）。之後還沒結束 10 筆，舊交易剩 2 筆（【定金】商品上的，按鈕是 `trade:` 開頭、能用）。
 - 定金流程的範例畫面與狀態圖（設計討論時的版本）：artifact https://claude.ai/code/artifact/46309e7a-ae71-475c-8839-9fe39784378f（「鳴潮市集定金流程」；本機檔已不在，要改先用 Artifact read 取回）。
 
 **已定案（之後改這塊要守的）**
@@ -195,9 +195,14 @@ history: dev/community/trade.md
   - TR-Q89＝A：還掛著舊交易、還沒改成定金＋尾款的商品，「編輯商品資訊」不能拿掉標題開頭的【定金】，送出時什麼都不存並請他先按「💰 改成定金＋尾款」。只在銜接模組裡，關開關時一起刪。
 - 「📦 開始收尾款」「⏩ 開始交貨」的確認畫面（TR-Q91～Q94，11-07 使用者問有人下單時要不要提示不能退回、文字要不要好看；警告句是使用者自己改的，要專業、不要太像 AI，其餘照建議，使用者「好 改」）：粗體標題＋條列＋空一行後最後一行 ⚠️「此操作無法復原：…請確認貨品已到再執行。」，整段同一種正式語氣（「此操作」「立即」「原訂」），稱呼照市集其他文字用「你」；沒人下單時寫「目前沒有人下單，不會發送任何通知」並提示只想暫停就把剩餘數量設為 0；開始交貨照同一套；確定按鈕維持藍色（紅色留給下架、刪除）。理由：按下去停收定金或停止下單、通知馬上發出去，都收不回；下架的確認本來就有寫不能恢復。
 
+- TR-Q95（11-10，使用者選 C；建議原本是 A）：開單訊息上沒有可用按鈕的自由市場舊交易（2026-02-17 前的按鈕是 discord.py 給的隨機代碼、更舊的是「按 ✅ 確認」流程、沒有按鈕），直接在資料庫標成 `ended`、不在 Discord 收尾、不通知。沒選的：A 重啟時在對話補發可用的按鈕、B 主控台加「結束舊交易」。之後再出現這種交易照同一套做（先備份、取得同意）。
+- TR-Q96（11-10，使用者選建議）：舊交易只列在待辦，不再列進「超過 14 天沒動靜」。理由：待辦已經寫了要完成或取消，再列一次只是重複，天數從開單那時算（幾百天）看不出什麼；新流程的交易照舊卡住 14 天才列。
+
 **坑**
 - 測試模式判斷在 `test/__init__.py` 的 `_is_test_run`（也認啟動 gate 與直接跑的 `test.` 模組）：測試中市集資料庫、GPU 鎖檔、runtime 備份都要換成暫存；判斷失準時 gate 會開到正式路徑、`test_data_file_paths` 紅，bot 起不來。
 - 測試的假 Discord 已有三條真實規則：封存中的 thread 要在同一個請求解封才改得了（50083）、封存中加不了人、訊息 2000 字。新測試要照真按鈕的路徑（`step()` 讀卡片上的版本再送）。
+- 給人點的交易對話、商品貼文、需求貼文連結不能用 `<#id>`：這些 thread 會封存，用戶端不會載入封存的 thread，私訊、留底、開單訊息裡會顯示成「# 不明」點不進去（11-09 週報出過）。一律用網址（AGENTS.md 共用元件表有一列、守衛擋自己拼網址）。
+- 上線匯入只檢查舊交易讀不讀得到身分，沒檢查在新程式裡還有沒有路可以結束：2026-02-17 前開的自由市場對話按鈕是隨機代碼，`LegacyTransactionView` 接不住，按了只會「此互動失敗」。以後匯入或搬舊資料，要確認每一筆在新流程裡按得動、結束得了。
 - 接受不修：留底或封存需求貼文發出去、還沒記 `archived` 就停機，重啟補收尾會再發一份。停機期間的真人訊息記不到 `trades.last_chat_at`，那幾筆的「沒動靜」天數會偏大。
 - 「改成定金＋尾款」做錯了收不回來的地方，給觀星者的說明一定要講：
   - 【定金】只從標題開頭認（`market_transition.waits_for_deposit`）。改好之前用「編輯商品資訊」改掉這三個字，會連著發生：按鈕消失、開始接一次付清的新訂單、截止排程把舊交易照「立即購買」接上新流程（原本的定金變全額）。之後改類型會被「交易中不能改類型」擋，兩個品項的那兩篇還會被「不能混放」擋（TR-Q89）。
@@ -221,7 +226,12 @@ history: dev/community/trade.md
 - [ ] 重啟後用群主 07:48 上架的「test」實測 TR-Q88：加一個品項讓貼文重畫，手機與桌機各點一次「供應方：名字」，看是不是開個人檔案；手機不行就換成說明第一行 @ 他。測完下架。
 - [ ] 觀星者把 5 篇【定金】改成定金＋尾款 → switches.json 的 `market_transition` 改 off（不用重啟）→ 確認沒問題 → 刪 `market_transition.py`、`DepositConvertModal`（含 `_balance_label`）、面板的 💰 按鈕、核心裡問它的那幾行（`grep -rn market_transition src`；含 `edit_info` 的 `check_title`、`redraw` 標籤的 `holds_orders`）、開關定義與 switches.json 兩行、相關測試。`ShopService.adopt_legacy_on`、`ListingTrades.adopt_legacy`／`heal_adoption`、`trade_progress.ADOPTED`、`TradeService.refresh_opening` 是之後改類型也用得到的一般功能，留著。
 - [ ] 商品圖順序：請使用者用標了 1、2、3 的圖上架一次，看大圖是不是 1、log 有沒有「上傳的圖照選取順序重排」（正式 log 還沒出現過）。
-- [ ] 舊交易都結束後刪 `forum_monitor.LegacyTransactionView` 與 `trade_service.legacy_ref_from_text`。
+- [ ] 重啟 discord-bot 讓 11-10 的連結修正與 TR-Q96 生效（避開 04:00～07:30；重啟前查有沒有別的 session 在容器裡跑測試）。
+- [x] commit 11-10 的修改（11-10：`e8e02d3` 共用連結＋守衛、`e40b908` 週報與清單的連結、`37ced3b` 舊交易不列沒動靜、`3b18231` 留底／開單訊息／擋操作清單，文件另一個；未推送，等使用者說）
+- [ ] 請使用者回覆那位觀星者：那 4 筆是上線前的舊交易，已經結束，不用處理；下週的週報不會再有。
+- [ ] `admin_console._clip`（從換行處切）與 `rollcall_commands._clip`（硬切）是同一件事的兩份，收成一份。
+- [ ] 11-10 碰到的 `services/relay/bahamut_monitor.py`、`services/community/community_lookup_service.py` 模組說明還是舊格式（只改了組網址的幾行，沒照新格式重寫），下次動到時改。
+- [ ] 舊交易都結束後刪 `forum_monitor.LegacyTransactionView` 與 `trade_service.legacy_ref_from_text`。11-10 起還開著的舊交易都不是它接的按鈕（剩 2 筆是 `trade:` 開頭），可以考慮現在刪；刪了之後，已結束的舊對話上的舊按鈕按了會「此互動失敗」，不再回「交易已結束」。等使用者。
 - [ ] 價目表第二階段（TR-Q7）：`item_prices.json` 已只經 `services.community.item_prices` 讀寫，剩搬進市集資料庫、停用兩個指令。
 - [ ] `/select_item`（`commands/trade_commands.py`）沒有測試（11-07 改成 `ensure_forum_tags` 建「代儲」標籤，沒有測試驗）。
 - [ ] 複查留下的小事（不成立或只是加固，沒改）：一篇貼文別人掛滿 4 個標籤時再加 bot 的兩個會超過 Discord 的 5 個、整個標籤更新失敗且封存回不去（以前要 5 個才會）；`can_sell` 每次重畫都同步讀 config.json，供應方沒觀星者身份組時每次重畫記一行「嘗試使用…已被拒絕」的 INFO。
