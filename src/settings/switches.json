@@ -53,7 +53,7 @@
     "dry_run：記錄模式——琇紫判斷要不要插話時可以想查一次遊戲情報或網路，但只記下她想查什麼（名字檢查的判定一起記進 discord_bot.log），不上網、不給她結果；每天最多記 30 次",
     "on：真的查——同一次判斷裡可以查一次，結果交給她再決定要不要開口（網路查詢先過名字與識別碼檢查，再經 SearXNG 出去；遊戲情報只到本機）；每天最多 30 次，有查的那次會回得比較晚"
   ],
-  "ambient_search_mode": "dry_run",
+  "ambient_search_mode": "on",
   "_ambient_seed_lines_mode 可以填": [
     "off：插話的語氣參考照舊撈被讚過的舊插話",
     "on：每次從預設句庫（settings/prompts/ambient_seed_lines.json）與學到的句子抽幾句當語氣參考；要和新人格的提示詞一起切"
