@@ -1169,6 +1169,14 @@ class ShopService:
         forum_id = await self._forum_id()
         return self.bot.get_channel(forum_id) if forum_id is not None else None
 
+    async def guild(self) -> Optional[discord.Guild]:
+        """市集所在的伺服器（商品論壇的，沒綁就用購物車的）：組連結、查名字都用它。"""
+        forum = await self._forum()
+        if forum is not None:
+            return forum.guild
+        cart = await self.trade._channel(self.trade.settings.cart_channel_key)
+        return getattr(cart, "guild", None)
+
 
 #: 擋下操作時列出的交易對話最多幾個（每個連結約 23 字；全列的話交易一多，訊息超過上限、面板就卡住）
 _THREAD_LIST_MAX = 15

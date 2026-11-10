@@ -50,7 +50,7 @@ import discord
 from sys_settings.admin_console_settings import ADMIN_CONSOLE_SETTINGS
 from utils import owner_alerts
 from utils.background_tasks import spawn
-from utils.discord_content import edit_screen, guarded_screen, message_custom_ids
+from utils.discord_content import edit_screen, guarded_screen, message_custom_ids, split_message
 from utils.discord_members import NO_HOME_GUILD, home_guild, require_access, resolve_member
 from utils.utils import paginate, safe_send_interaction_message
 
@@ -115,7 +115,8 @@ def screen_view(box: discord.ui.Container, *rows: Sequence[discord.ui.Item]) -> 
 
 
 def _clip(text: str) -> str:
-    return text if len(text) <= _TEXT_LIMIT else text[:_TEXT_LIMIT] + "\n…（太長，後面截掉）"
+    # 從換行處切：清單裡每一行可能是一條連結，切在中間會留下半截網址
+    return text if len(text) <= _TEXT_LIMIT else split_message(text, _TEXT_LIMIT)[0] + "\n…（太長，後面截掉）"
 
 
 def back_button(*, disabled: bool = False) -> "ConsoleButton":

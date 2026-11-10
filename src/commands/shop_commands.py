@@ -54,6 +54,7 @@ from services.community.shop_listing import (
 from services.community import market_transition as transition
 from services.community.shop_service import UNIT_EXAMPLES, PriceChanged, ShopService
 from services.community.shop_trade import STEP_TEMPLATE, Step
+from services.community.trade_service import party_name
 from services.market_db import backup_daily
 from sys_settings.paths import MARKET_BACKUP_DIR
 from sys_settings.shop_settings import ShopSettings
@@ -1153,12 +1154,11 @@ class ShopCommands(commands.Cog):
         if supplier_id is not None:
             # 群主看的是別人的清單：標題寫是誰、說「他」不說「你」
             summaries = await market_report.summarize(self.shop, _now(), supplier_id=supplier_id)
-            names = await self.shop.trade.display_names(await market_report.guild_of(self.shop), (supplier_id,))
-            return market_report.my_trades_text(summaries, supplier_id,
-                                                name=names.get(supplier_id, f"已離開的成員 {supplier_id}")), []
+            names = await self.shop.trade.display_names(await self.shop.guild(), (supplier_id,))
+            return market_report.my_trades_text(summaries, supplier_id, name=party_name(names, supplier_id)), []
         summaries = await market_report.summarize(self.shop, _now())
         ids = sorted({s.supplier_id for s in summaries})
-        names = await self.shop.trade.display_names(await market_report.guild_of(self.shop), ids)
+        names = await self.shop.trade.display_names(await self.shop.guild(), ids)
         return (await market_report.dashboard_text(self.shop, summaries, _now()),
                 [(i, names.get(i, str(i))) for i in ids])
 

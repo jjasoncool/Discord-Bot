@@ -15,6 +15,9 @@
 
 規則：
   - 「沒動靜」只算真人講話與交易紀錄；提醒、截止與延期的通知不算（不然一直提醒，對話就永遠不會沒動靜）。
+  - 每筆交易寫成交易對話的連結（`trade_service.thread_link`），字是標題加需求方：週報在私訊裡、對話會封存，
+    `<#id>` 在那裡顯示成「# 不明」點不進去；同一篇商品有好幾位需求方時，靠名字分得出是哪一筆。
+  - 週報太長時從換行處截掉，結尾照樣留「全部清單」那句（太長時最需要指路去看全部）。
   - 週報只給有待辦的觀星者，群主不收；每週一份、記在資料庫，重啟不重發；週一 23:59 前開機會補發，過了等下週。
   - 上線前的舊交易算待辦（沒有交易進度，只能請供應方自己完成或取消）。第一版不統計金額。
 """
@@ -32,8 +35,9 @@ from services.community import trade_progress as tp
 from services.community.market_import import UNRECOGNIZED_META
 from services.community import market_transition as transition
 from services.community.shop_trade import ready_at
-from services.community.trade_service import receipt_state
+from services.community.trade_service import party_name, receipt_state, thread_link
 from sys_settings.time_settings import APP_TZ
+from utils.discord_content import masked_link, split_message
 from utils.dm_notifier import send_dm
 
 if TYPE_CHECKING:
@@ -47,6 +51,10 @@ IDLE_DAYS = 14
 SHIPPED_DAYS = 7
 #: 週報在週一幾點發
 WEEKLY_AT = time(12, 0)
+#: 週報說明欄的上限（Discord 是 4096，留一點餘裕）
+_WEEKLY_LIMIT = 4000
+_ALL_TRADES_HINT = "全部清單：在商品論壇置頂說明按「📋 我的交易」。"
+_CUT_NOTE = f"\n…（太長，後面截掉）\n{_ALL_TRADES_HINT}"
 #: 這些事件是 bot 自己發的通知，不算「有動靜」
 #: 接上新流程（adopted）算動靜：舊交易從那一刻重新算，不然一上線就整批算成「超過 14 天沒動靜」被週報催
 _NOT_ACTIVITY = {tp.REMINDER, tp.RECEIPT_REMINDED, tp.CUTOFF_NOTICE, tp.DELAY_NOTICE}
@@ -65,6 +73,7 @@ class TradeSummary:
     waiting: Optional[str] = None                       # 不用供應方處理時在等什麼
     #: 每個品項都在等貨：本來就會安靜好幾個月，不算「沒動靜」（不然等貨的交易兩週後每週都被週報催）
     waiting_for_goods: bool = False
+    link: str = ""                                      # 清單上的那一筆：交易對話的連結，字是標題加需求方
 
     @property
     def idle(self) -> bool:
@@ -85,7 +94,10 @@ async def summarize(shop: "ShopService", now: datetime, *, supplier_id: Optional
     db = await trade_service.db()
     listings: dict[int, object] = {}
     summaries = []
-    for trade in await db.trades(status="open", supplier_id=supplier_id):
+    trades = await db.trades(status="open", supplier_id=supplier_id)
+    guild = await shop.guild()
+    names = await trade_service.display_names(guild, (trade.requester_id for trade in trades))
+    for trade in trades:
         events = await db.events(trade.id)
         title = "自由市場需求"
         listing = None
@@ -102,8 +114,11 @@ async def summarize(shop: "ShopService", now: datetime, *, supplier_id: Optional
                    default=datetime.fromisoformat(trade.opened_at))
         if trade.last_chat_at and datetime.fromisoformat(trade.last_chat_at) > last:
             last = datetime.fromisoformat(trade.last_chat_at)
+        # 找不到伺服器就查不到名字，只寫標題（不然每一位都會被寫成已離開）
+        label = f"{title}｜{party_name(names, trade.requester_id)}" if guild is not None else title
         summary = TradeSummary(trade.id, trade.supplier_id, trade.requester_id, title, trade.legacy,
-                               _days(datetime.fromisoformat(trade.opened_at), now), _days(last, now))
+                               _days(datetime.fromisoformat(trade.opened_at), now), _days(last, now),
+                               link=thread_link(guild, trade.id, label))
         _classify(summary, trade, listing, await db.items(trade.id), events, now)
         summaries.append(summary)
     return summaries
@@ -184,7 +199,7 @@ def _classify(summary: TradeSummary, trade, listing, items, events, now: datetim
 
 
 def _line(summary: TradeSummary) -> str:
-    return f"・<#{summary.trade_id}> {summary.title}"
+    return f"・{summary.link}"
 
 
 def my_trades_text(summaries: Sequence[TradeSummary], supplier_id: int, *, name: Optional[str] = None) -> str:
@@ -239,7 +254,7 @@ def weekly_text(summaries: Sequence[TradeSummary], supplier_id: int, now: dateti
     if idle:
         lines.append(f"\n超過 {IDLE_DAYS} 天沒動靜：{len(idle)} 筆")
         lines += [f"{_line(s)}（{s.days_idle} 天）" for s in idle]
-    lines.append("\n全部清單：在商品論壇置頂說明按「📋 我的交易」。")
+    lines.append(f"\n{_ALL_TRADES_HINT}")
     return "\n".join(lines)
 
 
@@ -261,7 +276,7 @@ async def run_weekly(shop: "ShopService", now: datetime) -> datetime:
     db = await shop.trade.db()
     week = week_key(monday)
     summaries = await summarize(shop, now)
-    guild = await guild_of(shop)
+    guild = await shop.guild()
     for supplier_id in sorted({s.supplier_id for s in summaries}):
         if await db.weekly_report(week, supplier_id) is not None:
             continue
@@ -271,7 +286,7 @@ async def run_weekly(shop: "ShopService", now: datetime) -> datetime:
         member = await shop.trade.member(guild, supplier_id)
         sent = None
         if member is not None:
-            embed = discord.Embed(title=f"每週交易提醒（{monday:%Y/%m/%d}）", description=text[:4000],
+            embed = discord.Embed(title=f"每週交易提醒（{monday:%Y/%m/%d}）", description=_fit_weekly(text),
                                   color=discord.Color.gold())
             sent = await send_dm(member, embed=embed)
         async with db.transaction():
@@ -284,13 +299,11 @@ async def run_weekly(shop: "ShopService", now: datetime) -> datetime:
     return start + timedelta(days=7)
 
 
-async def guild_of(shop: "ShopService"):
-    """市集所在的伺服器（商品論壇的，沒綁就用購物車的）。"""
-    forum = await shop._forum()
-    if forum is not None:
-        return forum.guild
-    cart = await shop.trade._channel(shop.trade.settings.cart_channel_key)
-    return getattr(cart, "guild", None)
+def _fit_weekly(text: str) -> str:
+    """放進說明欄：太長時從換行處切（不留半截網址），結尾補上截掉了與「全部清單」那句。"""
+    if len(text) <= _WEEKLY_LIMIT:
+        return text
+    return split_message(text, _WEEKLY_LIMIT - len(_CUT_NOTE))[0] + _CUT_NOTE
 
 
 async def dashboard_text(shop: "ShopService", summaries: Sequence[TradeSummary], now: datetime) -> str:
@@ -305,7 +318,7 @@ async def dashboard_text(shop: "ShopService", summaries: Sequence[TradeSummary],
             cancelled += trade.status == "cancelled"
     oldest = max((s.days_open for s in summaries), default=0)
     lines = [f"還沒結束 {len(summaries)} 筆｜本週完成 {done}、取消 {cancelled}｜最久 {oldest} 天"]
-    guild = await guild_of(shop)
+    guild = await shop.guild()
     names = await shop.trade.display_names(guild, sorted({s.supplier_id for s in summaries}))
     gone = 0
     for supplier_id in sorted({s.supplier_id for s in summaries}, key=lambda i: names.get(i, str(i))):
@@ -314,19 +327,20 @@ async def dashboard_text(shop: "ShopService", summaries: Sequence[TradeSummary],
             gone += len(mine)
         acting = sum(1 for s in mine if s.needs_supplier)
         idle = sum(1 for s in mine if s.idle)
-        lines.append(f"**{names.get(supplier_id, f'已離開的成員 {supplier_id}')}**　還沒結束 {len(mine)}｜"
+        lines.append(f"**{party_name(names, supplier_id)}**　還沒結束 {len(mine)}｜"
                      f"要他處理 {acting}" + (f"｜超過 {IDLE_DAYS} 天 {idle}" if idle else ""))
     unknown = []
     for thread_id in json.loads(await db.get_meta(UNRECOGNIZED_META) or "[]"):
         # 群主處理掉（鎖定或刪除）的就不再列
         thread = await shop.trade.get_thread(thread_id)
         if thread is not None and not getattr(thread, "locked", False):
-            unknown.append(thread_id)
+            unknown.append(masked_link(thread.name, thread.jump_url))
     failed = 0
     week = week_key(local.date() - timedelta(days=local.weekday()))
     for supplier_id in {s.supplier_id for s in summaries}:
         record = await db.weekly_report(week, supplier_id)
         failed += bool(record and record[1])
-    lines += ["", f"認不出身分的舊交易：{len(unknown)} 筆" + ("（" + " ".join(f"<#{i}>" for i in unknown) + "）" if unknown else ""),
+    # 一行一條連結：主控台太長時從換行處切，擠在同一行會切在連結中間
+    lines += ["", f"認不出身分的舊交易：{len(unknown)} 筆", *(f"・{link}" for link in unknown),
               f"供應方已離開伺服器的交易：{gone} 筆", f"這週週報沒送到：{failed} 位"]
     return "\n".join(lines)

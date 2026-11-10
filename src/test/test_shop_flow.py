@@ -68,6 +68,7 @@ import services.community.shop_listing as shop_listing_module  # noqa: E402
 from services.community.trade_service import CANCEL, CANCEL_OK, HOLD, NOTIFY, RECEIVE, TradeRef, TradeService  # noqa: E402
 from sys_settings.shop_settings import ShopSettings  # noqa: E402
 from sys_settings.switches import Switches  # noqa: E402
+from utils.discord_content import masked_link  # noqa: E402
 from test.test_trade_flow import (  # noqa: E402  只拿假物件，不拿 TestCase（免得被重跑）
     ARCHIVE_ID, BOT, CART_ID, FORUM_ID, OUTSIDER, OWNER, REQUESTER, SUPPLIER, SUPPLIER_B,
     FakeMessage, FakeThread, MarketTestMixin, World, _make_view,
@@ -2443,7 +2444,7 @@ class ImportTests(ShopTestCase):
         summaries = self.call(market_report.summarize(self.shop, self.world.now))
         text = market_report.my_trades_text(summaries, SELLER.id)
         self.assertIn("改成定金＋尾款", text)
-        self.assertNotIn("交付了請按「通知需求方領收」", text.split(f"<#{self.forum_trade.id}>")[0])
+        self.assertNotIn("交付了請按「通知需求方領收」", text.split(self.forum_trade.jump_url)[0])
 
     def test_an_old_trade_whose_listing_is_gone_does_not_stop_the_import(self):
         lost = self.cart_thread(TradeRef(424242, BUYER_B.id, SELLER.id))
@@ -3120,11 +3121,65 @@ class ReportTests(ShopTestCase):
         text = market_report.my_trades_text(self.summaries(), SELLER.id)
         self.assertIn("2 筆還沒結束", text)
         todo, rest = text.split("**不用你處理**")
-        self.assertIn(f"<#{self.claimed.id}>", todo)
+        self.assertIn(self.claimed.jump_url, todo)
         self.assertIn("需求方表示已付款，等你確認", todo)
-        self.assertIn(f"<#{self.waiting.id}>", rest)
+        self.assertIn(self.waiting.jump_url, rest)
         self.assertIn("等需求方付款", rest)
         self.assertEqual(market_report.my_trades_text(self.summaries(), OUTSIDER.id), "你目前沒有還沒結束的交易。")
+
+    def test_each_trade_is_a_link_that_names_the_requester(self):
+        # 週報在私訊裡、舊交易的對話早就封存：<#id> 在那裡顯示成「# 不明」點不進去，要給網址。
+        # 同一篇商品兩位需求方：靠名字分得出哪一筆是誰的
+        self.world.advance(days=15)
+        weekly = market_report.weekly_text(self.summaries(), SELLER.id, self.world.now)
+        mine = market_report.my_trades_text(self.summaries(), SELLER.id)
+        for text in (weekly, mine):
+            self.assertNotIn("<#", text)
+            self.assertIn(masked_link(f"月相代儲｜{BUYER_B.display_name}", self.claimed.jump_url), text)
+        self.assertIn(masked_link(f"月相代儲｜{BUYER.display_name}", self.waiting.jump_url), mine)
+        self.assertIn("（15 天）", weekly.split(f"超過 {market_report.IDLE_DAYS} 天沒動靜")[1])
+
+    def test_a_requester_who_left_is_still_listed(self):
+        # 寫 id：同一篇商品兩位需求方都離開了，清單上才分得出是哪一筆
+        del self.world.members[BUYER_B.id]
+        text = market_report.my_trades_text(self.summaries(), SELLER.id)
+        self.assertIn(masked_link(f"月相代儲｜已離開的成員 {BUYER_B.id}", self.claimed.jump_url), text)
+
+    def test_without_the_server_the_list_falls_back_to_ids(self):
+        # 找不到市集所在的伺服器：組不出網址、也查不到名字，不能把每一位都寫成已離開
+        with mock.patch.object(ShopService, "guild", mock.AsyncMock(return_value=None)):
+            text = market_report.my_trades_text(self.summaries(), SELLER.id)
+        self.assertIn(f"・月相代儲（<#{self.claimed.id}>）", text)
+        self.assertNotIn("已離開", text)
+
+    def test_a_url_in_a_title_stays_a_link(self):
+        # Discord 會擋字裡帶網址的遮罩連結：字裡的 https:// 拿掉，整條還是連結
+        thread = self.list_item(seller=SUPPLIER_B, title="代購 https://example.com/a")
+        self.add(thread, "60 月相｜30｜｜", actor=SUPPLIER_B)
+        trade = self.order(thread, BUYER, {1: 1})
+        text = market_report.my_trades_text(self.summaries(), SUPPLIER_B.id)
+        self.assertIn(f"・[代購 example.com/a｜{BUYER.display_name}]({trade.jump_url})", text)
+
+    def test_brackets_in_a_title_do_not_break_the_link(self):
+        # 連結的字是群友取的標題與名字：裡面有 ] 連結就斷在那裡、有 * 後面整段變粗體
+        thread = self.list_item(seller=SUPPLIER_B, title="[限定]*月相*")
+        self.add(thread, "60 月相｜30｜｜", actor=SUPPLIER_B)
+        trade = self.order(thread, BUYER, {1: 1})
+        text = market_report.my_trades_text(self.summaries(), SUPPLIER_B.id)
+        self.assertIn(f"・[［限定］\\*月相\\*｜{BUYER.display_name}]({trade.jump_url})", text)
+
+    def test_a_long_weekly_report_is_cut_between_lines(self):
+        # 說明欄有字數上限：從換行處切，不能留下半截網址
+        line = "・" + masked_link(f"月相代儲｜{BUYER_B.display_name}", self.claimed.jump_url)
+        monday = self.call(market_report.run_weekly(self.shop, self.world.now))
+        self.world.now = monday + timedelta(hours=1)
+        with mock.patch.object(market_report, "weekly_text", return_value="\n".join([line] * 200)):
+            self.call(market_report.run_weekly(self.shop, self.world.now))
+        description = self.dms.await_args.kwargs["embed"].description
+        self.assertLessEqual(len(description), 4000)
+        kept, cut = description.split("\n…（太長，後面截掉）\n")
+        self.assertTrue(kept.endswith(line))
+        self.assertIn("📋 我的交易", cut)   # 截掉了更要指路去看全部
 
     def test_each_todo_says_how_long_it_has_waited(self):
         # 寫這一步等了幾天，不是交易開了幾天（定金交易一開就是好幾個月，看不出哪筆是剛卡住的）
@@ -3145,7 +3200,7 @@ class ReportTests(ShopTestCase):
         summary = next(s for s in self.summaries() if s.trade_id == waiting.id)
         self.assertEqual(summary.waiting, "等貨中")
         self.assertFalse(summary.needs_supplier)
-        self.assertNotIn(f"<#{waiting.id}>", market_report.my_trades_text(self.summaries(), SUPPLIER_B.id).split(
+        self.assertNotIn(waiting.jump_url, market_report.my_trades_text(self.summaries(), SUPPLIER_B.id).split(
             "不用你處理")[0])
 
     def test_the_owner_sees_whose_list_it_is(self):
@@ -3172,7 +3227,7 @@ class ReportTests(ShopTestCase):
 
         (call,) = self.dms.await_args_list
         self.assertEqual(call.args[0].id, SELLER.id)
-        self.assertIn(f"<#{self.claimed.id}>", call.kwargs["embed"].description)
+        self.assertIn(self.claimed.jump_url, call.kwargs["embed"].description)
         self.assertIn("📋 我的交易", call.kwargs["embed"].description)
         week = market_report.week_key(due.astimezone(shop_service.APP_TZ).date())
         self.assertIsNotNone(self.call(self.db.weekly_report(week, SELLER.id))[0])
@@ -3241,7 +3296,7 @@ class ReportTests(ShopTestCase):
         self.call(remember())
 
         board = self.call(market_report.dashboard_text(self.shop, self.summaries(), self.world.now))
-        self.assertIn(f"認不出身分的舊交易：1 筆（<#{kept.id}>）", board)
+        self.assertIn(f"認不出身分的舊交易：1 筆\n・{masked_link(kept.name, kept.jump_url)}", board)
 
     def test_console_screen(self):
         from commands import admin_console
@@ -3265,6 +3320,19 @@ class ReportTests(ShopTestCase):
         self.assertIn("console:market:seller:1000", first)
         self.assertIn("console:market:seller:1016", second)
         self.assertNotIn("console:market:seller:1016", first)
+
+    def test_a_long_list_on_the_console_is_cut_between_lines(self):
+        # 觀星者的清單一行一條連結：太長時從換行處切，不能留下半截網址
+        from commands import admin_console
+        from utils.discord_content import layout_text
+        line = "・" + masked_link(f"月相代儲｜{BUYER_B.display_name}", self.claimed.jump_url)
+
+        async def build():
+            return admin_console.render_market("\n".join([line] * 100), detail=True)
+
+        text = layout_text(self.call(build()))
+        self.assertIn("…（太長，後面截掉）", text)
+        self.assertTrue(text.split("\n…（太長，後面截掉）")[0].endswith(line))
 
 
 class LayeringTests(unittest.TestCase):

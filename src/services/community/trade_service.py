@@ -21,6 +21,8 @@
   - `read(thread)` → `TradeThreadLog`：讀整串交易對話；只給上線匯入（舊交易）與交易結束時收按鈕用。
   - `add_source_kind`：登記自由市場以外的來源（商品貼文，`SourceKind`）。`ready`：上線匯入做完才開放；
     匯入期間的接單表情先記著，匯入做完 `replay_deferred` 補開。
+  - 給人看的清單（週報、我的交易、擋操作時的清單、留底）：`thread_link(guild, thread_id, label)` 寫交易對話或貼文的連結、
+    `party_name(names, user_id)` 寫需求方或供應方的名字。
 
 規則：
   - 交易的正本在資料庫：誰是需求方與供應方、進行中或結束、領收通知在等誰，全部查資料庫，不翻 Discord。
@@ -28,6 +30,8 @@
   - 同一個交易對話的動作排隊（`locked`）；鎖不能重入，鎖裡只呼叫 `*_locked`。商品那邊的鎖要先拿：
     商品鎖 → 交易鎖，反過來會卡死。
   - 只 @ 下一步要動手的人：每次發訊息都明確指定 `allowed_mentions`；交易結束時對話裡不 @、改私訊雙方。
+  - 交易對話、商品貼文、需求貼文都會封存：給人點的連結用網址，不用 `<#id>`（用戶端不會載入封存的 thread，
+    `<#id>` 在私訊、留底裡顯示成「# 不明」點不進去）。
   - 只有供應方與群主能取消（避免需求方受領服務後擅自取消）；來源說有已收的款時先跳確認。
   - 同一篇需求可以有多位供應方，各開一個對話；一位完成後需求貼文封存刪除，其他人的對話一併結束。
     商品貼文成交後保留，可以賣給很多人，取消時把沒交付的數量還回去（由來源種類處理）。
@@ -53,7 +57,7 @@ import re
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
-from typing import Any, AsyncIterator, Awaitable, Callable, Iterator, Optional, Protocol, Sequence
+from typing import Any, AsyncIterator, Awaitable, Callable, Iterator, Mapping, Optional, Protocol, Sequence
 
 import discord
 from discord.utils import snowflake_time
@@ -62,7 +66,8 @@ from services.community import trade_progress as tp
 from services.market_db import MarketDB, TradeEventRow, TradeRow, get_shared_market_db
 from sys_settings.time_settings import APP_TZ
 from sys_settings.trade_settings import TradeSettings
-from utils.discord_content import DISCORD_MESSAGE_LIMIT, get_forum_tags, post_to_channel, send_model_text
+from utils.discord_content import (DISCORD_MESSAGE_LIMIT, channel_url, get_forum_tags, masked_link, post_to_channel,
+                                   send_model_text)
 from utils.discord_members import check_role, resolve_member
 from utils.discord_threads import fetch_thread, reopen_thread
 from utils.dm_notifier import send_dm
@@ -258,6 +263,20 @@ _MENTION_RE = re.compile(r"<@!?(\d+)>")
 def mentions_to_names(text: str, names: dict[int, str]) -> str:
     """把 <@id> 換成 @名字：封存與留底要看得懂是誰，也不能在發封存時又通知到人。"""
     return _MENTION_RE.sub(lambda m: f"@{names.get(int(m[1])) or m[1]}", text or "")
+
+
+def party_name(names: Mapping[int, str], user_id: int) -> str:
+    """清單上的需求方或供應方名字；查不到（已離開伺服器）寫「已離開的成員 id」：
+    同一篇商品兩位需求方都離開了，清單上才分得出是哪一筆。"""
+    return names.get(user_id) or f"已離開的成員 {user_id}"
+
+
+def thread_link(guild: Optional[discord.Guild], thread_id: int, label: str) -> str:
+    """給人點的交易對話或貼文連結：網址、字是 label（封存後 `<#id>` 會顯示成「# 不明」點不進去）。
+    找不到市集所在的伺服器時組不出網址，退回「字（<#id>）」。"""
+    if guild is None:
+        return f"{discord.utils.escape_markdown(label)}（<#{thread_id}>）"
+    return masked_link(label, channel_url(guild.id, thread_id))
 
 
 def mention_only(*user_ids: int) -> discord.AllowedMentions:
