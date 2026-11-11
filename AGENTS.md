@@ -121,7 +121,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 群友的名字（Discord 顯示名稱、伺服器暱稱、全域名稱＋自介／印象暱稱） | `llm.persona.member_names`（`member_names_from_guild`、`merge_names`、`names_member`、`name_map_lines`） |
 | 查 X 貼文／給 AI 看貼文內容與縮圖 | `utils.link_fix.fetch_tweet`（syndication CDN）；給模型看用 `llm.preprocess.tweet_context.expand_tweets` |
 | 把播不了的影片連結（X、bilibili）換成能播的網址轉貼 | `services.relay.link_repost.repost_fixed_links`（回覆原訊息、不 @；轉貼長出影片或圖片預覽才壓原訊息的預覽，等不到就刪掉轉貼；守衛擋別處寫 `suppress=True`）；挑網址、預檢、暴雷照包在 `utils.link_fix`（平台的差異只寫在 `RULES`：加平台＝加一條 `LinkRule`（認哪種網址、替代網址範本、轉之前的判斷），認自動轉貼的網域從規則表組出來；`probe_preview` 照 Discord 的讀法：頁面標籤，或 fixupx 的 Mastodon 相容 API）；認出 bot 的自動轉貼用 `chat_line.is_link_repost` |
-| 連結預覽給模型看、存進向量庫（`[預覽：…]`） | 標記只有一份：`llm.preprocess.emoji_text_utils.preview_text`／`preview_marker`／`strip_preview_markers`（守衛擋自組 `[預覽：`）；聊天行用 `chat_line.link_previews`／`preview_image_urls`（bot 只收自動轉貼、有暴雷的不給）；判斷「有沒有可聊的字」、掃降溫字詞前先拿掉標記 |
+| 連結預覽給模型看、存進向量庫（`[預覽：…]`） | 標記只有一份：`llm.preprocess.emoji_text_utils.preview_text`／`preview_marker`／`strip_preview_markers`（守衛擋自組 `[預覽：`）；聊天行用 `chat_line.link_previews`／`preview_images`（bot 只收自動轉貼、有暴雷的不給）；判斷「有沒有可聊的字」、掃降溫字詞前先拿掉標記 |
 | 讀寫自訂表情字典（`settings/emoji_dictionary.txt`） | `llm.preprocess.emoji_dictionary.entries()`；AI 補描述用 `fill()`（不覆寫人寫的描述） |
 | 讀寫別的伺服器的貼圖描述（`settings/sticker_dictionary.txt`） | `llm.preprocess.sticker_dictionary.lookup()`／`add()`；本伺服器的貼圖描述在 Discord 上，走 `sticker_cache` |
 | 沒描述的表情／貼圖讓 AI 看圖補字典 | `llm.preprocess.emoji_autofill.observe`（`on_message` 呼叫；設定 `EmojiAutofillSettings`） |
@@ -129,7 +129,8 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 被點名罵時的應對（模型判斷、按嘲諷表情）；最近罵過它的人 | `llm.ambient.ambient_insult`（模型在插話 prompt 裡輸出 `[INSULT]`；`is_marker`、`respond`、`grudges`；開關 `ambient_insult_mode`） |
 | bot 與 telegram-scraper 都要用的定義（頻道識別正規化、媒體補圖時限） | `shared.telegram`（`src/shared/` 由 compose 唯讀掛進爬蟲容器；只能依賴標準庫） |
 | Telegram 爬蟲下載媒體 | `telegram_scraper.media_download.fetch_media_file`（同一個 Telegram 檔案已完整在硬碟就不重抓；先寫暫存檔、完成才換名，中斷不傷舊檔；太久沒進度就取消；守衛擋直接呼叫 `download_media`、`download_with_stall_guard`；時限常數：補掃重試與補發通知 `MEDIA_RETRY_WINDOW`、新訊息圖沒到先不通知 `MEDIA_HOLD_NOTIFY`） |
-| 下載網址上的圖給 vision 模型 | `llm.preprocess.vision_image.download_images`（失敗跳過、限張數與大小） |
+| Discord 附件、連結預覽上的圖給 vision 模型（插話、/askai） | `llm.preprocess.vision_image.fetch_for_vision(session, remote_image(附件或 embed.thumbnail))`（先抓 Discord 代理的縮小版、不行才抓簽過名的原檔，上限 `MAX_FETCH_BYTES` 10 MB；動圖拆最多 4 張 PNG 關鍵幀、長邊 512，靜態圖一張 JPEG、長邊 1280；解碼丟執行緒；抓不到回空的 `frames`、`too_big` 說是不是太大，呼叫端自己決定要不要告訴模型或使用者；守衛擋別處自己 `extract_key_frames`，Telegram 過濾拆本機檔案是例外） |
+| 下載網址上的圖給 vision 模型（X 縮圖、別的伺服器的表情與貼圖，只取第一幀） | `llm.preprocess.vision_image.download_images`（失敗跳過、限張數與大小） |
 | 本機的圖與影片給 vision 模型（縮圖、動圖與影片挑幀） | `llm.preprocess.vision_image.fit_for_vision`（縮到長邊上限、轉 JPEG）、`extract_key_frames`（動圖）、`video_key_frames`（影片）；挑幀規則只有 `select_key_frames` 一份 |
 | 跑 ffmpeg 這類子行程 | `utils.media_probe.run_media_tool(cmd, timeout=…)`（逾時砍掉行程、回 `ToolResult`；守衛擋自己 `create_subprocess_exec`） |
 | 讀影片長度 | `utils.media_probe.probe_duration`（ffprobe；失敗、逾時回 0） |
@@ -154,7 +155,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
   4. 規則：呼叫端要遵守的約定、不做的事。
   5. 例外與決策：不收斂的例外、決策與一兩句理由寫在這裡；不要只寫「見交接檔」。經過與長篇討論寫交接檔，程式這邊要有結論。
   範例：`src/utils/hot_files.py`。歷史敘述（「原本是…後來…」）不寫在程式裡。
-- **錯誤邊界**（`src/test/test_error_boundaries.py` 守衛）：技術層與服務層（`llm/`、`services/` 裡不是功能的模組）不接所有例外（`except Exception`、裸 `except`、含它們的 tuple），讓例外往外走到邊界處理；真的是邊界（排程的一次 tick、每則訊息、每個工具呼叫、對外的一次請求）才接，而且在那一行註明 `# 邊界：原因`（有註明的不計）。既有的 80 處記在該檔 `BASELINE`，只准減不准增；清掉一處就把基準往下調。
+- **錯誤邊界**（`src/test/test_error_boundaries.py` 守衛）：技術層與服務層（`llm/`、`services/` 裡不是功能的模組）不接所有例外（`except Exception`、裸 `except`、含它們的 tuple），讓例外往外走到邊界處理；真的是邊界（排程的一次 tick、每則訊息、每個工具呼叫、對外的一次請求）才接，而且在那一行註明 `# 邊界：原因`（有註明的不計）。既有的 77 處記在該檔 `BASELINE`，只准減不准增；清掉一處就把基準往下調。
 - async 裡的同步 DB 或檔案 I/O 丟到執行緒（`asyncio.to_thread`；persona agent 用 `run_db`）。音樂、Discord 心跳、插話都在同一個 event loop 上。
 - 新增欄位或改介面時，列出所有牽動點並逐一確認。
 - 細項設定放 `sys_settings/` 的 pydantic settings（frozen）；功能開關放 `settings/switches.json`（見共用元件表）。
