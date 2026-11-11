@@ -1,27 +1,42 @@
-"""vision 圖片前處理測試：動圖拆關鍵幀 + 格式降級備援。
+"""vision 圖片前處理測試：動圖拆關鍵幀 + 格式降級備援 + 抓網路上的圖。
 
 拆幀的重點不是「拆出幾張」，是**只留變化大的**——反應 gif 常常幾十幀都在原地抖，
 等距抽樣會拿到一疊幾乎一樣的圖，白白吃掉 context 額度（總上限 9 張）。
+
+抓圖守的底線：先抓 Discord 代理的縮小版、不行才抓原檔，兩邊上限都是 10 MB；代理的寬高照原圖比例、
+簽章參數原樣留著；動圖給最多 4 張 PNG 關鍵幀（長邊 512），靜態圖給一張 JPEG（長邊 1280）；
+兩邊都抓不到時什麼都不給、記一行 log、說得出是不是太大；解碼不在主流程上跑。
 
 執行：
     cd src && python -m unittest test.test_vision_image -v
 """
 
+import asyncio
 import base64
 import os
 import sys
+import threading
 import unittest
 from io import BytesIO
+from types import SimpleNamespace
+from unittest import mock
+from urllib.parse import parse_qsl, urlsplit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
+from llm.preprocess import vision_image
 from llm.preprocess.vision_image import (
+    MAX_FETCH_BYTES,
+    RemoteImage,
     extract_key_frames,
+    fetch_for_vision,
     fit_for_vision,
     is_universal_image,
+    proxy_variant,
+    remote_image,
     select_key_frames,
     to_png_first_frame,
 )
@@ -221,6 +236,181 @@ class SelectKeyFramesTests(unittest.TestCase):
         kept, _ = select_key_frames(frames(), 3)
         self.assertEqual(len(kept), 3)
         self.assertLess(len(consumed), 40, "名額滿了就不再往下解")
+
+
+# ── 抓網路上的圖：先代理的縮小版、不行才抓原檔 ──
+
+PROXY = "https://media.discordapp.net/attachments/1/2/a.gif?ex=1&is=2&hm=3&"
+ORIGINAL = "https://cdn.discordapp.com/attachments/1/2/a.gif?ex=1&is=2&hm=3&"
+
+
+def _image(**changes):
+    fields = dict(proxy_url=PROXY, url=ORIGINAL, width=None, height=None, animated=False)
+    fields.update(changes)
+    return RemoteImage(**fields)
+
+
+def _params(url):
+    return dict(parse_qsl(urlsplit(url).query))
+
+
+class ProxyVariantTests(unittest.TestCase):
+    """向代理要的縮小版網址。"""
+
+    def test_animated_asks_for_moving_webp_512_on_the_long_side(self):
+        url = proxy_variant(_image(width=1024, height=760, animated=True))
+        p = _params(url)
+        self.assertEqual((p["format"], p["animated"], p["width"], p["height"]), ("webp", "true", "512", "380"))
+        self.assertTrue(url.startswith(PROXY), "簽章參數要原樣留著，代理才認")
+
+    def test_static_asks_for_1280_on_the_long_side_and_keeps_its_format(self):
+        p = _params(proxy_variant(_image(width=2160, height=2880)))
+        self.assertEqual((p["width"], p["height"]), ("960", "1280"))
+        self.assertNotIn("format", p)
+
+    def test_small_pictures_are_not_enlarged(self):
+        p = _params(proxy_variant(_image(width=300, height=200, animated=True)))
+        self.assertEqual((p["width"], p["height"]), ("300", "200"))
+
+    def test_unknown_size_never_asks_for_a_size(self):
+        # 寬高比例不對代理會把圖拉變形；不知道原圖寬高就只要格式，靜態圖連格式都不用要
+        p = _params(proxy_variant(_image(animated=True)))
+        self.assertNotIn("width", p)
+        self.assertNotIn("height", p)
+        self.assertEqual(p["format"], "webp")
+        self.assertEqual(proxy_variant(_image()), PROXY)
+
+    def test_no_proxy_no_variant(self):
+        self.assertIsNone(proxy_variant(_image(proxy_url=None)))
+
+
+class RemoteImageTests(unittest.TestCase):
+    """附件與預覽縮圖都照屬性讀成同一種東西。"""
+
+    def test_attachment_or_preview_media_is_read_by_attribute(self):
+        media = SimpleNamespace(proxy_url="p", url="u", width=570, height=570, flags=SimpleNamespace(animated=True))
+        self.assertEqual(remote_image(media), RemoteImage("p", "u", 570, 570, True))
+
+    def test_gifs_count_as_animated_even_without_the_flag(self):
+        self.assertTrue(remote_image(SimpleNamespace(proxy_url="p", url="https://cdn/a.GIF?ex=1")).animated)
+        self.assertTrue(remote_image(SimpleNamespace(proxy_url="p", url="u", filename="a.gif")).animated)
+        self.assertTrue(remote_image(SimpleNamespace(proxy_url="p", url="u", content_type="image/gif")).animated)
+        self.assertFalse(remote_image(SimpleNamespace(proxy_url="p", url="https://cdn/a.jpg", flags=None)).animated)
+
+    def test_nothing_to_fetch_is_none(self):
+        self.assertIsNone(remote_image(SimpleNamespace(proxy_url=None, url=None)))
+        self.assertIsNone(remote_image(None))
+
+
+class _Resp:
+    def __init__(self, status=200, body=b"", content_length=None, error=None):
+        self.status, self.body, self.content_length, self.error = status, body, content_length, error
+
+    async def read(self):
+        return self.body
+
+    async def __aenter__(self):
+        if self.error is not None:
+            raise self.error
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _Session:
+    """代理的網址回 `proxy` 那一頁、其他回 `original`；記下問過哪些網址。"""
+
+    def __init__(self, proxy=None, original=None):
+        self.pages = {"proxy": proxy or _Resp(404), "original": original or _Resp(404)}
+        self.asked = []
+
+    def get(self, url, timeout=None):
+        self.asked.append(url)
+        return self.pages["proxy" if url.startswith("https://media.") else "original"]
+
+
+def _fetch(session, image, **kwargs):
+    return asyncio.run(fetch_for_vision(session, image, **kwargs))
+
+
+def _decoded(b64):
+    return Image.open(BytesIO(base64.b64decode(b64)))
+
+
+def _png_of(size):
+    buf = BytesIO()
+    Image.new("RGB", size, (30, 120, 200)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@unittest.skipUnless(HAS_PIL, "需要 Pillow")
+class FetchForVisionTests(unittest.TestCase):
+    def test_the_proxy_comes_first_and_the_original_is_left_alone(self):
+        session = _Session(proxy=_Resp(body=_png()), original=_Resp(body=_png()))
+        got = _fetch(session, _image(width=64, height=64))
+        self.assertEqual(len(got.frames), 1)
+        self.assertEqual(len(session.asked), 1)
+        self.assertTrue(session.asked[0].startswith(PROXY))
+
+    def test_falls_back_to_the_original_when_the_proxy_does_not_work(self):
+        cases = {
+            "404": _Resp(404),
+            "逾時": _Resp(error=asyncio.TimeoutError()),
+            "下載下來太大": _Resp(body=b"x" * (MAX_FETCH_BYTES + 1)),
+            "宣告的大小太大": _Resp(content_length=MAX_FETCH_BYTES + 1, body=_png()),
+            "解不開": _Resp(body=b"not an image"),
+        }
+        for name, proxy in cases.items():
+            with self.subTest(name):
+                session = _Session(proxy=proxy, original=_Resp(body=_png()))
+                got = _fetch(session, _image())
+                self.assertEqual(len(got.frames), 1)
+                self.assertEqual(session.asked[-1], ORIGINAL)
+
+    def test_the_limit_is_10mb_for_both(self):
+        self.assertEqual(MAX_FETCH_BYTES, 10 * 1024 * 1024)
+        got = _fetch(_Session(proxy=_Resp(content_length=6 * 1024 * 1024, body=_png())), _image())
+        self.assertEqual(len(got.frames), 1, "原本 5 MB 的上限會擋掉這張")
+
+    def test_nothing_when_both_fail_with_a_log_line_and_whether_it_was_too_big(self):
+        session = _Session(proxy=_Resp(404), original=_Resp(content_length=11 * 1024 * 1024))
+        with self.assertLogs(vision_image.logger, "INFO") as logs:
+            got = _fetch(session, _image())
+        self.assertEqual(got.frames, [])
+        self.assertTrue(got.too_big)
+        self.assertIn("404", "\n".join(logs.output))
+        got = _fetch(_Session(proxy=_Resp(404), original=_Resp(500)), _image())
+        self.assertEqual((got.frames, got.too_big), ([], False))
+
+    def test_animated_becomes_up_to_four_png_frames_512_on_the_long_side(self):
+        colours = [(220, 20, 20), (20, 220, 20), (20, 20, 220), (220, 220, 20), (20, 220, 220), (220, 20, 220)]
+        session = _Session(proxy=_Resp(body=_gif(colours, size=(800, 600))))
+        got = _fetch(session, _image(animated=True))
+        self.assertTrue(2 <= len(got.frames) <= 4, len(got.frames))
+        for frame in got.frames:
+            with _decoded(frame) as im:
+                self.assertEqual((im.format, im.size), ("PNG", (512, 384)))
+        self.assertLessEqual(len(_fetch(session, _image(animated=True), max_frames=2).frames), 2)
+
+    def test_static_becomes_one_jpeg_1280_on_the_long_side(self):
+        got = _fetch(_Session(proxy=_Resp(body=_png_of((2000, 3000)))), _image())
+        self.assertEqual(len(got.frames), 1)
+        with _decoded(got.frames[0]) as im:
+            self.assertEqual((im.format, im.size), ("JPEG", (853, 1280)))
+
+    def test_decoding_runs_off_the_event_loop(self):
+        threads = []
+        real = vision_image.vision_frames
+
+        def spy(*args, **kwargs):
+            threads.append(threading.current_thread() is threading.main_thread())
+            return real(*args, **kwargs)
+
+        with mock.patch.object(vision_image, "vision_frames", spy):
+            got = _fetch(_Session(proxy=_Resp(body=_png())), _image())
+        self.assertEqual(len(got.frames), 1)
+        self.assertEqual(threads, [False], "拆幀、轉檔要丟到執行緒，不卡音樂與 Discord 連線")
 
 if __name__ == "__main__":
     unittest.main()

@@ -40,7 +40,7 @@ BASELINE: dict[str, int] = {
     "llm/preprocess/chat_line.py": 1,
     "llm/preprocess/external_emoji.py": 1,
     "llm/preprocess/tweet_context.py": 1,
-    "llm/preprocess/vision_image.py": 4,
+    "llm/preprocess/vision_image.py": 3,
     "llm/retrievers/context_retriever.py": 11,
     "llm/retrievers/intel/client.py": 2,
     "llm/retrievers/web/searxng.py": 2,
