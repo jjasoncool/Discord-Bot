@@ -11,7 +11,9 @@ raw 表是備份層，也是互動（反應）的真相來源。
 
 介面：`enqueue_raw_message`、`enqueue_raw_edit`、`record_deletion`（刪除事件：判斷誰刪的再排進寫入）／`enqueue_raw_delete`、
   `prime_delete_audit`（上線時記審核日誌的基準）、`enqueue_reaction_change`、`should_trigger_flush`、
-  `flush_raw_buffer`、`get_reaction_salience`、`buffer_sizes`／`total_buffer_size`。
+  `flush_raw_buffer`、`get_reaction_salience`、`buffer_sizes`／`total_buffer_size`；
+  讀：`channel_keys`（頻道 → 表裡的 channel_id／thread_id）、`recent_deletions`、`rows_around`、`original_texts`
+  （給 `llm.storage.deleted_and_edited`，篩選與組字在那邊）。
 
 規則：四種事件各自一個緩衝；新訊息進來時任一緩衝滿 50 則就寫一批，另外每 60 秒定期寫（反應要夠即時），單次 flush 合併處理；
   純 SQL、不算 embedding；刪除是軟刪（is_deleted=TRUE），刪除時間記收到事件的時刻、不是寫入那一批的時刻；還沒寫進去就被刪的
@@ -40,7 +42,7 @@ import logging
 import re
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Optional
 
 import discord
@@ -178,20 +180,22 @@ def _has_non_tenor_embed(msg: discord.Message) -> bool:
     return False
 
 
-def _resolve_channel_thread(msg: discord.Message) -> tuple[str, str | None]:
-    """解析訊息的 channel_id / thread_id。
+def channel_keys(channel) -> tuple[str, str | None]:
+    """頻道 → 表裡的 (channel_id, thread_id)。寫入與查詢共用這一份，兩邊才對得上。
 
-    若訊息在 thread 內：channel_id = parent 頻道、thread_id = thread 本身
-    否則：            channel_id = msg.channel、thread_id = None
+    討論串：channel_id＝上層頻道、thread_id＝討論串本身；其他：channel_id＝頻道本身、thread_id＝None。
     """
-    ch = msg.channel
-    if isinstance(ch, discord.Thread):
-        parent_id = getattr(ch, "parent_id", None)
+    if isinstance(channel, discord.Thread):
+        parent_id = getattr(channel, "parent_id", None)
         if parent_id:
-            return str(parent_id), str(ch.id)
+            return str(parent_id), str(channel.id)
         # 防禦：parent_id 取不到就退而求其次
-        return str(ch.id), str(ch.id)
-    return str(ch.id), None
+        return str(channel.id), str(channel.id)
+    return str(channel.id), None
+
+
+def _resolve_channel_thread(msg: discord.Message) -> tuple[str, str | None]:
+    return channel_keys(msg.channel)
 
 
 def _build_row(msg: discord.Message) -> dict:
@@ -384,16 +388,8 @@ async def _author_of(message_id: str) -> str | None:
 
 
 def _author_in_db(message_id: str) -> str | None:
-    pool = _get_pool()
-    conn = pool.getconn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT author_id FROM discord_messages_raw WHERE message_id = %s", (message_id,))
-            row = cur.fetchone()
-        conn.rollback()   # 唯讀查詢：結束交易，不留 idle-in-transaction 回 pool
-    finally:
-        pool.putconn(conn)
-    return row[0] if row else None
+    rows = _select("SELECT author_id FROM discord_messages_raw WHERE message_id = %s", (message_id,))
+    return rows[0]["author_id"] if rows else None
 
 
 def enqueue_reaction_change(
@@ -534,6 +530,84 @@ def get_reaction_salience(message_ids: list[str]) -> dict[str, int]:
         reactors = breakdown.get("reactors") if isinstance(breakdown, dict) else None
         out[str(mid)] = len(reactors) if isinstance(reactors, dict) else 0
     return out
+
+
+# ========== 讀：被刪的訊息、編輯前的原文（給 `deleted_and_edited`）==========
+
+#: 被刪的訊息只看這麼久以內發的：查詢要有 created_at 的範圍才用得到 (channel_id, created_at) 索引
+_DELETED_MESSAGE_MAX_AGE = timedelta(days=7)
+_ROW_COLUMNS = ("message_id, author_id, content, stickers, tenor_gifs, has_attachment, created_at, "
+                "is_deleted, deleted_at, deleted_by")
+
+
+async def recent_deletions(channel_id: str, thread_id: str | None, *, since: datetime, limit: int) -> list[dict]:
+    """這個頻道（或討論串）`since` 之後被刪的訊息，最近刪的在前；誰刪的都回，篩選由呼叫端做。
+
+    先把緩衝寫進去：剛刪的、剛發的前後文才查得到。資料庫的錯誤往外丟。
+    """
+    await flush_raw_buffer()
+    return await asyncio.to_thread(
+        _select,
+        f"SELECT {_ROW_COLUMNS} FROM discord_messages_raw "
+        "WHERE channel_id = %s AND thread_id IS NOT DISTINCT FROM %s AND is_deleted "
+        "AND deleted_at >= %s AND created_at >= %s ORDER BY deleted_at DESC LIMIT %s",
+        (channel_id, thread_id, since, since - _DELETED_MESSAGE_MAX_AGE, limit),
+    )
+
+
+async def rows_around(channel_id: str, thread_id: str | None, created_at: datetime, *,
+                      before: int, after: int) -> tuple[list[dict], list[dict]]:
+    """同一個頻道（或討論串）在某則訊息之前 `before` 則、之後 `after` 則，都照時間順序；被刪的也在裡面。"""
+    def query() -> tuple[list[dict], list[dict]]:
+        where = "WHERE channel_id = %s AND thread_id IS NOT DISTINCT FROM %s AND created_at {} %s"
+        earlier = _select(f"SELECT {_ROW_COLUMNS} FROM discord_messages_raw {where.format('<')} "
+                          "ORDER BY created_at DESC LIMIT %s", (channel_id, thread_id, created_at, before))
+        later = _select(f"SELECT {_ROW_COLUMNS} FROM discord_messages_raw {where.format('>')} "
+                        "ORDER BY created_at LIMIT %s", (channel_id, thread_id, created_at, after))
+        return list(reversed(earlier)), later
+    return await asyncio.to_thread(query)
+
+
+async def original_texts(message_ids: list[int | str]) -> dict[str, str]:
+    """這幾則訊息第一次編輯前的原文；沒改過的不在結果裡。資料庫的錯誤往外丟。
+
+    還沒寫進去的改動也算：寫入緩衝裡的列帶著原文；排隊中的編輯，表裡現在的內容就是改之前的。
+    """
+    ids = {str(m) for m in message_ids}
+    if not ids:
+        return {}
+    found = {row["message_id"]: row["original_content"] for row in _insert_buffer
+             if row["message_id"] in ids and row.get("original_content") is not None}
+    pending = {row["message_id"]: row["content"] for row in _edit_buffer if row["message_id"] in ids}
+    rest = sorted(ids - found.keys())
+    if rest:
+        rows = await asyncio.to_thread(
+            _select,
+            "SELECT message_id, content, original_content FROM discord_messages_raw WHERE message_id = ANY(%s)",
+            (rest,),
+        )
+        for row in rows:
+            mid = row["message_id"]
+            if row["original_content"] is not None:
+                found[mid] = row["original_content"]
+            elif mid in pending and pending[mid] != row["content"]:
+                found[mid] = row["content"]
+    return found
+
+
+def _select(sql: str, params: tuple) -> list[dict]:
+    """唯讀查詢 → 每列一個 dict；查完 rollback 結束交易，連線不帶著交易回池子。"""
+    pool = _get_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            names = [col[0] for col in cur.description]
+            rows = [dict(zip(names, row)) for row in cur.fetchall()]
+        conn.rollback()
+    finally:
+        pool.putconn(conn)
+    return rows
 
 
 # ========== 同步 DB 操作（在 executor thread 執行）==========

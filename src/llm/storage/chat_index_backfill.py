@@ -5,7 +5,8 @@
   - 下層（呼叫誰）：`LLMServiceSettings().pgvector_cursor()`（查詢）、`HYBRID_RETRIEVAL_SETTINGS.chat_table()`（表名）、
     `store_chat`（組文字、判斷哪些要排、排進寫入佇列）、`llm.preprocess.sticker_cache`（貼圖描述）、`sys_settings.switches`（開關）。
 
-介面：`run_once()`（查一次，依開關排進佇列或只記 log）、`build_items(rows)`（raw 的列 → 寫入佇列的項目）。
+介面：`run_once()`（查一次，依開關排進佇列或只記 log）、`build_items(rows)`（raw 的列 → 寫入佇列的項目）、
+  `row_text(row)`（raw 的一列 → 文字；`llm.storage.deleted_and_edited` 給模型看被刪的訊息也用這份）。
 
 規則：
   - 為什麼會漏：聊天記憶先放記憶體、每 5 分鐘寫一次，停機時來不及寫的會丟；後端斷太久、緩衝滿了也會丟最舊的。
@@ -103,6 +104,21 @@ def _json_list(value) -> list:
     return value if isinstance(value, list) else []
 
 
+def row_text(row: dict) -> str:
+    """raw 的一列 → 跟即時寫入聊天向量庫一樣的文字：內文（自訂表情換成描述）、貼圖描述、Tenor 動圖的預覽。
+    @ 人保留原文 `<@id>`，要給模型看的由呼叫端換成名字。"""
+    sticker_texts = [
+        get_sticker_text(SimpleNamespace(id=int(s["id"]), name=s.get("name") or ""))
+        for s in _json_list(row.get("stickers"))
+    ]
+    previews = [
+        p for p in (preview_text(g.get("title"), g.get("description"))
+                    for g in _json_list(row.get("tenor_gifs")))
+        if p
+    ]
+    return store_chat.compose_persist_text(row.get("content") or "", sticker_texts, previews)
+
+
 def build_items(rows: list[dict]) -> tuple[list[dict], list[str]]:
     """raw 的列 → `store_chat` 寫入佇列的項目（欄位、組文字的規則都和即時寫入一樣）。
 
@@ -111,16 +127,7 @@ def build_items(rows: list[dict]) -> tuple[list[dict], list[str]]:
     items: list[dict] = []
     too_short: list[str] = []
     for row in rows:
-        sticker_texts = [
-            get_sticker_text(SimpleNamespace(id=int(s["id"]), name=s.get("name") or ""))
-            for s in _json_list(row.get("stickers"))
-        ]
-        previews = [
-            p for p in (preview_text(g.get("title"), g.get("description"))
-                        for g in _json_list(row.get("tenor_gifs")))
-            if p
-        ]
-        text = store_chat.compose_persist_text(row.get("content") or "", sticker_texts, previews)
+        text = row_text(row)
         if len(text) < store_chat.MIN_TEXT_LENGTH:
             too_short.append(row["message_id"])
             continue

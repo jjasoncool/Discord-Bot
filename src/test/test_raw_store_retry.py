@@ -20,6 +20,8 @@
   - 正式表還沒加後來的欄位：那幾欄不寫、其餘照常寫進去，ERROR 只記一次；之後欄位加上了，不必重啟就開始寫
   - 誰刪的：審核日誌裡同頻道、同作者的刪除紀錄多了一則＝別人刪的、記那人的 id；沒有多＝作者自己刪的、記作者 id；
     同一筆紀錄多兩則時兩次刪除各認領一則；判斷不了（基準還沒記好、讀審核日誌失敗、表裡沒有這則）記 NULL
+  - 讀：頻道與討論串拆成 channel_id／thread_id 的方式和寫入同一份；查被刪的訊息前先把緩衝寫進去；前後文照時間排；
+    編輯前的原文連還在緩衝裡的改動也算（寫入緩衝帶著原文、排隊中的編輯拿表裡現在的內容當原文）
 
 不連資料庫：連線池與連線都是假物件；逐筆寫入的測試用照 PostgreSQL 交易規則行為的假連線。
 """
@@ -676,6 +678,60 @@ class RecordDeletionTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(raw, "datetime", Ticking), mock.patch.object(raw, "_sleep", wait):
             await raw.record_deletion(guild, 7, 10)
         self.assertEqual("2026-11-11T12:00:01+00:00", raw._delete_buffer[0][1])
+
+
+class RawReadTests(unittest.IsolatedAsyncioTestCase):
+    """讀被刪的訊息與編輯前的原文（給 deleted_and_edited）。"""
+
+    def setUp(self):
+        for buffer in (raw._insert_buffer, raw._edit_buffer):
+            self.addCleanup(buffer.clear)
+            buffer.clear()
+        self.steps: list = []
+        self.results: list[list[dict]] = []
+
+        def select(sql, params):
+            self.steps.append(("查", " ".join(sql.split()), params))
+            return self.results.pop(0) if self.results else []
+
+        async def flush():
+            self.steps.append(("寫入",))
+            return {}
+        self.enterContext(mock.patch.object(raw, "_select", select))
+        self.enterContext(mock.patch.object(raw, "flush_raw_buffer", flush))
+
+    def test_threads_are_stored_under_their_parent_channel(self):
+        thread = mock.Mock(spec=discord.Thread, id=5, parent_id=4)
+        self.assertEqual(("4", "5"), raw.channel_keys(thread))
+        self.assertEqual(("7", None), raw.channel_keys(SimpleNamespace(id=7)))
+
+    async def test_recent_deletions_write_the_buffer_first(self):
+        since = datetime(2026, 11, 11, tzinfo=timezone.utc)
+        await raw.recent_deletions("4", "5", since=since, limit=20)
+        self.assertEqual(("寫入",), self.steps[0], "剛刪的、剛發的前後文都要先寫進去才查得到")
+        _, sql, params = self.steps[1]
+        self.assertIn("is_deleted", sql)
+        self.assertEqual(("4", "5", since), params[:3])
+        self.assertEqual(20, params[-1])
+
+    async def test_rows_around_come_back_in_time_order(self):
+        self.results = [[{"message_id": "b2"}, {"message_id": "b1"}], [{"message_id": "a1"}, {"message_id": "a2"}]]
+        earlier, later = await raw.rows_around("4", None, datetime(2026, 11, 11, tzinfo=timezone.utc),
+                                                before=5, after=20)
+        self.assertEqual((["b1", "b2"], ["a1", "a2"]),
+                         ([r["message_id"] for r in earlier], [r["message_id"] for r in later]))
+
+    async def test_original_texts_count_edits_that_are_not_written_yet(self):
+        raw._insert_buffer.append({**_new("n1", "改好了"), "original_content": "改壞了"})
+        raw._edit_buffer.append(_edit("m1", "新的"))
+        self.results = [[
+            {"message_id": "m1", "content": "舊的", "original_content": None},       # 編輯還在排隊
+            {"message_id": "m2", "content": "現在", "original_content": "最早"},      # 表裡已經記了
+            {"message_id": "m3", "content": "沒改過", "original_content": None},
+        ]]
+        found = await raw.original_texts(["n1", "m1", "m2", "m3"])
+        self.assertEqual({"n1": "改壞了", "m1": "舊的", "m2": "最早"}, found)
+        self.assertEqual(["m1", "m2", "m3"], self.steps[0][2][0], "緩衝裡已經知道的不再查表")
 
 
 if __name__ == "__main__":
