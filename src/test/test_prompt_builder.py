@@ -69,6 +69,15 @@ class PromptBundleContractTests(unittest.TestCase):
         self.assertIn("（換一段說明）", replaced)
         self.assertNotIn("反應不錯", replaced)
 
+    def test_deleted_messages_come_with_their_rules_only_when_given(self):
+        user = build(deleted_messages=["[11/11 20:57] 甲#1111【已刪，發出後 2 秒刪掉】: 打錯了"]).messages[1]["content"]
+        block = user.split("<deleted_messages>\n", 1)[1].split("</deleted_messages>", 1)[0]
+        for rule in ("沒人問", "看前後文判斷", "不要假裝沒看到"):
+            self.assertIn(rule, block)
+        self.assertIn("【已刪，發出後 2 秒刪掉】: 打錯了", block)
+        self.assertTrue(user.startswith(RULES.untrusted_context_intro), "只有這段時也要先講 context 不可信")
+        self.assertNotIn("<deleted_messages>", build().messages[1]["content"])
+
     def test_today_opens_the_user_message_only_when_given(self):
         with_date = build(today="2026-10-17（星期五）", **EVERYTHING)
         user = with_date.messages[1]["content"]

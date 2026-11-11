@@ -906,6 +906,7 @@ class LLMService:
         situation_signals: Optional[List[str]] = None,
         target_profiles: Optional[List[str]] = None,
         web_context: Optional[List[str]] = None,
+        deleted_messages: Optional[List[str]] = None,
         images: Optional[List[str]] = None,
         model: Optional[str] = None,
         think: Optional[bool] = None,
@@ -943,6 +944,8 @@ class LLMService:
         `tool_nudge`、`tools_plain_fallback`：查滿輪數時提醒模型的話、要不要「改用不帶工具的呼叫」這條退路
         （/askai 用預設；插話換成自己的提醒、關掉退路）。
         `today`：放在 user 段最前面的日期（插話傳；它的聊天行只有時:分，模型判斷不了查到的東西新不新）。
+        `deleted_messages`：這個頻道最近群友自己刪掉的訊息與前後文（被點名的插話、/askai 傳），放 user 段的
+        <deleted_messages>。
 
         呼叫端給了 `max_tokens`、而模型開著思考卻想到上限還沒寫出答案（或答案才開了頭就被切，結尾有
         `TRUNCATED_NOTE`）：關掉思考、不帶工具，用已經查到的資料（工具輪的 messages）再答一次——同樣的設定
@@ -968,6 +971,7 @@ class LLMService:
             situation_signals=situation_signals,
             target_profiles=target_profiles,
             web_context=web_context,
+            deleted_messages=deleted_messages,
             images=images,
             asker_profile=asker_profile,
             asker_display_name=asker_display_name,

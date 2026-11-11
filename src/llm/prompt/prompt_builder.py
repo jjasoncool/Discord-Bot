@@ -43,6 +43,7 @@ def build_prompt_bundle(
     situation_signals: Optional[List[str]] = None,
     target_profiles: Optional[List[str]] = None,
     web_context: Optional[List[str]] = None,
+    deleted_messages: Optional[List[str]] = None,
     images: Optional[List[str]] = None,
     asker_profile: Optional[str] = None,
     asker_display_name: Optional[str] = None,
@@ -69,6 +70,8 @@ def build_prompt_bundle(
     target_profiles: 發問者明確 mention（<@id>）的人物 persona card，獨立於 persona_context
         放在 <latest_user_message> 旁邊的 <target_profile> 區塊，提高 attention 優先序
     web_context: 網路搜尋結果（每筆一個字串，例如 "[1] 標題 — snippet (url)"）
+    deleted_messages: 這個頻道最近群友自己刪掉的訊息連同前後文（`llm.storage.deleted_and_edited.deleted_context`，
+        已經篩過：作者自己刪的、同頻道、個資已遮）。怎麼用寫在 <deleted_messages> 開頭，只在有這段時出現
     asker_profile: 發問者可信資訊區塊（已含 <asker_profile> 標籤），放 system block
     asker_display_name: 發問者 display_name，作為 <latest_user_message> 的 from 屬性
     bot_display_name: Bot 自身 display_name（由系統注入為 <bot_history> 的 name 屬性，
@@ -88,7 +91,7 @@ def build_prompt_bundle(
     has_context = bool(
         chat_context or bot_history or persona_context or recalled_context
         or style_refs or situation_signals or target_profiles or web_context
-        or replied_to_text
+        or deleted_messages or replied_to_text
     )
     if has_context:
         composed_user_prompt += (
@@ -168,6 +171,19 @@ def build_prompt_bundle(
         for line in web_context:
             composed_user_prompt += f"{_sanitize_text(line)}\n"
         composed_user_prompt += "</web_context>\n\n"
+
+    if deleted_messages:
+        # 規則跟著這段走、放 user 段：沒有刪除時 prompt 跟原本一模一樣，system 段也不必為它變
+        composed_user_prompt += "<deleted_messages>\n"
+        composed_user_prompt += (
+            "（以下是這個頻道最近有人自己刪掉的訊息，標【已刪】的那行就是被刪的，前後是當時的對話。"
+            "沒人問「刪了什麼」就當沒看到，不要主動提。有人問時看前後文判斷要不要講：打錯字、標錯人、"
+            "講錯話這種無傷大雅的可以講、可以虧；刪的人說了不要講，或內容是私事、吵架、會讓人難堪的，"
+            "就說你有看到但不講，可以帶一句理由，不要假裝沒看到。）\n"
+        )
+        for line in deleted_messages:
+            composed_user_prompt += f"{_sanitize_text(line)}\n"
+        composed_user_prompt += "</deleted_messages>\n\n"
 
     if images:
         composed_user_prompt += (
