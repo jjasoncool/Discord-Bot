@@ -571,10 +571,10 @@ class AmbientChatSettings(BaseSettings):
 
     # ── 看圖（ambient 模型需具 vision）──
     image_max_count: int = 9             # 一次請求最多帶幾張圖（含動圖拆出來的幀），硬上限
-    image_max_bytes: int = 5 * 1024 * 1024
-    # 連結預覽（最新那則、被回覆那則的 [預覽：…] 與縮圖；見 _link_preview_context）
+    # 單張圖的大小上限、縮到多大寫在 vision_image（MAX_FETCH_BYTES 等），插話與 /askai 共用
+    # 連結預覽（最新那則、被回覆那則的 [預覽：…] 與預覽上的圖；見 _link_preview_context）
     link_preview_wait_seconds: float = 3.0   # 最新那則有連結卻還沒預覽時最多等幾秒（Discord 抓預覽要一兩秒）
-    link_preview_max_images: int = 2         # 一則訊息最多附幾張預覽縮圖（跟群友貼的圖共用 image_max_count）
+    link_preview_max_previews: int = 2       # 一則訊息最多看幾個預覽的圖（動圖的幾幀全帶上；跟群友貼的圖共用 image_max_count）
     # 追問時沿回覆鏈補附圖（見 _reply_chain_image）：圖要是觸發前多久內貼的、最多往回幾則（觸發那則回的算第 1 則）
     reply_chain_image_max_age_seconds: float = 3600.0
     reply_chain_image_max_hops: int = 6

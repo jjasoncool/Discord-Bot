@@ -11,7 +11,7 @@
 - `semantic_message_text(msg)`：發話者自己的內容（文字、表情、@、貼圖），不含預覽與標記。
 - `name_with_anchor(author)`、`resolve_user_mentions(text, msg)`、`image_marker(msg)`。
 - `is_link_repost(msg)`、`repost_note(target)`：bot 的自動轉貼與它的標記。
-- `link_previews(msg, skip_tweets=)`、`preview_image_urls(msg, …)`：Discord 抓到的連結預覽文字與縮圖網址。
+- `link_previews(msg, skip_tweets=)`、`preview_images(msg, …)`：Discord 抓到的連結預覽文字與預覽上的圖。
 
 規則：
 - 發話者打的字一字不改；圖、自動轉貼、連結預覽都用標記接在後面（`(圖)`、`（自動轉貼 #N 的連結）`、`[預覽：…]`），
@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 from llm.preprocess import person_anchor
 from llm.preprocess.emoji_text_utils import preview_marker, preview_text, replace_custom_emoji_with_description
 from llm.preprocess.sticker_cache import get_sticker_text
-from llm.preprocess.vision_image import is_vision_image
+from llm.preprocess.vision_image import RemoteImage, is_vision_image, remote_image
 from utils.link_fix import TWEET_LINK_RE, is_repost_text
 
 if TYPE_CHECKING:  # 僅型別註解用；runtime 不依賴 discord（保持 leaf 輕量）
@@ -164,22 +164,25 @@ def link_previews(msg, *, skip_tweets: bool = False) -> list[str]:
     return out
 
 
-def preview_image_urls(msg, *, limit: int, skip_tweets: bool = True) -> list[str]:
-    """連結預覽的縮圖網址（優先 Discord 的媒體代理，一個 embed 取一張），最多 `limit` 張；X 預設跳過（理由同上）。"""
+def preview_images(msg, *, limit: int, skip_tweets: bool = True) -> list[RemoteImage]:
+    """連結預覽上的圖，一個預覽取一張（縮圖優先，沒有才拿大圖），最多 `limit` 個預覽；X 預設跳過（理由同上）。
+
+    代理與原檔網址都交出去，先抓哪個由 `fetch_for_vision` 決定。
+    """
     if not _preview_source_ok(msg):
         return []
-    urls: list[str] = []
+    images: list[RemoteImage] = []
     for embed in getattr(msg, "embeds", None) or []:
         if skip_tweets and _is_tweet_embed(embed):
             continue
         for part in (getattr(embed, "thumbnail", None), getattr(embed, "image", None)):
-            url = getattr(part, "proxy_url", None) or getattr(part, "url", None)
-            if url:
-                urls.append(url)
+            image = remote_image(part)
+            if image is not None:
+                images.append(image)
                 break
-        if len(urls) >= limit:
+        if len(images) >= limit:
             break
-    return urls
+    return images
 
 
 def format_chat_line(

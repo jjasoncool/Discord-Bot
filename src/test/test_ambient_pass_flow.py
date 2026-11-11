@@ -7,6 +7,7 @@
 被 @ 才有輸出上限；夾著工具呼叫原文的回答不送；回覆超過 Discord 上限只送第一段、回覆不 @ 任何人；
 最新這則 @ 的人要傳進人物卡檢索與回憶對象（給模型看的文字已把 @ 換成名字，從那裡抓不到）。
 追問時手上沒圖，沿回覆鏈往前補附第一張圖：只追一小時內、最多 6 則，觸發那則或被回覆那則自己有圖就不追。
+被回覆那則、最新那則的圖抓不到時，在那則後面標「（這張圖沒抓到）」，模型才不會自己編看不到的理由。
 """
 import asyncio
 import os
@@ -89,6 +90,7 @@ class PassFlowTests(unittest.TestCase):
         self.earlier = None
         self.media = {}            # id → (notes, imgs)
         self.images = {}           # id → base64 清單
+        self.missed = {}           # id → 有幾張圖沒抓到
         self.grudges = {}
         self.persona_cards = None
         self.memory_lines = None
@@ -112,7 +114,7 @@ class PassFlowTests(unittest.TestCase):
             return self.media.get(msg.id, ([], []))
 
         async def _images(msg):
-            return self.images.get(msg.id)
+            return list(self.images.get(msg.id) or []), self.missed.get(msg.id, 0)
 
         async def _referenced(bot, msg):
             self.looked_up.append(msg.id)
@@ -436,6 +438,31 @@ class PassFlowTests(unittest.TestCase):
         kw = self._generate_kwargs()
         self.assertIsNone(kw["images"])
         self.assertEqual("回你", kw["replied_to_text"], "沒附到圖就不講「附的圖是那張」")
+
+    def test_a_replied_picture_that_could_not_be_fetched_is_marked(self):
+        self.replied = self._said("", 6001, 3, image=True)
+        self.missed[6001] = 1
+        self._run(_message("這張圖是什麼"), directed=True)
+        kw = self._generate_kwargs()
+        self.assertIsNone(kw["images"])
+        self.assertEqual("(一張圖)（這張圖沒抓到）", kw["replied_to_text"])
+
+    def test_the_latest_picture_that_could_not_be_fetched_is_marked(self):
+        self.missed[7001] = 2
+        self._run(_message("看這兩張", attachments=[SimpleNamespace(filename="a.png", size=10),
+                                                  SimpleNamespace(filename="b.png", size=10)]), directed=True)
+        kw = self._generate_kwargs()
+        self.assertIsNone(kw["images"])
+        self.assertIn("看這兩張", kw["prompt"])
+        self.assertIn("（有 2 張圖沒抓到）", kw["prompt"])
+
+    def test_pictures_that_arrived_are_not_marked(self):
+        self.replied = self._said("", 6001, 3, image=True)
+        self.images[6001] = ["PIC"]
+        self._run(_message("這張圖是什麼"), directed=True)
+        kw = self._generate_kwargs()
+        self.assertEqual(["PIC"], kw["images"])
+        self.assertEqual("(一張圖)", kw["replied_to_text"])
 
     def test_persona_memory_and_tags_are_one_persona_context(self):
         self.persona_cards, self.memory_lines, self.tag_lines = ["卡"], ["偏好"], ["招牌"]
