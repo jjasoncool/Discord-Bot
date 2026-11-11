@@ -110,6 +110,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 插話判斷時先查一次（遊戲情報＋網路、每次 1 次、每天上限、名字檢查、開或記錄模式） | `llm.ambient.ambient_search`（`prepare` 回那組工具或 None、`AmbientSearchTools`；開關 `ambient_search_mode`、細項 `AmbientSearchSettings`；規則 `settings/prompts/ambient_search_rules.txt`） |
 | 插話的語氣參考句（預設句庫＋學到的句子輪換，學到越多預設越少、預設永遠留一句） | `llm.ambient.ambient_style_lines`（`enabled`／`pick`／`NOTE`；開關 `ambient_seed_lines_mode`，句庫 `settings/prompts/ambient_seed_lines.json`；放 user 段才不會讓提示詞快取失效） |
 | 要送出網的查詢字是不是在指群友（名字、#尾碼、長數字、email） | `llm.persona.member_names.query_names_member(query, parts)`（名字片段用 `name_parts`；插話用 `ambient_search.name_parts_for` 拿全伺服器的） |
+| 群友刪掉的訊息、改過的訊息給模型看（說出偷刪了什麼、拿錯字開玩笑） | `llm.storage.deleted_and_edited`（`deleted_context(guild, channel, tz=)` 給 `generate_reply(deleted_messages=)`、`edit_notes` 交給 `fetch_recent_lines(annotate=)`）：只給作者自己刪的、同頻道、24 小時內，附前後文，個資遮掉；原始訊息表的 `deleted_by` 只准它和 `raw_message_store` 碰（守衛擋）。資料怎麼記：刪除時讀審核日誌判斷誰刪的、第一次編輯前的原文存 `original_content`（`raw_message_store`） |
 | 一則訊息有沒有可聊、可當回憶的文字（純表情、純貼圖、純連結） | `llm.preprocess.emoji_text_utils.is_emoji_or_symbol_only`／`is_link_only`（Discord 原文 `<:name:id>` 與向量庫存的 `:描述:`、`[貼圖：…]` 都認；插話的內容閘、插話回憶、/askai 相關名額都用它，守衛擋自己判斷「整則只有連結」的 `all(... .startswith("http...") ...)`） |
 | 同一句話的折疊鍵（聊天檢索把同一人同一句折成一則） | `llm.preprocess.tokenization.dedup_key`（正規化後只留字母數字與中日韓文字；`search_chat`、BM25、/askai 相關名額共用，只認字面不判語意） |
 | 每天最多做幾次的計數（換日歸零） | `utils.daily_quota.DailyQuota`（看圖補字典、插話查詢都用它；守衛擋自己用 `["", 0]` 記） |
@@ -168,3 +169,4 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 - 測試會自動把 log 寫到 `/logs/test_run.log`，正式 log 不受影響。
 - 靠時間的邏輯（租約到期、排隊上限、相簿安靜期）看時間、睡覺要經過可換的名字（`gpu_gate._clock`／`_async_sleep`、轉發 worker 的 `_clock`／`_sleep`），測試換成 `test.fake_clock.FakeClock`，不要真的 sleep。流程裡夾著真的執行緒 IO（aiosqlite、to_thread）換不成假時鐘的，掛 `@timing_sensitive`（`test/__init__.py`）：啟動 gate 設了 `APP_STARTUP_GATE=1` 會跳過、手動與 CI 照跑。容器啟動時負載高，靠真實時間的測試會把幾十毫秒的誤差判成失敗，bot 就多等一輪 gate。
 - 突變測試複製到容器的 `/tmp` 做，只複製需要的目錄（`/app/telegram_scraper` 有 30 GB）；設 `PYTHONDONTWRITEBYTECODE=1` 並先清 `__pycache__`——同一秒內改壞又還原、檔案大小不變時，Python 會沿用改壞的 `.pyc`，結果不可信。
+- 在副本跑完整測試（例：驗拆開的 commit 各自過不過）：只排除資料（`telegram_scraper/media`、`telegram_scraper/session`、`music/cache`、`scraper` 的 `.db` 與 `data/`），程式一個都不能少（`music/` 有程式）；`APP_ROOT` 設成副本的路徑，不然守衛掃的是 `/app` 的檔案，會報一堆和改動無關的失敗。
