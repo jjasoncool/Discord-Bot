@@ -1045,6 +1045,14 @@ RULES = [
         allowed={"utils/media_probe.py"},
     ),
     Rule(
+        name="Discord 附件、連結預覽的圖給模型：先抓代理的縮小版、不行才抓原檔、10 MB、縮圖、拆幀丟執行緒只有一份"
+             "（自己 read() 再拆幀，大一點的 GIF 就整張丟掉、還卡住主流程）",
+        pattern=r"extract_key_frames\(",
+        canonical="llm.preprocess.vision_image.fetch_for_vision(session, remote_image(附件或預覽上的圖))",
+        # Telegram 過濾拆的是自己下載到硬碟的檔案，不是 Discord 上的圖
+        allowed={"llm/preprocess/vision_image.py", "services/relay/telegram_filter.py"},
+    ),
+    Rule(
         name="跑子行程（ffmpeg 這類）：每一處都要有逾時、逾時要收掉行程（轉發一次只處理一則，卡住整條就停）",
         pattern=r"create_subprocess_exec\(|create_subprocess_shell\(|subprocess\.(?:run|Popen|check_output)\(",
         canonical="utils.media_probe.run_media_tool(cmd, timeout=…)",
