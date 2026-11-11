@@ -16,6 +16,8 @@
   - flush_raw_buffer 的回傳與 INFO 帶出略過的筆數
   - 還沒寫進去就被刪的訊息照樣寫入、標成已刪，內容留著（發出後馬上刪的也查得到）；刪除時間是收到事件的時刻，
     不是寫入那一批的時刻；同一則收到兩次刪除事件，記先到的那次
+  - 編輯留下第一次改之前的原文：再改不覆蓋、文字沒變的編輯事件不算；還沒寫進去就被改的（10 秒內修錯字）也留得下
+  - 正式表還沒加後來的欄位：那幾欄不寫、其餘照常寫進去，ERROR 只記一次；之後欄位加上了，不必重啟就開始寫
 
 不連資料庫：連線池與連線都是假物件；逐筆寫入的測試用照 PostgreSQL 交易規則行為的假連線。
 """
@@ -27,6 +29,7 @@ import os
 import sys
 import unittest
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest import mock
 
 import psycopg2
@@ -38,6 +41,13 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from llm.storage import raw_message_store as raw  # noqa: E402
+
+
+def setUpModule():
+    # 預設正式表上欄位都在、已經查過：其他測試不必管查欄位那一句（數第幾句斷線的測試才對得上）
+    patcher = mock.patch.object(raw, "_added_columns", frozenset(raw.ADDED_COLUMNS))
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
 
 
 class FakeConn:
@@ -77,7 +87,7 @@ class FakePool:
 
 class RawStoreRetryTests(unittest.TestCase):
     def setUp(self):
-        self.enterContext(mock.patch.object(raw, "_write_inserts", lambda cur, batch: (len(batch), 0)))
+        self.enterContext(mock.patch.object(raw, "_write_inserts", lambda cur, batch, **_: (len(batch), 0)))
 
     def flush_with(self, *conns):
         pool = FakePool(conns)
@@ -112,7 +122,7 @@ class RawStoreRetryTests(unittest.TestCase):
         bad_data = FakeConn()
         pool = FakePool([bad_data, FakeConn()])
 
-        def violate(cur, batch):
+        def violate(cur, batch, **_):
             raise psycopg2.IntegrityError("duplicate key value violates unique constraint")
 
         with mock.patch.object(raw, "_get_pool", lambda: pool), mock.patch.object(raw, "_write_inserts", violate):
@@ -134,8 +144,9 @@ class PgDatabase:
     （像 jsonb 裡有 \\u0000）。錯誤訊息帶一段 CONTEXT（訊息內容），驗 log 不會把它寫出來。deny：每一句資料語句都丟權限不足。
     """
 
-    def __init__(self, rows=None, bad_ids=(), deny=False):
+    def __init__(self, rows=None, bad_ids=(), deny=False, columns=raw.ADDED_COLUMNS):
         self.rows = copy.deepcopy(rows or {})
+        self.columns = tuple(columns)   # 後來才加的欄位裡，這張表上有哪些
         self.bad_ids = (dict(bad_ids) if isinstance(bad_ids, dict)
                         else {mid: psycopg2.errors.UntranslatableCharacter for mid in bad_ids})
         self.deny = deny
@@ -185,9 +196,13 @@ class PgCursor:
         self.conn = conn
         self.rowcount = -1
         self._row = None
+        self._rows = []
 
     def fetchone(self):
         return self._row
+
+    def fetchall(self):
+        return list(self._rows)
 
     def _savepoint_index(self, name):
         for index in range(len(self.conn.savepoints) - 1, -1, -1):
@@ -229,20 +244,31 @@ class PgCursor:
             return
         if conn.db.deny:
             self._fail(psycopg2.errors.InsufficientPrivilege("permission denied for table discord_messages_raw"))
+        if words.startswith("SELECT column_name FROM information_schema.columns"):
+            self._rows = [(name,) for name in conn.db.columns if name in params[0]]
+            return
         if words.startswith("INSERT INTO discord_messages_raw"):
+            self._require_columns(words)
             mid = params["message_id"]
             self._maybe_bad(mid)
             if mid in conn.work:
                 self.rowcount = 0
             else:
                 conn.work[mid] = {"content": params["content"], "is_deleted": False, "reaction_breakdown": None}
+                if "original_content" in words:
+                    conn.work[mid]["original_content"] = params["original_content"]
                 self.rowcount = 1
         elif words.startswith("UPDATE discord_messages_raw SET content"):
+            self._require_columns(words)
             mid = params["message_id"]
             self._maybe_bad(mid)
             self.rowcount = int(mid in conn.work)
             if mid in conn.work:
-                conn.work[mid]["content"] = params["content"]
+                row = conn.work[mid]
+                if "original_content = CASE WHEN original_content IS NULL AND content IS DISTINCT FROM" in words:
+                    if row.get("original_content") is None and row["content"] != params["content"]:
+                        row["original_content"] = row["content"]
+                row["content"] = params["content"]
         elif words.startswith("UPDATE discord_messages_raw SET is_deleted"):
             mids, times = params
             hits = [(mid, at) for mid, at in zip(mids, times) if mid in conn.work]
@@ -261,6 +287,11 @@ class PgCursor:
             self.rowcount = 1
         else:
             raise AssertionError(f"假資料庫不認得這句：{words[:80]}")
+
+    def _require_columns(self, words):
+        for name in raw.ADDED_COLUMNS:
+            if name in words and name not in self.conn.db.columns:
+                self._fail(psycopg2.errors.UndefinedColumn(f'column "{name}" does not exist'))
 
     def _maybe_bad(self, mid):
         error = self.conn.db.bad_ids.get(mid)
@@ -398,6 +429,40 @@ class RowIsolationTests(unittest.TestCase):
         self.assertEqual(1, len(self.pool.handed_out), "權限不足換連線也沒用，不重試")
         self.assertEqual(EXISTING.keys(), db.rows.keys())
 
+    def test_the_first_edit_keeps_the_original_text(self):
+        db = PgDatabase(rows=EXISTING)
+        self.flush(db, edits=[_edit("m-edit", "改過")])
+        self.flush(db, edits=[_edit("m-edit", "改第二次")])
+        self.assertEqual(("改第二次", "原本"), (db.rows["m-edit"]["content"], db.rows["m-edit"]["original_content"]),
+                         "原文是第一次改之前的，再改不覆蓋")
+
+    def test_an_edit_event_that_keeps_the_text_is_not_an_edit(self):
+        db = PgDatabase(rows=EXISTING)
+        self.flush(db, edits=[_edit("m-edit", "原本")])   # 連結預覽載入
+        self.assertIsNone(db.rows["m-edit"].get("original_content"))
+
+    def test_without_the_added_columns_the_rest_is_still_written(self):
+        self.enterContext(mock.patch.object(raw, "_added_columns", None))
+        db = PgDatabase(rows=EXISTING, columns=())
+        with self.assertLogs(raw.logger, "ERROR") as logs:
+            stats = self.flush(db, inserts=[_new("n1")], edits=[_edit("m-edit", "改過")])
+        self.assertEqual((1, 1, 0), (stats["inserted"], stats["updated"], stats["failed"]))
+        self.assertEqual("改過", db.rows["m-edit"]["content"])
+        self.assertEqual(1, len([line for line in logs.output if "缺欄位" in line]))
+        with self.assertNoLogs(raw.logger, "ERROR"):
+            self.flush(db, edits=[_edit("m-edit", "又改")])
+
+    def test_columns_added_later_are_used_without_a_restart(self):
+        self.enterContext(mock.patch.object(raw, "_added_columns", None))
+        db = PgDatabase(rows=EXISTING, columns=())
+        with self.assertLogs(raw.logger, "ERROR"):
+            self.flush(db, edits=[_edit("m-edit", "改過")])
+        db.columns = raw.ADDED_COLUMNS
+        self.enterContext(mock.patch.object(raw, "_added_columns_checked_at",
+                                            raw._added_columns_checked_at - raw._ADDED_COLUMNS_RECHECK_SECONDS - 1))
+        self.flush(db, edits=[_edit("m-edit", "再改")])
+        self.assertEqual("改過", db.rows["m-edit"]["original_content"])
+
     def test_repeated_delete_events_keep_the_first_time(self):
         db = PgDatabase(rows=EXISTING)
         stats = self.flush(db, deletes=[("m-del", DELETED_AT), ("m-del", "2026-10-28T00:09:00+00:00")])
@@ -406,6 +471,18 @@ class RowIsolationTests(unittest.TestCase):
 
 
 class FlushReportTests(unittest.TestCase):
+    def test_an_edit_before_the_batch_is_written_keeps_the_original(self):
+        db = PgDatabase()
+        pool = FakePool([PgConn(db)])
+        raw._insert_buffer.append(_new("n1", "打措字"))
+        author = SimpleNamespace(bot=False)
+        for text in ("打錯字", "打錯字了"):
+            with mock.patch.object(raw, "_build_row", lambda msg, text=text: {**_new("n1", text), "original_content": None}):
+                raw.enqueue_raw_edit(SimpleNamespace(id="n1", author=author))
+        with mock.patch.object(raw, "_get_pool", lambda: pool):
+            asyncio.run(raw.flush_raw_buffer())
+        self.assertEqual(("打錯字了", "打措字"), (db.rows["n1"]["content"], db.rows["n1"]["original_content"]))
+
     def setUp(self):
         for buffer in (raw._insert_buffer, raw._edit_buffer, raw._delete_buffer, raw._reaction_buffer):
             self.addCleanup(buffer.clear)

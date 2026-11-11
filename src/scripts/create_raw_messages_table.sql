@@ -1,8 +1,9 @@
 -- Raw 訊息備份表：on_message / edit / delete / reaction 全量寫入
 --
--- 執行方式（必須在 container 內，pgvector 只在 docker network 可達）：
---   docker exec -i pgvector psql -U llm_vector -d discord_data \
---     < /app/scripts/create_raw_messages_table.sql
+-- 執行方式（在主機的 repo 根目錄；pgvector 只在 docker network 可達，所以經 docker exec 進去跑）：
+--   docker exec -i pgvector psql -v ON_ERROR_STOP=1 -1 -U llm_vector -d discord_data \
+--     < src/scripts/create_raw_messages_table.sql
+-- 整份可以對既有的表重跑：建表、建索引、加欄位都是「沒有才做」，不動既有資料。
 --
 -- 設計原則：
 -- 1. 全量原始訊息備份，不做任何過濾（bot 訊息除外）
@@ -14,6 +15,9 @@
 -- - 此表是「原始備份 + 互動狀態真相來源」
 -- - pgvector 那張是「篩選後的語意索引」（未來 Phase 4 才會改成依賴此表）
 -- - 目前兩者並列（雙寫），互不影響
+
+-- bot 正在寫入時等鎖最多 5 秒，等不到就整份失敗、什麼都不改，稍後再跑
+SET lock_timeout = '5s';
 
 CREATE TABLE IF NOT EXISTS discord_messages_raw (
     -- 主鍵與關聯
@@ -71,6 +75,12 @@ CREATE TABLE IF NOT EXISTS discord_messages_raw (
     -- 軟刪除
     is_deleted             BOOLEAN NOT NULL DEFAULT FALSE,
     deleted_at             TIMESTAMPTZ,
+    -- 誰刪的：作者自己刪＝作者 id，別人刪（審核日誌查得到的管理員或 bot）＝那人的 id，查不到＝NULL。
+    -- 說出偷刪了什麼只看作者自己刪的，NULL 一律當成不能講
+    deleted_by             TEXT,
+
+    -- 第一次編輯前的原文；之後再改不覆蓋（拿來和最後的版本比）。沒改過、或只是連結預覽載入＝NULL
+    original_content       TEXT,
 
     -- 相容標記：TRUE 代表從 pgvector backfill 而來，content 可能含貼圖描述合併文字
     legacy_backfilled      BOOLEAN NOT NULL DEFAULT FALSE
@@ -100,3 +110,8 @@ CREATE INDEX IF NOT EXISTS idx_raw_reaction_emoji
 CREATE INDEX IF NOT EXISTS idx_raw_hot_messages
     ON discord_messages_raw (reaction_unique_users DESC, created_at DESC)
     WHERE reaction_unique_users >= 2 AND is_deleted = FALSE;
+
+-- 表建好之後才加的欄位：既有的表照這段補上（只加還沒有的，空欄位、不改寫資料）
+ALTER TABLE discord_messages_raw
+    ADD COLUMN IF NOT EXISTS deleted_by       TEXT,
+    ADD COLUMN IF NOT EXISTS original_content TEXT;

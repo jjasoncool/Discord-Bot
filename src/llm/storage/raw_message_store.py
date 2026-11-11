@@ -14,20 +14,24 @@ raw 表是備份層，也是互動（反應）的真相來源。
 
 規則：四種事件各自一個緩衝；新訊息進來時任一緩衝滿 50 則就寫一批，另外每 60 秒定期寫（反應要夠即時），單次 flush 合併處理；
   純 SQL、不算 embedding；刪除是軟刪（is_deleted=TRUE），刪除時間記收到事件的時刻、不是寫入那一批的時刻；還沒寫進去就被刪的
-  照樣寫入再標成已刪（同一批裡新增先於刪除），發出後馬上刪掉的才留得下來。
+  照樣寫入再標成已刪（同一批裡新增先於刪除），發出後馬上刪掉的才留得下來。編輯蓋掉 content，但第一次改之前的原文
+  留在 original_content（之後再改不覆蓋；文字沒變的編輯事件不算），還沒寫進去就被改的也留得下。
   一批在同一個交易裡逐筆寫，每筆各自一個保存點：這筆自己的資料寫不進去（內容不合法、違反限制）只略過這筆、記 WARNING
   （只記錯誤的第一行，PostgreSQL 的 DETAIL／CONTEXT 會帶出訊息內容）；連線斷掉換一條連線整批重寫一次；
   權限、表不見這類每筆都會失敗的錯誤整批往外丟。統計是 commit 之後真的寫進去的筆數，另記略過幾筆。
   聊天向量庫的補寫照 channel_id／thread_id 的拆法與 stickers、tenor_gifs 的內容組文字：改這些欄位的語意時，
   要一起改 `chat_index_backfill.build_items`，不然補寫的文字會和即時寫入的不一樣。
 
-例外與決策：連不上（換連線也失敗）時這批就丟了，不放回緩衝。放回要同時有緩衝上限、同時只跑一個 flush、失敗後暫停滿門檻
+例外與決策：表結構由 `src/scripts/create_raw_messages_table.sql` 手動建，程式不建表也不加欄位；後來才加的欄位
+  （`ADDED_COLUMNS`）正式表上還沒有時，那幾欄先不寫、其餘照常，記一次 ERROR。
+  連不上（換連線也失敗）時這批就丟了，不放回緩衝。放回要同時有緩衝上限、同時只跑一個 flush、失敗後暫停滿門檻
   觸發，少了這三件，資料庫停著時每則新訊息都會開一個 flush、各佔一條執行緒，放回的反應與編輯還可能被舊的蓋回去。
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import re
@@ -73,6 +77,12 @@ _delete_buffer: list[tuple[str, str]] = []   # (message_id, 收到刪除事件�
 _reaction_buffer: list[dict] = []     # reaction 事件原始列表
 
 _buffer_lock = asyncio.Lock()
+
+#: 表建好之後才加的欄位（建表腳本結尾的 ALTER TABLE）：original_content＝第一次編輯前的原文、deleted_by＝誰刪的
+ADDED_COLUMNS = ("original_content", "deleted_by")
+_ADDED_COLUMNS_RECHECK_SECONDS = 600
+_added_columns: frozenset[str] | None = None    # 正式表上已經有的；None＝還沒查過
+_added_columns_checked_at = 0.0
 
 _pool: ThreadedConnectionPool | None = None
 _pool_lock = threading.Lock()
@@ -204,6 +214,7 @@ def _build_row(msg: discord.Message) -> dict:
         ),
         "mention_count": len(msg.mentions),
         "mentioned_users": [str(u.id) for u in msg.mentions] if msg.mentions else None,
+        "original_content": None,
     }
 
 
@@ -245,9 +256,18 @@ def enqueue_raw_edit(after: discord.Message) -> None:
         return
     for i, row in enumerate(_insert_buffer):
         if row["message_id"] == mid:
+            new_row["original_content"] = _original_before(row, new_row)
             _insert_buffer[i] = new_row
             return
     _edit_buffer.append(new_row)
+
+
+def _original_before(old: dict, new: dict) -> str | None:
+    """還沒寫進去就被改的訊息（修錯字多在 10 秒內）：記下第一次改之前的原文，已經記過就沿用；
+    文字沒變（Discord 載入連結預覽也會送編輯事件）不算改。"""
+    if old.get("original_content") is not None:
+        return old["original_content"]
+    return old["content"] if old["content"] != new["content"] else None
 
 
 def enqueue_raw_delete(message_id: int | str) -> None:
@@ -433,9 +453,10 @@ def _write_all(conn, insert_batch: list[dict], edit_batch: list[dict], delete_ba
     try:
         conn.autocommit = False
         with conn.cursor() as cur:
+            added = _present_added_columns(cur)
             for key, batch, write in (
-                ("inserted", insert_batch, _write_inserts),
-                ("updated", edit_batch, _write_edits),
+                ("inserted", insert_batch, functools.partial(_write_inserts, added=added)),
+                ("updated", edit_batch, functools.partial(_write_edits, added=added)),
                 ("deleted", delete_batch, _write_deletes),
                 ("reactions_applied", reaction_batch, _apply_reactions),
             ):
@@ -450,6 +471,34 @@ def _write_all(conn, insert_batch: list[dict], edit_batch: list[dict], delete_ba
             pass   # 連線已經斷了就 rollback 不了，交給呼叫端換連線
         raise
     return stats
+
+
+def _present_added_columns(cur) -> frozenset[str]:
+    """表建好之後才加的欄位裡，正式表上已經有的。都有就不再查；缺的每 10 分鐘再查一次，跑完建表腳本不必重啟。
+
+    缺欄位時其他欄位照常寫、記一次 ERROR：這張表是聊天向量庫補寫與停機收尾的依靠，不能因為新欄位整批寫不進去。
+    """
+    global _added_columns, _added_columns_checked_at
+    now = time.monotonic()
+    if _added_columns is not None and (
+        len(_added_columns) == len(ADDED_COLUMNS)
+        or now - _added_columns_checked_at < _ADDED_COLUMNS_RECHECK_SECONDS
+    ):
+        return _added_columns
+    cur.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name = 'discord_messages_raw' AND column_name = ANY(%s)",
+        (list(ADDED_COLUMNS),),
+    )
+    found = frozenset(row[0] for row in cur.fetchall())
+    missing = [name for name in ADDED_COLUMNS if name not in found]
+    if missing and found != _added_columns:
+        logger.error(
+            "discord_messages_raw 缺欄位 %s：這幾欄先不記、其餘照常寫；跑 src/scripts/create_raw_messages_table.sql 補上",
+            "、".join(missing),
+        )
+    _added_columns, _added_columns_checked_at = found, now
+    return found
 
 
 def _json_or_none(value: Any) -> str | None:
@@ -481,27 +530,28 @@ def _write_row(cur, kind: str, mid: Any, write):
         return None
 
 
-def _write_inserts(cur, batch: list[dict]) -> tuple[int, int]:
+def _write_inserts(cur, batch: list[dict], *, added: frozenset[str] = frozenset()) -> tuple[int, int]:
     """回 (新寫進去的筆數, 略過的筆數)；已經在表裡的（ON CONFLICT）兩邊都不算。"""
-    sql = """
+    keep_original = "original_content" in added
+    sql = f"""
         INSERT INTO discord_messages_raw (
             message_id, guild_id, channel_id, thread_id, author_id,
             content, stickers, tenor_gifs, has_attachment, has_embed,
             created_at, edited_at,
-            reply_to_id, mention_count, mentioned_users
+            reply_to_id, mention_count, mentioned_users{", original_content" if keep_original else ""}
         ) VALUES (
             %(message_id)s, %(guild_id)s, %(channel_id)s, %(thread_id)s, %(author_id)s,
             %(content)s, %(stickers)s::jsonb, %(tenor_gifs)s::jsonb,
             %(has_attachment)s, %(has_embed)s,
             %(created_at)s, %(edited_at)s,
-            %(reply_to_id)s, %(mention_count)s, %(mentioned_users)s::jsonb
+            %(reply_to_id)s, %(mention_count)s, %(mentioned_users)s::jsonb{", %(original_content)s" if keep_original else ""}
         )
         ON CONFLICT (message_id) DO NOTHING
     """
     inserted = failed = 0
     for row in batch:
         def write(row=row):
-            params = {**row}
+            params = {"original_content": None, **row}
             params["stickers"] = _json_or_none(row["stickers"])
             params["tenor_gifs"] = _json_or_none(row["tenor_gifs"])
             params["mentioned_users"] = _json_or_none(row["mentioned_users"])
@@ -516,16 +566,25 @@ def _write_inserts(cur, batch: list[dict]) -> tuple[int, int]:
     return inserted, failed
 
 
-def _write_edits(cur, batch: list[dict]) -> tuple[int, int]:
-    """回 (改到的筆數, 略過的筆數)；訊息不在表裡（bot 啟動前的舊訊息）時改到 0 筆、不算略過。"""
-    sql = """
+def _write_edits(cur, batch: list[dict], *, added: frozenset[str] = frozenset()) -> tuple[int, int]:
+    """回 (改到的筆數, 略過的筆數)；訊息不在表裡（bot 啟動前的舊訊息）時改到 0 筆、不算略過。
+
+    第一次改才記原文：SET 右邊讀到的 content 是改之前的值（同一句 UPDATE 都看舊的那一列）；
+    文字沒變（Discord 載入連結預覽也會送編輯事件）不算改。
+    """
+    original = (
+        ",\n            original_content = CASE WHEN original_content IS NULL AND content IS DISTINCT FROM %(content)s"
+        " THEN content ELSE original_content END"
+        if "original_content" in added else ""
+    )
+    sql = f"""
         UPDATE discord_messages_raw SET
             content = %(content)s,
             stickers = %(stickers)s::jsonb,
             tenor_gifs = %(tenor_gifs)s::jsonb,
             has_attachment = %(has_attachment)s,
             has_embed = %(has_embed)s,
-            edited_at = %(edited_at)s
+            edited_at = %(edited_at)s{original}
         WHERE message_id = %(message_id)s
     """
     updated = failed = 0
