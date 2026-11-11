@@ -14,6 +14,8 @@
   - 寫到一半斷線：不當成單筆失敗略過，換一條連線把整批重寫一次，每筆只寫一次
   - 權限不足、表不見這類每筆都會失敗的錯誤：整批往外丟、不逐筆略過、不重試
   - flush_raw_buffer 的回傳與 INFO 帶出略過的筆數
+  - 還沒寫進去就被刪的訊息照樣寫入、標成已刪，內容留著（發出後馬上刪的也查得到）；刪除時間是收到事件的時刻，
+    不是寫入那一批的時刻；同一則收到兩次刪除事件，記先到的那次
 
 不連資料庫：連線池與連線都是假物件；逐筆寫入的測試用照 PostgreSQL 交易規則行為的假連線。
 """
@@ -242,9 +244,10 @@ class PgCursor:
             if mid in conn.work:
                 conn.work[mid]["content"] = params["content"]
         elif words.startswith("UPDATE discord_messages_raw SET is_deleted"):
-            hits = [mid for mid in params[0] if mid in conn.work]
-            for mid in hits:
-                conn.work[mid]["is_deleted"] = True
+            mids, times = params
+            hits = [(mid, at) for mid, at in zip(mids, times) if mid in conn.work]
+            for mid, at in hits:
+                conn.work[mid].update(is_deleted=True, deleted_at=at)
             self.rowcount = len(hits)
         elif words.startswith("SELECT reaction_breakdown"):
             mid = params[0]
@@ -283,6 +286,8 @@ def _react(mid, user):
     return {"message_id": mid, "emoji_name": "👍", "emoji_id": None, "user_id": user, "action": "add"}
 
 
+DELETED_AT = "2026-10-28T00:02:00+00:00"
+
 EXISTING = {
     "m-edit": {"content": "原本", "is_deleted": False, "reaction_breakdown": None},
     "m-del": {"content": "要刪的", "is_deleted": False, "reaction_breakdown": None},
@@ -301,7 +306,7 @@ class RowIsolationTests(unittest.TestCase):
 
     def full_batch(self, db, *, with_delete=True, new=None):
         return self.flush(db, inserts=new or [_new("n1"), _new("n-bad"), _new("n2")], edits=[_edit("m-edit", "改過")],
-                          deletes=["m-del"] if with_delete else [], reactions=[_react("m-react", "u1")])
+                          deletes=[("m-del", DELETED_AT)] if with_delete else [], reactions=[_react("m-react", "u1")])
 
     def assert_others_committed(self, db, *, with_delete=True):
         self.assertIn("n1", db.rows)
@@ -393,6 +398,12 @@ class RowIsolationTests(unittest.TestCase):
         self.assertEqual(1, len(self.pool.handed_out), "權限不足換連線也沒用，不重試")
         self.assertEqual(EXISTING.keys(), db.rows.keys())
 
+    def test_repeated_delete_events_keep_the_first_time(self):
+        db = PgDatabase(rows=EXISTING)
+        stats = self.flush(db, deletes=[("m-del", DELETED_AT), ("m-del", "2026-10-28T00:09:00+00:00")])
+        self.assertEqual(DELETED_AT, db.rows["m-del"]["deleted_at"])
+        self.assertEqual(1, stats["deleted"])
+
 
 class FlushReportTests(unittest.TestCase):
     def setUp(self):
@@ -409,6 +420,21 @@ class FlushReportTests(unittest.TestCase):
         self.assertEqual((1, 1), (stats["inserted"], stats["failed"]))
         self.assertTrue([line for line in logs.output if "inserted=1" in line and "failed=1" in line])
         self.assertEqual(0, raw.total_buffer_size())
+
+    def test_message_deleted_before_its_batch_is_written_is_kept_and_marked(self):
+        db = PgDatabase()
+        pool = FakePool([PgConn(db)])
+        raw._insert_buffer.extend([_new("n1", "打錯了趕快刪"), _new("n2")])
+        raw.enqueue_raw_delete(1)   # bot 沒存過的訊息：對不到，不影響別則
+        raw.enqueue_raw_delete("n1")
+        received_at = raw._delete_buffer[-1][1]
+        with mock.patch.object(raw, "_get_pool", lambda: pool):
+            stats = asyncio.run(raw.flush_raw_buffer())
+        self.assertEqual("打錯了趕快刪", db.rows["n1"]["content"], "還在緩衝裡就被刪的訊息要留下內容")
+        self.assertTrue(db.rows["n1"]["is_deleted"])
+        self.assertEqual(received_at, db.rows["n1"]["deleted_at"], "刪除時間是收到事件的時刻")
+        self.assertFalse(db.rows["n2"]["is_deleted"])
+        self.assertEqual((2, 1), (stats["inserted"], stats["deleted"]))
 
 
 if __name__ == "__main__":

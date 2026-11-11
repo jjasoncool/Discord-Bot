@@ -13,7 +13,8 @@ raw 表是備份層，也是互動（反應）的真相來源。
   `flush_raw_buffer`、`get_reaction_salience`、`buffer_sizes`／`total_buffer_size`。
 
 規則：四種事件各自一個緩衝；新訊息進來時任一緩衝滿 50 則就寫一批，另外每 60 秒定期寫（反應要夠即時），單次 flush 合併處理；
-  純 SQL、不算 embedding；刪除是軟刪（is_deleted=TRUE）。
+  純 SQL、不算 embedding；刪除是軟刪（is_deleted=TRUE），刪除時間記收到事件的時刻、不是寫入那一批的時刻；還沒寫進去就被刪的
+  照樣寫入再標成已刪（同一批裡新增先於刪除），發出後馬上刪掉的才留得下來。
   一批在同一個交易裡逐筆寫，每筆各自一個保存點：這筆自己的資料寫不進去（內容不合法、違反限制）只略過這筆、記 WARNING
   （只記錯誤的第一行，PostgreSQL 的 DETAIL／CONTEXT 會帶出訊息內容）；連線斷掉換一條連線整批重寫一次；
   權限、表不見這類每筆都會失敗的錯誤整批往外丟。統計是 commit 之後真的寫進去的筆數，另記略過幾筆。
@@ -32,6 +33,7 @@ import logging
 import re
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
 import discord
@@ -67,7 +69,7 @@ _TENOR_URL_PATTERN = re.compile(r"tenor\.com/view/", re.IGNORECASE)
 # 四種事件的獨立 buffer
 _insert_buffer: list[dict] = []
 _edit_buffer: list[dict] = []
-_delete_buffer: list[str] = []        # message_id 列表
+_delete_buffer: list[tuple[str, str]] = []   # (message_id, 收到刪除事件的時刻 ISO 字串)
 _reaction_buffer: list[dict] = []     # reaction 事件原始列表
 
 _buffer_lock = asyncio.Lock()
@@ -249,16 +251,11 @@ def enqueue_raw_edit(after: discord.Message) -> None:
 
 
 def enqueue_raw_delete(message_id: int | str) -> None:
-    """on_raw_message_delete 呼叫：軟刪標記。
+    """on_raw_message_delete 呼叫：軟刪標記，記下收到事件的時刻。
 
-    若訊息還在 _insert_buffer，直接移除（反正還沒寫入 DB）。
+    還在 _insert_buffer 的訊息不拿掉：同一批裡新增先寫、刪除後標，發出後幾秒就刪的也留得下內容與刪除時間。
     """
-    mid = str(message_id)
-    for i, row in enumerate(_insert_buffer):
-        if row["message_id"] == mid:
-            _insert_buffer.pop(i)
-            return
-    _delete_buffer.append(mid)
+    _delete_buffer.append((str(message_id), datetime.now(timezone.utc).isoformat()))
 
 
 def enqueue_reaction_change(
@@ -406,7 +403,7 @@ def get_reaction_salience(message_ids: list[str]) -> dict[str, int]:
 def _sync_flush(
     insert_batch: list[dict],
     edit_batch: list[dict],
-    delete_batch: list[str],
+    delete_batch: list[tuple[str, str]],
     reaction_batch: list[dict],
 ) -> dict[str, int]:
     """寫一批到資料庫。連線層的錯誤（池子給到已斷的連線、伺服器端把閒置連線關了）換一條連線再寫一次：
@@ -428,7 +425,7 @@ def _sync_flush(
     return dict(_EMPTY_STATS)   # 迴圈一定 return 或 raise；給型別檢查看
 
 
-def _write_all(conn, insert_batch: list[dict], edit_batch: list[dict], delete_batch: list[str],
+def _write_all(conn, insert_batch: list[dict], edit_batch: list[dict], delete_batch: list[tuple[str, str]],
                reaction_batch: list[dict]) -> dict[str, int]:
     """整批在同一個交易裡寫；每筆各自包保存點（`_write_row`），壞的那筆只撤回那筆，交易不會進入失敗狀態，
     所以 commit 之後的統計就是真的寫進去的筆數。"""
@@ -554,22 +551,27 @@ def _write_edits(cur, batch: list[dict]) -> tuple[int, int]:
     return updated, failed
 
 
-def _write_deletes(cur, batch: list[str]) -> tuple[int, int]:
-    """軟刪；message_id 不存在（事件先於 insert）時 ANY 匹配不到、自然是 0。回 (標記的筆數, 略過的筆數)。"""
+def _write_deletes(cur, batch: list[tuple[str, str]]) -> tuple[int, int]:
+    """軟刪，刪除時間用收到事件的時刻；表裡沒有的訊息（bot 上線前發的）對不到、自然是 0。回 (標記的筆數, 略過的筆數)。"""
+    first_seen: dict[str, str] = {}
+    for mid, deleted_at in batch:
+        first_seen.setdefault(mid, deleted_at)   # 同一則收到兩次事件時記先到的那次
+    mids = list(first_seen)
+
     def write():
         cur.execute(
             """
-            UPDATE discord_messages_raw
-            SET is_deleted = TRUE, deleted_at = NOW()
-            WHERE message_id = ANY(%s)
+            UPDATE discord_messages_raw SET is_deleted = TRUE, deleted_at = d.deleted_at
+            FROM unnest(%s::text[], %s::timestamptz[]) AS d(message_id, deleted_at)
+            WHERE discord_messages_raw.message_id = d.message_id
             """,
-            (batch,),
+            (mids, [first_seen[mid] for mid in mids]),
         )
         return cur.rowcount
 
-    shown = "、".join(str(mid) for mid in batch[:3]) + ("…" if len(batch) > 3 else "")
-    marked = _write_row(cur, "刪除", f"{len(batch)} 則（{shown}）", write)
-    return (0, len(batch)) if marked is None else (marked, 0)
+    shown = "、".join(mids[:3]) + ("…" if len(mids) > 3 else "")
+    marked = _write_row(cur, "刪除", f"{len(mids)} 則（{shown}）", write)
+    return (0, len(mids)) if marked is None else (marked, 0)
 
 
 # ========== Reaction 合併邏輯 ==========
