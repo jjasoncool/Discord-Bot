@@ -8,8 +8,8 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, NamedTuple
-import base64
 import io
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -28,10 +28,12 @@ from llm.preprocess.external_emoji import external_emoji_context
 from llm.preprocess.tweet_context import expand_tweets
 from llm.preprocess.chat_line import name_with_anchor
 from llm.preprocess.vision_image import (
-    DEFAULT_MAX_FRAMES,
+    MAX_FETCH_BYTES,
     VISION_IMAGE_EXTS,
-    extract_key_frames,
+    VisionFetch,
+    fetch_for_vision,
     is_vision_image,
+    remote_image,
 )
 from services.llm_service import LLMService
 from sys_settings import switches
@@ -55,7 +57,6 @@ GUARDRAILS_FILE_PATH = Path(ASKAI_SETTINGS.guardrails_file_path)
 EXAMPLES_FILE_PATH = Path(ASKAI_SETTINGS.examples_file_path)
 PROMPT_LOG_PATH = Path(ASKAI_SETTINGS.prompt_log_path)
 RESPONSE_LOG_PATH = Path(ASKAI_SETTINGS.response_log_path)
-MAX_IMAGE_SIZE_BYTES = ASKAI_SETTINGS.max_image_size_bytes
 
 
 class _AskaiQueueItem(NamedTuple):
@@ -1022,7 +1023,11 @@ class LLMCommands(commands.Cog):
         interaction: discord.Interaction,
         image: discord.Attachment,
     ) -> list[str] | None:
-        """下載並轉換圖片為 Ollama 可接受的 base64 清單。"""
+        """附件的圖 → 給模型的 base64 清單；不能用時回一句只有本人看得到的話、回 None。
+
+        抓法跟插話同一套（`fetch_for_vision`）：附件大小不先擋，先抓 Discord 代理的縮小版，太大的 GIF 縮完常常就放得下；
+        代理不行才抓原檔。動圖拆成關鍵幀（後端直接吃 gif 只讀得到第一幀）。
+        """
         filename = (image.filename or "").lower()
         if not is_vision_image(filename):
             await interaction.followup.send(
@@ -1031,33 +1036,19 @@ class LLMCommands(commands.Cog):
             )
             return None
 
-        if image.size and image.size > MAX_IMAGE_SIZE_BYTES:
-            await interaction.followup.send(
-                "⚠️ 圖片大小超過 10MB，請縮圖或換小一點的檔案。",
-                ephemeral=True,
-            )
+        fetched = VisionFetch([])
+        source = remote_image(image)
+        if source is not None:
+            async with aiohttp.ClientSession() as session:
+                fetched = await fetch_for_vision(session, source)
+        if not fetched.frames:
+            if fetched.too_big:
+                text = f"⚠️ 圖片大小超過 {MAX_FETCH_BYTES // (1024 * 1024)}MB，請縮圖或換小一點的檔案。"
+            else:
+                text = "⚠️ 圖片讀取失敗，請重新上傳。"
+            await interaction.followup.send(text, ephemeral=True)
             return None
-
-        try:
-            image_bytes = await image.read()
-        except Exception as exc:
-            logger.warning("讀取圖片失敗: %s", exc)
-            await interaction.followup.send(
-                "⚠️ 圖片讀取失敗，請重新上傳。",
-                ephemeral=True,
-            )
-            return None
-
-        if not image_bytes:
-            await interaction.followup.send(
-                "⚠️ 圖片內容為空，請重新上傳。",
-                ephemeral=True,
-            )
-            return None
-
-        # 動圖拆成關鍵幀再送（後端直接吃 gif 只讀得到第一幀）；靜圖回原圖一張
-        frames = extract_key_frames(image_bytes, max_frames=DEFAULT_MAX_FRAMES)
-        return [base64.b64encode(f).decode("utf-8") for f in frames]
+        return fetched.frames
 
 
 class PersonalityCommands(commands.Cog):

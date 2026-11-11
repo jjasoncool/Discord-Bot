@@ -4,7 +4,8 @@
   - 給模型的東西：問題裡的 <@id> 換成「名字#尾碼」；聊天紀錄逐行、bot 自己的回覆另一段；人物卡分三路——
     發問者的進 asker_profile、被 @ 的進 target_profiles、其餘進 persona_context；名字對照接在 persona_context 尾端；
     被 @ 但沒有卡的人給一句「沒有紀錄」提示
-  - 有圖時：聊天紀錄縮到 5 則、圖以 base64 交給模型、回覆附圖片網址；圖不合格就什麼都不送、不叫模型
+  - 有圖時：聊天紀錄縮到 5 則、圖以 base64 交給模型、回覆附圖片網址；圖不合格就什麼都不送、不叫模型；
+    附件不先看大小擋，先試 Discord 代理的縮小版，兩邊都太大才回「超過 10MB」，其他抓不到回讀取失敗
   - 網路搜尋：keyword 模式先查好塞 web_context；tool 模式把工具交給工具輪，不先查；off 兩邊都不做
   - 取消：模型呼叫前已取消就不叫模型、不送回覆；生成途中取消就中斷、不送；不是使用者按的取消（底層連帶取消）
     回「這次沒有順利回答」而且不往外丟
@@ -32,6 +33,7 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from commands import llm_commands as lc  # noqa: E402
+from llm.preprocess.vision_image import VisionFetch  # noqa: E402
 from services.llm_service import GenerateReplyResult  # noqa: E402
 
 
@@ -364,6 +366,43 @@ class AskaiFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("抱歉，這次沒接到", h.sent[0])
         self.assertEqual(h.history[0]["error_kind"], "timeout")
         self.assertEqual(h.history[0]["messages_sent"], [{"role": "user", "content": "x"}])
+
+
+class AskaiImageTests(unittest.IsolatedAsyncioTestCase):
+    """附件的圖走共用的抓圖：13 MB 的 GIF 不先擋，交給代理縮小；抓不到時照原因回一句。"""
+
+    async def _prepare(self, fetched):
+        interaction = SimpleNamespace(followup=_Followup())
+        image = SimpleNamespace(filename="big.gif", size=13 * 1024 * 1024, url="https://cdn/big.gif",
+                                proxy_url="https://media/big.gif", width=570, height=570,
+                                flags=SimpleNamespace(animated=True))
+        seen = []
+
+        async def fake_fetch(session, source, **kwargs):
+            seen.append(source)
+            return fetched
+
+        with mock.patch.object(lc, "fetch_for_vision", fake_fetch):
+            got = await lc.LLMCommands._prepare_image_payload(None, interaction, image)
+        return got, interaction.followup.sent, seen
+
+    async def test_a_big_gif_goes_through_the_proxy_instead_of_being_refused(self):
+        got, sent, seen = await self._prepare(VisionFetch(["F1", "F2"], too_big=False))
+        self.assertEqual(got, ["F1", "F2"])
+        self.assertEqual(sent, [])
+        self.assertEqual((seen[0].proxy_url, seen[0].url, seen[0].animated),
+                         ("https://media/big.gif", "https://cdn/big.gif", True))
+
+    async def test_too_big_on_both_sides_says_so(self):
+        got, sent, _ = await self._prepare(VisionFetch([], too_big=True))
+        self.assertIsNone(got)
+        self.assertIn("10MB", sent[0][0])
+        self.assertTrue(sent[0][1]["ephemeral"])
+
+    async def test_other_failures_ask_to_upload_again(self):
+        got, sent, _ = await self._prepare(VisionFetch([], too_big=False))
+        self.assertIsNone(got)
+        self.assertIn("讀取失敗", sent[0][0])
 
 
 if __name__ == "__main__":
