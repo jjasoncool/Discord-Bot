@@ -1045,6 +1045,13 @@ RULES = [
         allowed={"utils/media_probe.py"},
     ),
     Rule(
+        name="原始訊息表的「誰刪的」只在寫入與給模型看的那兩處讀寫：只有作者自己刪的能講、管理員刪的與不知道的一律不給，"
+             "這條篩選只有一份（別處自己查已刪的訊息給模型，會把管理員刪掉的東西講出來）",
+        pattern=r"deleted_by",
+        canonical="llm.storage.deleted_and_edited.deleted_context(guild, channel, tz=…)",
+        allowed={"llm/storage/raw_message_store.py", "llm/storage/deleted_and_edited.py"},
+    ),
+    Rule(
         name="Discord 附件、連結預覽的圖給模型：先抓代理的縮小版、不行才抓原檔、10 MB、縮圖、拆幀丟執行緒只有一份"
              "（自己 read() 再拆幀，大一點的 GIF 就整張丟掉、還卡住主流程）",
         pattern=r"extract_key_frames\(",

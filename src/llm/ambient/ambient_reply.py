@@ -59,6 +59,7 @@ from llm.storage.ai_interactions_store import (
     record_interaction,
 )
 from llm.ambient import ambient_insult, ambient_search, ambient_style_lines
+from llm.storage import deleted_and_edited
 from llm.ambient.ambient_hooks import HookDecision, evaluate as evaluate_hook
 from llm.ambient.ambient_memory import enqueue_for_memory, recall_lines, recall_signature_tags
 from llm.preprocess.chat_line import (
@@ -286,6 +287,7 @@ async def _fetch_recent(
         thread_replies=True,  # 每行加編號（#N / ↩#M）：指代有錨，也讓鉤子拿得到訊息物件
         thread_map=thread_map,
         on_error=lambda exc: logger.debug("ambient 抓取頻道歷史失敗：%s", exc),
+        annotate=deleted_and_edited.edit_notes,   # 改過的那行附原文，好笑的錯字她才拿來虧
     )
     if message.author.id not in participant_ids:
         participant_ids.append(message.author.id)
@@ -1340,6 +1342,8 @@ class _Inputs:
     # 這次插話給模型的查詢工具（開關關、額度用完就 None）與今天的日期
     search_tools: Optional[object] = None
     today: str = ""
+    # 被點名時：這個頻道最近群友自己刪掉的訊息與前後文（有人問才講）
+    deleted_messages: Optional[list] = None
     # 只給 debug 摘要用的計數
     persona_count: int = 0
     memory_count: int = 0
@@ -1588,6 +1592,9 @@ async def _gather_inputs(
         (persona_cards or []) + (memory_lines or []) + (tag_lines or [])
     ) or None
     search_tools = await _prepare_search_tools(message, stripped, participant_ids, trace_id)
+    # 被刪的訊息只在被點名時帶：沒人問就不必給，自發插話也不該主動翻出來
+    deleted_messages = (await deleted_and_edited.deleted_context(message.guild, message.channel, tz=APP_TZ)
+                        if directed else None)
 
     return _Inputs(
         trace_id=trace_id, system_prompt=system_prompt, prompt_text=prompt_text,
@@ -1596,7 +1603,7 @@ async def _gather_inputs(
         asker_for_bundle=asker_for_bundle, bot_display_name=bot_display_name,
         search_tools=search_tools, today=_today_line(datetime.now(APP_TZ)),
         persona_context=persona_context, recalled_context=callback_lines, style_refs=style_ref_lines,
-        style_note=ambient_style_lines.NOTE if use_style_lines else None,
+        style_note=ambient_style_lines.NOTE if use_style_lines else None, deleted_messages=deleted_messages,
         grudge=grudge, persona_count=len(persona_cards or []), memory_count=len(memory_lines or []),
     )
 
@@ -1659,13 +1666,14 @@ async def _generate(inputs: _Inputs, ambient_model: str, directed: bool) -> tupl
     tools = inputs.search_tools
     logger.info(
         "ambient 生成 trace=%s directed=%s model=%s | chat=%d persona=%d memory=%d "
-        "callback=%d style=%d signals=%d img=%d reply_to=%d mood=%d search=%s tools=%d",
+        "callback=%d style=%d signals=%d img=%d reply_to=%d mood=%d search=%s tools=%d deleted=%d",
         inputs.trace_id, directed, ambient_model,
         len(inputs.chat_context or []), inputs.persona_count, inputs.memory_count,
         len(inputs.recalled_context or []), len(inputs.style_refs or []),
         len(hook.signals) if hook is not None else 0,
         len(inputs.image_payload or []), 1 if inputs.replied_to_text else 0, 1 if inputs.grudge is not None else 0,
         getattr(tools, "mode", "off"), len(tools.tools) if tools is not None else 0,
+        len(inputs.deleted_messages or []),
     )
     result = await _get_llm().generate_reply(
         prompt=inputs.prompt_text,
@@ -1690,6 +1698,7 @@ async def _generate(inputs: _Inputs, ambient_model: str, directed: bool) -> tupl
         timeout=int(_SETTINGS.pass_timeout_seconds),
         trace_id=inputs.trace_id,
         today=inputs.today,
+        deleted_messages=inputs.deleted_messages,
         # 查詢工具：三種來源同一份宣告（快取才穩）；一輪只查一次、查滿的提醒用插話的口吻、不退回不帶工具的呼叫
         tool_runner=tools,
         max_tool_rounds=ambient_search.max_tool_rounds(),

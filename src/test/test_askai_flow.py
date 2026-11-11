@@ -7,6 +7,7 @@
   - 有圖時：聊天紀錄縮到 5 則、圖以 base64 交給模型、回覆附圖片網址；圖不合格就什麼都不送、不叫模型；
     附件不先看大小擋，先試 Discord 代理的縮小版，兩邊都太大才回「超過 10MB」，其他抓不到回讀取失敗
   - 網路搜尋：keyword 模式先查好塞 web_context；tool 模式把工具交給工具輪，不先查；off 兩邊都不做
+  - 這個頻道最近被刪的訊息（`deleted_and_edited.deleted_context` 查問的那個頻道）照原樣交給模型；沒有就不帶
   - 取消：模型呼叫前已取消就不叫模型、不送回覆；生成途中取消就中斷、不送；不是使用者按的取消（底層連帶取消）
     回「這次沒有順利回答」而且不往外丟
   - 記錄：回應歷史帶 trace_id、模型、think、三種 meta、錯誤類型；prompt 紀錄與 debug 紀錄各寫一筆
@@ -129,6 +130,8 @@ class _Harness:
         self.file_logs = {}
         self.debug_kwargs = None
         self.image_payload = ["B64"]
+        self.deleted = None          # 這個頻道最近被刪的訊息（deleted_context 的回傳）
+        self.deleted_calls = []
         self.switch = SimpleNamespace(askai_web_search_mode=web_mode, askai_intel_search_mode=intel_mode,
                                       askai_rerank_mode="off", askai_chat_search_mode=chat_mode)
         self.chat_tool_kwargs = None
@@ -169,6 +172,10 @@ class _Harness:
     async def _prepare_image(self, interaction, image):
         return self.image_payload
 
+    async def _deleted_context(self, guild, channel, *, tz):
+        self.deleted_calls.append((guild, channel))
+        return self.deleted
+
     def patches(self):
         return [
             mock.patch.object(lc, "load_system_prompt", lambda: "SYSTEM"),
@@ -186,6 +193,7 @@ class _Harness:
             mock.patch.object(lc, "format_web_context_lines", lambda results, answers: [f"[網] {r.title} {r.url}" for r in results]),
             mock.patch.object(lc, "WebSearchTools", lambda settings: SimpleNamespace(calls=[{"kind": "general", "query": "q"}])),
             mock.patch.object(lc, "ChatSearchTools", self._chat_tools),
+            mock.patch.object(lc.deleted_and_edited, "deleted_context", self._deleted_context),
             mock.patch.object(lc, "get_or_create_file_logger", self._file_logger),
             mock.patch.object(lc, "build_askai_prompt_log", self._debug_log),
             mock.patch.object(lc, "append_askai_response_log", lambda **kwargs: self.history.append(kwargs)),
@@ -246,6 +254,18 @@ class AskaiFlowTests(unittest.IsolatedAsyncioTestCase):
         args, kwargs = h.rag_call
         self.assertEqual(args[3], [2222, 1111], "聊天裡的發言者（去重、照出現順序）交給人物卡檢索")
         self.assertEqual(kwargs["mentioned_user_ids"], ["2222"])
+
+    async def test_deleted_messages_of_this_channel_reach_the_model(self):
+        harness = self._harness()
+        harness.deleted = ["[11/11 20:57] 甲#1111【已刪，發出後 2 秒刪掉】: 打錯了"]
+        h = await harness.run(question="剛剛誰刪了什麼")
+        self.assertEqual(h.deleted, h.prompt["deleted_messages"])
+        self.assertEqual(1, len(h.deleted_calls))
+        self.assertEqual("閒聊", h.deleted_calls[0][1].name, "查的是問的那個頻道")
+
+    async def test_no_deleted_messages_means_no_block(self):
+        h = await self._harness().run(question="嗨")
+        self.assertIsNone(h.prompt["deleted_messages"])
 
     async def test_mentioned_person_without_a_card_gets_a_hint(self):
         h = await self._harness().run(question="<@4444> 是誰")

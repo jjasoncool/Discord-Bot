@@ -84,6 +84,12 @@ class Switches(BaseModel):
     #: 先不接新訂單、不能下架、上面的舊交易不能照舊流程做完，管理面板有「💰 改成定金＋尾款」；off＝照一般規則。
     #: 那幾篇都改好之後再關（關掉不影響其他商品），確認沒問題後連程式一起刪掉
     market_transition: Literal["off", "on"] = "on"
+    #: 說出群友偷刪了什麼（llm.storage.deleted_and_edited）：on＝被點名的插話與 /askai 帶上這個頻道最近 24 小時
+    #: 作者自己刪掉的訊息與前後文，有人問才講、看前後文判斷要不要講；off＝不帶，琇紫看不到被刪的訊息
+    deleted_messages_mode: Literal["off", "on"] = "off"
+    #: 改過的訊息附原文（llm.storage.deleted_and_edited）：on＝插話看到的近況裡，改過的那行後面附「（改過，原本打：…）」，
+    #: 改前改後有好笑的反差她才拿來虧；off＝只看到改過的版本
+    edit_notes_mode: Literal["off", "on"] = "off"
 
 
 def _parse(raw: str) -> Switches:

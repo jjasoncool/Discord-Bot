@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import tzinfo
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 from llm.preprocess import person_anchor
 from llm.preprocess.emoji_text_utils import preview_marker, preview_text, replace_custom_emoji_with_description
@@ -198,6 +198,7 @@ def format_chat_line(
     empty_placeholder: str | None = None,
     repost_target: str | None = None,
     previews: list[str] | None = None,
+    note: str = "",
 ) -> str:
     """組一行聊天紀錄：`[時間] 顯示名#XXXX: 內容`。
 
@@ -219,6 +220,7 @@ def format_chat_line(
     - bot 的自動轉貼接「（自動轉貼 {repost_target} 的連結）」（見 `repost_note`）。
     - 連結預覽接在最後 `[預覽：…]`（見 `link_previews`）；`previews` 給了就用它（呼叫端已經另外處理預覽時給空 list）。
       標記都接在截斷之後：內容再長也不能把它們截掉。
+    - note：再接在最後的說明（插話給改過的訊息附「（改過，原本打：…）」）。
     """
     name = name_with_anchor(msg.author)
     if self_id is not None and getattr(msg.author, "id", None) == self_id:
@@ -237,6 +239,8 @@ def format_chat_line(
     shown = link_previews(msg) if previews is None else previews
     if shown:
         text = f"{text} {preview_marker(shown)}" if text else preview_marker(shown)
+    if note:
+        text = f"{text}{note}" if text else note
     if not text and empty_placeholder is not None:
         text = empty_placeholder
     fmt = "%H:%M" if time_only else "%Y-%m-%d %H:%M"
@@ -284,7 +288,7 @@ def _reply_target_placeholder(msg) -> str:
 
 
 def _thread_render(
-    msgs: list, tz: tzinfo, max_len: int | None, self_id: int | None
+    msgs: list, tz: tzinfo, max_len: int | None, self_id: int | None, notes: Optional[dict] = None,
 ) -> tuple[list[str], dict]:
     """把時序訊息渲染成帶編號的行；回 (行, {編號: 訊息})。
 
@@ -326,6 +330,7 @@ def _thread_render(
                 suffix=suffix,
                 empty_placeholder=(None if texts[m.id] else _reply_target_placeholder(m)),
                 repost_target=target,
+                note=(notes or {}).get(m.id, "") if texts[m.id] else "",
             )
         )
     return lines, {thread_no[m.id]: m for m in rendered}
@@ -344,6 +349,7 @@ async def fetch_recent_lines(
     thread_replies: bool = False,
     thread_map: Optional[dict] = None,
     on_error: Optional[Callable[[Exception], None]] = None,
+    annotate: Optional[Callable[[list], Awaitable[dict]]] = None,
 ) -> tuple[list[str], Optional[list[int]]]:
     """抓近期頻道訊息 → 時序（舊→新）的 `[HH:MM] 名#XXXX: 內容` 行（time_only）。
 
@@ -360,6 +366,8 @@ async def fetch_recent_lines(
       out-param 而非改回傳簽章＝不動既有 caller 的 unpack。caller 拿它把模型回的 `#N`
       還原成真正的訊息物件（reply 錨定用）。
     - on_error：抓取失敗時呼叫（讓 caller 決定 log 等級/訊息）；失敗仍回已收集到的部分。
+    - annotate：收齊訊息後叫一次，回 {訊息 id: 接在那一行最後的說明}（插話的「改過，原本打」；要讀資料庫的事
+      由呼叫端做，這裡不碰）。
     """
     pids: Optional[list[int]] = [] if collect_participant_ids else None
     hist_kwargs: dict = {"limit": limit}
@@ -379,15 +387,17 @@ async def fetch_recent_lines(
             on_error(exc)
     msgs.reverse()  # newest-first → 時序（舊→新）
     _check_anchor_collision(msgs)  # #XXXX 指向兩個人時出警報（見函式說明）
+    notes = await annotate(msgs) if annotate is not None and msgs else {}
 
     if thread_replies:
-        lines, no_to_msg = _thread_render(msgs, tz, max_len, self_id)
+        lines, no_to_msg = _thread_render(msgs, tz, max_len, self_id, notes)
         if thread_map is not None:
             thread_map.update(no_to_msg)
     else:
         # compact=False：ambient / 日記歷史上不壓縮空白，保留原貌（嚴格等價）；空訊息整則跳過
         lines = [
-            format_chat_line(m, tz, time_only=True, max_len=max_len, compact=False, self_id=self_id)
+            format_chat_line(m, tz, time_only=True, max_len=max_len, compact=False, self_id=self_id,
+                             note=notes.get(m.id, "") if notes else "")
             for m in msgs
             if semantic_message_text(m)
         ]

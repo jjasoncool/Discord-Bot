@@ -8,6 +8,7 @@
 最新這則 @ 的人要傳進人物卡檢索與回憶對象（給模型看的文字已把 @ 換成名字，從那裡抓不到）。
 追問時手上沒圖，沿回覆鏈往前補附第一張圖：只追一小時內、最多 6 則，觸發那則或被回覆那則自己有圖就不追。
 被回覆那則、最新那則的圖抓不到時，在那則後面標「（這張圖沒抓到）」，模型才不會自己編看不到的理由。
+被點名時才帶這個頻道最近被刪的訊息（查觸發那則所在的頻道），自發插話不帶；近況交給改過訊息的附註。
 """
 import asyncio
 import os
@@ -26,6 +27,7 @@ if SRC_DIR not in sys.path:
 import discord  # noqa: E402
 
 from llm.ambient import ambient_insult, ambient_reply, ambient_search, ambient_style_lines  # noqa: E402
+from llm.storage import deleted_and_edited  # noqa: E402
 from llm.ambient.ambient_hooks import HookDecision  # noqa: E402
 from sys_settings import switches  # noqa: E402
 from sys_settings.switches import Switches  # noqa: E402
@@ -99,6 +101,8 @@ class PassFlowTests(unittest.TestCase):
         self.style_lines = mock.AsyncMock(return_value=None)
         self.style_lines_on = False
         self.search_tools = None
+        self.deleted = ["[11/11 20:57] 某人#0001【已刪，發出後 2 秒刪掉】: 打錯了"]
+        self.deleted_calls = []
 
     def _model_says(self, reply, error_kind=None):
         self.llm.generate_reply.return_value = SimpleNamespace(
@@ -122,6 +126,10 @@ class PassFlowTests(unittest.TestCase):
 
         async def _grudges(guild_id):
             return dict(self.grudges)
+
+        async def _deleted(guild, channel, *, tz):
+            self.deleted_calls.append(channel)
+            return self.deleted
 
         stubs = dict(
             stream_busy=lambda: self.stream_busy,
@@ -150,7 +158,8 @@ class PassFlowTests(unittest.TestCase):
         with mock.patch.multiple(ambient_reply, **stubs), \
                 mock.patch.object(ambient_style_lines, "enabled", lambda: self.style_lines_on), \
                 mock.patch.object(ambient_insult, "grudges", _grudges), \
-                mock.patch.object(ambient_insult, "enabled", lambda: True):
+                mock.patch.object(ambient_insult, "enabled", lambda: True), \
+                mock.patch.object(deleted_and_edited, "deleted_context", _deleted):
             asyncio.run(ambient_reply._run_one_ambient_pass(
                 self.bot, message, "m", directed, burst or [message], followup=followup))
 
@@ -160,6 +169,18 @@ class PassFlowTests(unittest.TestCase):
 
     def _state(self):
         return ambient_reply._get_proc_state(CHANNEL_ID)
+
+    # ── 被刪的訊息：被點名才帶 ──
+    def test_directed_replies_get_this_channels_deleted_messages(self):
+        message = _message("剛剛誰刪了什麼")
+        self._run(message, directed=True)
+        self.assertEqual(self.deleted, self._generate_kwargs()["deleted_messages"])
+        self.assertEqual([message.channel], self.deleted_calls)
+
+    def test_spontaneous_replies_never_look_at_deleted_messages(self):
+        self._run(_message("這波真的很誇張"))
+        self.assertIsNone(self._generate_kwargs()["deleted_messages"])
+        self.assertEqual([], self.deleted_calls, "沒人問就不翻")
 
     # ── 語氣參考：開關決定句子從哪來，說明跟著句子走 ──
     def test_style_lines_off_keeps_the_old_refs_and_their_note(self):

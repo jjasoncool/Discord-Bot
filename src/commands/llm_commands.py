@@ -24,6 +24,7 @@ from llm.retrievers.web import WebSearchTools, format_web_context_lines, search_
 from llm.client.gpu_gate import imagegen_busy, note_foreground_activity
 from llm.persona.member_names import member_names_from_guild, name_map_lines
 from llm.preprocess import person_anchor
+from llm.storage import deleted_and_edited
 from llm.preprocess.external_emoji import external_emoji_context
 from llm.preprocess.tweet_context import expand_tweets
 from llm.preprocess.chat_line import name_with_anchor
@@ -338,6 +339,7 @@ class _AskaiInputs:
     think: bool | None = None
     mention_anchors: dict[str, str] = field(default_factory=dict)   # 問題裡被 @ 的人：id → 「名字#尾碼」，送出時換回 @
     chat_search_meta: dict[str, object] | None = None   # 第 2 段填：聊天紀錄搜尋工具查了什麼
+    deleted_messages: list[str] | None = None   # 這個頻道最近群友自己刪掉的訊息與前後文（有人問才講）
 
 
 _ASKAI_RERANKER = None
@@ -879,6 +881,9 @@ class LLMCommands(commands.Cog):
         if tweet_images or emoji_images:
             image_payload = (image_payload or []) + tweet_images + emoji_images
 
+        # 這個頻道最近被刪的訊息：/askai 就是有人在問，有刪除就帶上，講不講由模型看前後文判斷
+        deleted_messages = await deleted_and_edited.deleted_context(guild, interaction.channel, tz=APP_TZ)
+
         image_meta = None
         if image and image_payload:
             image_meta = {
@@ -896,7 +901,7 @@ class LLMCommands(commands.Cog):
             web_mode=web_mode, web_context=web_context, web_meta=web_meta,
             image_payload=image_payload, image_meta=image_meta,
             discord_context=discord_context, discord_meta=discord_meta, rag_context=rag_context, rag_meta=rag_meta,
-            interaction=interaction, mention_anchors=mention_anchors,
+            interaction=interaction, mention_anchors=mention_anchors, deleted_messages=deleted_messages,
         )
 
     # ── 第 2 段：生成 ───────────────────────────────────────────────────────
@@ -936,6 +941,7 @@ class LLMCommands(commands.Cog):
                 persona_context=inputs.persona_context,
                 target_profiles=inputs.target_profiles,
                 web_context=inputs.web_context,
+                deleted_messages=inputs.deleted_messages,
                 images=inputs.image_payload,
                 model=target_model,
                 think=target_think,

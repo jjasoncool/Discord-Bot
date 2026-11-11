@@ -12,6 +12,7 @@
 import os
 import sys
 import unittest
+import unittest.mock
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -146,6 +147,37 @@ class FetchRecentLinesTests(unittest.IsolatedAsyncioTestCase):
         lines, pids = await fetch_recent_lines(ch, tz=TZ8, limit=10, collect_participant_ids=True)
         self.assertEqual(len(lines), 1)
         self.assertEqual(pids, [800000000000000001, 800000000000000002])
+
+    async def test_annotate_appends_notes_to_the_lines_it_names(self):
+        old = self._m(10, "今天天氣很好", uid=700000000000000011)
+        new = self._m(20, "對啊", uid=700000000000000012)
+        old.id, new.id = 1, 2
+        seen = []
+
+        async def annotate(msgs):
+            seen.append([m.id for m in msgs])
+            return {1: "（改過，原本打：今天舔器很好）"}
+        lines, _ = await fetch_recent_lines(_FakeChannel([new, old]), tz=TZ8, limit=10, annotate=annotate)
+        self.assertTrue(lines[0].endswith("今天天氣很好（改過，原本打：今天舔器很好）"), lines[0])
+        self.assertTrue(lines[1].endswith("對啊"))
+        self.assertEqual([[1, 2]], seen, "收齊才叫一次，照時間順序")
+
+    async def test_threaded_lines_put_the_note_before_the_reply_pointer(self):
+        old = self._m(10, "你說呢", uid=700000000000000021)
+        reply = self._m(20, "我要去洗澡", uid=700000000000000022)
+        old.id, reply.id = 1, 2
+        reply.reference = SimpleNamespace(message_id=1)
+
+        async def annotate(msgs):
+            return {2: "（改過，原本打：我要去死澡）"}
+        lines, _ = await fetch_recent_lines(_FakeChannel([reply, old]), tz=TZ8, limit=10,
+                                            thread_replies=True, annotate=annotate)
+        self.assertTrue(lines[1].endswith("我要去洗澡（改過，原本打：我要去死澡） ↩#1"), lines[1])
+
+    async def test_annotate_is_not_called_without_messages(self):
+        annotate = unittest.mock.AsyncMock(return_value={})
+        await fetch_recent_lines(_FakeChannel([]), tz=TZ8, limit=10, annotate=annotate)
+        annotate.assert_not_awaited()
 
     async def test_max_len_applied(self):
         ch = _FakeChannel([self._m(10, "一二三四五六", uid=700000000000000001)])
