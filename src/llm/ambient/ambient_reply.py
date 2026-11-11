@@ -30,6 +30,7 @@
 - 回覆超過 Discord 上限只送第一段；用回覆送出時也不 @ 任何人。
 - 回 bot 的自動轉貼不算在叫它（那是群友對影片、對原貼者的反應）；內文真的打了 @ 它才算。
 - 被回覆的那則、最新那則有連結時補上 Discord 抓到的預覽與縮圖；被轉過的原訊息預覽在轉貼上，從 bot 的訊息快取找。
+- 追問時手上一張圖都沒有，就沿回覆鏈往前找第一則帶圖的訊息補附（時限與層數有上限），說明接在被回覆那則後面。
 
 例外與決策：靜默期依對話節奏切換（熱聊等不到安靜，而且插話本來就不需要空檔）；純機率的減壓閥已被鉤子閘取代
 （隨機丟棄會丟掉好時機、留下爛時機，鉤子有判斷依據）。
@@ -750,9 +751,12 @@ def _repost_of(bot, msg: discord.Message) -> Optional[discord.Message]:
     return None
 
 
-async def _repost_origin(bot, repost: discord.Message) -> Optional[discord.Message]:
-    """自動轉貼的原訊息（轉貼是回覆原訊息送出的）；舊的轉貼沒有回覆關係、或原訊息不見了就回 None。"""
-    ref = getattr(repost, "reference", None)
+async def _referenced_message(bot, msg: discord.Message) -> Optional[discord.Message]:
+    """這則用回覆功能指向的那則訊息：被回覆的訊息、自動轉貼的原訊息（轉貼是回覆原訊息送出的）。
+
+    依序看 Discord 一起送來的那份、bot 的訊息快取，都沒有才問一次 API；沒有回覆關係、已刪或抓不到回 None。
+    """
+    ref = getattr(msg, "reference", None)
     mid = getattr(ref, "message_id", None)
     if mid is None:
         return None
@@ -763,9 +767,9 @@ async def _repost_origin(bot, repost: discord.Message) -> Optional[discord.Messa
     if cached is not None:
         return cached
     try:
-        return await repost.channel.fetch_message(mid)
+        return await msg.channel.fetch_message(mid)
     except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
-        logger.debug("ambient 補抓轉貼的原訊息失敗：%s", exc)
+        logger.debug("ambient 補抓被回覆的訊息失敗：%s", exc)
     return None
 
 
@@ -798,7 +802,7 @@ async def _link_preview_context(bot, msg: discord.Message) -> tuple[str, list[st
     """
     note = ""
     if is_link_repost(msg):
-        origin = await _repost_origin(bot, msg)
+        origin = await _referenced_message(bot, msg)
         note = repost_note(name_with_anchor(origin.author) if origin is not None else None)
     source = msg
     if not is_link_repost(msg) and not link_previews(msg, skip_tweets=True):
@@ -816,27 +820,32 @@ async def _link_preview_context(bot, msg: discord.Message) -> tuple[str, list[st
     return suffix, images
 
 
-async def _resolve_replied_to(
-    message: discord.Message,
-) -> Optional[discord.Message]:
-    """取「被回覆」的那則訊息（Discord 原生 reply 指向的訊息），給 prompt 標出指涉對象。
+async def _reply_chain_image(
+    bot, trigger: discord.Message, replied: discord.Message,
+) -> Optional[tuple[int, discord.Message]]:
+    """被回覆那則再往前，沿回覆鏈找第一則帶圖的訊息；回 (離觸發那則第幾則, 那則訊息)，找不到回 None。
 
-    reference.resolved 三態：discord.Message（已快取）/ DeletedReferencedMessage（已刪）/
-    None（未在快取）。None 時用 message_id 補抓一次；已刪或抓不到一律回 None（best-effort，
-    只在訊息確實帶 reference 時才會打 API）。
+    追問到第二層以後，圖不在觸發那則、也不在它直接回的那則，模型手上沒圖卻不知道（會編「看不清楚」）。
+    話題可能早就換了，所以圖要在觸發前 `reply_chain_image_max_age_seconds` 內貼的；回覆只會指向更早的訊息，
+    碰到一則太舊的就停。層數上限只防一直往回讀。只認附件：X 貼文、連結預覽的圖要另外下載或打外部服務。
     """
-    ref = message.reference
-    if ref is None:
-        return None
-    resolved = getattr(ref, "resolved", None)
-    if isinstance(resolved, discord.Message):
-        return resolved
-    if ref.message_id is not None:
-        try:
-            return await message.channel.fetch_message(ref.message_id)
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
-            logger.debug("ambient 補抓被回覆訊息失敗：%s", exc)
+    max_age = timedelta(seconds=_SETTINGS.reply_chain_image_max_age_seconds)
+    msg = replied
+    for hops in range(2, _SETTINGS.reply_chain_image_max_hops + 1):
+        msg = await _referenced_message(bot, msg)
+        if msg is None or trigger.created_at - msg.created_at > max_age:
+            return None
+        if _has_image(msg):
+            return hops, msg
     return None
+
+
+def _reply_chain_image_note(msg: discord.Message) -> str:
+    """接在被回覆那則後面，告訴模型這次附的圖是誰、幾點貼的（它在聊天紀錄裡標 `(圖)` 的那行）。"""
+    ts = msg.created_at.astimezone(APP_TZ).strftime("%H:%M")
+    gist = " ".join(semantic_message_text(msg).split())[:60]
+    said = f"，那則寫「{gist}」" if gist else ""
+    return f"（這串回覆再往前，{name_with_anchor(msg.author)} {ts} 貼了圖{said}；這次附的圖就是那張）"
 
 
 # per-channel 序列處理狀態：同頻道同時只有一個 ambient 在跑。生成期間進來的訊息不平行觸發，
@@ -1498,7 +1507,7 @@ async def _gather_inputs(
     # directed（@/reply 機器人）與自發插話都適用；best-effort，抓不到就略過。
     replied_to_from: Optional[str] = None
     replied_to_text: Optional[str] = None
-    replied_msg = await _resolve_replied_to(message)
+    replied_msg = await _referenced_message(bot, message)
     reply_link_imgs: list[str] = []
     if replied_msg is not None:
         rtext = semantic_message_text(replied_msg)
@@ -1528,6 +1537,18 @@ async def _gather_inputs(
     if latest_imgs or reply_imgs or latest_link_imgs or reply_link_imgs:   # 群友自己貼的圖優先，整體受 image_max_count 上限
         image_payload = ((image_payload or []) + latest_imgs + latest_link_imgs + reply_imgs
                          + reply_link_imgs)[:_SETTINGS.image_max_count]
+    # 追問：手上一張圖都沒有時，沿回覆鏈往前找圖。說明接在被回覆那則後面，沒有那段就不附（模型會不知道圖是哪來的）
+    if (not image_payload and not has_image and replied_msg is not None and replied_to_text is not None
+            and not _has_image(replied_msg)):
+        found = await _reply_chain_image(bot, message, replied_msg)
+        if found is not None:
+            hops, source = found
+            chain_imgs = await _prepare_images(source)
+            if chain_imgs:
+                image_payload = chain_imgs
+                replied_to_text = replied_to_text + "\n" + _reply_chain_image_note(source)
+                logger.info("ambient 追問補附圖 trace=%s 往回第 %d 則（%s 貼的）%d 張",
+                            trace_id, hops, name_with_anchor(source.author), len(chain_imgs))
 
     prompt_text, chat_context, asker_for_bundle = _frame_latest(
         message, directed, stripped, image_payload, latest_notes, chat_context, thread_map, asker_display_name,

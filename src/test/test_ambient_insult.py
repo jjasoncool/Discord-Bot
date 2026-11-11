@@ -258,7 +258,8 @@ class PassTests(unittest.TestCase):
             evaluate_hook=mock.AsyncMock(return_value=HookDecision(
                 passed=True, score=1.0, prob=0.9, features={}, veto=None, explore=False)),
             _load_ambient_prompt=lambda: "sys",
-            _resolve_replied_to=mock.AsyncMock(return_value=replied),
+            # 只有觸發那則回了 replied；再往前沒有回覆關係（追問補附圖不往回追）
+            _referenced_message=mock.AsyncMock(side_effect=lambda bot, msg: replied if msg is message else None),
             _media_context=mock.AsyncMock(return_value=([], [])),
             _build_persona_context=mock.AsyncMock(return_value=None),
             recall_lines=mock.AsyncMock(return_value=None),

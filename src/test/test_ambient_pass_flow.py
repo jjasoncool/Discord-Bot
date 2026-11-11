@@ -6,13 +6,14 @@
 另守：查詢工具有就交給模型（一輪、插話的提醒、不退回不帶工具的呼叫），沒有就跟原本一樣；今天的日期一起送；
 被 @ 才有輸出上限；夾著工具呼叫原文的回答不送；回覆超過 Discord 上限只送第一段、回覆不 @ 任何人；
 最新這則 @ 的人要傳進人物卡檢索與回憶對象（給模型看的文字已把 @ 換成名字，從那裡抓不到）。
+追問時手上沒圖，沿回覆鏈往前補附第一張圖：只追一小時內、最多 6 則，觸發那則或被回覆那則自己有圖就不追。
 """
 import asyncio
 import os
 import sys
 import time
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest import mock
 
@@ -50,7 +51,8 @@ class _Message(SimpleNamespace):
     """像 discord.Message 的假物件：reply／channel.send／add_reaction 都是可檢查的 AsyncMock。"""
 
 
-def _message(content="今天抽卡又歪了啦", *, author_id=SPEAKER, mid=7001, attachments=(), reference=None):
+def _message(content="今天抽卡又歪了啦", *, author_id=SPEAKER, mid=7001, attachments=(), reference=None,
+             created_at=NOW):
     guild = SimpleNamespace(id=GUILD_ID, me=SimpleNamespace(id=BOT_ID, display_name="琇紫", name="琇紫"),
                             emojis=[])
     return _Message(
@@ -58,7 +60,7 @@ def _message(content="今天抽卡又歪了啦", *, author_id=SPEAKER, mid=7001,
         author=SimpleNamespace(id=author_id, bot=False, display_name="某人", name="某人"),
         guild=guild,
         channel=SimpleNamespace(id=CHANNEL_ID, send=mock.AsyncMock(return_value=SimpleNamespace(id=9001))),
-        created_at=NOW,
+        created_at=created_at,
         reply=mock.AsyncMock(return_value=SimpleNamespace(id=9002)),
         add_reaction=mock.AsyncMock(),
     )
@@ -82,6 +84,8 @@ class PassFlowTests(unittest.TestCase):
         self.foreground_active = False
         self.hook = _hook()
         self.replied = None
+        self.chain = {}            # id → 那則用回覆功能回的訊息（被回覆那則再往前）
+        self.looked_up = []        # 往回讀過哪些訊息的回覆對象
         self.earlier = None
         self.media = {}            # id → (notes, imgs)
         self.images = {}           # id → base64 清單
@@ -110,6 +114,10 @@ class PassFlowTests(unittest.TestCase):
         async def _images(msg):
             return self.images.get(msg.id)
 
+        async def _referenced(bot, msg):
+            self.looked_up.append(msg.id)
+            return self.replied if msg is message else self.chain.get(msg.id)
+
         async def _grudges(guild_id):
             return dict(self.grudges)
 
@@ -119,7 +127,7 @@ class PassFlowTests(unittest.TestCase):
             _fetch_recent=mock.AsyncMock(side_effect=_fetch),
             evaluate_hook=mock.AsyncMock(return_value=self.hook),
             _load_ambient_prompt=lambda: "SYS",
-            _resolve_replied_to=mock.AsyncMock(return_value=self.replied),
+            _referenced_message=mock.AsyncMock(side_effect=_referenced),
             _media_context=mock.AsyncMock(side_effect=_media),
             _prepare_images=mock.AsyncMock(side_effect=_images),
             _build_persona_context=mock.AsyncMock(return_value=self.persona_cards),
@@ -308,6 +316,126 @@ class PassFlowTests(unittest.TestCase):
         self.media[msg.id] = ([], ["EXTRA"])
         self._run(msg, directed=True)
         self.assertEqual(cap, len(self._generate_kwargs()["images"]))
+
+    # ── 追問補附圖：手上一張圖都沒有時，沿回覆鏈往前找第一則帶圖的 ──
+    def _said(self, text, mid, minutes_ago, *, image=False):
+        attachments = [SimpleNamespace(filename=f"{mid}.png", size=10)] if image else []
+        return _message(text, author_id=EARLIER_AUTHOR, mid=mid, attachments=attachments,
+                        created_at=NOW - timedelta(minutes=minutes_ago))
+
+    def _chain(self, *older):
+        """觸發那則回 older[0]，older[0] 回 older[1]，依此類推。"""
+        self.replied = older[0]
+        for newer, earlier in zip(older, older[1:]):
+            self.chain[newer.id] = earlier
+
+    def test_a_followup_two_replies_from_the_picture_gets_it_again(self):
+        self._chain(self._said("背景那台我看不太清楚", 6001, 6),
+                    self._said("阿怎麼沒有聲優本人", 6000, 9, image=True))
+        self.images[6000] = ["PIC"]
+        self._run(_message("那背景機體的聲優是誰"), directed=True)
+        kw = self._generate_kwargs()
+        self.assertEqual(["PIC"], kw["images"])
+        note = kw["replied_to_text"].splitlines()[-1]
+        self.assertTrue(kw["replied_to_text"].startswith("背景那台我看不太清楚"))
+        self.assertIn("19:51", note, "說明要講圖是幾點貼的（本機時區）")
+        self.assertIn("某人#", note)
+        self.assertIn("阿怎麼沒有聲優本人", note)
+
+    def test_spontaneous_followups_get_the_picture_too(self):
+        self._chain(self._said("背景那台我看不太清楚", 6001, 6),
+                    self._said("", 6000, 9, image=True))
+        self.images[6000] = ["PIC"]
+        self._run(_message("我也看不到背景"))
+        self.assertEqual(["PIC"], self._generate_kwargs()["images"])
+
+    def test_the_picture_can_be_six_messages_back_but_not_seven(self):
+        older = [self._said(f"第{n}則", 6000 + n, n) for n in range(1, 8)]
+        older[5].attachments = [SimpleNamespace(filename="six.png", size=10)]
+        self.images[6006] = ["SIX"]
+        self._chain(*older)
+        self._run(_message("所以呢"), directed=True)
+        self.assertEqual(["SIX"], self._generate_kwargs()["images"])
+
+        self.llm.generate_reply.reset_mock()
+        older[5].attachments = []
+        older[6].attachments = [SimpleNamespace(filename="seven.png", size=10)]
+        self.images[6007] = ["SEVEN"]
+        self.looked_up.clear()
+        self._run(_message("所以呢"), directed=True)
+        self.assertIsNone(self._generate_kwargs()["images"])
+        self.assertNotIn(6006, self.looked_up, "第 6 則就停，不再往前讀")
+
+    def test_a_picture_from_over_an_hour_ago_is_not_brought_back(self):
+        self._chain(self._said("後來呢", 6002, 5), self._said("早就換話題了", 6001, 61),
+                    self._said("", 6000, 62, image=True))
+        self.images[6000] = ["OLD"]
+        self._run(_message("然後咧"), directed=True)
+        self.assertIsNone(self._generate_kwargs()["images"])
+        self.assertNotIn(6001, self.looked_up, "碰到太舊的一則就停：再往前只會更舊")
+
+    def test_a_picture_from_within_the_hour_is_brought_back(self):
+        self._chain(self._said("後來呢", 6002, 5), self._said("", 6000, 59, image=True))
+        self.images[6000] = ["PIC"]
+        self._run(_message("然後咧"), directed=True)
+        self.assertEqual(["PIC"], self._generate_kwargs()["images"])
+
+    def test_only_the_nearest_picture_on_the_chain_is_attached(self):
+        self._chain(self._said("回你", 6003, 2), self._said("這張", 6002, 3, image=True),
+                    self._said("那張", 6001, 4, image=True))
+        self.images[6002], self.images[6001] = ["NEAR"], ["FAR"]
+        self._run(_message("哪張"), directed=True)
+        self.assertEqual(["NEAR"], self._generate_kwargs()["images"])
+        self.assertNotIn(6002, self.looked_up, "找到第一張就停")
+
+    def test_no_chain_walk_when_the_trigger_or_the_replied_message_has_a_picture(self):
+        picture = self._said("", 6000, 9, image=True)
+        self.images[6000] = ["CHAIN"]
+        trigger = _message("那這張呢", attachments=[SimpleNamespace(filename="new.png", size=10)])
+        self.images[trigger.id] = ["NEW"]
+        self._chain(self._said("回你", 6001, 6), picture)
+        self._run(trigger, directed=True)
+        self.assertEqual(["NEW"], self._generate_kwargs()["images"])
+        self.assertNotIn("貼了圖", self._generate_kwargs()["replied_to_text"])
+
+        self.llm.generate_reply.reset_mock()
+        self._chain(self._said("", 6001, 6, image=True), picture)
+        self.images[6001] = ["REPLIED"]
+        self._run(_message("那這張呢"), directed=True)
+        self.assertEqual(["REPLIED"], self._generate_kwargs()["images"])
+
+    def test_no_chain_walk_when_a_picture_of_their_own_failed_to_download(self):
+        self._chain(self._said("回你", 6001, 6), self._said("", 6000, 9, image=True))
+        self.images[6000] = ["CHAIN"]
+        self._run(_message("那這張呢", attachments=[SimpleNamespace(filename="new.png", size=10)]), directed=True)
+        self.assertIsNone(self._generate_kwargs()["images"], "群友剛貼了新圖，不拿舊圖頂替")
+
+        self.llm.generate_reply.reset_mock()
+        self._chain(self._said("", 6001, 6, image=True), self.chain[6001])
+        self._run(_message("那這張呢"), directed=True)
+        self.assertIsNone(self._generate_kwargs()["images"])
+
+    def test_no_chain_walk_when_the_replied_message_brought_other_pictures(self):
+        self._chain(self._said("https://x.com/a/status/1", 6001, 6), self._said("", 6000, 9, image=True))
+        self.images[6000] = ["CHAIN"]
+        self.media[6001] = (["（X 貼文：內容）"], ["TW"])
+        self._run(_message("這篇在講啥"), directed=True)
+        self.assertEqual(["TW"], self._generate_kwargs()["images"])
+
+    def test_no_chain_walk_when_there_is_no_replied_text_to_explain_the_picture(self):
+        self._chain(self._said("", 6001, 6), self._said("", 6000, 9, image=True))
+        self.images[6000] = ["CHAIN"]
+        self._run(_message("然後咧"), directed=True)
+        kw = self._generate_kwargs()
+        self.assertIsNone(kw["images"])
+        self.assertIsNone(kw["replied_to_text"])
+
+    def test_a_failed_download_of_the_chain_picture_adds_nothing(self):
+        self._chain(self._said("回你", 6001, 6), self._said("", 6000, 9, image=True))
+        self._run(_message("那背景呢"), directed=True)
+        kw = self._generate_kwargs()
+        self.assertIsNone(kw["images"])
+        self.assertEqual("回你", kw["replied_to_text"], "沒附到圖就不講「附的圖是那張」")
 
     def test_persona_memory_and_tags_are_one_persona_context(self):
         self.persona_cards, self.memory_lines, self.tag_lines = ["卡"], ["偏好"], ["招牌"]
@@ -567,6 +695,45 @@ class MentionLookupTests(unittest.TestCase):
     def test_the_bot_itself_is_not_a_mention(self):
         msg = _message(f"<@{BOT_ID}> 在嗎")
         self.assertEqual([], ambient_reply._mentioned_user_ids(msg))
+
+
+class _Fetched(discord.Message):
+    """讓 isinstance(…, discord.Message) 成立的假訊息（不呼叫 discord 的建構子）。"""
+
+    def __init__(self, mid, ref=None, resolved=None):  # noqa: D107
+        self.id = mid
+        self.reference = SimpleNamespace(message_id=ref, resolved=resolved) if ref else None
+        self.channel = SimpleNamespace(fetch_message=mock.AsyncMock(side_effect=lambda i: _Fetched(i)))
+
+
+class ReferencedMessageTests(unittest.TestCase):
+    """讀「這則回了哪一則」：Discord 一起送來的那份、bot 的訊息快取都沒有，才問 API。"""
+
+    def _lookup(self, msg, *cached):
+        return asyncio.run(ambient_reply._referenced_message(SimpleNamespace(cached_messages=list(cached)), msg))
+
+    def test_the_copy_sent_with_the_message_is_used_first(self):
+        earlier = _Fetched(1)
+        msg = _Fetched(2, ref=1, resolved=earlier)
+        self.assertIs(earlier, self._lookup(msg, _Fetched(1)))
+        msg.channel.fetch_message.assert_not_awaited()
+
+    def test_the_bot_cache_is_used_before_the_api(self):
+        cached = _Fetched(1)
+        msg = _Fetched(2, ref=1)
+        self.assertIs(cached, self._lookup(msg, _Fetched(5), cached))
+        msg.channel.fetch_message.assert_not_awaited()
+
+    def test_the_api_is_asked_last_and_a_failure_is_none(self):
+        msg = _Fetched(2, ref=1)
+        self.assertEqual(1, self._lookup(msg).id)
+        msg.channel.fetch_message.side_effect = discord.NotFound(SimpleNamespace(status=404, reason="x"), "gone")
+        self.assertIsNone(self._lookup(msg))
+
+    def test_a_message_that_replies_to_nothing_is_none(self):
+        msg = _Fetched(2)
+        self.assertIsNone(self._lookup(msg))
+        msg.channel.fetch_message.assert_not_awaited()
 
 
 if __name__ == "__main__":
