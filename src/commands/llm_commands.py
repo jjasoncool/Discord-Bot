@@ -663,7 +663,7 @@ class LLMCommands(commands.Cog):
     @app_commands.command(name="askai", description="向 AI 詢問問題")
     @app_commands.describe(
         question="想問 AI 的問題",
-        image="可選的圖片（jpg/png/webp/gif；動畫 gif 只看得到第一幀）",
+        image="可選的圖片（jpg/png/webp/gif；動畫 gif 會挑幾格關鍵畫面）",
     )
     @app_commands.checks.dynamic_cooldown(askai_cooldown)
     async def askai_cmd(
