@@ -2,20 +2,23 @@
 
 架構定位：功能層（`llm/storage`），吃 Discord 訊息物件、寫資料庫。和 `store_chat`（篩選後的語意索引）並列、互不依賴；
 raw 表是備份層，也是互動（反應）的真相來源。
-  - 上層（誰呼叫）：`discord_bot` 的 on_message／on_message_edit／on_raw_message_delete／on_raw_reaction_add／remove
-    （各自的 `enqueue_*`；on_message 另外在滿門檻時 `flush_raw_buffer`）、on_ready（用 `utils.background_tasks.periodic`
-    定期呼叫 `flush_raw_buffer`）與停機收尾（`MyBot.close` 呼叫 `flush_raw_buffer`）；要看一則訊息被按了多少反應的功能查
+  - 上層（誰呼叫）：`discord_bot` 的 on_message／on_message_edit／on_raw_reaction_add／remove（各自的 `enqueue_*`；
+    on_message 另外在滿門檻時 `flush_raw_buffer`）、on_raw_message_delete（`record_deletion`）、on_ready（用
+    `utils.background_tasks.periodic` 定期呼叫 `flush_raw_buffer`、`prime_delete_audit`）與停機收尾（`MyBot.close` 呼叫 `flush_raw_buffer`）；要看一則訊息被按了多少反應的功能查
     `get_reaction_salience`。`llm.storage.chat_index_backfill` 直接讀 discord_messages_raw 表，從這裡補寫聊天向量庫漏掉的訊息。
   - 下層（呼叫誰）：psycopg2 連線池（獨立 pool，不和 pgvector 的 LlamaIndex 共用）、`sys_settings.llm_settings.pg_savepoint`、
-    `llm.preprocess.sticker_cache`。
+    `llm.preprocess.sticker_cache`、Discord 的審核日誌（`guild.audit_logs`，要有檢視審核日誌權限）。
 
-介面：`enqueue_raw_message`、`enqueue_raw_edit`、`enqueue_raw_delete`、`enqueue_reaction_change`、`should_trigger_flush`、
+介面：`enqueue_raw_message`、`enqueue_raw_edit`、`record_deletion`（刪除事件：判斷誰刪的再排進寫入）／`enqueue_raw_delete`、
+  `prime_delete_audit`（上線時記審核日誌的基準）、`enqueue_reaction_change`、`should_trigger_flush`、
   `flush_raw_buffer`、`get_reaction_salience`、`buffer_sizes`／`total_buffer_size`。
 
 規則：四種事件各自一個緩衝；新訊息進來時任一緩衝滿 50 則就寫一批，另外每 60 秒定期寫（反應要夠即時），單次 flush 合併處理；
   純 SQL、不算 embedding；刪除是軟刪（is_deleted=TRUE），刪除時間記收到事件的時刻、不是寫入那一批的時刻；還沒寫進去就被刪的
   照樣寫入再標成已刪（同一批裡新增先於刪除），發出後馬上刪掉的才留得下來。編輯蓋掉 content，但第一次改之前的原文
   留在 original_content（之後再改不覆蓋；文字沒變的編輯事件不算），還沒寫進去就被改的也留得下。
+  誰刪的記在 deleted_by：審核日誌對上的（管理員或 bot 刪別人的）記那人的 id，沒對上＝作者自己刪的、記作者 id，
+  判斷不了記 NULL。說出偷刪了什麼只能用作者自己刪的，NULL 一律當成不能講。
   一批在同一個交易裡逐筆寫，每筆各自一個保存點：這筆自己的資料寫不進去（內容不合法、違反限制）只略過這筆、記 WARNING
   （只記錯誤的第一行，PostgreSQL 的 DETAIL／CONTEXT 會帶出訊息內容）；連線斷掉換一條連線整批重寫一次；
   權限、表不見這類每筆都會失敗的錯誤整批往外丟。統計是 commit 之後真的寫進去的筆數，另記略過幾筆。
@@ -73,7 +76,7 @@ _TENOR_URL_PATTERN = re.compile(r"tenor\.com/view/", re.IGNORECASE)
 # 四種事件的獨立 buffer
 _insert_buffer: list[dict] = []
 _edit_buffer: list[dict] = []
-_delete_buffer: list[tuple[str, str]] = []   # (message_id, 收到刪除事件的時刻 ISO 字串)
+_delete_buffer: list[tuple[str, str, str | None]] = []   # (message_id, 收到刪除事件的時刻 ISO 字串, 誰刪的)
 _reaction_buffer: list[dict] = []     # reaction 事件原始列表
 
 _buffer_lock = asyncio.Lock()
@@ -270,12 +273,127 @@ def _original_before(old: dict, new: dict) -> str | None:
     return old["content"] if old["content"] != new["content"] else None
 
 
-def enqueue_raw_delete(message_id: int | str) -> None:
-    """on_raw_message_delete 呼叫：軟刪標記，記下收到事件的時刻。
+def enqueue_raw_delete(message_id: int | str, *, deleted_at: str | None = None,
+                       deleted_by: str | None = None) -> None:
+    """軟刪標記（`record_deletion` 判斷完誰刪的再叫）。`deleted_at` 沒給＝現在；`deleted_by`：`DELETED_BY_AUTHOR`、
+    刪的人的 id，或 None＝不知道。
 
     還在 _insert_buffer 的訊息不拿掉：同一批裡新增先寫、刪除後標，發出後幾秒就刪的也留得下內容與刪除時間。
     """
-    _delete_buffer.append((str(message_id), datetime.now(timezone.utc).isoformat()))
+    at = deleted_at or datetime.now(timezone.utc).isoformat()
+    _delete_buffer.append((str(message_id), at, deleted_by))
+
+
+# ========== 誰刪的（審核日誌）==========
+
+#: 作者自己刪的。事件當下不一定知道作者是誰，緩衝裡先放這個記號，寫入時換成那一列的 author_id
+DELETED_BY_AUTHOR = "author"
+#: Discord 寫審核日誌和送刪除事件幾乎同時，等一下再讀才看得到這次的紀錄
+AUDIT_WAIT_SECONDS = 2.0
+#: 每次讀最近幾筆「刪了別人的訊息」紀錄；同一筆紀錄只會在剛建立後的幾分鐘內累加，舊的不必看
+AUDIT_LOOKBACK = 25
+_AUDIT_TIMEOUT_SECONDS = 10.0
+_audit_claimed: dict[int, dict[int, int]] = {}   # 伺服器 id → {紀錄 id: 已經對上幾則刪除}；有這個伺服器＝基準記好了
+_audit_lock = asyncio.Lock()
+_sleep = asyncio.sleep   # 測試換成不真的睡
+
+
+async def prime_delete_audit(guild: discord.Guild) -> None:
+    """記下審核日誌裡現有的刪除紀錄與則數當基準，之後多出來的才算新的刪除。bot 上線時對每個伺服器叫一次；
+    記好了就不再記（重新連線也會觸發 on_ready）。"""
+    async with _audit_lock:
+        if guild.id in _audit_claimed:
+            return
+        entries = await _recent_delete_entries(guild)
+        _audit_claimed[guild.id] = {entry.id: entry.extra.count for entry in entries}
+
+
+async def record_deletion(guild: discord.Guild | None, message_id: int, channel_id: int,
+                          author_id: int | None = None) -> None:
+    """on_raw_message_delete 呼叫：記下刪除的時刻，等審核日誌寫好再判斷是誰刪的，然後排進寫入。
+
+    判斷不了（不在伺服器裡、表裡沒有這則、基準還沒記好、讀審核日誌失敗）就記成不知道（None）：
+    說出偷刪了什麼只看作者自己刪的，不知道的一律不講。
+    """
+    deleted_at = datetime.now(timezone.utc).isoformat()
+    deleted_by: str | None = None
+    author = str(author_id) if author_id is not None else await _author_of(str(message_id))
+    if guild is not None and author is not None:
+        if guild.id not in _audit_claimed:
+            # 基準沒記好時分不出這次的紀錄是不是新的：這則記成不知道，基準記好後的刪除才判斷
+            await _prime_quietly(guild)
+        else:
+            await _sleep(AUDIT_WAIT_SECONDS)
+            async with _audit_lock:
+                try:
+                    entries = await _recent_delete_entries(guild)
+                except (discord.HTTPException, asyncio.TimeoutError) as exc:
+                    logger.warning("讀審核日誌失敗，這則刪除記成不知道誰刪的 mid=%s：%s", message_id, exc)
+                else:
+                    deleted_by = _claim_deleter(_audit_claimed[guild.id], entries, channel_id, author)
+    enqueue_raw_delete(message_id, deleted_at=deleted_at, deleted_by=deleted_by)
+
+
+async def _prime_quietly(guild: discord.Guild) -> None:
+    try:
+        await prime_delete_audit(guild)
+    except (discord.HTTPException, asyncio.TimeoutError) as exc:
+        logger.warning("讀審核日誌失敗，還分不出誰刪的：%s", exc)
+
+
+async def _recent_delete_entries(guild: discord.Guild) -> list:
+    async def collect():
+        return [entry async for entry in guild.audit_logs(limit=AUDIT_LOOKBACK,
+                                                          action=discord.AuditLogAction.message_delete)]
+    return await asyncio.wait_for(collect(), _AUDIT_TIMEOUT_SECONDS)
+
+
+def _claim_deleter(claimed: dict[int, int], entries: list, channel_id: int, author: str) -> str:
+    """這次的刪除是誰做的；對上就在 `claimed` 記一則。
+
+    審核日誌只記刪別人的訊息；同一個人連刪同一位作者在同一頻道的訊息會併成一筆、則數加一，所以看則數比已經對上的多
+    才算新的。一次只認領一則：同一筆紀錄多出兩則時，兩次刪除各認領一則。沒有對上的就是作者自己刪的。
+    已經掉出最近幾筆的紀錄不會再累加，順手清掉。
+    """
+    for stale in set(claimed) - {entry.id for entry in entries}:
+        del claimed[stale]
+    for entry in entries:
+        done = claimed.get(entry.id, 0)
+        if entry.extra.count <= done:
+            continue
+        if getattr(entry.extra.channel, "id", None) != channel_id:
+            continue
+        target = getattr(entry.target, "id", None)
+        if target is not None and str(target) != author:
+            continue
+        claimed[entry.id] = done + 1
+        return str(entry.user_id) if entry.user_id else "unknown"
+    return DELETED_BY_AUTHOR
+
+
+async def _author_of(message_id: str) -> str | None:
+    """這則訊息的作者：還在緩衝裡的直接看，不然查表；表裡沒有（bot 的訊息、bot 上線前發的）回 None。"""
+    for row in _insert_buffer:
+        if row["message_id"] == message_id:
+            return row["author_id"]
+    try:
+        return await asyncio.to_thread(_author_in_db, message_id)
+    except psycopg2.Error as exc:
+        logger.warning("raw_message_store 查作者失敗 mid=%s：%s", message_id, exc)
+        return None
+
+
+def _author_in_db(message_id: str) -> str | None:
+    pool = _get_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT author_id FROM discord_messages_raw WHERE message_id = %s", (message_id,))
+            row = cur.fetchone()
+        conn.rollback()   # 唯讀查詢：結束交易，不留 idle-in-transaction 回 pool
+    finally:
+        pool.putconn(conn)
+    return row[0] if row else None
 
 
 def enqueue_reaction_change(
@@ -423,7 +541,7 @@ def get_reaction_salience(message_ids: list[str]) -> dict[str, int]:
 def _sync_flush(
     insert_batch: list[dict],
     edit_batch: list[dict],
-    delete_batch: list[tuple[str, str]],
+    delete_batch: list[tuple[str, str, str | None]],
     reaction_batch: list[dict],
 ) -> dict[str, int]:
     """寫一批到資料庫。連線層的錯誤（池子給到已斷的連線、伺服器端把閒置連線關了）換一條連線再寫一次：
@@ -445,7 +563,7 @@ def _sync_flush(
     return dict(_EMPTY_STATS)   # 迴圈一定 return 或 raise；給型別檢查看
 
 
-def _write_all(conn, insert_batch: list[dict], edit_batch: list[dict], delete_batch: list[tuple[str, str]],
+def _write_all(conn, insert_batch: list[dict], edit_batch: list[dict], delete_batch: list[tuple[str, str, str | None]],
                reaction_batch: list[dict]) -> dict[str, int]:
     """整批在同一個交易裡寫；每筆各自包保存點（`_write_row`），壞的那筆只撤回那筆，交易不會進入失敗狀態，
     所以 commit 之後的統計就是真的寫進去的筆數。"""
@@ -457,7 +575,7 @@ def _write_all(conn, insert_batch: list[dict], edit_batch: list[dict], delete_ba
             for key, batch, write in (
                 ("inserted", insert_batch, functools.partial(_write_inserts, added=added)),
                 ("updated", edit_batch, functools.partial(_write_edits, added=added)),
-                ("deleted", delete_batch, _write_deletes),
+                ("deleted", delete_batch, functools.partial(_write_deletes, added=added)),
                 ("reactions_applied", reaction_batch, _apply_reactions),
             ):
                 if batch:
@@ -610,22 +728,39 @@ def _write_edits(cur, batch: list[dict], *, added: frozenset[str] = frozenset())
     return updated, failed
 
 
-def _write_deletes(cur, batch: list[tuple[str, str]]) -> tuple[int, int]:
-    """軟刪，刪除時間用收到事件的時刻；表裡沒有的訊息（bot 上線前發的）對不到、自然是 0。回 (標記的筆數, 略過的筆數)。"""
-    first_seen: dict[str, str] = {}
-    for mid, deleted_at in batch:
-        first_seen.setdefault(mid, deleted_at)   # 同一則收到兩次事件時記先到的那次
-    mids = list(first_seen)
+def _write_deletes(cur, batch: list[tuple[str, str, str | None]], *,
+                   added: frozenset[str] = frozenset()) -> tuple[int, int]:
+    """軟刪，刪除時間用收到事件的時刻；表裡沒有的訊息（bot 上線前發的）對不到、自然是 0。回 (標記的筆數, 略過的筆數)。
+    誰刪的：作者自己刪的寫成那一列的 author_id，不知道的寫 NULL。"""
+    first_at: dict[str, str] = {}
+    by: dict[str, str | None] = {}
+    for mid, deleted_at, deleted_by in batch:
+        first_at.setdefault(mid, deleted_at)   # 同一則收到兩次事件時記先到的那次
+        by[mid] = by.get(mid) or deleted_by
+    mids = list(first_at)
+    times = [first_at[mid] for mid in mids]
 
     def write():
-        cur.execute(
-            """
-            UPDATE discord_messages_raw SET is_deleted = TRUE, deleted_at = d.deleted_at
-            FROM unnest(%s::text[], %s::timestamptz[]) AS d(message_id, deleted_at)
-            WHERE discord_messages_raw.message_id = d.message_id
-            """,
-            (mids, [first_seen[mid] for mid in mids]),
-        )
+        if "deleted_by" in added:
+            cur.execute(
+                f"""
+                UPDATE discord_messages_raw SET is_deleted = TRUE, deleted_at = d.deleted_at,
+                    deleted_by = CASE WHEN d.deleted_by = '{DELETED_BY_AUTHOR}' THEN discord_messages_raw.author_id
+                                      ELSE d.deleted_by END
+                FROM unnest(%s::text[], %s::timestamptz[], %s::text[]) AS d(message_id, deleted_at, deleted_by)
+                WHERE discord_messages_raw.message_id = d.message_id
+                """,
+                (mids, times, [by[mid] for mid in mids]),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE discord_messages_raw SET is_deleted = TRUE, deleted_at = d.deleted_at
+                FROM unnest(%s::text[], %s::timestamptz[]) AS d(message_id, deleted_at)
+                WHERE discord_messages_raw.message_id = d.message_id
+                """,
+                (mids, times),
+            )
         return cur.rowcount
 
     shown = "、".join(mids[:3]) + ("…" if len(mids) > 3 else "")

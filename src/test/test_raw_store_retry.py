@@ -18,6 +18,8 @@
     不是寫入那一批的時刻；同一則收到兩次刪除事件，記先到的那次
   - 編輯留下第一次改之前的原文：再改不覆蓋、文字沒變的編輯事件不算；還沒寫進去就被改的（10 秒內修錯字）也留得下
   - 正式表還沒加後來的欄位：那幾欄不寫、其餘照常寫進去，ERROR 只記一次；之後欄位加上了，不必重啟就開始寫
+  - 誰刪的：審核日誌裡同頻道、同作者的刪除紀錄多了一則＝別人刪的、記那人的 id；沒有多＝作者自己刪的、記作者 id；
+    同一筆紀錄多兩則時兩次刪除各認領一則；判斷不了（基準還沒記好、讀審核日誌失敗、表裡沒有這則）記 NULL
 
 不連資料庫：連線池與連線都是假物件；逐筆寫入的測試用照 PostgreSQL 交易規則行為的假連線。
 """
@@ -29,9 +31,11 @@ import os
 import sys
 import unittest
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest import mock
 
+import discord
 import psycopg2
 import psycopg2.errors
 
@@ -254,7 +258,8 @@ class PgCursor:
             if mid in conn.work:
                 self.rowcount = 0
             else:
-                conn.work[mid] = {"content": params["content"], "is_deleted": False, "reaction_breakdown": None}
+                conn.work[mid] = {"content": params["content"], "is_deleted": False, "reaction_breakdown": None,
+                                  "author_id": params["author_id"]}
                 if "original_content" in words:
                     conn.work[mid]["original_content"] = params["original_content"]
                 self.rowcount = 1
@@ -270,10 +275,16 @@ class PgCursor:
                         row["original_content"] = row["content"]
                 row["content"] = params["content"]
         elif words.startswith("UPDATE discord_messages_raw SET is_deleted"):
-            mids, times = params
-            hits = [(mid, at) for mid, at in zip(mids, times) if mid in conn.work]
-            for mid, at in hits:
+            self._require_columns(words)
+            with_by = "deleted_by" in words
+            mids, times, bys = params if with_by else (*params, [None] * len(params[0]))
+            hits = [(mid, at, by) for mid, at, by in zip(mids, times, bys) if mid in conn.work]
+            for mid, at, by in hits:
                 conn.work[mid].update(is_deleted=True, deleted_at=at)
+                if with_by:
+                    to_author = by == raw.DELETED_BY_AUTHOR and (
+                        f"WHEN d.deleted_by = '{raw.DELETED_BY_AUTHOR}' THEN discord_messages_raw.author_id" in words)
+                    conn.work[mid]["deleted_by"] = conn.work[mid]["author_id"] if to_author else by
             self.rowcount = len(hits)
         elif words.startswith("SELECT reaction_breakdown"):
             mid = params[0]
@@ -321,7 +332,7 @@ DELETED_AT = "2026-10-28T00:02:00+00:00"
 
 EXISTING = {
     "m-edit": {"content": "原本", "is_deleted": False, "reaction_breakdown": None},
-    "m-del": {"content": "要刪的", "is_deleted": False, "reaction_breakdown": None},
+    "m-del": {"content": "要刪的", "is_deleted": False, "reaction_breakdown": None, "author_id": "9"},
     "m-react": {"content": "被按讚的", "is_deleted": False, "reaction_breakdown": None},
 }
 
@@ -337,7 +348,7 @@ class RowIsolationTests(unittest.TestCase):
 
     def full_batch(self, db, *, with_delete=True, new=None):
         return self.flush(db, inserts=new or [_new("n1"), _new("n-bad"), _new("n2")], edits=[_edit("m-edit", "改過")],
-                          deletes=[("m-del", DELETED_AT)] if with_delete else [], reactions=[_react("m-react", "u1")])
+                          deletes=[("m-del", DELETED_AT, None)] if with_delete else [], reactions=[_react("m-react", "u1")])
 
     def assert_others_committed(self, db, *, with_delete=True):
         self.assertIn("n1", db.rows)
@@ -463,10 +474,26 @@ class RowIsolationTests(unittest.TestCase):
         self.flush(db, edits=[_edit("m-edit", "再改")])
         self.assertEqual("改過", db.rows["m-edit"]["original_content"])
 
+    def test_who_deleted_is_written(self):
+        for by, expected in ((raw.DELETED_BY_AUTHOR, "9"), ("77", "77"), (None, None)):
+            with self.subTest(by=by):
+                db = PgDatabase(rows=EXISTING)
+                self.flush(db, deletes=[("m-del", DELETED_AT, by)])
+                self.assertEqual(expected, db.rows["m-del"]["deleted_by"], "作者自己刪的記作者 id、別人刪的記那人、不知道記空")
+
+    def test_without_the_deleted_by_column_the_deletion_is_still_marked(self):
+        self.enterContext(mock.patch.object(raw, "_added_columns", frozenset({"original_content"})))
+        db = PgDatabase(rows=EXISTING, columns=("original_content",))
+        stats = self.flush(db, deletes=[("m-del", DELETED_AT, raw.DELETED_BY_AUTHOR)])
+        self.assertEqual(1, stats["deleted"])
+        self.assertTrue(db.rows["m-del"]["is_deleted"])
+        self.assertNotIn("deleted_by", db.rows["m-del"])
+
     def test_repeated_delete_events_keep_the_first_time(self):
         db = PgDatabase(rows=EXISTING)
-        stats = self.flush(db, deletes=[("m-del", DELETED_AT), ("m-del", "2026-10-28T00:09:00+00:00")])
+        stats = self.flush(db, deletes=[("m-del", DELETED_AT, "77"), ("m-del", "2026-10-28T00:09:00+00:00", None)])
         self.assertEqual(DELETED_AT, db.rows["m-del"]["deleted_at"])
+        self.assertEqual("77", db.rows["m-del"]["deleted_by"], "誰刪的以知道的那次為準")
         self.assertEqual(1, stats["deleted"])
 
 
@@ -512,6 +539,143 @@ class FlushReportTests(unittest.TestCase):
         self.assertEqual(received_at, db.rows["n1"]["deleted_at"], "刪除時間是收到事件的時刻")
         self.assertFalse(db.rows["n2"]["is_deleted"])
         self.assertEqual((2, 1), (stats["inserted"], stats["deleted"]))
+
+
+def _audit(entry_id, count, *, channel=10, target=3, user=99):
+    """審核日誌裡一筆「刪了別人的訊息」：誰刪的（user）、刪了誰的（target）、哪個頻道、累計幾則。"""
+    return SimpleNamespace(id=entry_id, user_id=user, target=SimpleNamespace(id=target),
+                           extra=SimpleNamespace(count=count, channel=SimpleNamespace(id=channel)))
+
+
+class FakeGuild:
+    def __init__(self, entries=(), fail=None):
+        self.id = 1
+        self.entries = list(entries)
+        self.fail = fail
+        self.reads = 0
+
+    def audit_logs(self, *, limit, action):
+        self.reads += 1
+        guild = self
+
+        async def read():
+            if guild.fail is not None:
+                raise guild.fail
+            for entry in guild.entries[:limit]:
+                yield entry
+        return read()
+
+
+class DeleterClaimTests(unittest.TestCase):
+    """審核日誌對上這次刪除的規則（純函式）。"""
+
+    def test_a_new_record_in_this_channel_for_this_author_is_someone_else(self):
+        claimed = {}
+        entries = [_audit(500, 1)]
+        self.assertEqual("99", raw._claim_deleter(claimed, entries, 10, "3"))
+        self.assertEqual(raw.DELETED_BY_AUTHOR, raw._claim_deleter(claimed, entries, 10, "3"), "同一則不認領兩次")
+
+    def test_a_grown_count_is_someone_else(self):
+        claimed = {500: 2}
+        self.assertEqual("99", raw._claim_deleter(claimed, [_audit(500, 3)], 10, "3"))
+        self.assertEqual({500: 3}, claimed)
+
+    def test_two_new_deletions_in_one_record_are_claimed_one_each(self):
+        claimed = {500: 1}
+        entries = [_audit(500, 3)]
+        self.assertEqual(["99", "99", raw.DELETED_BY_AUTHOR],
+                         [raw._claim_deleter(claimed, entries, 10, "3") for _ in range(3)])
+
+    def test_records_elsewhere_or_for_someone_else_mean_the_author_deleted_it(self):
+        cases = {"別的頻道": ({}, _audit(500, 1, channel=11)), "刪的是別人的訊息": ({}, _audit(500, 1, target=4)),
+                 "則數沒變": ({500: 2}, _audit(500, 2))}
+        for name, (claimed, entry) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(raw.DELETED_BY_AUTHOR, raw._claim_deleter(claimed, [entry], 10, "3"))
+
+    def test_records_that_left_the_window_are_dropped(self):
+        claimed = {400: 1, 500: 1}
+        raw._claim_deleter(claimed, [_audit(500, 1)], 10, "3")
+        self.assertEqual({500: 1}, claimed)
+
+
+class RecordDeletionTests(unittest.IsolatedAsyncioTestCase):
+    """刪除事件：先記時刻，等審核日誌再判斷誰刪的，然後排進寫入。"""
+
+    def setUp(self):
+        self.enterContext(mock.patch.dict(raw._audit_claimed, clear=True))
+        self.waits = []
+
+        async def no_wait(seconds):
+            self.waits.append(seconds)
+        self.enterContext(mock.patch.object(raw, "_sleep", no_wait))
+        self.enterContext(mock.patch.object(raw, "_author_in_db", lambda mid: "3"))
+        for buffer in (raw._insert_buffer, raw._delete_buffer):
+            self.addCleanup(buffer.clear)
+            buffer.clear()
+
+    async def test_someone_elses_deletion_is_recorded_with_their_id(self):
+        guild = FakeGuild([_audit(500, 1)])
+        await raw.prime_delete_audit(guild)
+        guild.entries = [_audit(500, 2)]
+        await raw.record_deletion(guild, 7, 10)
+        self.assertEqual([("7", "99")], [(mid, by) for mid, _, by in raw._delete_buffer])
+        self.assertEqual([raw.AUDIT_WAIT_SECONDS], self.waits, "要等審核日誌寫好再讀")
+
+    async def test_no_new_record_means_the_author_deleted_it(self):
+        guild = FakeGuild([_audit(500, 1)])
+        await raw.prime_delete_audit(guild)
+        await raw.record_deletion(guild, 7, 10, author_id=3)
+        self.assertEqual(raw.DELETED_BY_AUTHOR, raw._delete_buffer[0][2])
+
+    async def test_before_the_baseline_is_known_the_deleter_is_unknown(self):
+        guild = FakeGuild([_audit(500, 1)])
+        await raw.record_deletion(guild, 7, 10)
+        self.assertIsNone(raw._delete_buffer[0][2], "基準還沒記好，分不出這筆紀錄是不是這次的")
+        self.assertIn(guild.id, raw._audit_claimed, "順手把基準記好")
+        await raw.record_deletion(guild, 8, 10)
+        self.assertEqual(raw.DELETED_BY_AUTHOR, raw._delete_buffer[1][2])
+
+    async def test_a_failed_audit_read_is_unknown(self):
+        guild = FakeGuild()
+        await raw.prime_delete_audit(guild)
+        guild.fail = discord.HTTPException(SimpleNamespace(status=500, reason="boom"), "boom")
+        with self.assertLogs(raw.logger, "WARNING"):
+            await raw.record_deletion(guild, 7, 10)
+        self.assertIsNone(raw._delete_buffer[0][2])
+
+    async def test_a_message_the_table_does_not_have_skips_the_audit_log(self):
+        guild = FakeGuild()
+        await raw.prime_delete_audit(guild)
+        with mock.patch.object(raw, "_author_in_db", lambda mid: None):
+            await raw.record_deletion(guild, 7, 10)
+        self.assertEqual(1, guild.reads, "只有記基準那一次")
+        self.assertIsNone(raw._delete_buffer[0][2])
+
+    async def test_the_author_of_a_buffered_message_is_read_from_the_buffer(self):
+        raw._insert_buffer.append({**_new("7"), "author_id": "4"})
+        guild = FakeGuild([_audit(500, 1, target=4)])
+        await raw.prime_delete_audit(guild)
+        guild.entries = [_audit(500, 2, target=4)]
+        with mock.patch.object(raw, "_author_in_db", lambda mid: self.fail("緩衝裡有就不查表")):
+            await raw.record_deletion(guild, 7, 10)
+        self.assertEqual("99", raw._delete_buffer[0][2])
+
+    async def test_the_deletion_time_is_taken_before_waiting(self):
+        guild = FakeGuild()
+        await raw.prime_delete_audit(guild)
+        ticks = iter(range(1, 10))
+
+        class Ticking:   # 每讀一次時間多一秒：看得出刪除時間是等之前還是等之後讀的
+            @staticmethod
+            def now(tz=None):
+                return datetime(2026, 11, 11, 12, 0, next(ticks), tzinfo=tz)
+
+        async def wait(seconds):
+            Ticking.now(timezone.utc)
+        with mock.patch.object(raw, "datetime", Ticking), mock.patch.object(raw, "_sleep", wait):
+            await raw.record_deletion(guild, 7, 10)
+        self.assertEqual("2026-11-11T12:00:01+00:00", raw._delete_buffer[0][1])
 
 
 if __name__ == "__main__":

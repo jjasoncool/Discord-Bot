@@ -197,6 +197,7 @@ async def on_ready():
     _log_invite_url()
     await _preload_stickers()
     _start_background_loops()
+    _prime_delete_audit()
     await _ensure_tables()
     _start_embedding_backfill()
     await auto_start_article_monitor(bot)
@@ -235,6 +236,13 @@ async def _preload_stickers() -> None:
         except Exception as exc:
             logger.warning("載入伺服器 %s 的貼圖失敗: %s", guild.id, exc)
     logger.info("已載入 %d 個貼圖描述", loaded)
+
+
+def _prime_delete_audit() -> None:
+    """記下審核日誌的基準，之後才分得出刪除是作者自己刪的、還是管理員刪的（記好了就不再記）。"""
+    from llm.storage.raw_message_store import prime_delete_audit
+    for guild in bot.guilds:
+        spawn(prime_delete_audit(guild), name="審核日誌基準")
 
 
 def _start_once(task_attr: str, name: str, factory, started_log: str) -> None:
@@ -467,10 +475,15 @@ async def on_message_edit(before, after):
 
 @bot.event
 async def on_raw_message_delete(payload):
-    """使用者刪除訊息 → raw 表軟刪標記。
+    """使用者刪除訊息 → raw 表軟刪標記，連同誰刪的（要等審核日誌，丟到背景）。
     用 raw 版本因為訊息可能不在 bot cache 裡（例如啟動前發的舊訊息）。"""
-    from llm.storage.raw_message_store import enqueue_raw_delete
-    enqueue_raw_delete(payload.message_id)
+    from llm.storage.raw_message_store import record_deletion
+    cached = payload.cached_message
+    if cached is not None and cached.author.bot:
+        return   # raw 表不存 bot 的訊息；bot 自己常刪面板、轉貼，不必每次去讀審核日誌
+    guild = bot.get_guild(payload.guild_id) if payload.guild_id else None
+    author_id = cached.author.id if cached is not None else None
+    spawn(record_deletion(guild, payload.message_id, payload.channel_id, author_id), name="原始訊息刪除")
 
 
 async def _cleanup_created_event(discord_event_id: int, reason: str) -> None:
