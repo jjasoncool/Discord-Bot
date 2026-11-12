@@ -28,12 +28,31 @@ DEFAULT_QUESTIONS = [
 ]
 
 
-async def answer(service: LLMService, question: str, *, trace_id: str):
+class _WithExtraRules:
+    """原本那組工具照舊，只在使用規則最後再接一段文字：試驗一段新規則（例如某類題目的查法）有沒有用時，
+    不必改正式的規則檔（改了群友的 /askai 也會跟著變）。接在最後，和寫進 askai_intel_rules.txt 尾端的位置相同。"""
+
+    def __init__(self, runner, extra: str):
+        self._runner = runner
+        self.instructions = f"{runner.instructions}\n\n{extra}" if (runner.instructions or "").strip() else extra
+
+    @property
+    def tools(self):
+        return self._runner.tools
+
+    async def execute(self, name, arguments):
+        return await self._runner.execute(name, arguments)
+
+
+async def answer(service: LLMService, question: str, *, trace_id: str, extra_rules: str = ""):
     """走 /askai 工具模式同一條路回答一題。回傳（回答結果、查情報的經過、網路搜尋工具）。
-    Agent 評估（`it_askai_agent_eval`）也用這個，兩邊量的才是同一條路。"""
+    Agent 評估（`it_askai_agent_eval`）也用這個，兩邊量的才是同一條路。
+    `extra_rules`：接在工具使用規則最後的試驗文字；沒有工具時不給（和正式的規則一樣，沒工具就不叫它去查）。"""
     meta: dict = {"mode": "on"}
 
     async def generate(tool_runner):
+        if extra_rules.strip() and tool_runner is not None:
+            tool_runner = _WithExtraRules(tool_runner, extra_rules.strip())
         return await service.generate_reply(
             prompt=question, system=load_system_prompt(), tool_runner=tool_runner,
             max_tool_rounds=INTEL_SETTINGS.max_tool_rounds,

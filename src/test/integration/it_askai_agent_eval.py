@@ -11,6 +11,7 @@
     docker exec -w /app discord-bot python -m test.integration.it_askai_agent_eval --limit 2 --label 試跑
     … --resume services/search/eval/private/<檔名>-經過.jsonl     # 中斷後接著跑（跑過的題目跳過）
     … --score-only services/search/eval/private/<檔名>-經過.jsonl # 不跑模型，只重算分數
+    … --extra-rules /tmp/試驗規則.txt --label 加規則                # 規則最後多接一段試驗文字，和不加的比
 
 輸出：
   - 每題的經過（回答全文、模型看到的工具結果）：`services/search/eval/private/<時間>-<名稱>-經過.jsonl`
@@ -50,13 +51,15 @@ REPORT_DIR = EVAL_DIR / "reports"
 _SUFFIX = "-經過.jsonl"
 
 
-async def ask_one(service: LLMService, qid: str, question: str, kind: str, limit: float) -> dict:
+async def ask_one(service: LLMService, qid: str, question: str, kind: str, limit: float,
+                  extra_rules: str = "") -> dict:
     started = time.monotonic()
     record: dict = {"qid": qid, "kind": kind, "question": question}
     try:
         # 一題的時間上限：模型偶爾會寫個不停（2026-10-12 有一題的最後一次回答跑了 14 分鐘還沒停），那段時間
         # 顯示卡被這個行程佔著，bot 自己的工作只能等。超過就中止這一題（連線一斷後端就停），記成逾時
-        result, meta, web = await asyncio.wait_for(answer(service, question, trace_id=f"agent-eval-{qid}"), limit)
+        result, meta, web = await asyncio.wait_for(
+            answer(service, question, trace_id=f"agent-eval-{qid}", extra_rules=extra_rules), limit)
     except Exception as exc:  # 一題出錯或逾時不讓整份考卷中斷；照實記下來
         record.update(reply="", error_kind=f"exception:{type(exc).__name__}", error=str(exc)[:300], tool_calls=[])
     else:
@@ -79,14 +82,15 @@ def _progress(record: dict) -> str:
     return f"{record['qid']} {record['elapsed_s']:>6.1f} 秒  {used}  {queries[:2]}{extra}"
 
 
-async def run(items: list[tuple[str, str, str]], out_path: Path, done: set[str], limit: float) -> None:
+async def run(items: list[tuple[str, str, str]], out_path: Path, done: set[str], limit: float,
+              extra_rules: str = "") -> None:
     service = LLMService()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     todo = [item for item in items if item[0] not in done]
     # 獨立行程、一題才寫一行：直接寫檔，不必丟執行緒
     with out_path.open("a", encoding="utf-8") as fh:
         for position, (qid, question, kind) in enumerate(todo, 1):
-            record = await ask_one(service, qid, question, kind, limit)
+            record = await ask_one(service, qid, question, kind, limit, extra_rules)
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
             fh.flush()
             print(f"[{position}/{len(todo)}] {_progress(record)}", flush=True)
@@ -137,7 +141,10 @@ def main(argv: list[str] | None = None) -> Path:
     parser.add_argument("--score-only", type=Path, default=None, help="不跑模型，只拿這份經過檔重算分數")
     parser.add_argument("--question-timeout", type=float, default=600.0,
                         help="一題最多跑幾秒，超過就中止這一題、記成逾時（要比 bot 等顯示卡的放行上限 15 分鐘短）")
+    parser.add_argument("--extra-rules", type=Path, default=None,
+                        help="接在工具使用規則最後的試驗文字檔（試一段新規則有沒有用，不必改正式的規則檔）")
     args = parser.parse_args(argv)
+    extra_rules = args.extra_rules.read_text(encoding="utf-8") if args.extra_rules else ""
 
     questions = load_questions(args.questions)
     controls = [(f"c{i:02d}", text) for i, text in enumerate(NO_SEARCH_QUESTIONS, 1)]
@@ -155,7 +162,7 @@ def main(argv: list[str] | None = None) -> Path:
     if args.score_only is None:
         done = {record["qid"] for record in load_records(out_path)} if out_path.exists() else set()
         items = [(q["qid"], q["question"], "考卷") for q in questions] + [(qid, text, "閒聊") for qid, text in controls]
-        asyncio.run(run(items, out_path, done, args.question_timeout))
+        asyncio.run(run(items, out_path, done, args.question_timeout, extra_rules))
 
     records = load_records(out_path)
     report = build_report(questions, [r for r in records if r["kind"] == "考卷"],
@@ -169,6 +176,8 @@ def main(argv: list[str] | None = None) -> Path:
             "search_limit": INTEL_SETTINGS.search_limit, "max_tool_rounds": INTEL_SETTINGS.max_tool_rounds,
             "note": f"名次看模型實際看到的前 {INTEL_SETTINGS.search_limit} 筆；要和搜尋評估（前 20 筆）用同一把尺比，"
                     "把這份報告當 --keywords 重放",
+            # 只記這次跑的時候給的；--score-only 重算時沒給就是空的
+            "extra_rules": extra_rules,
         },
         **report,
     }, ensure_ascii=False, indent=1), encoding="utf-8")
