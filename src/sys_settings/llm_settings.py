@@ -569,12 +569,14 @@ class AmbientChatSettings(BaseSettings):
     insult_reaction_emoji: str = "sointeresting"   # 按的表情：本伺服器自訂表情的名稱（真有趣・反諷）；找不到用 🙄
 
     # ── 看圖（ambient 模型需具 vision）──
-    image_max_count: int = 9             # 一次請求最多帶幾張圖（含動圖拆出來的幀），硬上限
+    image_max_pictures: int = 3          # 一輪最多給模型看幾張圖（動圖拆成幾幀仍算一張）：多一張就多一段算圖的時間，也更容易搞混
+    image_max_animated: int = 1          # 其中動圖最多幾張（那一張照樣拆成幾幀，其餘的動圖不收）
+    image_max_count: int = 9             # 實際送出去的張數（含動圖拆出來的幀）硬上限
     # 單張圖的大小上限、縮到多大寫在 vision_image（MAX_FETCH_BYTES 等），插話與 /askai 共用
     # 連結預覽（最新那則、被回覆那則的 [預覽：…] 與預覽上的圖；見 _link_preview_context）
     link_preview_wait_seconds: float = 3.0   # 最新那則有連結卻還沒預覽時最多等幾秒（Discord 抓預覽要一兩秒）
-    link_preview_max_previews: int = 2       # 一則訊息最多看幾個預覽的圖（動圖的幾幀全帶上；跟群友貼的圖共用 image_max_count）
-    # 追問時沿回覆鏈補附圖（見 _reply_chain_image）：圖要是觸發前多久內貼的、最多往回幾則（觸發那則回的算第 1 則）
+    link_preview_max_previews: int = 2       # 一則訊息最多看幾個預覽的圖（跟群友貼的圖共用同一份額度）
+    # 沿回覆鏈往前收圖（見 _chain_pictures）：圖要是觸發前多久內貼的、最多往回幾則（觸發那則回的算第 1 則）
     reply_chain_image_max_age_seconds: float = 3600.0
     reply_chain_image_max_hops: int = 6
 

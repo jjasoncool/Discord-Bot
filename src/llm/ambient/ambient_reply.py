@@ -32,7 +32,9 @@
 - 被回覆的那則、最新那則有連結時補上 Discord 抓到的預覽與縮圖；被轉過的原訊息預覽在轉貼上，從 bot 的訊息快取找。
 - 有附圖就給圖片清單（`_picture_list`，放 user 段的 <image_instruction>）：每張是誰、在哪一則貼的，聊天紀錄裡哪幾行的圖
   沒附。圖另外送，文字裡看不出哪張對哪一行，不講模型會把圖安到別人頭上。
-- 追問時手上一張圖都沒有，就沿回覆鏈往前找第一則帶圖的訊息補附（時限與層數有上限）。
+- 圖照固定順序收，收滿就停：最新那則 → 被回覆那則 → 回覆鏈再往前（時限與層數有上限）→ 聊天紀錄裡被人回覆過的圖，
+  都是近的優先；同一則裡群友自己貼的圖先、貼文表情與預覽上的圖後。一輪最多 `image_max_pictures` 張，動圖算一張、
+  最多 `image_max_animated` 張。
 
 例外與決策：靜默期依對話節奏切換（熱聊等不到安靜，而且插話本來就不需要空檔）；純機率的減壓閥已被鉤子閘取代
 （隨機丟棄會丟掉好時機、留下爛時機，鉤子有判斷依據）。
@@ -704,6 +706,7 @@ def _attached(message: discord.Message) -> list[RemoteImage]:
 _TRIGGER = "trigger"    # 觸發這次評估的那則
 _REPLIED = "replied"    # 它直接回覆的那則
 _CHAIN = "chain"        # 回覆鏈再往前的
+_WINDOW = "window"      # 聊天紀錄視窗裡被人回覆過的
 # 那則訊息的哪一種圖
 _ATTACHED = "attached"  # 貼上去的附件
 _PREVIEW = "preview"    # 連結預覽上的圖
@@ -764,8 +767,8 @@ class _PicBudget:
 
 
 def _new_budget() -> _PicBudget:
-    cap = _SETTINGS.image_max_count
-    return _PicBudget(pictures=cap, animated=cap, frames=cap)
+    return _PicBudget(pictures=_SETTINGS.image_max_pictures, animated=_SETTINGS.image_max_animated,
+                      frames=_SETTINGS.image_max_count)
 
 
 async def _collect_pictures(budget: _PicBudget, sources: list[_PicSource]) -> list[_Pic]:
@@ -989,24 +992,52 @@ async def _link_preview_context(bot, msg: discord.Message) -> tuple[str, list[Re
     return suffix, preview_images(source, limit=_SETTINGS.link_preview_max_previews)
 
 
-async def _reply_chain_image(
-    bot, trigger: discord.Message, replied: discord.Message,
-) -> Optional[tuple[int, discord.Message]]:
-    """被回覆那則再往前，沿回覆鏈找第一則帶圖的訊息；回 (離觸發那則第幾則, 那則訊息)，找不到回 None。
+async def _chain_pictures(
+    bot, budget: _PicBudget, trigger: discord.Message, replied: discord.Message, taken: set,
+) -> list[_Pic]:
+    """被回覆那則再往前，沿回覆鏈收圖：近的優先，收滿就不再往回讀。
 
     追問到第二層以後，圖不在觸發那則、也不在它直接回的那則，模型手上沒圖卻不知道（會編「看不清楚」）。
-    話題可能早就換了，所以圖要在觸發前 `reply_chain_image_max_age_seconds` 內貼的；回覆只會指向更早的訊息，
-    碰到一則太舊的就停。層數上限只防一直往回讀。只認附件：X 貼文、連結預覽的圖要另外下載或打外部服務。
+    話題可能早就換了，所以只看觸發前 `reply_chain_image_max_age_seconds` 內的訊息；回覆只會指向更早的訊息，
+    碰到一則太舊的就停。層數上限只防一直往回讀（觸發那則回的算第 1 則）。只認附件：X 貼文、連結預覽的圖要
+    另外下載或打外部服務。`taken` 是已經收過的訊息，收了就記進去。
     """
+    pics: list[_Pic] = []
     max_age = timedelta(seconds=_SETTINGS.reply_chain_image_max_age_seconds)
-    msg = replied
-    for hops in range(2, _SETTINGS.reply_chain_image_max_hops + 1):
+    msg: Optional[discord.Message] = replied
+    for _hop in range(2, _SETTINGS.reply_chain_image_max_hops + 1):
+        if budget.full:
+            break
         msg = await _referenced_message(bot, msg)
         if msg is None or trigger.created_at - msg.created_at > max_age:
-            return None
-        if _has_image(msg):
-            return hops, msg
-    return None
+            break
+        if msg.id in taken:
+            continue
+        taken.add(msg.id)
+        pics += await _collect_pictures(budget, [_PicSource(msg, _CHAIN, _ATTACHED, remote=_attached(msg))])
+    return pics
+
+
+async def _window_pictures(budget: _PicBudget, trigger: discord.Message, thread_map: dict, taken: set) -> list[_Pic]:
+    """聊天紀錄視窗裡被人回覆過的圖，近的優先。有人回覆代表大家正在講它；沒人理的圖不收，洗版的圖才不會佔掉名額。"""
+    if budget.full:
+        return []
+    replied_to = {getattr(getattr(m, "reference", None), "message_id", None)
+                  for m in (*thread_map.values(), trigger)}
+    return await _collect_pictures(budget, [
+        _PicSource(m, _WINDOW, _ATTACHED, remote=_attached(m))
+        for _number, m in sorted(thread_map.items(), reverse=True)
+        if m.id in replied_to and m.id not in taken and _has_image(m)
+    ])
+
+
+def _picture_log(pics: list[_Pic]) -> str:
+    """log 用：每張圖的出處（哪一種、誰、幾點、幾幀），查「它到底看了哪張」時不必回頭拼。"""
+    return "；".join(
+        f"{pic.role}/{pic.kind} {name_with_anchor(pic.source.author)} "
+        f"{pic.source.created_at.astimezone(APP_TZ).strftime('%H:%M')}×{len(pic.frames)}"
+        for pic in pics
+    )
 
 
 # per-channel 序列處理狀態：同頻道同時只有一個 ambient 在跑。生成期間進來的訊息不平行觸發，
@@ -1698,11 +1729,11 @@ async def _gather_inputs(
     await _await_link_previews(bot, message)
     latest_link_note, latest_previews = await _link_preview_context(bot, message)
     latest_preview = _PicSource(message, _TRIGGER, _PREVIEW, remote=latest_previews)
-    # 群友自己貼的圖優先（最新那則的已經收了，接著是被回覆那則的），再來才是貼文、表情與預覽上的圖
+    # 先收最新那則的（貼的圖已經收了），再收被回覆那則的；同一則裡群友自己貼的圖先、貼文表情與預覽上的圖後
     pics += await _collect_pictures(budget, [source for source in (
-        replied_att,
         _PicSource(message, _TRIGGER, _EMBEDDED, ready=latest_imgs),
         latest_preview,
+        replied_att,
         _PicSource(replied_msg, _REPLIED, _EMBEDDED, ready=reply_imgs) if replied_msg is not None else None,
         replied_preview,
     ) if source is not None])
@@ -1715,18 +1746,14 @@ async def _gather_inputs(
         replied_to_text += _missed_of(replied_preview) + _missed_of(replied_att)
         if reply_notes:
             replied_to_text = replied_to_text + "\n" + "\n".join(reply_notes)
-    # 追問：手上一張圖都沒有時，沿回覆鏈往前找圖；是哪一則的圖由圖片清單講
-    if (not pics and not has_image and replied_msg is not None and replied_to_text is not None
-            and not _has_image(replied_msg)):
-        found = await _reply_chain_image(bot, message, replied_msg)
-        if found is not None:
-            hops, earlier = found
-            chain = await _collect_pictures(
-                budget, [_PicSource(earlier, _CHAIN, _ATTACHED, remote=_attached(earlier))])
-            if chain:
-                pics += chain
-                logger.info("ambient 追問補附圖 trace=%s 往回第 %d 則（%s 貼的）%d 張",
-                            trace_id, hops, name_with_anchor(earlier.author), sum(len(p.frames) for p in chain))
+    # 還有名額就補上大家正在講的圖：沿回覆鏈往前，再來是聊天紀錄裡被人回覆過的。是哪一則的圖由圖片清單講
+    taken = {message.id}
+    if replied_msg is not None:
+        taken.add(replied_msg.id)
+        pics += await _chain_pictures(bot, budget, message, replied_msg, taken)
+    pics += await _window_pictures(budget, message, thread_map, taken)
+    if pics:
+        logger.info("ambient 附圖 trace=%s：%s", trace_id, _picture_log(pics))
     image_payload: Optional[list[str]] = [frame for pic in pics for frame in pic.frames] or None
 
     prompt_text, chat_context, asker_for_bundle = _frame_latest(
