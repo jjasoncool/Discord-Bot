@@ -1851,21 +1851,18 @@ def _frame_latest(
             prompt_text = prompt_text + "\n" + "\n".join(latest_notes)
         return prompt_text, chat_context, asker_display_name
 
-    ts = message.created_at.astimezone(APP_TZ).strftime("%H:%M")
     # 觸發訊息附在脈絡末尾時也要給編號並登記進 thread_map——否則模型想接「最新這一則」
     # 卻指不到它（reply 錨定就落空）。編號接續 _fetch_recent 已用掉的最大號。
     next_no = (max(thread_map) if thread_map else 0) + 1
-    if stripped:
-        # 觸發訊息本體不截斷（time_only 不帶日期，與近期視窗一致）；compact=False 保留原貌
+    if stripped or posted_picture:
+        # 觸發訊息本體不截斷（time_only 不帶日期，與近期視窗一致）；compact=False 保留原貌。
+        # 只有圖的那一行跟聊天紀錄其他行同一個標記 `(圖)`：圖片清單與插話規則都是照這個標記講的
         chat_context = (chat_context or []) + [
             # 預覽由 link_note 給（原訊息的預覽被壓掉時，那份是從轉貼拿的），這裡不再自己讀
             format_chat_line(message, APP_TZ, time_only=True, compact=False, prefix=f"#{next_no} ", previews=[])
             + link_note
             + "".join(f" {n}" for n in latest_notes)
         ]
-        thread_map[next_no] = message
-    elif posted_picture:
-        chat_context = (chat_context or []) + [f"#{next_no} [{ts}] {asker_display_name}: (貼了一張圖)"]
         thread_map[next_no] = message
     prompt_text = (
         "（以上是你在群裡旁觀到的最新對話。最新一則是群友彼此在講話、不一定是對你說的——"

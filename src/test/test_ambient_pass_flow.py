@@ -355,7 +355,7 @@ class PassFlowTests(unittest.TestCase):
         self.images[msg.id] = ["IMG1"]
         self._run(msg)
         kw = self._generate_kwargs()
-        self.assertIn("(貼了一張圖)", kw["chat_context"][-1])
+        self.assertTrue(kw["chat_context"][-1].endswith(": (圖)"), "跟聊天紀錄其他行同一個標記")
         self.assertEqual(["IMG1"], kw["images"])
 
     def test_a_bare_mention_is_not_said_to_carry_a_picture_that_someone_else_posted(self):

@@ -1,7 +1,8 @@
 """「自然插話」重構的單元測試（2026-08-09）。
 
 覆蓋的新行為：
-  1. chat_line 每行編號 + thread_map（模型要靠編號表態「我在接哪一條線」）
+  1. chat_line 每行編號 + thread_map（模型要靠編號表態「我在接哪一條線」）；純圖訊息沒人回覆也成行 `(圖)`、
+     其他沒有文字的訊息照舊跳過
   2. `_parse_line_choice`：從模型輸出剝出 `#N` 錨點
   3. `_passes_content_gate`：內容閘改看整段 burst 的單則判定
   4. ambient_hooks 結構鉤子：懸空問句／獨白／冷場／對話正熱／聊完停頓
@@ -133,6 +134,21 @@ class LineNumberingTests(unittest.TestCase):
         self.assertEqual(2, len(lines))
         self.assertIn("(圖)", lines[0])
         self.assertTrue(lines[1].endswith(" ↩#1"), lines[1])
+
+    def test_image_only_message_becomes_a_line_even_when_nobody_replied(self):
+        # 沒這一行，模型不知道那段時間有人貼過圖；手上的圖是哪一行的也對不出來
+        msgs = [_msg("我沒哭", mid=1), _msg("", mid=2, attachments=("cry.png",)), _msg("笑死", mid=3)]
+        thread_map = {}
+        lines, _ = asyncio.run(fetch_recent_lines(
+            _FakeChannel(list(reversed(msgs))), tz=TZ8, limit=20, thread_replies=True, thread_map=thread_map))
+        self.assertEqual(3, len(lines))
+        self.assertTrue(lines[1].startswith("#2 ") and lines[1].endswith("(圖)"), lines[1])
+        self.assertEqual(2, thread_map[2].id, "鉤子與回覆錨點也拿得到這一則")
+
+    def test_other_empty_messages_are_still_skipped(self):
+        msgs = [_msg("有內容", mid=1), _msg("", mid=2, attachments=("report.pdf",)), _msg("也有內容", mid=3)]
+        lines, _ = _fetch(msgs)
+        self.assertEqual(2, len(lines))
 
     def test_self_marker_still_applied(self):
         # 既有行為不能退化：bot 自己的行仍標「(你自己)」

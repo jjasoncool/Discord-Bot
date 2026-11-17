@@ -297,7 +297,8 @@ def _thread_render(
       「我這句在接哪一條線」時無錨可指。多組人各聊各的時，這個編號就是唯一的指線方式。
     - 是回覆的行加後綴 ` ↩#M`（M＝被回那則的編號）；被回的在視窗外 → ` ↩(較早)`。
       bot 的自動轉貼也是用回覆送出的，但它不是在回話：改標「（自動轉貼 #M 的連結）」、不加 ↩。
-    - 空訊息（純圖等）照舊跳過、不佔編號；但「被回覆過的空訊息」要成行顯示 `(圖)` 才指得到。
+    - 純圖訊息成行顯示 `(圖)`：圖是另外送給模型的，聊天紀錄裡沒有這一行，模型就不知道那段時間有人貼過圖，
+      也對不出手上的圖是誰貼的。其他沒有文字的訊息（純附件等）照舊跳過、不佔編號，被回覆過的才成行（才指得到）。
     回覆只會指向更早的訊息 → 目標必在其回覆者之前出現，編號無前向引用問題。
     """
     in_window = {m.id for m in msgs}
@@ -311,7 +312,7 @@ def _thread_render(
     # 文字只算一次（semantic_message_text 有 regex 替換成本），過濾與渲染共用
     texts = {m.id: semantic_message_text(m) for m in msgs}
     # 先決定哪些會成行，再依序編號 → 編號連續、不因跳過的空訊息而跳號
-    rendered = [m for m in msgs if texts[m.id] or m.id in referenced]
+    rendered = [m for m in msgs if texts[m.id] or m.id in referenced or image_marker(m)]
     thread_no = {m.id: i + 1 for i, m in enumerate(rendered)}
 
     lines: list[str] = []
