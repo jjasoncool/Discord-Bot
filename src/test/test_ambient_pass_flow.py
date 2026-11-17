@@ -29,6 +29,7 @@ import discord  # noqa: E402
 from llm.ambient import ambient_insult, ambient_reply, ambient_search, ambient_style_lines  # noqa: E402
 from llm.storage import deleted_and_edited  # noqa: E402
 from llm.ambient.ambient_hooks import HookDecision  # noqa: E402
+from llm.preprocess.vision_image import VisionFetch  # noqa: E402
 from sys_settings import switches  # noqa: E402
 from sys_settings.switches import Switches  # noqa: E402
 
@@ -54,12 +55,26 @@ class _Message(SimpleNamespace):
     """像 discord.Message 的假物件：reply／channel.send／add_reaction 都是可檢查的 AsyncMock。"""
 
 
+def _att(mid, index=0, name=None):
+    """一張貼上去的圖；網址記著是哪一則的第幾張，假的抓圖照它找 `self.images`。"""
+    return SimpleNamespace(filename=name or f"{mid}.png", size=10, url=f"att://{mid}/{index}")
+
+
+def _preview(picture, *, title="影片標題", url="https://example.com/v/1"):
+    """Discord 幫連結抓到的預覽，帶一張縮圖。"""
+    return SimpleNamespace(url=url, title=title, description=None, image=None,
+                           thumbnail=SimpleNamespace(url=picture, proxy_url=None, width=None, height=None))
+
+
 def _message(content="今天抽卡又歪了啦", *, author_id=SPEAKER, mid=7001, attachments=(), reference=None,
-             created_at=NOW):
+             created_at=NOW, embeds=()):
+    attachments = [att if getattr(att, "url", None) else _att(mid, index, att.filename)
+                   for index, att in enumerate(attachments)]
     guild = SimpleNamespace(id=GUILD_ID, me=SimpleNamespace(id=BOT_ID, display_name="琇紫", name="琇紫"),
                             emojis=[])
     return _Message(
         content=content, id=mid, reference=reference, mentions=[], stickers=[], attachments=list(attachments),
+        embeds=list(embeds),
         author=SimpleNamespace(id=author_id, bot=False, display_name="某人", name="某人"),
         guild=guild,
         channel=SimpleNamespace(id=CHANNEL_ID, send=mock.AsyncMock(return_value=SimpleNamespace(id=9001))),
@@ -91,8 +106,9 @@ class PassFlowTests(unittest.TestCase):
         self.looked_up = []        # 往回讀過哪些訊息的回覆對象
         self.earlier = None
         self.media = {}            # id → (notes, imgs)
-        self.images = {}           # id → base64 清單
-        self.missed = {}           # id → 有幾張圖沒抓到
+        self.images = {}           # id → 那則每張附件抓到的圖（一張是字串，動圖是幾幀的清單）；沒列的就是沒抓到
+        self.fetched = []          # 真的去抓了哪些網址
+        self.preview_frames = {}   # 預覽縮圖的網址 → 抓到的圖
         self.grudges = {}
         self.persona_cards = None
         self.memory_lines = None
@@ -117,8 +133,15 @@ class PassFlowTests(unittest.TestCase):
         async def _media(msg):
             return self.media.get(msg.id, ([], []))
 
-        async def _images(msg):
-            return list(self.images.get(msg.id) or []), self.missed.get(msg.id, 0)
+        async def _fetch_picture(session, image, *, max_frames=4, **_kwargs):
+            self.fetched.append(image.url)
+            if not image.url.startswith("att://"):
+                return VisionFetch(list(self.preview_frames.get(image.url) or [])[:max_frames])
+            mid, index = image.url.removeprefix("att://").split("/")
+            got = self.images.get(int(mid)) or []
+            frames = got[int(index)] if int(index) < len(got) else []
+            frames = [frames] if isinstance(frames, str) else list(frames)
+            return VisionFetch(frames[:max_frames])
 
         async def _referenced(bot, msg):
             self.looked_up.append(msg.id)
@@ -139,7 +162,7 @@ class PassFlowTests(unittest.TestCase):
             _load_ambient_prompt=lambda: "SYS",
             _referenced_message=mock.AsyncMock(side_effect=_referenced),
             _media_context=mock.AsyncMock(side_effect=_media),
-            _prepare_images=mock.AsyncMock(side_effect=_images),
+            fetch_for_vision=_fetch_picture,
             _build_persona_context=mock.AsyncMock(return_value=self.persona_cards),
             recall_lines=mock.AsyncMock(return_value=self.memory_lines),
             recall_signature_tags=mock.AsyncMock(return_value=self.tag_lines),
@@ -285,7 +308,7 @@ class PassFlowTests(unittest.TestCase):
         self.llm.generate_reply.assert_not_awaited()
         self._run(msg, directed=True)                       # 被點名還是要回
         self.llm.generate_reply.assert_awaited_once()
-        self.assertEqual("(對方只 @ 了我，沒有文字)", self._generate_kwargs()["prompt"])
+        self.assertEqual("(對方只 @ 了我，沒有文字)\n（這張圖沒抓到）", self._generate_kwargs()["prompt"])
 
     # ── 脈絡怎麼包 ──
     def test_directed_prompt_is_the_text_with_the_speaker_named(self):
@@ -334,11 +357,40 @@ class PassFlowTests(unittest.TestCase):
 
     def test_image_payload_is_capped(self):
         cap = ambient_reply._SETTINGS.image_max_count
-        msg = _message("看這些", attachments=[SimpleNamespace(filename="a.png", size=10)])
+        msg = _message("看這些", attachments=[_att(7001, i) for i in range(cap)])
         self.images[msg.id] = [f"I{i}" for i in range(cap)]
         self.media[msg.id] = ([], ["EXTRA"])
         self._run(msg, directed=True)
-        self.assertEqual(cap, len(self._generate_kwargs()["images"]))
+        self.assertEqual([f"I{i}" for i in range(cap)], self._generate_kwargs()["images"])
+
+    # ── 連結預覽上的圖 ──
+    def test_a_moving_preview_brings_all_its_frames(self):
+        msg = _message("你們看這個 https://example.com/v/1", embeds=[_preview("https://i.example/a.gif")])
+        self.preview_frames["https://i.example/a.gif"] = ["F1", "F2", "F3", "F4"]
+        self._run(msg, directed=True)
+        kw = self._generate_kwargs()
+        self.assertEqual(["F1", "F2", "F3", "F4"], kw["images"], "預覽的額度算個數，不把動圖的幀砍掉")
+        self.assertIn("[預覽：影片標題]", kw["prompt"])
+
+    def test_a_preview_picture_that_could_not_be_fetched_is_marked(self):
+        msg = _message("你們看這個 https://example.com/v/1", embeds=[_preview("https://i.example/a.jpg")])
+        self._run(msg, directed=True)
+        kw = self._generate_kwargs()
+        self.assertIsNone(kw["images"])
+        self.assertTrue(kw["prompt"].endswith("[預覽：影片標題]（這張圖沒抓到）"), kw["prompt"])
+
+    def test_the_replied_messages_preview_picture_is_marked_too(self):
+        self.replied = _message("https://example.com/v/1", author_id=EARLIER_AUTHOR, mid=6001,
+                                embeds=[_preview("https://i.example/a.jpg")])
+        self._run(_message("這在講什麼"), directed=True)
+        kw = self._generate_kwargs()
+        self.assertTrue(kw["replied_to_text"].endswith("[預覽：影片標題]（這張圖沒抓到）"), kw["replied_to_text"])
+        self.preview_frames["https://i.example/a.jpg"] = ["THUMB"]
+        self.llm.generate_reply.reset_mock()
+        self._run(_message("這在講什麼"), directed=True)
+        kw = self._generate_kwargs()
+        self.assertEqual(["THUMB"], kw["images"])
+        self.assertNotIn("沒抓到", kw["replied_to_text"])
 
     # ── 追問補附圖：手上一張圖都沒有時，沿回覆鏈往前找第一則帶圖的 ──
     def _said(self, text, mid, minutes_ago, *, image=False):
@@ -374,7 +426,7 @@ class PassFlowTests(unittest.TestCase):
 
     def test_the_picture_can_be_six_messages_back_but_not_seven(self):
         older = [self._said(f"第{n}則", 6000 + n, n) for n in range(1, 8)]
-        older[5].attachments = [SimpleNamespace(filename="six.png", size=10)]
+        older[5].attachments = [_att(6006)]
         self.images[6006] = ["SIX"]
         self._chain(*older)
         self._run(_message("所以呢"), directed=True)
@@ -382,7 +434,7 @@ class PassFlowTests(unittest.TestCase):
 
         self.llm.generate_reply.reset_mock()
         older[5].attachments = []
-        older[6].attachments = [SimpleNamespace(filename="seven.png", size=10)]
+        older[6].attachments = [_att(6007)]
         self.images[6007] = ["SEVEN"]
         self.looked_up.clear()
         self._run(_message("所以呢"), directed=True)
@@ -462,14 +514,12 @@ class PassFlowTests(unittest.TestCase):
 
     def test_a_replied_picture_that_could_not_be_fetched_is_marked(self):
         self.replied = self._said("", 6001, 3, image=True)
-        self.missed[6001] = 1
         self._run(_message("這張圖是什麼"), directed=True)
         kw = self._generate_kwargs()
         self.assertIsNone(kw["images"])
         self.assertEqual("(一張圖)（這張圖沒抓到）", kw["replied_to_text"])
 
     def test_the_latest_picture_that_could_not_be_fetched_is_marked(self):
-        self.missed[7001] = 2
         self._run(_message("看這兩張", attachments=[SimpleNamespace(filename="a.png", size=10),
                                                   SimpleNamespace(filename="b.png", size=10)]), directed=True)
         kw = self._generate_kwargs()

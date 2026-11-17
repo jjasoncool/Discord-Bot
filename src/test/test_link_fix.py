@@ -16,7 +16,8 @@
 - 存進向量庫的文字跟以前一字不差
 - 插話：回 bot 的自動轉貼不算在叫它（內文真的打 @ 才算）；被回覆的轉貼標出原貼者；原訊息的預覽被壓掉時拿轉貼上的；
   降溫閘不把影片標題當成群友在嫌它吵
-- 預覽的圖：一則最多看 2 個預覽（算預覽、不算張數，動圖的幾幀全帶上）；代理與原檔網址都交給抓圖；抓不到在後面標「（這張圖沒抓到）」
+- 預覽的圖：一則最多看 2 個預覽（算預覽、不算張數）；代理與原檔網址都交給收圖的那邊，讀預覽時不下載
+  （動圖的幾幀全帶上、抓不到要標，守在 test_ambient_pass_flow）
 - 標記的意思寫在共用的 system_safety_prompt
 
 執行：
@@ -486,18 +487,19 @@ class LinkPreviewContextTests(unittest.TestCase):
                            embeds=[BILI], ref=1)
         self.bot = _bot(self.original, self.repost)
         self.downloads = []
-        self.frames = ["IMG"]
 
         async def fake_fetch(session, image, **kwargs):
             self.downloads.append(image.url)
-            return VisionFetch(list(self.frames), too_big=False)
+            return VisionFetch(["IMG"], too_big=False)
 
         patcher = mock.patch.object(ambient_reply, "fetch_for_vision", fake_fetch)
         patcher.start()
         self.addCleanup(patcher.stop)
 
     def _ctx(self, msg):
-        return asyncio.run(ambient_reply._link_preview_context(self.bot, msg))
+        """(標記, 預覽上的圖的網址)：圖在這裡只交出去、不抓，收不收由收圖那邊決定。"""
+        note, images = asyncio.run(ambient_reply._link_preview_context(self.bot, msg))
+        return note, [image.url for image in images]
 
     def test_replied_repost_names_who_posted_the_video(self):
         note, images = self._ctx(self.repost)
@@ -505,28 +507,20 @@ class LinkPreviewContextTests(unittest.TestCase):
             note,
             f"（自動轉貼 {name_with_anchor(A)} 的連結） [預覽：【鳴潮】小朋友走散了 - 因為看其他人做的二創人物都有糯糯的說話]",
         )
-        self.assertEqual(images, ["IMG"])
-        self.assertEqual(self.downloads, ["https://i.hdslb/a.jpg"])
-
-    def test_a_moving_preview_brings_all_its_frames(self):
-        self.frames = ["F1", "F2", "F3", "F4"]
-        _, images = self._ctx(self.repost)
-        self.assertEqual(images, ["F1", "F2", "F3", "F4"], "預覽的額度算個數，不把動圖的幀砍成 2 張")
-
-    def test_a_preview_picture_that_could_not_be_fetched_is_marked(self):
-        self.frames = []
-        note, images = self._ctx(self.repost)
-        self.assertEqual(images, [])
-        self.assertTrue(note.endswith("（這張圖沒抓到）"), note)
+        self.assertEqual(images, ["https://i.hdslb/a.jpg"])
 
     def test_suppressed_original_borrows_the_reposts_preview(self):
         note, images = self._ctx(self.original)
         self.assertTrue(note.startswith(" [預覽：【鳴潮】小朋友走散了"), note)
         self.assertNotIn("自動轉貼", note)
-        self.assertEqual(images, ["IMG"])
+        self.assertEqual(images, ["https://i.hdslb/a.jpg"])
 
-    def test_plain_text_gets_nothing_and_downloads_nothing(self):
+    def test_plain_text_gets_nothing(self):
         self.assertEqual(self._ctx(_Msg(5, "今天抽卡又歪了", A)), ("", []))
+
+    def test_reading_the_previews_downloads_nothing(self):
+        self._ctx(self.repost)
+        self._ctx(self.original)
         self.assertEqual(self.downloads, [])
 
     def test_waits_for_a_late_preview_but_not_for_plain_text_or_x(self):

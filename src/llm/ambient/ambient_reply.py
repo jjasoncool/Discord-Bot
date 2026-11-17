@@ -45,7 +45,7 @@ import random
 import re
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -691,36 +691,113 @@ def _has_image(message: discord.Message) -> bool:
     return any(is_vision_image(att.filename or "") for att in message.attachments)
 
 
-async def _prepare_images(message: discord.Message) -> tuple[list[str], int]:
-    """圖片附件 → (給 vision 模型的圖 base64, 沒抓到幾張)。
+def _attached(message: discord.Message) -> list[RemoteImage]:
+    """這則訊息貼的圖（附件裡模型看得懂的格式），還沒抓。"""
+    return [image for att in message.attachments
+            if is_vision_image(att.filename or "") and (image := remote_image(att)) is not None]
 
-    抓法見 `fetch_for_vision`：先抓 Discord 代理的縮小版、不行才抓原檔。動圖拆成幾張關鍵幀（後端直接吃 gif
-    只讀得到第一幀），跟一般圖片共用 `image_max_count` 這個總額度（上限 9 張）。
+
+# 一張圖是哪一則訊息帶來的
+_TRIGGER = "trigger"    # 觸發這次評估的那則
+_REPLIED = "replied"    # 它直接回覆的那則
+_CHAIN = "chain"        # 回覆鏈再往前的
+# 那則訊息的哪一種圖
+_ATTACHED = "attached"  # 貼上去的附件
+_PREVIEW = "preview"    # 連結預覽上的圖
+_EMBEDDED = "embedded"  # X 貼文的圖、別的伺服器的表情與貼圖
+
+
+@dataclass
+class _Pic:
+    """給模型看的一張圖（動圖是同一張的幾幀），連同它是哪一則訊息帶來的。"""
+    frames: list[str]
+    source: discord.Message
+    role: str
+    kind: str
+
+
+@dataclass
+class _PicSource:
+    """一則訊息帶來的一種圖：還沒抓的（附件、預覽）放 `remote`，已經在手上的（X 貼文、表情貼圖）放 `ready`。
+
+    `missed` 由 `_collect_pictures` 填：這個出處有幾張該抓卻沒抓到（呼叫端照它在那則後面標「這張圖沒抓到」）。
     """
-    images = [image for att in message.attachments
-              if is_vision_image(att.filename or "") and (image := remote_image(att)) is not None]
-    return await _fetch_images(images)
+    message: discord.Message
+    role: str
+    kind: str
+    remote: list[RemoteImage] = field(default_factory=list)
+    ready: list[str] = field(default_factory=list)
+    missed: int = 0
 
 
-async def _fetch_images(images: list[RemoteImage]) -> tuple[list[str], int]:
-    """幾張網路上的圖 → (給模型的圖, 沒抓到幾張)；動圖的幾幀跟其他圖共用 `image_max_count`，額度用完就不再抓。"""
-    out: list[str] = []
-    missed = 0
-    if not images:
-        return out, missed
-    import aiohttp
+class _PicBudget:
+    """這一輪還收得下多少圖：張數、其中動圖幾張、總幀數各有上限。動圖拆成幾幀仍算一張。"""
 
-    async with aiohttp.ClientSession() as session:
-        for image in images:
-            room = _SETTINGS.image_max_count - len(out)
-            if room <= 0:
-                break
-            got = await fetch_for_vision(session, image, max_frames=min(DEFAULT_MAX_FRAMES, room))
-            if got.frames:
-                out.extend(got.frames)
-            else:
-                missed += 1
-    return out, missed
+    def __init__(self, pictures: int, animated: int, frames: int) -> None:
+        self.pictures = pictures
+        self.animated = animated
+        self.frames = frames
+
+    @property
+    def full(self) -> bool:
+        return self.pictures <= 0 or self.frames <= 0
+
+    def frames_for(self, image: RemoteImage) -> int:
+        """這張可以拆幾幀；0＝不收（滿了，或它是動圖而動圖的名額用完了）。
+
+        動圖還有名額時每張都照動圖抓：沒標成會動的圖也可能會動，抓回來拆得出幾幀才知道。
+        """
+        if self.full:
+            return 0
+        if self.animated > 0:
+            return min(DEFAULT_MAX_FRAMES, self.frames)
+        return 0 if image.animated else 1
+
+    def take(self, frames: list[str]) -> None:
+        self.pictures -= 1
+        self.frames -= len(frames)
+        if len(frames) > 1:
+            self.animated -= 1
+
+
+def _new_budget() -> _PicBudget:
+    cap = _SETTINGS.image_max_count
+    return _PicBudget(pictures=cap, animated=cap, frames=cap)
+
+
+async def _collect_pictures(budget: _PicBudget, sources: list[_PicSource]) -> list[_Pic]:
+    """照順序把各出處的圖收進額度 → 收到的圖（順序就是送給模型的順序）。
+
+    收得下才抓（抓法見 `fetch_for_vision`：先抓 Discord 代理的縮小版、不行才抓原檔；動圖拆成幾張關鍵幀，後端直接吃
+    gif 只讀得到第一幀）。抓不到的記在那個出處的 `missed`；額度滿了之後的不抓，也不算沒抓到。
+    """
+    pics: list[_Pic] = []
+    session = None
+    try:
+        for source in sources:
+            for image in source.remote:
+                max_frames = budget.frames_for(image)
+                if not max_frames:
+                    continue
+                if session is None:
+                    import aiohttp
+
+                    session = aiohttp.ClientSession()
+                got = await fetch_for_vision(session, image, max_frames=max_frames)
+                if not got.frames:
+                    source.missed += 1
+                    continue
+                budget.take(got.frames)
+                pics.append(_Pic(got.frames, source.message, source.role, source.kind))
+            for frame in source.ready:
+                if budget.full:
+                    break
+                budget.take([frame])
+                pics.append(_Pic([frame], source.message, source.role, source.kind))
+    finally:
+        if session is not None:
+            await session.close()
+    return pics
 
 
 def _missed_note(missed: int) -> str:
@@ -728,6 +805,10 @@ def _missed_note(missed: int) -> str:
     if missed <= 0:
         return ""
     return "（這張圖沒抓到）" if missed == 1 else f"（有 {missed} 張圖沒抓到）"
+
+
+def _missed_of(source: Optional[_PicSource]) -> str:
+    return _missed_note(source.missed) if source is not None else ""
 
 
 async def _media_context(msg: discord.Message) -> tuple[list[str], list[str]]:
@@ -811,14 +892,14 @@ async def _await_link_previews(bot, msg: discord.Message) -> None:
         waited += _LINK_PREVIEW_POLL_SECONDS
 
 
-async def _link_preview_context(bot, msg: discord.Message) -> tuple[str, list[str]]:
-    """這則訊息上的連結 → (接在它文字後面的標記, 預覽上的圖 base64)。
+async def _link_preview_context(bot, msg: discord.Message) -> tuple[str, list[RemoteImage]]:
+    """這則訊息上的連結 → (接在它文字後面的標記, 預覽上的圖)。圖還沒抓：收不收、抓不到怎麼標由收圖那邊決定。
 
     - bot 的自動轉貼標「（自動轉貼 原貼者 的連結）」：被回覆的是轉貼時，模型才知道影片是誰貼的、不是它自己分享的。
     - 預覽用 `[預覽：…]`（跟聊天行同一個標記）；原訊息的預覽被壓掉了就拿 bot 轉貼上的。
     - X 的預覽跳過：`_media_context` 另外查 X，內容比預覽完整。
     - 預覽的圖最多看 `link_preview_max_previews` 個預覽，算個數不算張數：貼成網址的 GIF 拆出來的幾幀全帶上，
-      跟附件的動圖同一套。圖抓不到在標記後面寫「（這張圖沒抓到）」，不擋回覆。
+      跟附件的動圖同一套。
     """
     note = ""
     if is_link_repost(msg):
@@ -829,8 +910,7 @@ async def _link_preview_context(bot, msg: discord.Message) -> tuple[str, list[st
         source = _repost_of(bot, msg) or msg
     previews = link_previews(source, skip_tweets=True)
     suffix = note + (f" {preview_marker(previews)}" if previews else "")
-    images, missed = await _fetch_images(preview_images(source, limit=_SETTINGS.link_preview_max_previews))
-    return suffix + _missed_note(missed), images
+    return suffix, preview_images(source, limit=_SETTINGS.link_preview_max_previews)
 
 
 async def _reply_chain_image(
@@ -1513,10 +1593,11 @@ async def _gather_inputs(
         system_prompt = f"{system_prompt}\n\n{ambient_insult.mood_note(grudge, datetime.now(timezone.utc))}"
     trace_id = f"amb-{cid}-{int(time.time() * 1000)}"
 
-    # 看圖：有圖就準備 vision payload（插話模型本身支援 vision，不必換模型）
-    own_imgs, own_missed = await _prepare_images(message) if has_image else ([], 0)
-    image_payload: Optional[list[str]] = own_imgs or None
-    if not stripped and not image_payload and not directed:
+    # 看圖（插話模型本身支援 vision，不必換模型）：各出處的圖照固定順序收進同一份額度，每張都記著是哪一則帶來的
+    budget = _new_budget()
+    own = _PicSource(message, _TRIGGER, _ATTACHED, remote=_attached(message))
+    pics = await _collect_pictures(budget, [own])
+    if not stripped and not pics and not directed:
         return None  # 圖沒抓成功又沒文字 → 沒東西可接
 
     # 被回覆訊息（Discord 原生 reply）：把指涉對象明確帶進 prompt，避免「他/這個」無錨點亂答。
@@ -1524,8 +1605,10 @@ async def _gather_inputs(
     replied_to_from: Optional[str] = None
     replied_to_text: Optional[str] = None
     replied_msg = await _referenced_message(bot, message)
-    reply_link_imgs: list[str] = []
+    replied_att: Optional[_PicSource] = None
+    replied_preview: Optional[_PicSource] = None
     if replied_msg is not None:
+        replied_att = _PicSource(replied_msg, _REPLIED, _ATTACHED, remote=_attached(replied_msg))
         rtext = semantic_message_text(replied_msg)
         if not rtext and _has_image(replied_msg):
             rtext = "(一張圖)"
@@ -1533,42 +1616,49 @@ async def _gather_inputs(
             if len(rtext) > 200:
                 rtext = rtext[:200] + "…"
             # 連結預覽、自動轉貼的標記接在截斷之後：網址再長也不能把影片內容截掉
-            reply_link_note, reply_link_imgs = await _link_preview_context(bot, replied_msg)
+            reply_link_note, reply_previews = await _link_preview_context(bot, replied_msg)
+            replied_preview = _PicSource(replied_msg, _REPLIED, _PREVIEW, remote=reply_previews)
             replied_to_from = name_with_anchor(replied_msg.author)
             replied_to_text = rtext + reply_link_note
-        # 帶圖：被回覆訊息的圖也補進 vision payload（trigger 自己的圖優先，整體受 image_max_count 上限）
-        if _has_image(replied_msg):
-            ref_imgs, ref_missed = await _prepare_images(replied_msg)
-            if ref_imgs:
-                image_payload = ((image_payload or []) + ref_imgs)[:_SETTINGS.image_max_count]
-            if replied_to_text is not None:
-                replied_to_text += _missed_note(ref_missed)
 
     # 模型原本看不懂的東西：X 貼文連結、別的伺服器的表情與貼圖（見 `_media_context`）
     reply_notes, reply_imgs = await _media_context(replied_msg) if replied_msg is not None else ([], [])
     latest_notes, latest_imgs = await _media_context(message)
-    if own_missed:
-        latest_notes = [*latest_notes, _missed_note(own_missed)]
-    if reply_notes and replied_to_text is not None:
-        replied_to_text = replied_to_text + "\n" + "\n".join(reply_notes)
     # 最新那則的連結預覽（被 @ 時常常還沒長出來，先等一下）
     await _await_link_previews(bot, message)
-    latest_link_note, latest_link_imgs = await _link_preview_context(bot, message)
-    if latest_imgs or reply_imgs or latest_link_imgs or reply_link_imgs:   # 群友自己貼的圖優先，整體受 image_max_count 上限
-        image_payload = ((image_payload or []) + latest_imgs + latest_link_imgs + reply_imgs
-                         + reply_link_imgs)[:_SETTINGS.image_max_count]
+    latest_link_note, latest_previews = await _link_preview_context(bot, message)
+    latest_preview = _PicSource(message, _TRIGGER, _PREVIEW, remote=latest_previews)
+    # 群友自己貼的圖優先（最新那則的已經收了，接著是被回覆那則的），再來才是貼文、表情與預覽上的圖
+    pics += await _collect_pictures(budget, [source for source in (
+        replied_att,
+        _PicSource(message, _TRIGGER, _EMBEDDED, ready=latest_imgs),
+        latest_preview,
+        _PicSource(replied_msg, _REPLIED, _EMBEDDED, ready=reply_imgs) if replied_msg is not None else None,
+        replied_preview,
+    ) if source is not None])
+
+    # 圖沒抓到要講：模型手上沒有圖卻不知道，會自己編看不到的理由
+    if own.missed:
+        latest_notes = [*latest_notes, _missed_note(own.missed)]
+    latest_link_note += _missed_note(latest_preview.missed)
+    if replied_to_text is not None:
+        replied_to_text += _missed_of(replied_preview) + _missed_of(replied_att)
+        if reply_notes:
+            replied_to_text = replied_to_text + "\n" + "\n".join(reply_notes)
     # 追問：手上一張圖都沒有時，沿回覆鏈往前找圖。說明接在被回覆那則後面，沒有那段就不附（模型會不知道圖是哪來的）
-    if (not image_payload and not has_image and replied_msg is not None and replied_to_text is not None
+    if (not pics and not has_image and replied_msg is not None and replied_to_text is not None
             and not _has_image(replied_msg)):
         found = await _reply_chain_image(bot, message, replied_msg)
         if found is not None:
-            hops, source = found
-            chain_imgs, _ = await _prepare_images(source)
-            if chain_imgs:
-                image_payload = chain_imgs
-                replied_to_text = replied_to_text + "\n" + _reply_chain_image_note(source)
+            hops, earlier = found
+            chain = await _collect_pictures(
+                budget, [_PicSource(earlier, _CHAIN, _ATTACHED, remote=_attached(earlier))])
+            if chain:
+                pics += chain
+                replied_to_text = replied_to_text + "\n" + _reply_chain_image_note(earlier)
                 logger.info("ambient 追問補附圖 trace=%s 往回第 %d 則（%s 貼的）%d 張",
-                            trace_id, hops, name_with_anchor(source.author), len(chain_imgs))
+                            trace_id, hops, name_with_anchor(earlier.author), sum(len(p.frames) for p in chain))
+    image_payload: Optional[list[str]] = [frame for pic in pics for frame in pic.frames] or None
 
     prompt_text, chat_context, asker_for_bundle = _frame_latest(
         message, directed, stripped, image_payload, latest_notes, chat_context, thread_map, asker_display_name,
