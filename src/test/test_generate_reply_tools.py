@@ -96,6 +96,12 @@ class GenerateReplyToolTests(unittest.IsolatedAsyncioTestCase):
         await self.ask(FakeRunner(), style_refs=["一句"], style_refs_note="（換一段說明）")
         self.assertEqual("（換一段說明）", self.build.call_args.kwargs["style_refs_note"])
 
+    async def test_the_picture_note_reaches_the_prompt_builder(self):
+        # 插話的圖片清單（每張圖是誰貼的）；中間漏傳的話模型只會看到 /askai 那句「使用者上傳圖片」
+        self.replies = [says("正式回答")]
+        await self.ask(FakeRunner(), images=["aGVsbG8="], image_note="第 1 張：甲貼的")
+        self.assertEqual("第 1 張：甲貼的", self.build.call_args.kwargs["image_note"])
+
     async def test_the_reasoning_effort_reaches_every_model_call(self):
         self.replies = [says("正式回答")]
         await self.ask(FakeRunner(), reasoning_effort="medium")

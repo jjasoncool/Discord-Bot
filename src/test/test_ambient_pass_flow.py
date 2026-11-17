@@ -7,7 +7,9 @@
 被 @ 才有輸出上限；夾著工具呼叫原文的回答不送；回覆超過 Discord 上限只送第一段、回覆不 @ 任何人；
 最新這則 @ 的人要傳進人物卡檢索與回憶對象（給模型看的文字已把 @ 換成名字，從那裡抓不到）。
 追問時手上沒圖，沿回覆鏈往前補附第一張圖：只追一小時內、最多 6 則，觸發那則或被回覆那則自己有圖就不追。
-被回覆那則、最新那則的圖抓不到時，在那則後面標「（這張圖沒抓到）」，模型才不會自己編看不到的理由。
+被回覆那則、最新那則的圖（附件、連結預覽）抓不到時，在那則後面標「（這張圖沒抓到）」，模型才不會自己編看不到的理由。
+有附圖就給圖片清單：每張是誰、在哪一則貼的（發問的這則／聊天紀錄第幾行／更早的一則）、動圖是同一張的幾幀、
+預覽與貼文的圖不說成群友貼的、聊天紀錄裡哪幾行的圖沒附；沒附圖就沒有清單。
 被點名時才帶這個頻道最近被刪的訊息（查觸發那則所在的頻道），自發插話不帶；近況交給改過訊息的附註。
 """
 import asyncio
@@ -105,6 +107,7 @@ class PassFlowTests(unittest.TestCase):
         self.chain = {}            # id → 那則用回覆功能回的訊息（被回覆那則再往前）
         self.looked_up = []        # 往回讀過哪些訊息的回覆對象
         self.earlier = None
+        self.window = []           # 聊天紀錄視窗裡的訊息，照順序是 #1、#2…（給了就不看 earlier）
         self.media = {}            # id → (notes, imgs)
         self.images = {}           # id → 那則每張附件抓到的圖（一張是字串，動圖是幾幀的清單）；沒列的就是沒抓到
         self.fetched = []          # 真的去抓了哪些網址
@@ -126,8 +129,9 @@ class PassFlowTests(unittest.TestCase):
 
     def _run(self, message, *, directed=False, followup=False, burst=None):
         async def _fetch(msg, thread_map=None):
-            if self.earlier is not None and thread_map is not None:
-                thread_map[1] = self.earlier
+            if thread_map is not None:
+                window = self.window or ([self.earlier] if self.earlier is not None else [])
+                thread_map.update({number: earlier for number, earlier in enumerate(window, start=1)})
             return (["#1 [12:00] 某人: 前一句"], [msg.author.id])
 
         async def _media(msg):
@@ -363,6 +367,75 @@ class PassFlowTests(unittest.TestCase):
         self._run(msg, directed=True)
         self.assertEqual([f"I{i}" for i in range(cap)], self._generate_kwargs()["images"])
 
+    # ── 圖片清單：每張圖是誰、在哪一則貼的 ──
+    def _list(self):
+        return self._generate_kwargs()["image_note"].splitlines()
+
+    def test_no_pictures_means_no_picture_list(self):
+        self._run(_message("今天抽卡又歪了啦"), directed=True)
+        self.assertIsNone(self._generate_kwargs()["image_note"])
+
+    def test_the_askers_own_picture_is_listed_as_theirs(self):
+        msg = _message("看這張", attachments=[_att(7001)])
+        self.images[7001] = ["MINE"]
+        self._run(msg, directed=True)
+        lines = self._list()
+        self.assertEqual("這次附了 1 張圖，照順序：", lines[0])
+        self.assertTrue(lines[1].startswith("・第 1 張：發問的這則，某人#"), lines[1])
+        self.assertTrue(lines[1].endswith("20:00 貼的"), lines[1])
+        self.assertEqual("講圖裡的東西之前，先對一下那張是誰貼的。", lines[-1])
+
+    def test_a_spontaneous_picture_is_tied_to_its_line_and_other_picture_lines_are_named(self):
+        # 視窗裡另一行也標著 (圖)、有人回覆它；這次只附了最新那張，清單要講清楚不是那一行的
+        other = self._said("", 6000, 3, image=True)
+        self.window = [other, _message("我沒哭", author_id=EARLIER_AUTHOR, mid=6001,
+                                       reference=SimpleNamespace(message_id=6000, resolved=None))]
+        msg = _message("", attachments=[_att(7001)])
+        self.images[7001] = ["LATEST"]
+        self._run(msg)
+        kw = self._generate_kwargs()
+        self.assertEqual(["LATEST"], kw["images"])
+        lines = self._list()
+        self.assertTrue(lines[1].startswith("・第 1 張：聊天紀錄 #3，某人#"), lines[1])
+        self.assertEqual("聊天紀錄裡其他標 (圖) 的行（#1）這次沒附，那些圖你沒看到。", lines[2])
+
+    def test_the_replied_picture_says_who_posted_it_and_who_replied_to_it(self):
+        picture = self._said("", 6000, 9, image=True)
+        self.window = [picture]
+        self.replied = picture
+        self.images[6000] = ["PIC"]
+        self._run(_message("這張是什麼", reference=SimpleNamespace(message_id=6000, resolved=None)), directed=True)
+        line = self._list()[1]
+        self.assertTrue(line.startswith("・第 1 張：聊天紀錄 #1，某人#"), line)
+        self.assertIn("19:51 貼的", line)
+        self.assertIn("發問的這則 回覆的就是這張", line)
+
+    def test_a_moving_picture_is_listed_as_one_picture_in_several_frames(self):
+        msg = _message("看這兩張", attachments=[_att(7001, 0, "a.gif"), _att(7001, 1, "b.png")])
+        self.images[7001] = [["F1", "F2", "F3", "F4"], "STILL"]
+        self._run(msg, directed=True)
+        lines = self._list()
+        self.assertEqual("這次附了 5 張圖，照順序：", lines[0])
+        self.assertTrue(lines[1].startswith("・第 1～4 張：發問的這則"), lines[1])
+        self.assertTrue(lines[1].endswith("貼的動圖，同一張圖照時間順序的 4 幀"), lines[1])
+        self.assertTrue(lines[2].startswith("・第 5 張：發問的這則"), lines[2])
+
+    def test_preview_and_post_pictures_are_not_listed_as_something_a_member_posted(self):
+        msg = _message("你們看這個 https://example.com/v/1", embeds=[_preview("https://i.example/a.jpg")])
+        self.preview_frames["https://i.example/a.jpg"] = ["THUMB"]
+        self.media[7001] = (["（X 貼文：內容）"], ["TW"])
+        self._run(msg, directed=True)
+        lines = self._list()
+        self.assertIn("那則裡 X 貼文或表情貼圖的圖", lines[1])
+        self.assertIn("那則的連結預覽縮圖", lines[2])
+        self.assertNotIn("貼的", lines[1] + lines[2])
+
+    def test_a_message_with_more_pictures_than_were_attached_says_so(self):
+        msg = _message("看這兩張", attachments=[_att(7001, 0), _att(7001, 1)])
+        self.images[7001] = ["ONE"]          # 第二張沒抓到
+        self._run(msg, directed=True)
+        self.assertTrue(self._list()[1].endswith("（那則貼了 2 張，這次只附 1 張）"), self._list()[1])
+
     # ── 連結預覽上的圖 ──
     def test_a_moving_preview_brings_all_its_frames(self):
         msg = _message("你們看這個 https://example.com/v/1", embeds=[_preview("https://i.example/a.gif")])
@@ -411,11 +484,13 @@ class PassFlowTests(unittest.TestCase):
         self._run(_message("那背景機體的聲優是誰"), directed=True)
         kw = self._generate_kwargs()
         self.assertEqual(["PIC"], kw["images"])
-        note = kw["replied_to_text"].splitlines()[-1]
-        self.assertTrue(kw["replied_to_text"].startswith("背景那台我看不太清楚"))
-        self.assertIn("19:51", note, "說明要講圖是幾點貼的（本機時區）")
-        self.assertIn("某人#", note)
-        self.assertIn("阿怎麼沒有聲優本人", note)
+        self.assertEqual("背景那台我看不太清楚", kw["replied_to_text"], "圖的說明在圖片清單，不接在被回覆那則後面")
+        line = kw["image_note"].splitlines()[1]
+        self.assertTrue(line.startswith("・第 1 張：更早的一則（不在上面的聊天紀錄裡）"), line)
+        self.assertIn("19:51 貼的", line, "要講圖是幾點貼的（本機時區）")
+        self.assertIn("某人#", line)
+        self.assertIn("沿著這串回覆往前找到的", line)
+        self.assertIn("那則寫「阿怎麼沒有聲優本人」", line)
 
     def test_spontaneous_followups_get_the_picture_too(self):
         self._chain(self._said("背景那台我看不太清楚", 6001, 6),
@@ -471,7 +546,7 @@ class PassFlowTests(unittest.TestCase):
         self._chain(self._said("回你", 6001, 6), picture)
         self._run(trigger, directed=True)
         self.assertEqual(["NEW"], self._generate_kwargs()["images"])
-        self.assertNotIn("貼了圖", self._generate_kwargs()["replied_to_text"])
+        self.assertNotIn("沿著這串回覆", self._generate_kwargs()["image_note"])
 
         self.llm.generate_reply.reset_mock()
         self._chain(self._said("", 6001, 6, image=True), picture)
@@ -510,7 +585,8 @@ class PassFlowTests(unittest.TestCase):
         self._run(_message("那背景呢"), directed=True)
         kw = self._generate_kwargs()
         self.assertIsNone(kw["images"])
-        self.assertEqual("回你", kw["replied_to_text"], "沒附到圖就不講「附的圖是那張」")
+        self.assertIsNone(kw["image_note"], "沒附到圖就沒有圖片清單")
+        self.assertEqual("回你", kw["replied_to_text"])
 
     def test_a_replied_picture_that_could_not_be_fetched_is_marked(self):
         self.replied = self._said("", 6001, 3, image=True)

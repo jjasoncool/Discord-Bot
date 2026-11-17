@@ -45,6 +45,7 @@ def build_prompt_bundle(
     web_context: Optional[List[str]] = None,
     deleted_messages: Optional[List[str]] = None,
     images: Optional[List[str]] = None,
+    image_note: Optional[str] = None,
     asker_profile: Optional[str] = None,
     asker_display_name: Optional[str] = None,
     bot_display_name: Optional[str] = None,
@@ -72,6 +73,8 @@ def build_prompt_bundle(
     web_context: 網路搜尋結果（每筆一個字串，例如 "[1] 標題 — snippet (url)"）
     deleted_messages: 這個頻道最近群友自己刪掉的訊息連同前後文（`llm.storage.deleted_and_edited.deleted_context`，
         已經篩過：作者自己刪的、同頻道、個資已遮）。怎麼用寫在 <deleted_messages> 開頭，只在有這段時出現
+    image_note: 有附圖時 <image_instruction> 裡寫的話；沒給就用共用的那句（/askai：圖是發問者自己上傳的）。
+        插話傳圖片清單：圖來自好幾則訊息，要逐張講是誰、在哪一則貼的，模型才不會把圖安到別人頭上
     asker_profile: 發問者可信資訊區塊（已含 <asker_profile> 標籤），放 system block
     asker_display_name: 發問者 display_name，作為 <latest_user_message> 的 from 屬性
     bot_display_name: Bot 自身 display_name（由系統注入為 <bot_history> 的 name 屬性，
@@ -188,7 +191,7 @@ def build_prompt_bundle(
     if images:
         composed_user_prompt += (
             "<image_instruction>\n"
-            f"{safety_rules.image_instruction_prompt}\n"
+            f"{_sanitize_text(image_note) if image_note else safety_rules.image_instruction_prompt}\n"
             "</image_instruction>\n"
         )
 

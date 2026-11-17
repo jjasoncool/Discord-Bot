@@ -908,6 +908,7 @@ class LLMService:
         web_context: Optional[List[str]] = None,
         deleted_messages: Optional[List[str]] = None,
         images: Optional[List[str]] = None,
+        image_note: Optional[str] = None,
         model: Optional[str] = None,
         think: Optional[bool] = None,
         temperature: Optional[float] = None,
@@ -946,6 +947,7 @@ class LLMService:
         `today`：放在 user 段最前面的日期（插話傳；它的聊天行只有時:分，模型判斷不了查到的東西新不新）。
         `deleted_messages`：這個頻道最近群友自己刪掉的訊息與前後文（被點名的插話、/askai 傳），放 user 段的
         <deleted_messages>。
+        `image_note`：有附圖時 <image_instruction> 裡寫的話（插話傳圖片清單：每張圖是誰、在哪一則貼的）；沒給用共用的那句。
 
         呼叫端給了 `max_tokens`、而模型開著思考卻想到上限還沒寫出答案（或答案才開了頭就被切，結尾有
         `TRUNCATED_NOTE`）：關掉思考、不帶工具，用已經查到的資料（工具輪的 messages）再答一次——同樣的設定
@@ -973,6 +975,7 @@ class LLMService:
             web_context=web_context,
             deleted_messages=deleted_messages,
             images=images,
+            image_note=image_note,
             asker_profile=asker_profile,
             asker_display_name=asker_display_name,
             bot_display_name=bot_display_name,

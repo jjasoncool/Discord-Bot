@@ -139,6 +139,13 @@ class PromptBundleContractTests(unittest.TestCase):
         self.assertIn("<image_instruction>\n【看圖說明】\n</image_instruction>", bundle.messages[1]["content"])
         self.assertNotIn("images", build().messages[1])
 
+    def test_a_callers_own_picture_note_replaces_the_shared_instruction(self):
+        content = build(images=["aGVsbG8="], image_note="第 1 張：甲貼的\x00").messages[1]["content"]
+        self.assertIn("<image_instruction>\n第 1 張：甲貼的\n</image_instruction>", content)
+        self.assertNotIn("【看圖說明】", content)
+        self.assertNotIn("<image_instruction>", build(image_note="第 1 張：甲貼的").messages[1]["content"],
+                         "沒附圖就沒有這一段")
+
     def test_no_context_means_only_latest_message(self):
         bundle = build(system=None)
         self.assertEqual(bundle.messages[0]["content"], "【安全規則】")

@@ -30,7 +30,9 @@
 - 回覆超過 Discord 上限只送第一段；用回覆送出時也不 @ 任何人。
 - 回 bot 的自動轉貼不算在叫它（那是群友對影片、對原貼者的反應）；內文真的打了 @ 它才算。
 - 被回覆的那則、最新那則有連結時補上 Discord 抓到的預覽與縮圖；被轉過的原訊息預覽在轉貼上，從 bot 的訊息快取找。
-- 追問時手上一張圖都沒有，就沿回覆鏈往前找第一則帶圖的訊息補附（時限與層數有上限），說明接在被回覆那則後面。
+- 有附圖就給圖片清單（`_picture_list`，放 user 段的 <image_instruction>）：每張是誰、在哪一則貼的，聊天紀錄裡哪幾行的圖
+  沒附。圖另外送，文字裡看不出哪張對哪一行，不講模型會把圖安到別人頭上。
+- 追問時手上一張圖都沒有，就沿回覆鏈往前找第一則帶圖的訊息補附（時限與層數有上限）。
 
 例外與決策：靜默期依對話節奏切換（熱聊等不到安靜，而且插話本來就不需要空檔）；純機率的減壓閥已被鉤子閘取代
 （隨機丟棄會丟掉好時機、留下爛時機，鉤子有判斷依據）。
@@ -65,6 +67,7 @@ from llm.ambient.ambient_memory import enqueue_for_memory, recall_lines, recall_
 from llm.preprocess.chat_line import (
     fetch_recent_lines,
     format_chat_line,
+    image_marker,
     is_link_repost,
     link_previews,
     name_with_anchor,
@@ -811,6 +814,79 @@ def _missed_of(source: Optional[_PicSource]) -> str:
     return _missed_note(source.missed) if source is not None else ""
 
 
+def _picture_list(pics: list[_Pic], trigger: discord.Message, thread_map: dict, directed: bool) -> Optional[str]:
+    """圖片清單：這次附的每一張是誰、在哪一則貼的，聊天紀錄裡還有哪幾行的圖沒附。沒附圖回 None。
+
+    圖是另外送的，文字裡看不出哪張對哪一行。聊天紀錄常常不只一行標著 `(圖)`，不講清楚模型會把手上的圖當成別行的
+    （實例：甲後來貼的哭臉被當成乙回覆的那張，拿去虧乙）。張數照送出去的算：動圖拆成幾幀就佔幾張。
+    """
+    if not pics:
+        return None
+    line_of = {m.id: no for no, m in thread_map.items()}
+    lines = [f"這次附了 {sum(len(pic.frames) for pic in pics)} 張圖，照順序："]
+    first = 1
+    for position, pic in enumerate(pics):
+        last = first + len(pic.frames) - 1
+        which = f"第 {first} 張" if last == first else f"第 {first}～{last} 張"
+        is_last_of_message = all(later.source.id != pic.source.id or later.kind != pic.kind
+                                 for later in pics[position + 1:])
+        lines.append(f"・{which}：{_picture_origin(pic, pics, trigger, thread_map, line_of, directed, is_last_of_message)}")
+        first = last + 1
+    attached = {pic.source.id for pic in pics if pic.kind == _ATTACHED}
+    unseen = [f"#{no}" for no, m in sorted(thread_map.items()) if m.id not in attached and image_marker(m)]
+    if unseen:
+        lines.append(f"聊天紀錄裡其他標 (圖) 的行（{'、'.join(unseen)}）這次沒附，那些圖你沒看到。")
+    lines.append("講圖裡的東西之前，先對一下那張是誰貼的。")
+    return "\n".join(lines)
+
+
+def _picture_origin(
+    pic: _Pic, pics: list[_Pic], trigger: discord.Message, thread_map: dict, line_of: dict, directed: bool,
+    is_last_of_message: bool,
+) -> str:
+    """清單裡一張圖的那一行：在哪一則、誰幾點貼的、是哪一種圖，以及認得出它的線索（誰回覆它、那則寫了什麼）。"""
+    source = pic.source
+    number = line_of.get(source.id)
+    in_latest = directed and source.id == trigger.id
+    if in_latest:
+        where = "發問的這則"
+    elif number:
+        where = f"聊天紀錄 #{number}"
+    else:
+        where = "更早的一則（不在上面的聊天紀錄裡）"
+
+    me = getattr(getattr(trigger.guild, "me", None), "id", None)
+    name = name_with_anchor(source.author) + ("(你自己)" if me is not None and source.author.id == me else "")
+    posted = f"{name} {source.created_at.astimezone(APP_TZ).strftime('%H:%M')}"
+    frames = len(pic.frames)
+    if pic.kind == _ATTACHED:
+        what = f"{posted} 貼的" + (f"動圖，同一張圖照時間順序的 {frames} 幀" if frames > 1 else "")
+    elif pic.kind == _PREVIEW:
+        what = f"{posted} 那則的連結預覽" + (f"，會動，同一張圖照時間順序的 {frames} 幀" if frames > 1 else "縮圖")
+    else:
+        what = f"{posted} 那則裡 X 貼文或表情貼圖的圖"
+
+    clues: list[str] = []
+    replied_by = [f"#{no}" for no, m in sorted(thread_map.items())
+                  if getattr(getattr(m, "reference", None), "message_id", None) == source.id]
+    if directed and getattr(getattr(trigger, "reference", None), "message_id", None) == source.id:
+        replied_by.append("發問的這則")
+    if replied_by and pic.kind == _ATTACHED:
+        clues.append(f"{'、'.join(replied_by)} 回覆的就是這張")
+    if pic.role == _CHAIN:
+        clues.append("沿著這串回覆往前找到的")
+    if not number and not in_latest:
+        gist = " ".join(semantic_message_text(source).split())[:60]
+        if gist:
+            clues.append(f"那則寫「{gist}」")
+    if pic.kind == _ATTACHED and is_last_of_message:
+        posted_count = len(_attached(source))
+        got = sum(1 for other in pics if other.source.id == source.id and other.kind == _ATTACHED)
+        if got < posted_count:
+            clues.append(f"那則貼了 {posted_count} 張，這次只附 {got} 張")
+    return f"{where}，{what}" + (f"（{'；'.join(clues)}）" if clues else "")
+
+
 async def _media_context(msg: discord.Message) -> tuple[list[str], list[str]]:
     """訊息裡模型原本看不懂的東西 → `(說明行, 圖 base64)`：
 
@@ -931,14 +1007,6 @@ async def _reply_chain_image(
         if _has_image(msg):
             return hops, msg
     return None
-
-
-def _reply_chain_image_note(msg: discord.Message) -> str:
-    """接在被回覆那則後面，告訴模型這次附的圖是誰、幾點貼的（它在聊天紀錄裡標 `(圖)` 的那行）。"""
-    ts = msg.created_at.astimezone(APP_TZ).strftime("%H:%M")
-    gist = " ".join(semantic_message_text(msg).split())[:60]
-    said = f"，那則寫「{gist}」" if gist else ""
-    return f"（這串回覆再往前，{name_with_anchor(msg.author)} {ts} 貼了圖{said}；這次附的圖就是那張）"
 
 
 # per-channel 序列處理狀態：同頻道同時只有一個 ambient 在跑。生成期間進來的訊息不平行觸發，
@@ -1408,6 +1476,8 @@ class _Inputs:
     thread_map: dict
     hook: Optional[HookDecision]
     image_payload: Optional[list]
+    # 圖片清單（每張圖是誰、在哪一則貼的）；沒附圖是 None
+    image_note: Optional[str]
     replied_msg: Optional[discord.Message]
     replied_to_from: Optional[str]
     replied_to_text: Optional[str]
@@ -1645,7 +1715,7 @@ async def _gather_inputs(
         replied_to_text += _missed_of(replied_preview) + _missed_of(replied_att)
         if reply_notes:
             replied_to_text = replied_to_text + "\n" + "\n".join(reply_notes)
-    # 追問：手上一張圖都沒有時，沿回覆鏈往前找圖。說明接在被回覆那則後面，沒有那段就不附（模型會不知道圖是哪來的）
+    # 追問：手上一張圖都沒有時，沿回覆鏈往前找圖；是哪一則的圖由圖片清單講
     if (not pics and not has_image and replied_msg is not None and replied_to_text is not None
             and not _has_image(replied_msg)):
         found = await _reply_chain_image(bot, message, replied_msg)
@@ -1655,7 +1725,6 @@ async def _gather_inputs(
                 budget, [_PicSource(earlier, _CHAIN, _ATTACHED, remote=_attached(earlier))])
             if chain:
                 pics += chain
-                replied_to_text = replied_to_text + "\n" + _reply_chain_image_note(earlier)
                 logger.info("ambient 追問補附圖 trace=%s 往回第 %d 則（%s 貼的）%d 張",
                             trace_id, hops, name_with_anchor(earlier.author), sum(len(p.frames) for p in chain))
     image_payload: Optional[list[str]] = [frame for pic in pics for frame in pic.frames] or None
@@ -1689,6 +1758,7 @@ async def _gather_inputs(
     return _Inputs(
         trace_id=trace_id, system_prompt=system_prompt, prompt_text=prompt_text,
         chat_context=chat_context, thread_map=thread_map, hook=hook, image_payload=image_payload,
+        image_note=_picture_list(pics, message, thread_map, directed),
         replied_msg=replied_msg, replied_to_from=replied_to_from, replied_to_text=replied_to_text,
         asker_for_bundle=asker_for_bundle, bot_display_name=bot_display_name,
         search_tools=search_tools, today=_today_line(datetime.now(APP_TZ)),
@@ -1778,6 +1848,7 @@ async def _generate(inputs: _Inputs, ambient_model: str, directed: bool) -> tupl
         # 時間關係的負擔，判斷仍歸它。directed 時 hook 為 None，不帶（對方在直接跟它說話）。
         situation_signals=(hook.signals if hook is not None else None) or None,
         images=inputs.image_payload,
+        image_note=inputs.image_note,
         model=ambient_model,
         bot_display_name=inputs.bot_display_name,
         asker_display_name=inputs.asker_for_bundle,
