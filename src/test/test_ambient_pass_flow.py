@@ -358,6 +358,21 @@ class PassFlowTests(unittest.TestCase):
         self.assertIn("(貼了一張圖)", kw["chat_context"][-1])
         self.assertEqual(["IMG1"], kw["images"])
 
+    def test_a_bare_mention_is_not_said_to_carry_a_picture_that_someone_else_posted(self):
+        picture = self._said("", 6000, 3, image=True)
+        self.replied = picture
+        self.images[6000] = ["THEIRS"]
+        self._run(_message("", reference=SimpleNamespace(message_id=6000, resolved=None)), directed=True)
+        kw = self._generate_kwargs()
+        self.assertEqual(["THEIRS"], kw["images"])
+        self.assertEqual("(對方只 @ 了我，沒有文字)", kw["prompt"], "圖是被回覆那則的，不是發問的人貼的")
+
+        self.llm.generate_reply.reset_mock()
+        own = _message("", attachments=[_att(7001)])
+        self.images[7001] = ["MINE"]
+        self._run(own, directed=True)
+        self.assertEqual("(對方貼了一張圖)", self._generate_kwargs()["prompt"])
+
     def test_replied_to_message_is_quoted_truncated_and_its_images_added(self):
         replied = _message("甲" * 300, author_id=EARLIER_AUTHOR, mid=6000,
                            attachments=[SimpleNamespace(filename="b.jpg", size=10)])

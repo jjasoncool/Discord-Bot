@@ -1789,8 +1789,8 @@ async def _gather_inputs(
     image_payload: Optional[list[str]] = [frame for pic in pics for frame in pic.frames] or None
 
     prompt_text, chat_context, asker_for_bundle = _frame_latest(
-        message, directed, stripped, image_payload, latest_notes, chat_context, thread_map, asker_display_name,
-        latest_link_note,
+        message, directed, stripped, any(pic.source.id == message.id and pic.kind == _ATTACHED for pic in pics),
+        latest_notes, chat_context, thread_map, asker_display_name, latest_link_note,
     )
 
     # 認得人——召回在場成員 persona card（best-effort；用真正的觸發文字當檢索 query）
@@ -1828,10 +1828,13 @@ async def _gather_inputs(
 
 
 def _frame_latest(
-    message, directed: bool, stripped: str, image_payload: Optional[list], latest_notes: list,
+    message, directed: bool, stripped: str, posted_picture: bool, latest_notes: list,
     chat_context: Optional[list], thread_map: dict, asker_display_name: str, link_note: str = "",
 ) -> tuple[str, Optional[list], Optional[str]]:
     """「最新訊息」怎麼包：被點名與自發分開。回 (prompt_text, chat_context, asker_for_bundle)。
+
+    posted_picture：最新這則自己貼的圖有沒有送到模型手上。附的圖也可能是別則的（被回覆的、聊天紀錄裡的），
+    那種不能說成「對方貼了一張圖」。
 
     被 @/reply：對方真的在跟你說話 → 維持 <latest_user_message from=發話者>。
     自發插話：把觸發訊息併進「你旁觀到的對話」，latest 換成中性自我提示、且不帶 from——
@@ -1840,7 +1843,7 @@ def _frame_latest(
     if directed:
         if stripped:
             prompt_text = stripped + link_note
-        elif image_payload:
+        elif posted_picture:
             prompt_text = "(對方貼了一張圖)"
         else:
             prompt_text = "(對方只 @ 了我，沒有文字)"
@@ -1861,7 +1864,7 @@ def _frame_latest(
             + "".join(f" {n}" for n in latest_notes)
         ]
         thread_map[next_no] = message
-    elif image_payload:
+    elif posted_picture:
         chat_context = (chat_context or []) + [f"#{next_no} [{ts}] {asker_display_name}: (貼了一張圖)"]
         thread_map[next_no] = message
     prompt_text = (

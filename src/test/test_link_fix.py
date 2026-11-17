@@ -578,10 +578,10 @@ class WiredInTests(unittest.TestCase):
     def test_latest_message_carries_its_link_note_exactly_once(self):
         msg = _msg(10, "這是什麼 https://youtu.be/x", A, embeds=[BILI])
         note = " [預覽：從轉貼拿的]"
-        prompt, _, _ = ambient_reply._frame_latest(msg, True, "這是什麼 https://youtu.be/x", None, [], [], {},
+        prompt, _, _ = ambient_reply._frame_latest(msg, True, "這是什麼 https://youtu.be/x", False, [], [], {},
                                                    "群友A#1234", note)
         self.assertEqual(prompt, "這是什麼 https://youtu.be/x [預覽：從轉貼拿的]")
-        _, ctx, _ = ambient_reply._frame_latest(msg, False, "這是什麼 https://youtu.be/x", None, [], [], {},
+        _, ctx, _ = ambient_reply._frame_latest(msg, False, "這是什麼 https://youtu.be/x", False, [], [], {},
                                                 "群友A#1234", note)
         self.assertEqual(ctx[-1].count("[預覽："), 1, ctx[-1])
         self.assertTrue(ctx[-1].endswith("https://youtu.be/x [預覽：從轉貼拿的]"), ctx[-1])
