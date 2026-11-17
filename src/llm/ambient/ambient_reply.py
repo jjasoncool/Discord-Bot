@@ -32,9 +32,9 @@
 - 被回覆的那則、最新那則有連結時補上 Discord 抓到的預覽與縮圖；被轉過的原訊息預覽在轉貼上，從 bot 的訊息快取找。
 - 有附圖就給圖片清單（`_picture_list`，放 user 段的 <image_instruction>）：每張是誰、在哪一則貼的，聊天紀錄裡哪幾行的圖
   沒附。圖另外送，文字裡看不出哪張對哪一行，不講模型會把圖安到別人頭上。
-- 圖照固定順序收，收滿就停：最新那則 → 被回覆那則 → 回覆鏈再往前（時限與層數有上限）→ 聊天紀錄裡被人回覆過的圖，
-  都是近的優先；同一則裡群友自己貼的圖先、貼文表情與預覽上的圖後。一輪最多 `image_max_pictures` 張，動圖算一張、
-  最多 `image_max_animated` 張。
+- 圖照固定順序收，收滿就停：最新那則 → 被回覆那則 → 回覆鏈再往前（時限與層數有上限；鏈上是它自己的話，先收它當時
+  對著講的那一則）→ 聊天紀錄裡被人回覆過的圖，都是近的優先；同一則裡群友自己貼的圖先、貼文表情與預覽上的圖後。
+  一輪最多 `image_max_pictures` 張，動圖算一張、最多 `image_max_animated` 張。
 
 例外與決策：靜默期依對話節奏切換（熱聊等不到安靜，而且插話本來就不需要空檔）；純機率的減壓閥已被鉤子閘取代
 （隨機丟棄會丟掉好時機、留下爛時機，鉤子有判斷依據）。
@@ -61,6 +61,7 @@ from llm.storage.ai_interactions_store import (
     is_tracked_reply,
     mark_got_reply,
     record_interaction,
+    trigger_message_id,
 )
 from llm.ambient import ambient_insult, ambient_search, ambient_style_lines
 from llm.storage import deleted_and_edited
@@ -706,6 +707,7 @@ def _attached(message: discord.Message) -> list[RemoteImage]:
 _TRIGGER = "trigger"    # 觸發這次評估的那則
 _REPLIED = "replied"    # 它直接回覆的那則
 _CHAIN = "chain"        # 回覆鏈再往前的
+_SEEN = "seen"          # 回覆鏈上它自己的話，當時是看了這則才講的
 _WINDOW = "window"      # 聊天紀錄視窗裡被人回覆過的
 # 那則訊息的哪一種圖
 _ATTACHED = "attached"  # 貼上去的附件
@@ -720,6 +722,7 @@ class _Pic:
     source: discord.Message
     role: str
     kind: str
+    clue: str = ""      # 圖片清單上多講的一句（認得出這張的線索）
 
 
 @dataclass
@@ -733,6 +736,7 @@ class _PicSource:
     kind: str
     remote: list[RemoteImage] = field(default_factory=list)
     ready: list[str] = field(default_factory=list)
+    clue: str = ""
     missed: int = 0
 
 
@@ -794,12 +798,12 @@ async def _collect_pictures(budget: _PicBudget, sources: list[_PicSource]) -> li
                     source.missed += 1
                     continue
                 budget.take(got.frames)
-                pics.append(_Pic(got.frames, source.message, source.role, source.kind))
+                pics.append(_Pic(got.frames, source.message, source.role, source.kind, source.clue))
             for frame in source.ready:
                 if budget.full:
                     break
                 budget.take([frame])
-                pics.append(_Pic([frame], source.message, source.role, source.kind))
+                pics.append(_Pic([frame], source.message, source.role, source.kind, source.clue))
     finally:
         if session is not None:
             await session.close()
@@ -869,7 +873,7 @@ def _picture_origin(
     else:
         what = f"{posted} 那則裡 X 貼文或表情貼圖的圖"
 
-    clues: list[str] = []
+    clues: list[str] = [pic.clue] if pic.clue else []
     replied_by = [f"#{no}" for no, m in sorted(thread_map.items())
                   if getattr(getattr(m, "reference", None), "message_id", None) == source.id]
     if directed and getattr(getattr(trigger, "reference", None), "message_id", None) == source.id:
@@ -942,14 +946,30 @@ async def _referenced_message(bot, msg: discord.Message) -> Optional[discord.Mes
     resolved = getattr(ref, "resolved", None)
     if isinstance(resolved, discord.Message):
         return resolved
-    cached = _cached_message(bot, mid)
+    return await _message_by_id(bot, msg.channel, mid)
+
+
+async def _message_by_id(bot, channel, message_id: int) -> Optional[discord.Message]:
+    """這個頻道的某一則訊息：先看 bot 的訊息快取，沒有才問一次 API；已刪或抓不到回 None。"""
+    cached = _cached_message(bot, message_id)
     if cached is not None:
         return cached
     try:
-        return await msg.channel.fetch_message(mid)
+        return await channel.fetch_message(message_id)
     except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
-        logger.debug("ambient 補抓被回覆的訊息失敗：%s", exc)
+        logger.debug("ambient 補抓訊息失敗：%s", exc)
     return None
+
+
+async def _seen_by_bot(bot, said: discord.Message) -> Optional[discord.Message]:
+    """它自己的這句話當時是對著哪一則講的（互動紀錄記著觸發訊息）；不是它的插話、查不到、那則已刪回 None。"""
+    me = getattr(bot, "user", None)
+    if me is None or said.author.id != me.id or is_link_repost(said):
+        return None
+    trigger_id = await asyncio.to_thread(trigger_message_id, str(said.id))
+    if not trigger_id:
+        return None
+    return await _message_by_id(bot, said.channel, int(trigger_id))
 
 
 def _waits_for_previews(bot, msg: discord.Message) -> bool:
@@ -995,26 +1015,38 @@ async def _link_preview_context(bot, msg: discord.Message) -> tuple[str, list[Re
 async def _chain_pictures(
     bot, budget: _PicBudget, trigger: discord.Message, replied: discord.Message, taken: set,
 ) -> list[_Pic]:
-    """被回覆那則再往前，沿回覆鏈收圖：近的優先，收滿就不再往回讀。
+    """沿回覆鏈往前收圖：近的優先，收滿就不再往回讀。被回覆那則自己的圖呼叫端已經收了，這裡從它開始往前走。
 
-    追問到第二層以後，圖不在觸發那則、也不在它直接回的那則，模型手上沒圖卻不知道（會編「看不清楚」）。
-    話題可能早就換了，所以只看觸發前 `reply_chain_image_max_age_seconds` 內的訊息；回覆只會指向更早的訊息，
-    碰到一則太舊的就停。層數上限只防一直往回讀（觸發那則回的算第 1 則）。只認附件：X 貼文、連結預覽的圖要
-    另外下載或打外部服務。`taken` 是已經收過的訊息，收了就記進去。
+    - 鏈上是它自己的插話：收它當時對著講的那一則的圖（它的插話本身不帶圖）。它回話是用回覆指向模型選的那一句，
+      不一定是觸發它的那則，順著回覆走會走到別張圖去；而它不記得上一輪看了什麼，有人追問「你看清楚」時手上得是同一張。
+    - 其他訊息：收它自己貼的圖。追問到第二層以後，圖不在觸發那則、也不在它直接回的那則，模型手上沒圖卻不知道
+      （會編「看不清楚」）。話題可能早就換了，所以只看觸發前 `reply_chain_image_max_age_seconds` 內的訊息；回覆只會
+      指向更早的訊息，碰到一則太舊的就停。層數上限只防一直往回讀（觸發那則回的算第 1 則）。
+    只認附件：X 貼文、連結預覽的圖要另外下載或打外部服務。`taken` 是已經收過的訊息，收了就記進去。
     """
     pics: list[_Pic] = []
     max_age = timedelta(seconds=_SETTINGS.reply_chain_image_max_age_seconds)
     msg: Optional[discord.Message] = replied
-    for _hop in range(2, _SETTINGS.reply_chain_image_max_hops + 1):
+    for hop in range(1, _SETTINGS.reply_chain_image_max_hops + 1):
         if budget.full:
             break
-        msg = await _referenced_message(bot, msg)
-        if msg is None or trigger.created_at - msg.created_at > max_age:
-            break
-        if msg.id in taken:
+        if hop > 1:
+            msg = await _referenced_message(bot, msg)
+            if msg is None or trigger.created_at - msg.created_at > max_age:
+                break
+        seen = await _seen_by_bot(bot, msg)
+        if seen is not None:
+            said_at = msg.created_at.astimezone(APP_TZ).strftime("%H:%M")
+            source = _PicSource(seen, _SEEN, _ATTACHED, remote=_attached(seen),
+                                clue=f"你 {said_at} 那句就是看了這張講的")
+        elif hop > 1:
+            source = _PicSource(msg, _CHAIN, _ATTACHED, remote=_attached(msg))
+        else:
+            continue    # 被回覆那則自己的圖，呼叫端已經收了
+        if source.message.id in taken:
             continue
-        taken.add(msg.id)
-        pics += await _collect_pictures(budget, [_PicSource(msg, _CHAIN, _ATTACHED, remote=_attached(msg))])
+        taken.add(source.message.id)
+        pics += await _collect_pictures(budget, [source])
     return pics
 
 

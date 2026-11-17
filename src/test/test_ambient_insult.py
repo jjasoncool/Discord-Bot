@@ -261,6 +261,7 @@ class PassTests(unittest.TestCase):
             # 只有觸發那則回了 replied；再往前沒有回覆關係（追問補附圖不往回追）
             _referenced_message=mock.AsyncMock(side_effect=lambda bot, msg: replied if msg is message else None),
             _media_context=mock.AsyncMock(return_value=([], [])),
+            trigger_message_id=lambda _reply_id: None,   # 被回覆的是它的話時會查它當時看了哪一則：不碰資料庫
             _build_persona_context=mock.AsyncMock(return_value=None),
             recall_lines=mock.AsyncMock(return_value=None),
             recall_signature_tags=mock.AsyncMock(return_value=None),

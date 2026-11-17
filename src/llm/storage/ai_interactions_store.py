@@ -15,6 +15,7 @@ import time
 from collections import deque
 from typing import Any, Optional
 
+import psycopg2
 
 from sys_settings import switches
 from sys_settings.llm_settings import AmbientChatSettings, LLMServiceSettings, pg_savepoint
@@ -248,6 +249,29 @@ def record_interaction(
             conn.close()
     except Exception as exc:
         logger.warning("ai_interactions 寫入失敗 trace=%s：%s", trace_id, exc)
+
+
+def trigger_message_id(reply_message_id: str) -> Optional[str]:
+    """它這句話（`reply_message_id`）當時是被哪一則觸發的 → 那則的訊息 id；不是插話、查不到回 None。sync。
+
+    有人追問它的話時用：它不記得上一輪看了什麼，要知道那句話是對著哪一則講的，才能把當時的圖再附一次。
+    """
+    try:
+        conn = _get_conn()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT trigger_message_id FROM {_TABLE} WHERE reply_message_id = %s ORDER BY id DESC LIMIT 1",
+                        (str(reply_message_id),),
+                    )
+                    row = cur.fetchone()
+                    return str(row[0]) if row and row[0] else None
+        finally:
+            conn.close()
+    except psycopg2.Error as exc:
+        logger.warning("ai_interactions 查觸發訊息失敗 reply=%s：%s", reply_message_id, exc)
+        return None
 
 
 def mark_got_reply(

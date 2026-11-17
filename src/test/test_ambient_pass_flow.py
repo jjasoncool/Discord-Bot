@@ -9,6 +9,7 @@
 一輪最多給模型 3 張圖（動圖算一張、最多 1 張，那張照樣帶全部的幀），收滿就不再抓：最新那則 → 被回覆那則 →
 回覆鏈再往前（只追一小時內、最多 6 則，近的優先）→ 聊天紀錄裡被人回覆過的圖（近的優先；沒人回覆的不收）。
 自己貼的圖沒抓到時，補上的舊圖要標明是更早的一則。
+回覆鏈上是它自己的話：先附它當時對著講的那一則的圖（查互動紀錄；它的自動轉貼、別人的話不查）。
 被回覆那則、最新那則的圖（附件、連結預覽）抓不到時，在那則後面標「（這張圖沒抓到）」，模型才不會自己編看不到的理由。
 有附圖就給圖片清單：每張是誰、在哪一則貼的（發問的這則／聊天紀錄第幾行／更早的一則）、動圖是同一張的幾幀、
 預覽與貼文的圖不說成群友貼的、聊天紀錄裡哪幾行的圖沒附；沒附圖就沒有清單。
@@ -30,8 +31,10 @@ if SRC_DIR not in sys.path:
 
 import discord  # noqa: E402
 
+import psycopg2  # noqa: E402
+
 from llm.ambient import ambient_insult, ambient_reply, ambient_search, ambient_style_lines  # noqa: E402
-from llm.storage import deleted_and_edited  # noqa: E402
+from llm.storage import ai_interactions_store, deleted_and_edited  # noqa: E402
 from llm.ambient.ambient_hooks import HookDecision  # noqa: E402
 from llm.preprocess.vision_image import VisionFetch  # noqa: E402
 from sys_settings import switches  # noqa: E402
@@ -114,6 +117,9 @@ class PassFlowTests(unittest.TestCase):
         self.images = {}           # id → 那則每張附件抓到的圖（一張是字串，動圖是幾幀的清單）；沒列的就是沒抓到
         self.fetched = []          # 真的去抓了哪些網址
         self.preview_frames = {}   # 預覽縮圖的網址 → 抓到的圖
+        self.said_about = {}       # 它的某句話（訊息 id）→ 當時觸發它的那則的 id（互動紀錄）
+        self.asked_about = []      # 查過哪幾句話的互動紀錄
+        self.by_id = {}            # 用 id 還讀得到的訊息
         self.grudges = {}
         self.persona_cards = None
         self.memory_lines = None
@@ -153,6 +159,10 @@ class PassFlowTests(unittest.TestCase):
             self.looked_up.append(msg.id)
             return self.replied if msg is message else self.chain.get(msg.id)
 
+        def _trigger_of(reply_id):
+            self.asked_about.append(int(reply_id))
+            return self.said_about.get(int(reply_id))
+
         async def _grudges(guild_id):
             return dict(self.grudges)
 
@@ -169,6 +179,8 @@ class PassFlowTests(unittest.TestCase):
             _referenced_message=mock.AsyncMock(side_effect=_referenced),
             _media_context=mock.AsyncMock(side_effect=_media),
             fetch_for_vision=_fetch_picture,
+            trigger_message_id=_trigger_of,
+            _message_by_id=mock.AsyncMock(side_effect=lambda bot, channel, mid: self.by_id.get(mid)),
             _build_persona_context=mock.AsyncMock(return_value=self.persona_cards),
             recall_lines=mock.AsyncMock(return_value=self.memory_lines),
             recall_signature_tags=mock.AsyncMock(return_value=self.tag_lines),
@@ -640,6 +652,54 @@ class PassFlowTests(unittest.TestCase):
         self.assertIsNone(kw["replied_to_text"])
         self.assertIn("沿著這串回覆往前找到的", kw["image_note"], "圖是哪來的由圖片清單講")
 
+    # ── 追問它的話：先附它當時對著講的那一則的圖 ──
+    def _it_said(self, text, mid, minutes_ago, *, about=None):
+        """它的一句插話；about 是當時觸發它的那則（互動紀錄記的），給了就讀得到。"""
+        said = _message(text, author_id=BOT_ID, mid=mid, created_at=NOW - timedelta(minutes=minutes_ago))
+        if about is not None:
+            self.said_about[mid] = str(about.id)
+            self.by_id[about.id] = about
+        return said
+
+    def test_asking_about_what_it_said_brings_back_the_picture_it_was_looking_at(self):
+        # 實例：它看了甲後來貼的哭臉，用回覆指向的卻是乙那句「我沒哭」（那句回的是更早的梗圖）。乙回它
+        # 「你看一下圖是誰發的」：只順著回覆走會附到梗圖，它手上就不是當初看的那張
+        meme = self._said("", 6000, 9, image=True)
+        crying = self._said("", 6002, 6, image=True)
+        self._chain(self._it_said("淚都噴到麥克風上了欸，沒哭。", 6003, 4, about=crying),
+                    self._said("我沒哭", 6001, 7), meme)
+        self.images[6000], self.images[6002] = ["MEME"], ["CRYING"]
+        self._run(_message("你看一下圖是誰發的好嗎"), directed=True)
+        kw = self._generate_kwargs()
+        self.assertEqual(["CRYING", "MEME"], kw["images"], "它當時看的那張排前面")
+        lines = self._list()
+        self.assertTrue(lines[1].endswith("19:54 貼的（你 19:56 那句就是看了這張講的）"), lines[1])
+        self.assertIn("沿著這串回覆往前找到的", lines[2])
+
+    def test_the_picture_it_looked_at_is_taken_once_when_it_also_replied_to_it(self):
+        picture = self._said("這張好笑", 6000, 6, image=True)
+        self._chain(self._it_said("確實", 6001, 4, about=picture), picture)
+        self.images[6000] = ["PIC"]
+        self._run(_message("哪裡好笑"), directed=True)
+        self.assertEqual(["PIC"], self._generate_kwargs()["images"])
+        self.assertIn("那句就是看了這張講的", self._list()[1])
+
+    def test_only_its_own_talk_is_looked_up_in_the_interaction_records(self):
+        repost = _message("https://fixupx.com/a/status/1", author_id=BOT_ID, mid=6002,
+                          created_at=NOW - timedelta(minutes=3))
+        repost.author.bot = True                                # 它的自動轉貼不是插話
+        self._chain(self._said("回你", 6003, 2), repost, self._said("更早", 6001, 5))
+        self._run(_message("所以呢"), directed=True)
+        self.assertEqual([], self.asked_about)
+
+    def test_what_it_looked_at_is_skipped_when_that_message_is_gone(self):
+        gone = self._said("", 6000, 6, image=True)
+        self._chain(self._it_said("確實", 6001, 4, about=gone))
+        self.by_id.clear()                                      # 那則已刪，讀不到
+        self._run(_message("哪裡好笑"), directed=True)
+        self.assertEqual([6001], self.asked_about)
+        self.assertIsNone(self._generate_kwargs()["images"])
+
     def test_a_failed_download_of_the_chain_picture_adds_nothing(self):
         self._chain(self._said("回你", 6001, 6), self._said("", 6000, 9, image=True))
         self._run(_message("那背景呢"), directed=True)
@@ -968,6 +1028,36 @@ class ReferencedMessageTests(unittest.TestCase):
         msg = _Fetched(2)
         self.assertIsNone(self._lookup(msg))
         msg.channel.fetch_message.assert_not_awaited()
+
+
+class TriggerOfItsReplyTests(unittest.TestCase):
+    """互動紀錄：它的某句話當時是被哪一則觸發的。查不到、資料庫出錯都回 None（照舊沿回覆鏈找圖）。"""
+
+    def _conn(self, row):
+        self.cur = mock.MagicMock()
+        self.cur.__enter__.return_value = self.cur
+        self.cur.fetchone.return_value = row
+        conn = mock.MagicMock()
+        conn.__enter__.return_value = conn
+        conn.cursor.return_value = self.cur
+        return conn
+
+    def test_the_trigger_is_looked_up_by_the_id_of_what_it_said(self):
+        with mock.patch.object(ai_interactions_store, "_get_conn", return_value=self._conn(("6002",))):
+            self.assertEqual("6002", ai_interactions_store.trigger_message_id(6003))
+        sql, params = self.cur.execute.call_args.args
+        self.assertIn("WHERE reply_message_id = %s", sql)
+        self.assertEqual(("6003",), params, "資料庫裡的 id 是字串")
+
+    def test_not_one_of_its_interjections_is_none(self):
+        for row in (None, (None,)):
+            with mock.patch.object(ai_interactions_store, "_get_conn", return_value=self._conn(row)):
+                self.assertIsNone(ai_interactions_store.trigger_message_id("6003"))
+
+    def test_a_database_error_is_none_and_logged(self):
+        with mock.patch.object(ai_interactions_store, "_get_conn", side_effect=psycopg2.OperationalError("連不上")), \
+                self.assertLogs(ai_interactions_store.logger, "WARNING"):
+            self.assertIsNone(ai_interactions_store.trigger_message_id("6003"))
 
 
 if __name__ == "__main__":
