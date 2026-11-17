@@ -13,7 +13,8 @@
 被回覆那則、最新那則的圖（附件、連結預覽）抓不到時，在那則後面標「（這張圖沒抓到）」，模型才不會自己編看不到的理由。
 有附圖就給圖片清單：每張是誰、在哪一則貼的（發問的這則／聊天紀錄第幾行／更早的一則）、動圖是同一張的幾幀、
 預覽與貼文的圖不說成群友貼的、聊天紀錄裡哪幾行的圖沒附；沒附圖就沒有清單。
-被點名時才帶這個頻道最近被刪的訊息（查觸發那則所在的頻道），自發插話不帶；近況交給改過訊息的附註。
+被點名時才帶這個頻道最近被刪的訊息（查觸發那則所在的頻道；最新那句、被回覆那句、最近幾行聊天交去判斷有沒有人問），
+自發插話不帶；近況交給改過訊息的附註。
 """
 import asyncio
 import os
@@ -113,6 +114,7 @@ class PassFlowTests(unittest.TestCase):
         self.looked_up = []        # 往回讀過哪些訊息的回覆對象
         self.earlier = None
         self.window = []           # 聊天紀錄視窗裡的訊息，照順序是 #1、#2…（給了就不看 earlier）
+        self.chat_lines = ["#1 [12:00] 某人: 前一句"]   # 聊天紀錄那幾行的文字
         self.media = {}            # id → (notes, imgs)
         self.images = {}           # id → 那則每張附件抓到的圖（一張是字串，動圖是幾幀的清單）；沒列的就是沒抓到
         self.fetched = []          # 真的去抓了哪些網址
@@ -140,7 +142,7 @@ class PassFlowTests(unittest.TestCase):
             if thread_map is not None:
                 window = self.window or ([self.earlier] if self.earlier is not None else [])
                 thread_map.update({number: earlier for number, earlier in enumerate(window, start=1)})
-            return (["#1 [12:00] 某人: 前一句"], [msg.author.id])
+            return (list(self.chat_lines), [msg.author.id])
 
         async def _media(msg):
             return self.media.get(msg.id, ([], []))
@@ -166,8 +168,9 @@ class PassFlowTests(unittest.TestCase):
         async def _grudges(guild_id):
             return dict(self.grudges)
 
-        async def _deleted(guild, channel, *, tz):
+        async def _deleted(guild, channel, *, tz, asked):
             self.deleted_calls.append(channel)
+            self.deleted_asked = list(asked)
             return self.deleted
 
         stubs = dict(
@@ -217,6 +220,16 @@ class PassFlowTests(unittest.TestCase):
         self._run(message, directed=True)
         self.assertEqual(self.deleted, self._generate_kwargs()["deleted_messages"])
         self.assertEqual([message.channel], self.deleted_calls)
+
+    def test_whether_someone_asked_is_judged_from_the_trigger_the_replied_message_and_the_last_lines(self):
+        # 問的人常常沒有 @ 她，是下一個人才叫她：最新那句、它回覆的那句、最近幾行聊天都要交去判斷
+        self.replied = _message("他是不是偷刪了", author_id=EARLIER_AUTHOR, mid=6000)
+        self._run(_message("你有看到嗎"), directed=True)
+        self.assertEqual(["你有看到嗎", "他是不是偷刪了", "#1 [12:00] 某人: 前一句"], self.deleted_asked)
+
+        self.chat_lines = [f"#{n} [12:0{n}] 某人: 第 {n} 行" for n in range(1, 8)]
+        self._run(_message("你有看到嗎"), directed=True)
+        self.assertEqual(self.chat_lines[-5:], self.deleted_asked[2:], "只看最近幾行，更早的話題不算")
 
     def test_spontaneous_replies_never_look_at_deleted_messages(self):
         self._run(_message("這波真的很誇張"))

@@ -4,6 +4,7 @@
   - 只給作者自己刪的：管理員或 bot 刪的、不知道誰刪的，被刪的那則和前後文裡都不給
   - 被刪的那則標【已刪，發出後幾秒刪掉】，前後文照時間排、帶名字#尾碼；重疊的併成一段、不重疊的空一行分開；最多 3 則
   - 含電話、email、一長串數字的被刪訊息，內容換成不給看；只有附件的寫 (附件)
+  - 有人問到才帶（最新那句、被回覆的那句、最近幾行聊天裡有「刪、收回、剛剛說了什麼」這類字）；沒問到不帶也不查
   - 開關關著不查；資料庫出錯不帶、記 WARNING
   - 改過的訊息附「（改過，原本打：…）」：只差空白標點不附、bot 的不附、沒改過的不查；原文的 @ 換成名字、太長截斷
   - 插話整理近況時把附註函式交給 fetch_recent_lines
@@ -76,8 +77,8 @@ class DeletedContextTests(unittest.IsolatedAsyncioTestCase):
         self.enterContext(mock.patch.object(raw_message_store, "rows_around", rows_around))
         self.enterContext(mock.patch.object(de.switches, "current", lambda: self.switch))
 
-    async def _context(self):
-        return await de.deleted_context(_guild(), SimpleNamespace(id=77), tz=TZ8)
+    async def _context(self, asked=("剛剛誰刪了什麼",)):
+        return await de.deleted_context(_guild(), SimpleNamespace(id=77), tz=TZ8, asked=asked)
 
     async def test_a_self_deleted_message_comes_with_what_was_said_around_it(self):
         self.deleted = [_gone("d1", A, "儲值跟 @我 請款", at=10)]
@@ -128,6 +129,21 @@ class DeletedContextTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_nothing_deleted_means_no_block(self):
         self.assertIsNone(await self._context())
+
+    async def test_nobody_asking_means_no_block_and_no_query(self):
+        # 這段一帶就是幾十行：沒人問到被刪的訊息就不帶，連資料庫都不查
+        self.deleted = [_gone("d1", A, "打錯了", at=10)]
+        self.error = AssertionError("沒人問不該查")
+        for asked in ((), ("今天抽卡又歪了", None, ""), ("你看一下圖是誰發的好嗎", "#3 [12:11] 乙#0002: (圖)")):
+            with self.subTest(asked=asked):
+                self.assertIsNone(await self._context(asked))
+
+    async def test_asking_in_any_of_the_texts_brings_it(self):
+        self.deleted = [_gone("d1", A, "打錯了", at=10)]
+        for asked in (("我剛剛說了什麼",), ("你有看到嗎", "他是不是把訊息收回了"), ("笑死", None, "#9 [20:01] 乙#0002: 誰又偷刪"),
+                      ("剛才那則訊息是什麼",), ("他講了啥",), ("who DELETED it",)):
+            with self.subTest(asked=asked):
+                self.assertIn("打錯了", "\n".join(await self._context(asked)))
 
     async def test_switch_off_does_not_look(self):
         self.switch.deleted_messages_mode = "off"

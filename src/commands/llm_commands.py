@@ -881,8 +881,9 @@ class LLMCommands(commands.Cog):
         if tweet_images or emoji_images:
             image_payload = (image_payload or []) + tweet_images + emoji_images
 
-        # 這個頻道最近被刪的訊息：/askai 就是有人在問，有刪除就帶上，講不講由模型看前後文判斷
-        deleted_messages = await deleted_and_edited.deleted_context(guild, interaction.channel, tz=APP_TZ)
+        # 這個頻道最近被刪的訊息：問到才帶（看問題裡的字眼），講不講由模型看前後文判斷
+        deleted_messages = await deleted_and_edited.deleted_context(
+            guild, interaction.channel, tz=APP_TZ, asked=[question])
 
         image_meta = None
         if image and image_payload:

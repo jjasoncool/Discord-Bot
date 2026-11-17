@@ -1661,6 +1661,8 @@ async def _pass_gates(bot, message, directed: bool, followup: bool, burst: Optio
 
 
 _WEEKDAYS = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
+#: 判斷「有沒有人在問被刪的訊息」時，往回看幾行聊天：問的人常常沒有 @ 她，是下一個人才叫她
+_DELETED_ASK_LINES = 5
 
 
 def _today_line(now: datetime) -> str:
@@ -1810,9 +1812,12 @@ async def _gather_inputs(
         (persona_cards or []) + (memory_lines or []) + (tag_lines or [])
     ) or None
     search_tools = await _prepare_search_tools(message, stripped, participant_ids, trace_id)
-    # 被刪的訊息只在被點名時帶：沒人問就不必給，自發插話也不該主動翻出來
-    deleted_messages = (await deleted_and_edited.deleted_context(message.guild, message.channel, tz=APP_TZ)
-                        if directed else None)
+    # 被刪的訊息只在被點名、而且有人問到的時候帶（最新那句、它回覆的那句、最近幾行聊天裡有沒有問）：
+    # 沒人問就不必給，自發插話也不該主動翻出來
+    deleted_messages = (await deleted_and_edited.deleted_context(
+        message.guild, message.channel, tz=APP_TZ,
+        asked=[stripped, replied_to_text, *(chat_context or [])[-_DELETED_ASK_LINES:]],
+    ) if directed else None)
 
     return _Inputs(
         trace_id=trace_id, system_prompt=system_prompt, prompt_text=prompt_text,

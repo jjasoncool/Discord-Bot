@@ -1048,7 +1048,7 @@ RULES = [
         name="原始訊息表的「誰刪的」只在寫入與給模型看的那兩處讀寫：只有作者自己刪的能講、管理員刪的與不知道的一律不給，"
              "這條篩選只有一份（別處自己查已刪的訊息給模型，會把管理員刪掉的東西講出來）",
         pattern=r"deleted_by",
-        canonical="llm.storage.deleted_and_edited.deleted_context(guild, channel, tz=…)",
+        canonical="llm.storage.deleted_and_edited.deleted_context(guild, channel, tz=…, asked=…)",
         allowed={"llm/storage/raw_message_store.py", "llm/storage/deleted_and_edited.py"},
     ),
     Rule(

@@ -7,11 +7,14 @@
     `llm.preprocess.chat_line`（名字#尾碼、@ 換名字）、`sys_settings.switches`。
 
 介面：
-  - `deleted_context(guild, channel, *, tz)`：這個頻道最近被作者自己刪掉的訊息連同前後文，一行一則；沒有、開關關著
-    或查不到回 None。交給 `generate_reply(deleted_messages=…)`，怎麼用寫在 prompt 的 <deleted_messages> 開頭。
+  - `deleted_context(guild, channel, *, tz, asked)`：這個頻道最近被作者自己刪掉的訊息連同前後文，一行一則；沒人問、
+    沒有、開關關著或查不到回 None。`asked` 是要看「有沒有人在問」的幾段文字（最新那句、它回覆的那句、最近幾行聊天）。
+    交給 `generate_reply(deleted_messages=…)`，怎麼用寫在 prompt 的 <deleted_messages> 開頭。
+  - `asks_about_deleted(texts)`：這幾段文字裡有沒有人在問被刪的訊息。
   - `edit_notes(messages)`：{訊息 id: 「（改過，原本打：…）」}，接在近況那一行後面；`fetch_recent_lines(annotate=…)` 用。
 
 規則：
+  - 有人問到才帶（字眼見 `_ASKED`），沒問到連資料庫都不查。
   - 只給作者自己刪的（deleted_by＝作者）：管理員或 bot 刪別人的、判斷不了是誰刪的（NULL）一律不給，前後文裡也拿掉。
   - 只給同一個頻道或討論串、最近 `WINDOW` 內刪的，最多 `MAX_DELETED` 則；每則附前 `BEFORE` 則、刪掉之後到現在最多
     `AFTER` 則，重疊的併成一段。
@@ -24,6 +27,9 @@
   - 管理員刪的不給看：那是處理過的結果（洗版、🔞、罵人），模型從前後文看不出來，講出來等於把刪掉的貼回去。
   - 刪掉之後的訊息比之前的重要（「有鬼」「請po」「你敢 PO 出來…」都在後面），所以後面給得多。
   - 圖、檔案只記「有附件」，刪掉之後拿不回來，只能說附了東西。
+  - 有人問到才帶：這段一帶就是幾十行，比聊天紀錄本身還長，每次被點名都帶會把模型的注意力從當下的對話拉走。
+    判斷只看字眼、不叫模型：多跑一輪生成比多帶一段還貴，而問被刪的訊息幾乎都會講到「刪」或「剛剛說了什麼」。
+    寧可多帶：字眼放寬一點沒關係，漏掉的代價是她答不出來。
 """
 
 from __future__ import annotations
@@ -32,7 +38,7 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone, tzinfo
 from types import SimpleNamespace
-from typing import Optional
+from typing import Iterable, Optional
 
 import psycopg2
 
@@ -58,13 +64,27 @@ _DELETED_FETCH = 20
 # email、八位以上的數字（中間可以夾空白或 -，電話常這樣寫）
 _PRIVATE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+|(?<!\d)(?:\d[ -]?){7,}\d(?!\d)")
 _HIDDEN = "（內容有電話、email 或一長串數字，不給看）"
+# 有人在問被刪的訊息時會出現的字眼：刪、收回這類字，或「剛剛／上面…說了什麼」
+_ASKED = re.compile(
+    r"刪|收回|撤回|不見了|delete"
+    r"|(剛剛|剛才|方才|前面|上面|上一句|上一則).{0,6}(說|講|打|發|貼|傳|po|那句|那則|訊息)"
+    r"|(說|講|打|發|貼|傳)了(什麼|甚麼|啥)",
+    re.IGNORECASE,
+)
 # 比較改前改後時拿掉的：空白、標點、符號（中日韓文字、英數字留著）
 _NOT_WORDS = re.compile(r"[\W_]+")
 
 
-async def deleted_context(guild, channel, *, tz: tzinfo) -> Optional[list[str]]:
-    """這個頻道最近被作者自己刪掉的訊息連同前後文；段與段之間空一行。"""
+def asks_about_deleted(texts: Iterable[Optional[str]]) -> bool:
+    """這幾段文字裡有沒有人在問被刪的訊息（看字眼，見 `_ASKED`）。"""
+    return any(_ASKED.search(text) for text in texts if text)
+
+
+async def deleted_context(guild, channel, *, tz: tzinfo, asked: Iterable[Optional[str]]) -> Optional[list[str]]:
+    """這個頻道最近被作者自己刪掉的訊息連同前後文；段與段之間空一行。`asked` 裡沒有人在問被刪的訊息就不帶。"""
     if switches.current().deleted_messages_mode != "on" or guild is None or channel is None:
+        return None
+    if not asks_about_deleted(asked):
         return None
     channel_id, thread_id = raw_message_store.channel_keys(channel)
     try:

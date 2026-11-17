@@ -7,7 +7,7 @@
   - 有圖時：聊天紀錄縮到 5 則、圖以 base64 交給模型、回覆附圖片網址；圖不合格就什麼都不送、不叫模型；
     附件不先看大小擋，先試 Discord 代理的縮小版，兩邊都太大才回「超過 10MB」，其他抓不到回讀取失敗
   - 網路搜尋：keyword 模式先查好塞 web_context；tool 模式把工具交給工具輪，不先查；off 兩邊都不做
-  - 這個頻道最近被刪的訊息（`deleted_and_edited.deleted_context` 查問的那個頻道）照原樣交給模型；沒有就不帶
+  - 這個頻道最近被刪的訊息（`deleted_and_edited.deleted_context` 查問的那個頻道、把問題交去判斷有沒有問到）照原樣交給模型；沒有就不帶
   - 取消：模型呼叫前已取消就不叫模型、不送回覆；生成途中取消就中斷、不送；不是使用者按的取消（底層連帶取消）
     回「這次沒有順利回答」而且不往外丟
   - 記錄：回應歷史帶 trace_id、模型、think、三種 meta、錯誤類型；prompt 紀錄與 debug 紀錄各寫一筆
@@ -172,8 +172,9 @@ class _Harness:
     async def _prepare_image(self, interaction, image):
         return self.image_payload
 
-    async def _deleted_context(self, guild, channel, *, tz):
+    async def _deleted_context(self, guild, channel, *, tz, asked):
         self.deleted_calls.append((guild, channel))
+        self.deleted_asked = list(asked)
         return self.deleted
 
     def patches(self):
@@ -262,6 +263,7 @@ class AskaiFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(h.deleted, h.prompt["deleted_messages"])
         self.assertEqual(1, len(h.deleted_calls))
         self.assertEqual("閒聊", h.deleted_calls[0][1].name, "查的是問的那個頻道")
+        self.assertEqual(["剛剛誰刪了什麼"], h.deleted_asked, "有沒有人在問，看的是他打的問題")
 
     async def test_no_deleted_messages_means_no_block(self):
         h = await self._harness().run(question="嗨")
