@@ -96,15 +96,13 @@ class MyBot(commands.Bot):
                 self.failed_extensions.append(module)
                 logger.error(f"載入指令模組 {module} 時發生錯誤: {str(e)}", exc_info=True)
 
-        # 同步斜線命令
+        # 只同步全域指令；sync 回傳的就是 Discord 上現在的清單，照它印，不另外再抓一次
         try:
-            logger.info("開始同步斜線命令...")
-            # 同步全局命令
             cmds = await self.tree.sync()
-            logger.info(f"已同步 {len(cmds)} 個全局斜線命令")
-
+            for line in _command_summary(cmds):
+                logger.info(line)
         except Exception as e:
-            logger.error(f"斜線命令同步失敗: {str(e)}", exc_info=True)
+            logger.error(f"應用程式指令同步失敗: {str(e)}", exc_info=True)
 
     async def close(self):
         """停機收尾：docker stop 送 SIGINT 後由 discord.py 呼叫。
@@ -203,7 +201,6 @@ async def on_ready():
     await auto_start_article_monitor(bot)
     await auto_start_telegram_relay(bot)
     await auto_start_notify_server(bot)   # 接收 Scraper webhook 通知
-    await _log_registered_commands()
 
 
 def _log_invite_url() -> None:
@@ -220,10 +217,9 @@ def _log_invite_url() -> None:
     invite_url = discord.utils.oauth_url(
         bot.user.id,
         permissions=permissions,
-        scopes=("bot", "applications.commands"),  # 要含 applications.commands，斜線命令才會出現
+        scopes=("bot", "applications.commands"),  # 要含 applications.commands，斜線指令與右鍵選單才會出現
     )
-    logger.info(f"邀請連結: {invite_url}")
-    logger.info("如果斜線命令未顯示，請使用上面的連結重新邀請機器人，確保包含應用程序命令權限")
+    logger.info(f"邀請連結（斜線指令或右鍵選單沒出現時用它重新邀請）: {invite_url}")
 
 
 async def _preload_stickers() -> None:
@@ -314,14 +310,24 @@ def _start_embedding_backfill() -> None:
         logger.error("ai_interactions embedding 回填啟動失敗: %s", exc, exc_info=True)
 
 
-async def _log_registered_commands() -> None:
-    try:
-        commands = await bot.tree.fetch_commands()
-        logger.info(f"已註冊 {len(commands)} 個全局斜線命令:")
-        for cmd in commands:
-            logger.info(f"  /{cmd.name} - {cmd.description}")
-    except Exception as e:
-        logger.error(f"獲取命令列表失敗: {str(e)}")
+_COMMAND_KINDS = (
+    (discord.AppCommandType.chat_input, "斜線", "/"),
+    (discord.AppCommandType.message, "右鍵訊息", ""),
+    (discord.AppCommandType.user, "右鍵成員", ""),
+)
+
+
+def _command_summary(cmds) -> list[str]:
+    """同步結果的 log：總數一行、每種一行列名字。右鍵選單沒有說明、也不是打 / 叫出來的，分開列才不會被當成斜線指令。"""
+    groups = [
+        (label, sorted(prefix + c.name for c in cmds if c.type == kind))
+        for kind, label, prefix in _COMMAND_KINDS
+    ]
+    groups = [(label, names) for label, names in groups if names]
+    counts = "、".join(f"{label} {len(names)}" for label, names in groups)
+    lines = [f"已同步 {len(cmds)} 個全域指令" + (f"（{counts}）" if counts else "")]
+    lines += [f"  {label}：{'、'.join(names)}" for label, names in groups]
+    return lines
 
 
 # 添加斜線命令交互回應處理
