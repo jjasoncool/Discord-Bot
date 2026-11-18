@@ -444,3 +444,5 @@ UN_PoincoGood = 害羞、不好意思 | neutral
 cry_01 = 哭哭難過 | negative
 FR18 = 害羞、不好意思 | neutral
 emoji_300 = 懷疑、不爽 | negative
+A52_2 = 震驚、嚇到 | think
+41 = 震驚、驚訝 | think
