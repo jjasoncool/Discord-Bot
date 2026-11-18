@@ -73,9 +73,12 @@ class _FakeLLM:
                                           messages_sent=[{"role": "user", "content": "x"}])
         self.block: asyncio.Event | None = None
         self.raise_cancel = False
+        self.models = ["主模型"]      # 每問一次拿下一個、問完停在最後一個：放兩個＝一題中途有人換了模型
+        self.model_asked = 0
 
     def resolve_request_model(self):
-        return "主模型"
+        self.model_asked += 1
+        return self.models[min(self.model_asked, len(self.models)) - 1]
 
     def resolve_request_think(self):
         return True
@@ -172,6 +175,10 @@ class _Harness:
     async def _prepare_image(self, interaction, image):
         return self.image_payload
 
+    def _system_prompt(self, model):
+        self.system_model = model
+        return "SYSTEM"
+
     async def _deleted_context(self, guild, channel, *, tz, asked):
         self.deleted_calls.append((guild, channel))
         self.deleted_asked = list(asked)
@@ -179,7 +186,7 @@ class _Harness:
 
     def patches(self):
         return [
-            mock.patch.object(lc, "load_system_prompt", lambda: "SYSTEM"),
+            mock.patch.object(lc, "load_system_prompt", self._system_prompt),
             mock.patch.object(lc, "note_foreground_activity", lambda: None),
             mock.patch.object(lc, "retrieve_discord_context", self._discord),
             mock.patch.object(lc, "retrieve_rag_context_sync", self._rag),
@@ -255,6 +262,21 @@ class AskaiFlowTests(unittest.IsolatedAsyncioTestCase):
         args, kwargs = h.rag_call
         self.assertEqual(args[3], [2222, 1111], "聊天裡的發言者（去重、照出現順序）交給人物卡檢索")
         self.assertEqual(kwargs["mentioned_user_ids"], ["2222"])
+
+    async def test_the_system_prompt_is_assembled_for_the_model_in_use(self):
+        # 模型補丁照模型名稱挑：組 system 時要把這次用的模型交進去
+        h = await self._harness().run(question="嗨")
+        self.assertEqual("主模型", h.system_model)
+        self.assertEqual("SYSTEM", h.prompt["system"])
+
+    async def test_switching_the_model_midway_keeps_one_question_on_one_model(self):
+        # 補丁是照模型挑的：組 system 用一顆、送出用另一顆，補丁就接到不是它的模型上
+        harness = self._harness()
+        harness.llm.models = ["開始時的模型", "中途換的模型"]
+        h = await harness.run(question="嗨")
+        self.assertEqual("開始時的模型", h.system_model, "補丁照這一題開始時的模型挑")
+        self.assertEqual("開始時的模型", h.prompt["model"], "送出的也是同一顆")
+        self.assertEqual("開始時的模型", h.history[0]["model"], "紀錄寫的是真的送出的那一顆")
 
     async def test_deleted_messages_of_this_channel_reach_the_model(self):
         harness = self._harness()

@@ -1,52 +1,133 @@
 """prompt 組裝：system 段的人設各層怎麼疊、整份 messages 怎麼組，並產生同源的可讀紀錄。
 
-架構定位：技術層（`llm/prompt`），只依賴基礎層（`utils.hot_files`）。
+架構定位：技術層（`llm/prompt`），只依賴基礎層（`utils.hot_files`、`sys_settings.paths`）。
   - 上層（誰呼叫）：`persona_system` 由各場合組自己的 system 時呼叫（/askai `commands.llm_commands`、插話
     `llm.ambient.ambient_reply`、日記 `llm.ambient.ambient_diary`）；`build_prompt_bundle` 由
     `services.llm_service.LLMService.generate_reply` 呼叫（/askai、插話、日記、印象審核都走那裡）。
   - 下層（呼叫誰）：`utils.hot_files`（prompt 檔改了下一次就生效）。
 
 介面：
-  - `persona_system(identity=, guardrails=, rules=, examples=)`：system 段裡跟著人設走的那幾層，疊成一段文字。
+  - `persona_system(identity=, guardrails=, rules=, examples=, model=)`：system 段裡跟著人設走的那幾層，疊成一段文字；
+    `model` 沒有預設值，一定要給。
+  - `model_notes(model)`：這次用的模型的補丁；沒有就空字串。
   - `build_prompt_bundle(...)`：system、聊天紀錄、人物卡、搜尋結果等組成送給模型的 messages 與可讀紀錄。
 
 規則：
-  - system 段的層次只有一份，由前到後：身分 → 守則 → 場合規則 → 範例卡（以上 `persona_system`）
+  - system 段的層次只有一份，由前到後：身分 → 守則 → 場合規則 → 範例卡 → 模型補丁（以上 `persona_system`）
     → 工具的使用規則（`generate_reply`，有工具才有）→ 安全規則 → 發問者資料（以上 `build_prompt_bundle`）。
-    每件事只寫在一層：她是誰寫在身分、不能做的寫在守則、這個場合才有的事寫在場合規則。
+    每件事只寫在一層：她是誰寫在身分、不能做的寫在守則、這個場合才有的事寫在場合規則、某顆模型的壞習慣寫在模型補丁。
     插話在點名的人還在記仇名單時，會在 `persona_system` 回傳的文字後面再接一段【你的心情】：那是插話自己的事，不算這裡的層次。
   - 會變的資料（聊天紀錄、人物卡、圖片清單、今天的日期）都放 user 段：system 段一變，整份提示詞快取都可能重讀。
-  - 身分、守則、場合規則、範例卡一個字都沒讀到就回空字串，呼叫端才退得回自己的預設 prompt。
+  - 模型補丁照模型名稱挑：`settings/prompts/models/` 裡檔名對得上模型名稱的 .txt 全部都接，由粗到細
+    （家族 → 這一代 → 這一版 → 這個大小）。換模型時人設不動，只加或換這裡的檔。
+  - 怎樣算對得上：不分大小寫；`:`、`/`、`_`、空白都當成 `-`（各家後端分段的寫法不同，`abc3.8-27b.txt` 也對得上
+    `abc3.8:27b`）；要從名稱裡任何一段的開頭對起，不能停在一個字或一串數字的中間，數字後面也不能緊接字母
+    （`abc-4` 不算 `abc-4o`）。有沒有分隔符號算不同寫法（`abc4` 對不上 `abc-4`），檔名照實際的模型名稱取。
+  - `model` 給的是送請求的那一顆：補丁對錯模型比沒有補丁更難發現。真的不要補丁才明確給 None。
+  - 補丁只接在有人設的時候：身分、守則、場合規則、範例卡一個字都沒讀到就回空字串，呼叫端才退得回自己的預設 prompt。
+  - 接了哪些補丁檔記一行 INFO；同一個模型名稱只在清單變了才再記。
 
 例外與決策：各場合要哪幾層、哪幾個檔由呼叫端的設定決定（日記不給範例卡）；全部讀不到時用什麼預設的 prompt 也由呼叫端決定。
 """
 
 from __future__ import annotations
 
+import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional, Union
 
+from sys_settings.paths import PROMPTS_DIR
 from utils import hot_files
 
 if TYPE_CHECKING:
     from sys_settings.llm_settings import LLMContextSafetyRules
 
+logger = logging.getLogger(__name__)
+
+#: 模型補丁放這裡：檔名（不含副檔名）寫模型名稱裡任何一段開頭起的一截，寫得越長管得越細（abc／abc3／abc3.8／abc3.8-27b）
+MODEL_NOTES_DIR = PROMPTS_DIR / "models"
+
 PromptPath = Union[str, Path, None]
+
+#: 這些符號在模型名稱裡都只是分段用的，各家後端寫法不同；比對前一律當成 -
+_SEPARATORS = re.compile(r"[:/_\s]")
+
+#: 每個模型名稱上次記過接了哪些補丁檔：清單沒變就不再記，不然每一則回覆都多一行
+_logged_notes: dict[str, tuple[str, ...]] = {}
+
+
+def _normalized(text: str) -> str:
+    """比對用的寫法：小寫、分段的符號統一成 -。"""
+    return _SEPARATORS.sub("-", text.lower())
+
+
+def _found_in_model_name(stem: str, name: str) -> Optional[int]:
+    """檔名在模型名稱裡對上的位置；對不上回 None。兩邊都先過 `_normalized`。
+
+    要從名稱裡某一段的開頭對起（最前面，或接在 - . 這類符號後面），而且不能停在一個字或一串數字的中間，
+    數字後面也不能緊接字母：`abc3` 對得上 `abc3.8-27b`（3 這一代），對不上 `abc35`；`7b` 對不上 `27b`；
+    `abc-4` 對不上 `abc-4o`（那是另一顆）。字母後面接數字算對上（家族名接版本：`abc` 對得上 `abc3.8`）。
+    """
+    start = 0
+    while (at := name.find(stem, start)) != -1:
+        end = at + len(stem)
+        after = name[end:end + 1]
+        cut_short = after.isalnum() and (stem[-1].isdigit() or (stem[-1].isalpha() and after.isalpha()))
+        if (at == 0 or not name[at - 1].isalnum()) and not cut_short:
+            return at
+        start = at + 1
+    return None
+
+
+def _log_attached(model: str, files: tuple[str, ...]) -> None:
+    """這個模型名稱接上的補丁檔和上次記的不一樣（含第一次）才記一行：檔名取錯對不上時，從 log 看得出來。"""
+    if _logged_notes.get(model) == files:
+        return
+    _logged_notes[model] = files
+    if files:
+        logger.info("模型補丁 model=%s 接上：%s", model, "、".join(files))
+    else:
+        logger.info("模型補丁 model=%s 沒有接上任何檔", model)
+
+
+def model_notes(model: Optional[str]) -> str:
+    """這次用的模型的補丁：`settings/prompts/models/` 裡檔名對得上模型名稱的每個 .txt 都接上；沒有就空字串。
+
+    檔名可以粗也可以細，對得上的全部都用，由粗到細接（越細的越後面）：`abc.txt`（整個家族）→ `abc3.txt`（這一代）
+    → `abc3.8.txt`（這一版）→ `abc3.8-27b.txt`（這個大小），再來才是 `27b.txt`、`q4.txt` 這種只講大小或量化的。
+    怎樣算對得上見 `_found_in_model_name`。補丁只寫那顆模型的壞習慣（例：會寫出簡體字），不寫人設。
+    """
+    given = (model or "").strip()
+    if not given:
+        return ""
+    name = _normalized(given)
+    candidates = MODEL_NOTES_DIR.glob("*.txt") if MODEL_NOTES_DIR.is_dir() else ()
+    found = [(at, len(path.stem), path) for path in candidates
+             if path.stem and (at := _found_in_model_name(_normalized(path.stem), name)) is not None]
+    attached = [(path.name, text) for _at, _length, path in sorted(found)
+                if (text := hot_files.read_text(path, label="模型補丁"))]
+    _log_attached(given, tuple(file for file, _text in attached))
+    return "\n\n".join(text for _file, text in attached)
 
 
 def persona_system(
     *, identity: PromptPath = None, guardrails: PromptPath = None, rules: PromptPath = None,
-    examples: PromptPath = None,
+    examples: PromptPath = None, model: Optional[str],
 ) -> str:
     """system 段裡跟著人設走的那幾層 → 一段文字。每一層是一個檔，沒給、讀不到或是空的就略過。
 
-    層次固定：身分（她是誰）→ 守則（紅線與底線）→ 場合規則（這個場合怎麼做）→ 範例卡。
-    四層一個字都沒讀到就回空字串：用什麼預設的 prompt 由呼叫端決定。
+    層次固定：身分（她是誰）→ 守則（紅線與底線）→ 場合規則（這個場合怎麼做）→ 範例卡 → 模型補丁（`model_notes`）。
+    `model` 給送請求的那一顆，沒有預設值：漏給只會少一層，沒有人會發現。
+    前四層一個字都沒讀到就回空字串、不單獨回補丁：只有補丁的 system 沒有人設，呼叫端也退不回自己的預設 prompt。
     """
     layers = (("身分", identity), ("守則", guardrails), ("場合規則", rules), ("範例卡", examples))
     parts = [text for label, path in layers if path and (text := hot_files.read_text(path, label=f"{label} prompt"))]
-    return "\n\n".join(parts)
+    if not parts:
+        return ""
+    notes = model_notes(model)
+    return "\n\n".join(parts + [notes] if notes else parts)
 
 
 @dataclass(frozen=True)

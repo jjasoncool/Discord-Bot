@@ -4,7 +4,7 @@
   層級：基礎層（utils）。只依賴標準庫；不 import llm、services、sys_settings、commands（分層守衛擋）。
   上層（誰呼叫）：
     - prompt 與規則檔：各功能自己讀（llm.retrievers.*、llm.persona.*、llm.preprocess.*、services.relay.telegram_filter）；
-      人設的幾層（身分、守則、場合規則、範例卡）由 llm.prompt.prompt_builder.persona_system 逐檔讀
+      人設的幾層（身分、守則、場合規則、範例卡、模型補丁）由 llm.prompt.prompt_builder.persona_system 逐檔讀
     - config.json：utils.utils.ChannelConfig（驗證最外層是物件、寫入走安全寫入＋備份）
     - settings/switches.json：sys_settings.switches（每個值 pydantic 驗證）
     - LLM runtime 設定：services.llm_service（pydantic 模型、模型名稱空白＝沒設定）

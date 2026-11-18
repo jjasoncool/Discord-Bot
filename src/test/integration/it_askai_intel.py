@@ -54,7 +54,7 @@ async def answer(service: LLMService, question: str, *, trace_id: str, extra_rul
         if extra_rules.strip() and tool_runner is not None:
             tool_runner = _WithExtraRules(tool_runner, extra_rules.strip())
         return await service.generate_reply(
-            prompt=question, system=load_system_prompt(), tool_runner=tool_runner,
+            prompt=question, system=load_system_prompt(service.resolve_request_model()), tool_runner=tool_runner,
             max_tool_rounds=INTEL_SETTINGS.max_tool_rounds,
             trace_id=trace_id,
         )

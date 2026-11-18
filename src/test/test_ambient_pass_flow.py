@@ -178,7 +178,7 @@ class PassFlowTests(unittest.TestCase):
             foreground_recently_active=lambda *_a: self.foreground_active,
             _fetch_recent=mock.AsyncMock(side_effect=_fetch),
             evaluate_hook=mock.AsyncMock(return_value=self.hook),
-            _load_ambient_prompt=lambda: "SYS",
+            _load_ambient_prompt=lambda model: setattr(self, "prompt_model", model) or "SYS",
             _referenced_message=mock.AsyncMock(side_effect=_referenced),
             _media_context=mock.AsyncMock(side_effect=_media),
             fetch_for_vision=_fetch_picture,
@@ -777,6 +777,7 @@ class PassFlowTests(unittest.TestCase):
         self._run(_message(), directed=True)
         kw = self._generate_kwargs()
         self.assertEqual("m", kw["model"])
+        self.assertEqual(kw["model"], self.prompt_model, "組 system 時挑補丁的模型，就是送請求的那一顆")
         self.assertEqual(int(ambient_reply._SETTINGS.pass_timeout_seconds), kw["timeout"])
         self.assertTrue(kw["trace_id"].startswith(f"amb-{CHANNEL_ID}-"))
 

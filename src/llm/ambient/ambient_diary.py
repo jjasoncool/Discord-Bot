@@ -51,12 +51,13 @@ _DEFAULT_DIARY_PROMPT = (
 )
 
 
-def _load_diary_prompt() -> str:
-    """日記的 system：共用的身分與守則、日記規則（層次見 `persona_system`）。不給範例卡。"""
+def _load_diary_prompt(model: Optional[str]) -> str:
+    """日記的 system：共用的身分與守則、日記規則，再接這次用的模型的補丁（層次見 `persona_system`）。不給範例卡。"""
     text = persona_system(
         identity=_SETTINGS.identity_path if _SETTINGS.use_shared_identity else None,
         guardrails=_SETTINGS.guardrails_path,
         rules=_SETTINGS.prompt_path,
+        model=model,
     )
     return text or _DEFAULT_DIARY_PROMPT
 
@@ -187,7 +188,8 @@ async def run_daily_reflection(bot) -> Optional[str]:
         bot_display_name = bot.user.name
 
     llm = _get_llm()
-    model = _SETTINGS.model or llm.resolve_ambient_model()
+    # 先解析成實際會送的那一顆：日記與插話的模型都沒設時請求會退到主模型，補丁要對的是它，不是「沒有模型」
+    model = llm.resolve_request_model(_SETTINGS.model or llm.resolve_ambient_model())
     trace_id = f"diary-{diary_cid}-{int(time.time())}"
     prompt_text = "（一天到了尾聲，回顧今天群裡從早到晚發生的事，寫一段你自己的日記。）"
 
@@ -197,7 +199,7 @@ async def run_daily_reflection(bot) -> Optional[str]:
     )
     result = await llm.generate_reply(
         prompt=prompt_text,
-        system=_load_diary_prompt(),
+        system=_load_diary_prompt(model),
         chat_context=combined_context or None,
         model=model,
         think=_SETTINGS.think,

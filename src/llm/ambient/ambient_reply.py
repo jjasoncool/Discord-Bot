@@ -1,7 +1,7 @@
 """AI 偶爾插話／閒聊：看群裡最新的對話，決定要不要開口、開口說什麼、回到哪一則。
 
 架構定位：功能層（`llm/ambient`）。上層：介面層的 `discord_bot.on_message`（背景 task 執行，不阻塞訊息處理）。
-下層：`services.llm_service.LLMService`（生成）、`llm.prompt.prompt_builder.persona_system`（疊 system 的人設各層）、
+下層：`services.llm_service.LLMService`（生成）、`llm.prompt.prompt_builder.persona_system`（疊 system 的人設各層與模型補丁）、
 `ambient_hooks`（鉤子閘）、`ambient_memory`（偏好與招牌梗召回）、
 `ambient_insult`（被罵的應對與記仇名單）、`ambient_search`（判斷時可以先查一次遊戲情報或網路）、
 `ambient_style_lines`（語氣參考句）、
@@ -133,16 +133,18 @@ def _get_llm() -> LLMService:
     return _LLM_SERVICE
 
 
-def _load_ambient_prompt() -> str:
-    """插話的 system：共用的身分與守則、插話規則、範例卡（層次見 `persona_system`）。
+def _load_ambient_prompt(model: Optional[str]) -> str:
+    """插話的 system：共用的身分與守則、插話規則、範例卡，再接這次用的模型的補丁（層次見 `persona_system`）。
 
     身分與守則跟 /askai、日記是同一份檔，三個場合才是同一個角色；每個檔改了下一次就生效。
+    `model` 由這一輪插話一路傳進來、就是等一下送請求的那一顆：這裡再讀一次設定，中途換模型時補丁會對到別顆。
     """
     text = persona_system(
         identity=_SETTINGS.identity_path if _SETTINGS.use_shared_identity else None,
         guardrails=_SETTINGS.guardrails_path,
         rules=_SETTINGS.prompt_path,
         examples=_SETTINGS.examples_path if _SETTINGS.use_examples else None,
+        model=model,
     )
     return text or _DEFAULT_AMBIENT_PROMPT
 
@@ -1559,7 +1561,7 @@ async def _run_one_ambient_pass(
     gate = await _pass_gates(bot, message, directed, followup, burst)
     if gate is None:
         return
-    inputs = await _gather_inputs(bot, message, directed, followup, gate, stripped, has_image)
+    inputs = await _gather_inputs(bot, message, directed, followup, gate, stripped, has_image, ambient_model)
     if inputs is None:
         return
     outcome, line_choice, reply = await _generate(inputs, ambient_model, directed)
@@ -1655,7 +1657,7 @@ async def _prepare_search_tools(message: discord.Message, stripped: str, partici
 
 async def _gather_inputs(
     bot, message: discord.Message, directed: bool, followup: bool, gate: _Gate,
-    stripped: str, has_image: bool,
+    stripped: str, has_image: bool, ambient_model: str,
 ) -> Optional[_Inputs]:
     """把要給模型看的材料全部備齊；途中的降溫硬閘、鉤子閘、「沒東西可接」擋下就回 None。"""
     cid = message.channel.id
@@ -1694,7 +1696,7 @@ async def _gather_inputs(
             _log_skip(cid, f"鉤子閘未過（{reason}）")
             return None
 
-    system_prompt = _load_ambient_prompt()
+    system_prompt = _load_ambient_prompt(ambient_model)
     grudge = gate.grudges.get(message.author.id) if (directed and not followup) else None
     if grudge is not None:
         # 記仇中的人點名：照回，但帶著心情（怎麼回寫在插話 prompt 的「被 @ 或被回覆時」）

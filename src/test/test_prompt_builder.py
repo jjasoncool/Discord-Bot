@@ -11,13 +11,22 @@
   6. 沒有任何 context 時不放「以下是不可信內容」的開場說明；有給機器人名稱時，就算沒有歷史回覆，
      也保留空殼標籤當身份錨點。
   7. 給了今天的日期，它是 user 段的第一行、在開場說明之前（system 段一變整份快取都可能重讀）；沒給就沒有這行。
-  8. system 段的人設各層只有一個函式疊（`persona_system`）：身分 → 守則 → 場合規則 → 範例卡，沒給、讀不到、
+  8. system 段的人設各層只有一個函式疊（`persona_system`）：身分 → 守則 → 場合規則 → 範例卡 → 模型補丁，沒給、讀不到、
      空的層略過；檔案改了下一次就生效。/askai、插話、日記都交給它。
-  9. 四層一個字都沒讀到就回空字串：插話與日記因此退回各自的預設 prompt。
+  9. 前四層一個字都沒讀到就回空字串，不單獨送補丁：插話與日記因此退回各自的預設 prompt。
+  10. 模型一定要交：`persona_system` 與三個場合的組裝函式漏給就是 TypeError。交給補丁的模型就是交給 `generate_reply`
+      的那一顆；日記的模型與插話的模型都沒設時，是請求會退到的主模型。
+  11. 模型補丁照模型名稱挑：不分大小寫，分段的符號（- : / _ 空白）不分，可以細到版本與大小——家族、這一代、這一版、
+      這個大小的檔對得上的全部都接、由粗到細。要從名稱裡某一段的開頭對起，別的版本、別的大小、數字後面多了字母的不接
+      （`abc3` 不算 `abc35`、`7b` 不算 `27b`、`abc-4` 不算 `abc-4o`）；有沒有分隔符號算不同寫法（`abc4` 不算 `abc-4`）。
+      沒有補丁的模型，組出來的跟沒有這一層時一字不差。
+  12. 接了哪些補丁檔記一行 INFO：同一個模型、同樣的清單只記一次，檔案增減後再記一次，一個都沒接上也記。
+  13. 正式的補丁資料夾裡只放檔名小寫、有內容的 .txt。
 
-安全規則用假的標記字串，只驗證「放在哪裡」，不綁定規則檔的實際文案。
+安全規則用假的標記字串，只驗證「放在哪裡」，不綁定規則檔的實際文案。模型名稱與補丁檔名都是虛構的。
 """
 
+import asyncio
 import os
 import sys
 import unittest
@@ -32,7 +41,8 @@ import tempfile  # noqa: E402
 from pathlib import Path  # noqa: E402
 from unittest import mock  # noqa: E402
 
-from llm.prompt.prompt_builder import build_prompt_bundle, persona_system  # noqa: E402
+from llm.prompt import prompt_builder  # noqa: E402
+from llm.prompt.prompt_builder import build_prompt_bundle, model_notes, persona_system  # noqa: E402
 from utils import hot_files  # noqa: E402
 
 RULES = SimpleNamespace(
@@ -41,6 +51,8 @@ RULES = SimpleNamespace(
     system_safety_prompt="【安全規則】",
 )
 OPEN_TAG, CLOSE_TAG = "<latest_user_message>", "</latest_user_message>"
+#: 虛構的模型名稱：家族接版本、大小、量化各一段
+MODEL = "Abc3.8-27B-Q4"
 
 
 EVERYTHING = dict(
@@ -176,10 +188,13 @@ class PromptBundleContractTests(unittest.TestCase):
 
 
 class PersonaSystemTests(unittest.TestCase):
-    """system 段的人設各層：層次只有一份。"""
+    """system 段的人設各層：層次只有一份，模型補丁照模型名稱挑。"""
 
     def setUp(self):
         self.dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.notes = self.dir / "models"
+        self.enterContext(mock.patch.object(prompt_builder, "MODEL_NOTES_DIR", self.notes))
+        self.enterContext(mock.patch.dict(prompt_builder._logged_notes, clear=True))
         self.addCleanup(hot_files._cache.clear)
 
     def _file(self, name, text):
@@ -193,26 +208,141 @@ class PersonaSystemTests(unittest.TestCase):
                     rules=self._file("rules.txt", "【場合規則】"), examples=self._file("examples.txt", "【範例卡】\n\n"))
 
     def test_layers_are_stacked_in_one_fixed_order(self):
-        self.assertEqual("【身分】\n\n【守則】\n\n【場合規則】\n\n【範例卡】", persona_system(**self._layers()))
+        self.assertEqual("【身分】\n\n【守則】\n\n【場合規則】\n\n【範例卡】", persona_system(**self._layers(), model=None))
 
     def test_a_layer_that_is_not_given_missing_or_empty_is_skipped(self):
         layers = self._layers()
         layers["guardrails"] = self.dir / "沒有這個檔.txt"
         layers["examples"] = None
         self._file("rules.txt", "   \n")
-        self.assertEqual("【身分】", persona_system(**layers))
-        self.assertEqual("", persona_system(rules=self.dir / "沒有這個檔.txt"), "全部讀不到是空字串，預設由呼叫端決定")
+        self.assertEqual("【身分】", persona_system(**layers, model=None))
+        self.assertEqual("", persona_system(rules=self.dir / "沒有這個檔.txt", model=None), "全部讀不到是空字串，預設由呼叫端決定")
+
+    def test_forgetting_the_model_is_an_error(self):
+        # 漏給只會少接一層、沒有人會發現，所以不給預設值；真的不要補丁要明確給 None
+        with self.assertRaises(TypeError):
+            persona_system(**self._layers())
+
+    def test_the_notes_for_the_model_in_use_come_last(self):
+        self._file("models/abc.txt", "【abc 的毛病】\n")
+        self._file("models/xyz.txt", "【xyz 的毛病】")
+        text = persona_system(**self._layers(), model=MODEL)
+        self.assertTrue(text.endswith("【範例卡】\n\n【abc 的毛病】"), text)
+        self.assertNotIn("xyz", text)
+
+    def test_a_model_without_notes_gets_the_same_prompt_as_before(self):
+        self._file("models/abc.txt", "【abc 的毛病】")
+        plain = "【身分】\n\n【守則】\n\n【場合規則】\n\n【範例卡】"
+        for model in ("別家的模型", "", None):
+            self.assertEqual(plain, persona_system(**self._layers(), model=model))
+
+    def test_notes_alone_are_not_a_system_prompt(self):
+        # 人設一個字都沒讀到時不單獨送補丁：回空字串，呼叫端才會退回自己的預設 prompt
+        self._file("models/abc.txt", "【abc 的毛病】")
+        self._file("rules.txt", "  \n")
+        self.assertEqual("【abc 的毛病】", model_notes(MODEL), "補丁本身對得上")
+        self.assertEqual("", persona_system(identity=self.dir / "沒有身分.txt", guardrails=self.dir / "沒有守則.txt",
+                                            rules=self.dir / "rules.txt", examples=None, model=MODEL))
+
+    def test_notes_can_be_as_fine_as_the_version_and_go_from_coarse_to_fine(self):
+        for stem, text in (("abc3.8-27b", "【這個大小】"), ("abc", "【整個家族】"), ("abc3.8", "【這一版】"), ("abc3", "【這一代】"),
+                           ("27b", "【只講大小】"), ("q4", "【只講量化】")):
+            self._file(f"models/{stem}.txt", text)
+        self._file("models/abc.md", "不是補丁：只認 .txt")
+        self.assertEqual("【整個家族】\n\n【這一代】\n\n【這一版】\n\n【這個大小】\n\n【只講大小】\n\n【只講量化】", model_notes(MODEL))
+
+    def test_notes_for_another_version_or_size_are_left_out(self):
+        for stem in ("abc2.5", "abc2", "abc3.5", "abc35", "7b", "abc3.8-7b", "bc", "q8", "xyz",
+                     "ab", "abc3.8-2", "2"):      # 最後三個：停在一個字或一串數字的中間
+            self._file(f"models/{stem}.txt", f"【{stem}】")
+        self.assertEqual("", model_notes(MODEL))
+
+    def test_a_number_followed_by_a_letter_is_another_model(self):
+        self._file("models/abc-4.txt", "【4 這一代】")
+        for other in ("abc-4o-mini", "Abc-4n"):
+            self.assertEqual("", model_notes(other), other)
+        for same in ("abc-4-mini", "Abc-4.1", "abc-4"):
+            self.assertEqual("【4 這一代】", model_notes(same), same)
+        self._file("models/abc.txt", "【整個家族】")
+        self.assertEqual("【整個家族】", model_notes("abc4o"), "字母後面接數字算對上：家族名接版本")
+
+    def test_separators_written_differently_are_the_same_name(self):
+        # 同一顆模型各家後端分段的寫法不同，補丁檔不必每種寫法各放一份
+        self._file("models/abc3.8-27b.txt", "【這個大小】")
+        for name in ("Abc3.8-27B", "abc3.8:27b", "org/abc3.8_27b", "Abc3.8 27B"):
+            self.assertEqual("【這個大小】", model_notes(name), name)
+        self._file("models/fast_b.txt", "【檔名用底線分段】")
+        for name in ("xyz-Fast-B", "xyz:fast_b"):
+            self.assertEqual("【檔名用底線分段】", model_notes(name), name)
+
+    def test_with_or_without_a_separator_are_different_names(self):
+        self._file("models/abc4.txt", "【黏在一起的寫法】")
+        self._file("models/abc-5.txt", "【分開的寫法】")
+        self.assertEqual("", model_notes("abc-4-27b"))
+        self.assertEqual("", model_notes("abc5:27b"))
+        self.assertEqual("【黏在一起的寫法】", model_notes("abc4:27b"))
+        self.assertEqual("【分開的寫法】", model_notes("abc-5-27b"))
+
+    def test_a_later_place_in_the_name_still_counts_when_the_first_one_does_not(self):
+        self._file("models/7b.txt", "【只講大小】")
+        self.assertEqual("【只講大小】", model_notes("Mini27b-Instruct-7B"), "前面那個 7b 夾在 27b 裡不算，後面那個才是")
+
+    def test_a_name_with_a_prefix_in_front_still_finds_its_family(self):
+        self._file("models/abc2.5.txt", "【這一版】")
+        self._file("models/user.txt", "【前綴也是一段】")
+        self.assertEqual("【前綴也是一段】\n\n【這一版】", model_notes("user.Abc2.5-7B-Instruct-Q4"))
+        self.assertEqual("", model_notes("Abc3.8-27B"))
+
+    def test_no_notes_folder_is_no_notes(self):
+        self.assertEqual("", model_notes("abc"))
 
     def test_editing_a_layer_takes_effect_on_the_next_call(self):
         layers = self._layers()
-        self.assertIn("【場合規則】", persona_system(**layers))
+        self.assertIn("【場合規則】", persona_system(**layers, model=None))
         path = self._file("rules.txt", "【改過的場合規則】")
         os.utime(path, ns=(path.stat().st_atime_ns, path.stat().st_mtime_ns + 1_000_000_000))
-        self.assertIn("【改過的場合規則】", persona_system(**layers))
+        self.assertIn("【改過的場合規則】", persona_system(**layers, model=None))
+
+    def test_the_attached_files_are_logged_once_until_they_change(self):
+        self._file("models/abc.txt", "【整個家族】")
+        with self.assertLogs(prompt_builder.logger, level="INFO") as first:
+            model_notes(MODEL)
+            model_notes(MODEL)
+        self.assertEqual(1, len(first.records), "同樣的結果連叫兩次只記一行")
+        self.assertIn(MODEL, first.output[0])
+        self.assertIn("abc.txt", first.output[0])
+
+        self._file("models/abc3.txt", "【這一代】")
+        with self.assertLogs(prompt_builder.logger, level="INFO") as added:
+            model_notes(MODEL)
+            model_notes(MODEL)
+        self.assertEqual(1, len(added.records), "多了一個檔再記一行")
+        self.assertIn("abc.txt、abc3.txt", added.output[0])
+
+        (self.notes / "abc.txt").unlink()
+        with self.assertLogs(prompt_builder.logger, level="INFO") as removed:
+            model_notes(MODEL)
+        self.assertEqual(1, len(removed.records), "少了一個檔再記一行")
+        self.assertNotIn("abc.txt", removed.output[0])
+        with self.assertNoLogs(prompt_builder.logger, level="INFO"):
+            model_notes(MODEL)
+
+    def test_a_model_no_file_matches_is_logged_too(self):
+        # 檔名取錯、對不上的時候，要從 log 看得出這顆模型什麼都沒接
+        self._file("models/abc.txt", "【整個家族】")
+        with self.assertLogs(prompt_builder.logger, level="INFO") as logs:
+            model_notes("別家的模型")
+            model_notes("別家的模型")
+        self.assertEqual(1, len(logs.records))
+        self.assertIn("別家的模型", logs.output[0])
+        self.assertIn("沒有接上", logs.output[0])
+        with self.assertNoLogs(prompt_builder.logger, level="INFO"):
+            for no_model in (None, "", "  "):
+                model_notes(no_model)
 
 
 class SurfacesUseTheSharedLayersTests(unittest.TestCase):
-    """/askai、插話、日記都交給同一個函式疊。"""
+    """/askai、插話、日記都交給同一個函式疊，而且把這次用的模型交進去。"""
 
     def setUp(self):
         self.calls = []
@@ -223,47 +353,102 @@ class SurfacesUseTheSharedLayersTests(unittest.TestCase):
 
         self.fake = fake
 
-    def test_ambient_gives_its_four_layers(self):
+    def test_ambient_gives_its_four_layers_and_the_model_it_was_handed(self):
+        # 模型是這一輪插話傳進來的那一顆，不在這裡再讀一次設定（中途換模型時補丁會對到別顆）
         from llm.ambient import ambient_reply
-        with mock.patch.object(ambient_reply, "persona_system", self.fake):
-            self.assertEqual("疊好的 system", ambient_reply._load_ambient_prompt())
+        llm = mock.Mock(resolve_ambient_model=lambda: "設定檔這一刻的模型")
+        with mock.patch.object(ambient_reply, "persona_system", self.fake), \
+                mock.patch.object(ambient_reply, "_get_llm", lambda: llm):
+            self.assertEqual("疊好的 system", ambient_reply._load_ambient_prompt("這一輪的模型"))
         settings = ambient_reply._SETTINGS
         self.assertEqual(dict(identity=settings.identity_path, guardrails=settings.guardrails_path, rules=settings.prompt_path,
-                              examples=settings.examples_path), self.calls[0])
+                              examples=settings.examples_path, model="這一輪的模型"), self.calls[0])
 
-    def test_the_diary_gives_no_examples(self):
+    def test_the_diary_gives_no_examples_and_its_own_model(self):
         from llm.ambient import ambient_diary
         with mock.patch.object(ambient_diary, "persona_system", self.fake):
-            self.assertEqual("疊好的 system", ambient_diary._load_diary_prompt())
+            self.assertEqual("疊好的 system", ambient_diary._load_diary_prompt("日記的模型"))
         settings = ambient_diary._SETTINGS
-        self.assertEqual(dict(identity=settings.identity_path, guardrails=settings.guardrails_path, rules=settings.prompt_path),
-                         self.calls[0])
+        self.assertEqual(dict(identity=settings.identity_path, guardrails=settings.guardrails_path, rules=settings.prompt_path,
+                              model="日記的模型"), self.calls[0])
 
-    def test_askai_gives_its_four_layers(self):
+    def test_askai_gives_its_four_layers_and_the_request_model(self):
         from commands import llm_commands
         with mock.patch.object(llm_commands, "persona_system", self.fake):
-            self.assertEqual("疊好的 system", llm_commands.load_system_prompt())
+            self.assertEqual("疊好的 system", llm_commands.load_system_prompt("主模型"))
         self.assertEqual(dict(identity=llm_commands.IDENTITY_FILE_PATH, guardrails=llm_commands.GUARDRAILS_FILE_PATH,
-                              rules=llm_commands.PROMPT_FILE_PATH, examples=llm_commands.EXAMPLES_FILE_PATH),
+                              rules=llm_commands.PROMPT_FILE_PATH, examples=llm_commands.EXAMPLES_FILE_PATH, model="主模型"),
                          self.calls[0])
+
+    def test_every_surface_must_be_told_the_model(self):
+        from commands import llm_commands
+        from llm.ambient import ambient_diary, ambient_reply
+        for load in (llm_commands.load_system_prompt, ambient_reply._load_ambient_prompt, ambient_diary._load_diary_prompt):
+            with self.subTest(load=load.__qualname__), self.assertRaises(TypeError):
+                load()
+
+    def _run_diary(self, *, diary_model, ambient_model):
+        """跑一次日記（頻道是假的、不叫模型），回 (交給補丁的模型, 交給 `generate_reply` 的 model, 那個 LLMService)。
+        模型怎麼決定走真的 `LLMService`：設定檔的主模型是「主模型」、插話的模型是 `ambient_model`。"""
+        from llm.ambient import ambient_diary
+        from services.llm_service import LLMService
+        llm = LLMService.__new__(LLMService)      # 不連線、不讀設定檔，只借它決定模型的那幾個函式
+        llm.model_default = "環境變數的模型"
+        llm._load_runtime_config_cached = lambda: SimpleNamespace(model="主模型", ambient_model=ambient_model)
+        llm.generate_reply = mock.AsyncMock(return_value=SimpleNamespace(reply="", error_kind=None, prompt_record_log=""))
+        settings = SimpleNamespace(
+            enabled=True, diary_channel_config_key="diary", source_channel_config_key="source", model=diary_model,
+            think=None, debug_log=False, use_shared_identity=True, identity_path="身分", guardrails_path="守則", prompt_path="日記規則")
+        channels = SimpleNamespace(DEFAULT_ID=0, load_config=lambda caller=None: {"diary": 123})
+        bot = SimpleNamespace(user=None, get_channel=lambda cid: SimpleNamespace(guild=None))
+        with mock.patch.object(ambient_diary, "_SETTINGS", settings), \
+                mock.patch.object(ambient_diary, "ChannelConfig", channels), \
+                mock.patch.object(ambient_diary, "_get_llm", lambda: llm), \
+                mock.patch.object(ambient_diary, "persona_system", self.fake):
+            asyncio.run(ambient_diary.run_daily_reflection(bot))
+        return self.calls[-1]["model"], llm.generate_reply.await_args.kwargs["model"], llm
+
+    def test_the_diary_picks_notes_for_the_model_the_request_really_uses(self):
+        for diary_model, ambient_model, used in (("日記專用的模型", "插話的模型", "日記專用的模型"),
+                                                 (None, "插話的模型", "插話的模型"),
+                                                 (None, None, "主模型")):       # 兩個都沒設：請求退到主模型，補丁也要對它
+            with self.subTest(diary_model=diary_model, ambient_model=ambient_model):
+                for_notes, for_request, llm = self._run_diary(diary_model=diary_model, ambient_model=ambient_model)
+                self.assertEqual(used, llm.resolve_request_model(for_request), "請求實際會用的那一顆")
+                self.assertEqual(used, for_notes, "補丁要對同一顆")
 
     def test_askai_uses_its_default_prompt_when_identity_and_rules_are_both_unreadable(self):
         from commands import llm_commands
         with mock.patch.object(llm_commands.hot_files, "read_text", lambda path, **_k: ""), \
                 mock.patch.object(llm_commands, "persona_system", self.fake):
-            self.assertEqual(llm_commands.ASKAI_SETTINGS.default_system_prompt, llm_commands.load_system_prompt())
+            self.assertEqual(llm_commands.ASKAI_SETTINGS.default_system_prompt, llm_commands.load_system_prompt("主模型"))
         self.assertEqual([], self.calls)
 
     def test_ambient_and_diary_use_their_own_defaults_when_no_persona_file_is_readable(self):
+        # 走真的 `persona_system`：補丁對得上、人設檔全讀不到時，不能拿只有補丁的字串當 system
         from llm.ambient import ambient_diary, ambient_reply
         folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (folder / "models").mkdir()
+        (folder / "models" / "abc.txt").write_text("【abc 的毛病】", encoding="utf-8")
         nowhere = SimpleNamespace(use_shared_identity=True, identity_path=str(folder / "沒有身分.txt"),
                                   guardrails_path=str(folder / "沒有守則.txt"), prompt_path=str(folder / "沒有規則.txt"),
                                   use_examples=True, examples_path=str(folder / "沒有範例.txt"))
         self.addCleanup(hot_files._cache.clear)
-        with mock.patch.object(ambient_reply, "_SETTINGS", nowhere), mock.patch.object(ambient_diary, "_SETTINGS", nowhere):
-            self.assertEqual(ambient_reply._DEFAULT_AMBIENT_PROMPT, ambient_reply._load_ambient_prompt())
-            self.assertEqual(ambient_diary._DEFAULT_DIARY_PROMPT, ambient_diary._load_diary_prompt())
+        with mock.patch.object(prompt_builder, "MODEL_NOTES_DIR", folder / "models"), \
+                mock.patch.dict(prompt_builder._logged_notes, clear=True), \
+                mock.patch.object(ambient_reply, "_SETTINGS", nowhere), mock.patch.object(ambient_diary, "_SETTINGS", nowhere):
+            self.assertEqual("【abc 的毛病】", model_notes(MODEL), "補丁本身對得上")
+            self.assertEqual(ambient_reply._DEFAULT_AMBIENT_PROMPT, ambient_reply._load_ambient_prompt(MODEL))
+            self.assertEqual(ambient_diary._DEFAULT_DIARY_PROMPT, ambient_diary._load_diary_prompt(MODEL))
+
+    def test_the_real_notes_folder_holds_only_lowercase_txt_files_with_content(self):
+        # 只認 .txt；比對不分大小寫，檔名大小寫各一份會兩個都接上；空檔接不上任何東西卻看起來像有補丁
+        folder = prompt_builder.MODEL_NOTES_DIR
+        for path in sorted(folder.iterdir()) if folder.is_dir() else []:
+            with self.subTest(file=path.name):
+                self.assertTrue(path.is_file() and path.suffix == ".txt", "補丁資料夾只放 .txt")
+                self.assertEqual(path.name.lower(), path.name, "檔名一律小寫")
+                self.assertTrue(path.read_text(encoding="utf-8").strip(), "內容不能是空的")
 
 
 if __name__ == "__main__":

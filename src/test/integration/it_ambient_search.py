@@ -80,7 +80,7 @@ async def run_one(name: str, spec: dict, model: str) -> dict:
     started = time.perf_counter()
     result = await llm.generate_reply(
         prompt=spec["latest"] if spec["directed"] else SPONTANEOUS_PROMPT,
-        system=_load_ambient_prompt(),
+        system=_load_ambient_prompt(model),
         chat_context=spec["chat"],
         images=[_png()] if spec.get("image") else None,
         model=model,

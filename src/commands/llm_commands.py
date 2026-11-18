@@ -119,10 +119,11 @@ def _format_log_block(*, title: str, body: str) -> str:
     )
 
 
-def load_system_prompt() -> str:
-    """/askai 的 system：共用的身分與守則、askai 的風格與任務、範例卡（層次見 `persona_system`）。
+def load_system_prompt(model: str | None) -> str:
+    """/askai 的 system：共用的身分與守則、askai 的風格與任務、範例卡，再接這次用的模型的補丁（層次見 `persona_system`）。
 
     身分與守則跟插話、日記是同一份檔。身分與 askai 規則都讀不到才用預設的 prompt。
+    `model` 給送請求的那一顆（`LLMService.resolve_request_model()`），沒有預設值：漏給只會少接補丁，沒有人會發現。
     """
     if not (hot_files.read_text(IDENTITY_FILE_PATH, label="身分 prompt")
             or hot_files.read_text(PROMPT_FILE_PATH, label="場合規則 prompt")):
@@ -133,6 +134,7 @@ def load_system_prompt() -> str:
         guardrails=GUARDRAILS_FILE_PATH,
         rules=PROMPT_FILE_PATH,
         examples=EXAMPLES_FILE_PATH,
+        model=model,
     )
 
 
@@ -324,8 +326,8 @@ class _AskaiInputs:
     rag_context: list[dict[str, object]]
     rag_meta: dict[str, object]
     interaction: Any = None       # 記錄回應歷史要 guild／channel／user
-    model: str | None = None      # 第 2 段決定後填回，第 3 段記錄用
-    think: bool | None = None
+    model: str | None = None      # 第 1 段決定：模型補丁照它挑、第 2 段照它送、第 3 段記錄用（中途換模型也不會兩邊不一致）
+    think: bool | None = None     # 第 2 段決定後填回，第 3 段記錄用
     mention_anchors: dict[str, str] = field(default_factory=dict)   # 問題裡被 @ 的人：id → 「名字#尾碼」，送出時換回 @
     chat_search_meta: dict[str, object] | None = None   # 第 2 段填：聊天紀錄搜尋工具查了什麼
     deleted_messages: list[str] | None = None   # 這個頻道最近群友自己刪掉的訊息與前後文（有人問才講）
@@ -777,7 +779,10 @@ class LLMCommands(commands.Cog):
         順序刻意保留：網搜先在背景起跑，和聊天／人物卡檢索並行；人物卡檢索要等聊天紀錄
         回來（參與者名單從那裡來）。圖不合格回 None（已回覆使用者）。
         """
-        system_prompt = load_system_prompt()
+        # 這一題用哪顆模型只在這裡問一次：設定檔隨時會被改，後面再問一次可能拿到另一顆，
+        # 補丁就會接到不是它的模型上
+        model = self.llm_service.resolve_request_model()
+        system_prompt = load_system_prompt(model)
         guild = interaction.guild
         resolved_question, mentioned_user_ids, mention_anchors = _resolve_mentions(question, guild)
         web_mode, intent, run_web, web_task = _start_web_search(resolved_question)
@@ -891,7 +896,8 @@ class LLMCommands(commands.Cog):
             web_mode=web_mode, web_context=web_context, web_meta=web_meta,
             image_payload=image_payload, image_meta=image_meta,
             discord_context=discord_context, discord_meta=discord_meta, rag_context=rag_context, rag_meta=rag_meta,
-            interaction=interaction, mention_anchors=mention_anchors, deleted_messages=deleted_messages,
+            interaction=interaction, model=model, mention_anchors=mention_anchors,
+            deleted_messages=deleted_messages,
         )
 
     # ── 第 2 段：生成 ───────────────────────────────────────────────────────
@@ -903,9 +909,9 @@ class LLMCommands(commands.Cog):
         thinking_msg,
     ):
         """叫模型（含情報與網搜工具輪）。回傳 (結果, intel_meta, web_tools)；使用者取消或底層連帶取消回 None。"""
-        target_model = self.llm_service.resolve_request_model()
+        target_model = inputs.model
         target_think = self.llm_service.resolve_request_think()
-        inputs.model, inputs.think = target_model, target_think
+        inputs.think = target_think
         llm_question = inputs.llm_question
 
         # Bot 自身身份：伺服器暱稱優先 → 全域 username → None（僅極端情境）。
