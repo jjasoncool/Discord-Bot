@@ -3,7 +3,8 @@
 架構定位
   層級：基礎層（utils）。只依賴標準庫；不 import llm、services、sys_settings、commands（分層守衛擋）。
   上層（誰呼叫）：
-    - prompt 與規則檔：各功能自己讀（llm.retrievers.*、llm.persona.*、llm.preprocess.*、services.relay.telegram_filter）
+    - prompt 與規則檔：各功能自己讀（llm.retrievers.*、llm.persona.*、llm.preprocess.*、services.relay.telegram_filter）；
+      人設的幾層（身分、守則、場合規則、範例卡）由 llm.prompt.prompt_builder.persona_system 逐檔讀
     - config.json：utils.utils.ChannelConfig（驗證最外層是物件、寫入走安全寫入＋備份）
     - settings/switches.json：sys_settings.switches（每個值 pydantic 驗證）
     - LLM runtime 設定：services.llm_service（pydantic 模型、模型名稱空白＝沒設定）
@@ -21,8 +22,6 @@
   2. 解析失敗 → 沿用上次的好內容並記 WARNING（給了 on_error 就由呼叫端記）；從未成功過 → None。
   3. 缺檔 → None；missing_ok=True 時不記警告（檔案本來就可能還不存在，例如還沒寫過的貼圖字典）。
   4. 這裡只有機制。解析、驗證、寫入、壞了怎麼辦的政策都在呼叫端；不加認得特定檔案的函式。
-
-不收斂的例外：llm.ambient.ambient_reply._load_ambient_prompt（多檔疊層、自己組裝）。
 """
 from __future__ import annotations
 

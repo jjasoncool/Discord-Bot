@@ -40,6 +40,8 @@ from services.llm_service import LLMService
 from sys_settings import switches
 from sys_settings.llm_settings import AskAIChatSearchSettings, AskAICommandSettings, AskAIIntelSettings, AskAIWebSettings
 from sys_settings.time_settings import APP_TZ
+from llm.prompt.prompt_builder import persona_system
+from utils import hot_files
 from utils.discord_content import send_model_text
 from utils.dm_notifier import send_dm
 from utils.discord_members import home_guild, require_access
@@ -117,34 +119,21 @@ def _format_log_block(*, title: str, body: str) -> str:
     )
 
 
-def _read_prompt_file(path: Path) -> str:
-    """讀單一 prompt 檔；不存在或失敗回傳空字串並記 warning。"""
-    try:
-        if path.exists():
-            return path.read_text(encoding="utf-8").strip()
-        logger.warning("找不到 prompt 檔案：%s", path)
-    except Exception as exc:
-        logger.warning("載入 prompt 檔案失敗 %s：%s", path, exc)
-    return ""
-
-
 def load_system_prompt() -> str:
-    """從檔案載入 system prompt（模組化拼裝）：身份 → 守則 → 深聊風格+任務 → few-shot 範例。
+    """/askai 的 system：共用的身分與守則、askai 的風格與任務、範例卡（層次見 `persona_system`）。
 
-    身份(persona_identity)與守則(persona_guardrails)跟 ambient 共用同檔；深聊風格+問答任務
-    在 askai_system_prompt（ambient 不載這層 → 較不端著）。範例放最末，因 LLM 對 prompt
-    尾端模仿力最強；範例缺檔不影響主流程。主規則與身份都缺才降級至預設值。
+    身分與守則跟插話、日記是同一份檔。身分與 askai 規則都讀不到才用預設的 prompt。
     """
-    identity = _read_prompt_file(IDENTITY_FILE_PATH)
-    guardrails = _read_prompt_file(GUARDRAILS_FILE_PATH)
-    main_prompt = _read_prompt_file(PROMPT_FILE_PATH)
-    examples = _read_prompt_file(EXAMPLES_FILE_PATH)
-    # 模組化拼裝：人格 → 守則 → 深聊風格+任務 → few-shot（守則與人格跟 ambient 共用同檔）
-    parts = [p for p in (identity, guardrails, main_prompt, examples) if p]
-    if not (identity or main_prompt):
+    if not (hot_files.read_text(IDENTITY_FILE_PATH, label="身分 prompt")
+            or hot_files.read_text(PROMPT_FILE_PATH, label="場合規則 prompt")):
         logger.warning("身份與主 prompt 皆無內容，改用預設 SYSTEM PROMPT")
         return ASKAI_SETTINGS.default_system_prompt
-    return "\n\n".join(parts)
+    return persona_system(
+        identity=IDENTITY_FILE_PATH,
+        guardrails=GUARDRAILS_FILE_PATH,
+        rules=PROMPT_FILE_PATH,
+        examples=EXAMPLES_FILE_PATH,
+    )
 
 
 def askai_cooldown(interaction: discord.Interaction):

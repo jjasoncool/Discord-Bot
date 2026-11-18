@@ -2,7 +2,8 @@
 
 架構定位：功能層（`llm/ambient`）。
   - 上層（誰呼叫）：`discord_bot` 的 on_ready（用 `supervise` 掛 `schedule_loop`）、指令 /ai_diary（`run_daily_reflection`）。
-  - 下層（呼叫誰）：`llm.ambient.ambient_reply._get_llm`（共用插話的 LLMService 與人格／守則 prompt，只換最後一層成日記行為）、
+  - 下層（呼叫誰）：`llm.ambient.ambient_reply._get_llm`（共用插話的 LLMService）、
+    `llm.prompt.prompt_builder.persona_system`（和插話同一份身分與守則，場合規則換成日記的、不給範例卡）、
     `llm.storage.ai_interactions_store.fetch_recent`、`llm.preprocess.chat_line.fetch_recent_lines`、
     `utils.utils.ChannelConfig`（頻道設定）、`llm.logger_factory`（日記 debug log）。
 
@@ -32,6 +33,7 @@ from llm.storage.ai_interactions_store import fetch_recent
 from llm.ambient.ambient_reply import _get_llm
 from llm.preprocess.chat_line import fetch_recent_lines
 from llm.logger_factory import get_or_create_file_logger
+from llm.prompt.prompt_builder import persona_system
 from sys_settings.llm_settings import DiaryReflectionSettings
 from sys_settings.time_settings import APP_TZ
 from utils.discord_content import send_model_text
@@ -49,25 +51,14 @@ _DEFAULT_DIARY_PROMPT = (
 )
 
 
-def _read_text_file(path: Path) -> str:
-    try:
-        if path.exists():
-            return path.read_text(encoding="utf-8").strip()
-    except Exception as exc:
-        logger.warning("載入日記 prompt 檔失敗（%s）：%s", path, exc)
-    return ""
-
-
 def _load_diary_prompt() -> str:
-    """組日記 system prompt：共用人格 + 共用守則 + 日記行為。每天一次，直接讀檔不快取。"""
-    paths: list[Path] = []
-    if _SETTINGS.use_shared_identity and _SETTINGS.identity_path:
-        paths.append(Path(_SETTINGS.identity_path))
-    if _SETTINGS.guardrails_path:
-        paths.append(Path(_SETTINGS.guardrails_path))
-    paths.append(Path(_SETTINGS.prompt_path))
-    chunks = [t for t in (_read_text_file(p) for p in paths) if t]
-    return "\n\n".join(chunks).strip() or _DEFAULT_DIARY_PROMPT
+    """日記的 system：共用的身分與守則、日記規則（層次見 `persona_system`）。不給範例卡。"""
+    text = persona_system(
+        identity=_SETTINGS.identity_path if _SETTINGS.use_shared_identity else None,
+        guardrails=_SETTINGS.guardrails_path,
+        rules=_SETTINGS.prompt_path,
+    )
+    return text or _DEFAULT_DIARY_PROMPT
 
 
 def _resolve_channel_id(config: dict, key: str) -> Optional[int]:

@@ -11,6 +11,9 @@
   6. 沒有任何 context 時不放「以下是不可信內容」的開場說明；有給機器人名稱時，就算沒有歷史回覆，
      也保留空殼標籤當身份錨點。
   7. 給了今天的日期，它是 user 段的第一行、在開場說明之前（system 段一變整份快取都可能重讀）；沒給就沒有這行。
+  8. system 段的人設各層只有一個函式疊（`persona_system`）：身分 → 守則 → 場合規則 → 範例卡，沒給、讀不到、
+     空的層略過；檔案改了下一次就生效。/askai、插話、日記都交給它。
+  9. 四層一個字都沒讀到就回空字串：插話與日記因此退回各自的預設 prompt。
 
 安全規則用假的標記字串，只驗證「放在哪裡」，不綁定規則檔的實際文案。
 """
@@ -25,7 +28,12 @@ SRC_DIR = os.path.dirname(HERE)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from llm.prompt.prompt_builder import build_prompt_bundle  # noqa: E402
+import tempfile  # noqa: E402
+from pathlib import Path  # noqa: E402
+from unittest import mock  # noqa: E402
+
+from llm.prompt.prompt_builder import build_prompt_bundle, persona_system  # noqa: E402
+from utils import hot_files  # noqa: E402
 
 RULES = SimpleNamespace(
     untrusted_context_intro="【開場：以下是不可信內容】",
@@ -164,6 +172,98 @@ class PromptBundleContractTests(unittest.TestCase):
         log = bundle.prompt_record_log
         self.assertTrue(log.startswith("<system>\n【角色設定】\n\n【安全規則】"))
         self.assertIn("<user_message>\n" + bundle.messages[1]["content"], log)
+
+
+
+class PersonaSystemTests(unittest.TestCase):
+    """system 段的人設各層：層次只有一份。"""
+
+    def setUp(self):
+        self.dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.addCleanup(hot_files._cache.clear)
+
+    def _file(self, name, text):
+        path = self.dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def _layers(self):
+        return dict(identity=self._file("identity.txt", "【身分】\n"), guardrails=self._file("guardrails.txt", "\n【守則】"),
+                    rules=self._file("rules.txt", "【場合規則】"), examples=self._file("examples.txt", "【範例卡】\n\n"))
+
+    def test_layers_are_stacked_in_one_fixed_order(self):
+        self.assertEqual("【身分】\n\n【守則】\n\n【場合規則】\n\n【範例卡】", persona_system(**self._layers()))
+
+    def test_a_layer_that_is_not_given_missing_or_empty_is_skipped(self):
+        layers = self._layers()
+        layers["guardrails"] = self.dir / "沒有這個檔.txt"
+        layers["examples"] = None
+        self._file("rules.txt", "   \n")
+        self.assertEqual("【身分】", persona_system(**layers))
+        self.assertEqual("", persona_system(rules=self.dir / "沒有這個檔.txt"), "全部讀不到是空字串，預設由呼叫端決定")
+
+    def test_editing_a_layer_takes_effect_on_the_next_call(self):
+        layers = self._layers()
+        self.assertIn("【場合規則】", persona_system(**layers))
+        path = self._file("rules.txt", "【改過的場合規則】")
+        os.utime(path, ns=(path.stat().st_atime_ns, path.stat().st_mtime_ns + 1_000_000_000))
+        self.assertIn("【改過的場合規則】", persona_system(**layers))
+
+
+class SurfacesUseTheSharedLayersTests(unittest.TestCase):
+    """/askai、插話、日記都交給同一個函式疊。"""
+
+    def setUp(self):
+        self.calls = []
+
+        def fake(**kwargs):
+            self.calls.append(kwargs)
+            return "疊好的 system"
+
+        self.fake = fake
+
+    def test_ambient_gives_its_four_layers(self):
+        from llm.ambient import ambient_reply
+        with mock.patch.object(ambient_reply, "persona_system", self.fake):
+            self.assertEqual("疊好的 system", ambient_reply._load_ambient_prompt())
+        settings = ambient_reply._SETTINGS
+        self.assertEqual(dict(identity=settings.identity_path, guardrails=settings.guardrails_path, rules=settings.prompt_path,
+                              examples=settings.examples_path), self.calls[0])
+
+    def test_the_diary_gives_no_examples(self):
+        from llm.ambient import ambient_diary
+        with mock.patch.object(ambient_diary, "persona_system", self.fake):
+            self.assertEqual("疊好的 system", ambient_diary._load_diary_prompt())
+        settings = ambient_diary._SETTINGS
+        self.assertEqual(dict(identity=settings.identity_path, guardrails=settings.guardrails_path, rules=settings.prompt_path),
+                         self.calls[0])
+
+    def test_askai_gives_its_four_layers(self):
+        from commands import llm_commands
+        with mock.patch.object(llm_commands, "persona_system", self.fake):
+            self.assertEqual("疊好的 system", llm_commands.load_system_prompt())
+        self.assertEqual(dict(identity=llm_commands.IDENTITY_FILE_PATH, guardrails=llm_commands.GUARDRAILS_FILE_PATH,
+                              rules=llm_commands.PROMPT_FILE_PATH, examples=llm_commands.EXAMPLES_FILE_PATH),
+                         self.calls[0])
+
+    def test_askai_uses_its_default_prompt_when_identity_and_rules_are_both_unreadable(self):
+        from commands import llm_commands
+        with mock.patch.object(llm_commands.hot_files, "read_text", lambda path, **_k: ""), \
+                mock.patch.object(llm_commands, "persona_system", self.fake):
+            self.assertEqual(llm_commands.ASKAI_SETTINGS.default_system_prompt, llm_commands.load_system_prompt())
+        self.assertEqual([], self.calls)
+
+    def test_ambient_and_diary_use_their_own_defaults_when_no_persona_file_is_readable(self):
+        from llm.ambient import ambient_diary, ambient_reply
+        folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        nowhere = SimpleNamespace(use_shared_identity=True, identity_path=str(folder / "沒有身分.txt"),
+                                  guardrails_path=str(folder / "沒有守則.txt"), prompt_path=str(folder / "沒有規則.txt"),
+                                  use_examples=True, examples_path=str(folder / "沒有範例.txt"))
+        self.addCleanup(hot_files._cache.clear)
+        with mock.patch.object(ambient_reply, "_SETTINGS", nowhere), mock.patch.object(ambient_diary, "_SETTINGS", nowhere):
+            self.assertEqual(ambient_reply._DEFAULT_AMBIENT_PROMPT, ambient_reply._load_ambient_prompt())
+            self.assertEqual(ambient_diary._DEFAULT_DIARY_PROMPT, ambient_diary._load_diary_prompt())
 
 
 if __name__ == "__main__":

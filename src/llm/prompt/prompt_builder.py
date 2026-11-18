@@ -1,17 +1,52 @@
-"""prompt 組裝：把聊天紀錄、人物卡、搜尋結果等資料組成送給模型的 messages，並產生同源的可讀紀錄。
+"""prompt 組裝：system 段的人設各層怎麼疊、整份 messages 怎麼組，並產生同源的可讀紀錄。
 
-原本是 `services/llm_service.py` 的 `LLMService._build_prompt_bundle`，搬到這裡讓「服務」（連線、
-載模型、呼叫、重試）與「組裝」分開。/askai、插話、日記、印象審核都經由
-`LLMService.generate_reply` 使用。
+架構定位：技術層（`llm/prompt`），只依賴基礎層（`utils.hot_files`）。
+  - 上層（誰呼叫）：`persona_system` 由各場合組自己的 system 時呼叫（/askai `commands.llm_commands`、插話
+    `llm.ambient.ambient_reply`、日記 `llm.ambient.ambient_diary`）；`build_prompt_bundle` 由
+    `services.llm_service.LLMService.generate_reply` 呼叫（/askai、插話、日記、印象審核都走那裡）。
+  - 下層（呼叫誰）：`utils.hot_files`（prompt 檔改了下一次就生效）。
+
+介面：
+  - `persona_system(identity=, guardrails=, rules=, examples=)`：system 段裡跟著人設走的那幾層，疊成一段文字。
+  - `build_prompt_bundle(...)`：system、聊天紀錄、人物卡、搜尋結果等組成送給模型的 messages 與可讀紀錄。
+
+規則：
+  - system 段的層次只有一份，由前到後：身分 → 守則 → 場合規則 → 範例卡（以上 `persona_system`）
+    → 工具的使用規則（`generate_reply`，有工具才有）→ 安全規則 → 發問者資料（以上 `build_prompt_bundle`）。
+    每件事只寫在一層：她是誰寫在身分、不能做的寫在守則、這個場合才有的事寫在場合規則。
+    插話在點名的人還在記仇名單時，會在 `persona_system` 回傳的文字後面再接一段【你的心情】：那是插話自己的事，不算這裡的層次。
+  - 會變的資料（聊天紀錄、人物卡、圖片清單、今天的日期）都放 user 段：system 段一變，整份提示詞快取都可能重讀。
+  - 身分、守則、場合規則、範例卡一個字都沒讀到就回空字串，呼叫端才退得回自己的預設 prompt。
+
+例外與決策：各場合要哪幾層、哪幾個檔由呼叫端的設定決定（日記不給範例卡）；全部讀不到時用什麼預設的 prompt 也由呼叫端決定。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional
+from pathlib import Path
+from typing import TYPE_CHECKING, List, Optional, Union
+
+from utils import hot_files
 
 if TYPE_CHECKING:
     from sys_settings.llm_settings import LLMContextSafetyRules
+
+PromptPath = Union[str, Path, None]
+
+
+def persona_system(
+    *, identity: PromptPath = None, guardrails: PromptPath = None, rules: PromptPath = None,
+    examples: PromptPath = None,
+) -> str:
+    """system 段裡跟著人設走的那幾層 → 一段文字。每一層是一個檔，沒給、讀不到或是空的就略過。
+
+    層次固定：身分（她是誰）→ 守則（紅線與底線）→ 場合規則（這個場合怎麼做）→ 範例卡。
+    四層一個字都沒讀到就回空字串：用什麼預設的 prompt 由呼叫端決定。
+    """
+    layers = (("身分", identity), ("守則", guardrails), ("場合規則", rules), ("範例卡", examples))
+    parts = [text for label, path in layers if path and (text := hot_files.read_text(path, label=f"{label} prompt"))]
+    return "\n\n".join(parts)
 
 
 @dataclass(frozen=True)

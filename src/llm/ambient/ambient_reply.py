@@ -1,7 +1,8 @@
 """AI 偶爾插話／閒聊：看群裡最新的對話，決定要不要開口、開口說什麼、回到哪一則。
 
 架構定位：功能層（`llm/ambient`）。上層：介面層的 `discord_bot.on_message`（背景 task 執行，不阻塞訊息處理）。
-下層：`services.llm_service.LLMService`（生成）、`ambient_hooks`（鉤子閘）、`ambient_memory`（偏好與招牌梗召回）、
+下層：`services.llm_service.LLMService`（生成）、`llm.prompt.prompt_builder.persona_system`（疊 system 的人設各層）、
+`ambient_hooks`（鉤子閘）、`ambient_memory`（偏好與招牌梗召回）、
 `ambient_insult`（被罵的應對與記仇名單）、`ambient_search`（判斷時可以先查一次遊戲情報或網路）、
 `ambient_style_lines`（語氣參考句）、
 `llm.preprocess`（聊天行格式、人名錨點、貼文與表情描述）、`llm.storage.ai_interactions_store`（互動紀錄）、
@@ -98,6 +99,7 @@ from llm.preprocess.vision_image import (
     remote_image,
 )
 from llm.logger_factory import get_or_create_file_logger
+from llm.prompt.prompt_builder import persona_system
 from services.llm_service import LLMService, TRUNCATED_NOTE
 from sys_settings.llm_settings import AmbientChatSettings
 from utils.utils import ChannelConfig
@@ -117,9 +119,6 @@ _DEFAULT_AMBIENT_PROMPT = (
     f"如果這則訊息沒什麼好接的、或不適合插話，就只輸出 {_SETTINGS.silence_sentinel}（不要多寫任何字）。"
 )
 
-# system prompt 以「組成檔的 mtime 組合」快取：改任一檔即時生效、不必每則訊息重讀
-_PROMPT_CACHE: dict = {"text": None, "key": None}
-
 # 共用一個無狀態 LLMService（與 /askai cog 各自持有亦可，因模型協調走的是 module-level 鎖/時間戳）
 _LLM_SERVICE: Optional[LLMService] = None
 
@@ -134,44 +133,18 @@ def _get_llm() -> LLMService:
     return _LLM_SERVICE
 
 
-def _read_text_file(path: Path) -> str:
-    """讀單一文字檔；不存在或讀失敗回空字串。"""
-    try:
-        if path.exists():
-            return path.read_text(encoding="utf-8").strip()
-    except Exception as exc:
-        logger.warning("載入 prompt 檔失敗（%s）：%s", path, exc)
-    return ""
-
-
 def _load_ambient_prompt() -> str:
-    """組 ambient system prompt：共用人設身份（琇紫）+ 插話行為規則 + 風格對照範例。
+    """插話的 system：共用的身分與守則、插話規則、範例卡（層次見 `persona_system`）。
 
-    身份來自 `persona_identity.txt`（與 /askai 同一份），確保插話與問答是同一個角色；
-    行為來自 `ambient_reply_prompt.txt`（簡短、允許沉默）；最後疊上與 /askai 共用的
-    `persona_examples.txt`（風格對照範例，教它別跟著頻道互嗆下場補刀）。
-    以各檔 mtime 組合快取。
+    身分與守則跟 /askai、日記是同一份檔，三個場合才是同一個角色；每個檔改了下一次就生效。
     """
-    paths: list[Path] = []
-    if _SETTINGS.use_shared_identity and _SETTINGS.identity_path:
-        paths.append(Path(_SETTINGS.identity_path))      # 共用人格
-    if _SETTINGS.guardrails_path:
-        paths.append(Path(_SETTINGS.guardrails_path))    # 共用守則/限制
-    paths.append(Path(_SETTINGS.prompt_path))            # 插話行為
-    if _SETTINGS.use_examples and _SETTINGS.examples_path:
-        paths.append(Path(_SETTINGS.examples_path))      # 風格對照範例（克制 roast）
-
-    key = tuple(
-        (str(p), p.stat().st_mtime_ns if p.exists() else None) for p in paths
+    text = persona_system(
+        identity=_SETTINGS.identity_path if _SETTINGS.use_shared_identity else None,
+        guardrails=_SETTINGS.guardrails_path,
+        rules=_SETTINGS.prompt_path,
+        examples=_SETTINGS.examples_path if _SETTINGS.use_examples else None,
     )
-    if _PROMPT_CACHE["key"] == key and _PROMPT_CACHE["text"]:
-        return _PROMPT_CACHE["text"]
-
-    chunks = [t for t in (_read_text_file(p) for p in paths) if t]
-    text = "\n\n".join(chunks).strip() or _DEFAULT_AMBIENT_PROMPT
-    _PROMPT_CACHE["text"] = text
-    _PROMPT_CACHE["key"] = key
-    return text
+    return text or _DEFAULT_AMBIENT_PROMPT
 
 
 def _is_command_like(stripped: str) -> bool:
