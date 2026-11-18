@@ -67,6 +67,7 @@ Python / asyncio / discord.py / Telethon / asyncpg；程式在 `src/`，跑在 d
 | 清理聊天文字 | `llm.persona.personality_extractor._clean_text_for_extraction()` |
 | 描述品質規則 | `persona_description_rules.txt`（各處讀同一個檔） |
 | 人格素描的角色設定 | 疊在 `personality_extraction_prompt.json` 的 `system_prompt` 之上 |
+| 組琇紫的 system prompt（/askai、插話、日記；要加一層、要因模型而不同） | `llm.prompt.prompt_builder.persona_system(identity=, guardrails=, rules=, examples=, model=)`：層次只有這一份——身分 → 守則 → 場合規則 → 範例卡 → 模型補丁，之後才是工具規則（`generate_reply`）與安全規則（`build_prompt_bundle`）。每件事只寫在一層：她是誰寫身分檔、不能做的寫守則、那個場合才有的事寫場合規則、某顆模型的壞習慣寫模型補丁（`settings/prompts/models/*.txt`，檔名寫模型名稱裡任何一段開頭起的一截，寫得越長管得越細：`abc`／`abc3`／`abc3.8`／`abc3.8-27b`；不分大小寫，`:` `/` `_` 空白都當成 `-`，數字後面緊接字母不算（`abc-4` 對不上 `abc-4o`），有沒有分隔符號算不同寫法（`abc4` 對不上 `abc-4`）；對得上這次用的模型的全部都接、由粗到細，沒有檔就不接；接了哪幾個檔看 log 的「模型補丁 model=…」；換模型時人設不動，只加或換這裡的檔）。`model=` 沒有預設值，給送請求的那一顆（和交給 `generate_reply` 的是同一個值），不要補丁才給 None；人設檔全讀不到時回空字串、不單獨回補丁。各場合只決定要哪幾個檔、讀不到時用什麼預設；守衛擋把守則檔的路徑拿去做「交給 `persona_system(guardrails=…)`」以外的事 |
 | 發文到頻道 | `utils.discord_content.post_to_channel`（論壇／文字頻道自動分流、附件分批、失敗退純文字） |
 | 論壇標籤：找、沒有就建 | `utils.discord_content.find_forum_tags(forum, names)`（照快取找）／`ensure_forum_tags(forum, names)`（缺的先向 Discord 讀最新清單、一次建好；同一個論壇排隊）；守衛擋直接 `create_tag`：它拿快取的清單整份覆寫、建完不更新快取，連著建兩個後一個會把前一個蓋掉 |
 | Discord 上傳單檔上限（離上限留一點餘裕；每次從伺服器讀） | `utils.discord_content.upload_limit(channel 或 guild)`；守衛擋自己算 `filesize_limit - 512…` |
