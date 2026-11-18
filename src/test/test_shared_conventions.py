@@ -823,6 +823,57 @@ def _find_direct_searxng_queries(path: Path) -> list[int]:
 def _find_sleep_until(path: Path) -> list[int]:
     return _find_sleep_until_in_tree(_parse(path))
 
+
+#: 守則檔路徑在程式裡的叫法：設定欄位（`x.guardrails_path`）與指令模組的常數
+_GUARDRAILS_PATH_ATTRS = {"guardrails_path", "guardrails_file_path", "GUARDRAILS_FILE_PATH"}
+_GUARDRAILS_PATH_CONSTANTS = {"GUARDRAILS_FILE_PATH"}
+_GUARDRAILS_FILE_NAME = "persona_guardrails.txt"
+
+
+def _find_guardrails_path_uses_in_tree(tree: ast.Module) -> list[int]:
+    """守則檔的路徑被拿去做「交給 `persona_system(guardrails=…)`」以外的事：自己讀它、先放進變數、交給別的函式。
+
+    人設的層次（身分 → 守則 → 場合規則 → 範例卡 → 模型補丁）只有 `persona_system` 一份；某個場合自己讀守則檔來拼，
+    層次就各寫各的，換模型時的補丁也接不上。守則是每個場合都會帶的那一層，所以看它的路徑流到哪裡。
+    只認路徑怎麼被用、不認它出現在一行的哪個位置：只比對「路徑後面接右括號」的話，後面多一個參數就躲得掉，
+    合法的呼叫把守則寫在最後一個參數反而被擋。
+
+    不算違規的只有：`persona_system(…, guardrails=<這裡面>)`（含 import 時改的別名）、定義常數的那一行
+    （`GUARDRAILS_FILE_PATH = …` 的右邊）、設定類別裡的欄位定義（那是名字，不是取用）。
+    程式裡直接寫守則檔檔名的字串也算違規；設定欄位的預設值那一份列在規則的 allowed。
+    """
+    stackers = {"persona_system"} | {
+        alias.asname for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+        for alias in node.names if alias.name == "persona_system" and alias.asname
+    }
+    fine: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name in stackers:
+                for keyword in node.keywords:
+                    if keyword.arg == "guardrails":
+                        fine.update(id(inner) for inner in ast.walk(keyword.value))
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(target, ast.Name) and target.id in _GUARDRAILS_PATH_CONSTANTS for target in targets):
+                fine.update(id(inner) for inner in ast.walk(node.value))
+
+    def uses_the_path(node) -> bool:
+        if isinstance(node, ast.Attribute):
+            return node.attr in _GUARDRAILS_PATH_ATTRS
+        return isinstance(node, ast.Name) and node.id in _GUARDRAILS_PATH_CONSTANTS and isinstance(node.ctx, ast.Load)
+
+    hits = {node.lineno for node in ast.walk(tree) if uses_the_path(node) and id(node) not in fine}
+    hits |= {lineno for lineno, text in _code_strings_in_tree(tree) if text.endswith(_GUARDRAILS_FILE_NAME)}
+    return sorted(hits)
+
+
+def _find_guardrails_path_uses(path: Path) -> list[int]:
+    return _find_guardrails_path_uses_in_tree(_parse(path))
+
+
 RULES = [
     Rule(
         name="全站時區",
@@ -921,9 +972,15 @@ RULES = [
         name="prompt 檔 mtime 快取",
         pattern=r'_PROMPT_CACHE\s*[:=]\s*(?:dict)?\s*[:=]?\s*\{"text"',
         canonical="utils.hot_files.read_text() / read_json()",
-        # ambient_reply 是多檔疊層（identity+guardrails+行為+examples）且有自己的
-        # 組裝順序，硬套單檔載入器反而更繞——形狀不同就不該硬收斂。
-        allowed={"utils/hot_files.py", "llm/ambient/ambient_reply.py"},
+        allowed={"utils/hot_files.py"},
+    ),
+    Rule(
+        name="system 段的人設各層（身分、守則、場合規則、範例卡、模型補丁）只由一個函式疊："
+             "各場合自己讀守則檔來拼，層次會各寫各的，換模型時的補丁也接不上",
+        finder=_find_guardrails_path_uses,
+        canonical="llm.prompt.prompt_builder.persona_system(identity=…, guardrails=…, rules=…, examples=…, model=…)",
+        # 守則檔的檔名只寫在設定欄位的預設值
+        allowed={"sys_settings/llm_settings.py"},
     ),
     Rule(
         name="模組 logger 一律用 __name__（分類與去向寫在 settings/logging.json）",
@@ -1512,6 +1569,66 @@ class SleepUntilFinderTests(unittest.TestCase):
             "async def loop():\n"
             "    await asyncio.sleep(INTERVAL)\n"
             "    await asyncio.sleep(0.5)\n"
+        )
+        self.assertEqual(self._scan(src), [])
+
+
+class GuardrailsPathFinderTests(unittest.TestCase):
+    """「人設各層只由一個函式疊」規則的偵測器本身：守則檔的路徑只能交給 `persona_system(guardrails=…)`，
+    寫成什麼樣子、放在一行的哪裡都一樣。"""
+
+    def _scan(self, src):
+        return _find_guardrails_path_uses_in_tree(ast.parse(src))
+
+    def test_catches_a_surface_reading_the_file_itself(self):
+        src = (
+            "def ambient(paths):\n"
+            "    if _SETTINGS.guardrails_path:\n"
+            "        paths.append(Path(_SETTINGS.guardrails_path))\n"
+            "def askai():\n"
+            "    guardrails = _read_prompt_file(GUARDRAILS_FILE_PATH)\n"
+        )
+        self.assertEqual(self._scan(src), [2, 3, 5])
+
+    def test_catches_forms_a_line_pattern_would_miss(self):
+        src = (
+            "def more_arguments_after_it():\n"
+            "    return hot_files.read_text(GUARDRAILS_FILE_PATH, label='守則')\n"
+            "def kept_in_a_variable_first():\n"
+            "    path = _SETTINGS.guardrails_path\n"
+            "    return open(path).read()\n"
+            "def another_function_stacks_the_layers():\n"
+            "    return my_own_layers(guardrails=cfg.guardrails_path)\n"
+            "def the_constant_of_another_module():\n"
+            "    return llm_commands.GUARDRAILS_FILE_PATH.read_text()\n"
+            "def the_file_name_itself():\n"
+            "    return hot_files.read_text(prompt_file('persona_guardrails.txt'))\n"
+        )
+        self.assertEqual(self._scan(src), [2, 4, 7, 9, 11])
+
+    def test_allows_handing_it_to_the_one_stacker_and_defining_it(self):
+        src = (
+            "from llm.prompt.prompt_builder import persona_system as stack\n"
+            "GUARDRAILS_FILE_PATH = Path(ASKAI_SETTINGS.guardrails_file_path)\n"
+            "class Settings:\n"
+            "    guardrails_path: str = prompt_file(name)\n"
+            "def last_argument_on_one_line(m):\n"
+            "    return persona_system(identity=_SETTINGS.identity_path, model=m, guardrails=_SETTINGS.guardrails_path)\n"
+            "def behind_a_switch(m):\n"
+            "    return prompt_builder.persona_system(\n"
+            "        guardrails=GUARDRAILS_FILE_PATH if use_guardrails else None,\n"
+            "        model=m,\n"
+            "    )\n"
+            "def imported_under_another_name(m):\n"
+            "    return stack(guardrails=GUARDRAILS_FILE_PATH, model=m)\n"
+        )
+        self.assertEqual(self._scan(src), [])
+
+    def test_ignores_docstrings_and_comments(self):
+        src = (
+            '"""守則在 persona_guardrails.txt，路徑是 _SETTINGS.guardrails_path。"""\n'
+            "# GUARDRAILS_FILE_PATH 只交給 persona_system\n"
+            "x = 1\n"
         )
         self.assertEqual(self._scan(src), [])
 
