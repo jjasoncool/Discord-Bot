@@ -7,10 +7,10 @@
 不 import discord：成員名字、頻道名稱、bot 自己的 id 由指令層查好交進來。
 
 介面：
-- `ChatSearchTools(settings=, member_names=, channel_names=, self_id=, instructions=)`：`ToolRunner`——
+- `ChatSearchTools(settings=, member_names=, channel_names=, self_id=, instructions=, fixed_channel_id=)`：`ToolRunner`——
   `tools`（宣告一個 chat_search）、`instructions`（規則檔 `askai_chat_search_rules.txt`，改檔即生效）、`execute`；
   `calls` 記這次請求查了什麼（寫進 /askai 的回應紀錄）。`phrase_search`／`topic_search` 是兩種模式的後端（同步、碰 DB）。
-- `CHAT_SEARCH_TOOL`：宣告（名稱與說明是模型決定要不要查的依據）。
+- `CHAT_SEARCH_TOOL`：宣告（名稱與說明是模型決定要不要查的依據）；`ONE_CHANNEL_TOOL` 是鎖在一個頻道時的宣告。
 
 規則：
 - 兩種模式由模型選：phrase＝照字面找（ILIKE 子字串）、按人與頻道計數＋每人最近幾則原文，給「誰常說、誰說過」這類要數
@@ -20,6 +20,8 @@
 - 結果一律標「頻道、名字#尾碼、時間」：/askai 本來只看一個頻道的視窗，全庫搜回來的東西不標出處會混在一起。
 - 聊天表沒存 guild_id（只有 channel_id），bot 目前只在一個伺服器，所以不分伺服器；之後多伺服器要用指令層交進來的頻道
   名單當白名單。bot 自己的訊息不算（`self_id`）。
+- 給了 `fixed_channel_id` 就只查那個頻道：宣告裡沒有 `channel` 參數，模型填了也不看。插話是在公開頻道回話，
+  全庫搜回來的東西會帶著別的頻道（成人頻道、管理群、私人討論串）的名稱與原文，所以鎖在它所在的那一個。
 - 任何失敗（參數錯、名字對不到、DB 壞）都回 `{"error": ...}` 給模型，不往外丟。DB 是同步的，`execute` 丟到執行緒。
 
 例外與決策：topic 的統計只數最像的 N 句、不是全庫，向量抓的是主題不是態度，含蓄的欺負會漏；要判態度得再加一層 reranker，
@@ -31,6 +33,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import re
@@ -82,6 +85,19 @@ CHAT_SEARCH_TOOL: dict[str, Any] = {
 }
 
 
+def _one_channel_tool() -> dict[str, Any]:
+    """鎖在一個頻道時的宣告：沒有 channel 參數，說明不講「全部頻道」。內容固定，接上去不會讓提示詞快取每次失效。"""
+    tool = copy.deepcopy(CHAT_SEARCH_TOOL)
+    function = tool["function"]
+    function["description"] = function["description"].replace(
+        "搜尋這個伺服器的聊天紀錄（全部頻道、所有時間）", "搜尋這個頻道的聊天紀錄（所有時間）")
+    del function["parameters"]["properties"]["channel"]
+    return tool
+
+
+ONE_CHANNEL_TOOL: dict[str, Any] = _one_channel_tool()
+
+
 def _connect():
     return _LLM_SETTINGS.pgvector_connect()
 
@@ -107,13 +123,15 @@ class ChatSearchTools:
 
     def __init__(self, *, member_names: Mapping[Any, list[str]], channel_names: Mapping[Any, str],
                  self_id: Any = None, settings: Optional[AskAIChatSearchSettings] = None,
-                 instructions: Optional[str] = None):
+                 instructions: Optional[str] = None, fixed_channel_id: Any = None):
         self.settings = settings or AskAIChatSearchSettings()
         #: author_id → [顯示名稱, …]（`member_names_from_guild`；第一個是顯示名稱，bot 不在裡面）
         self.member_names = {str(uid): list(names) for uid, names in member_names.items() if names}
         #: channel_id → 頻道或 thread 名稱（只有指令層查得到的；封存的 thread 標成未知頻道）
         self.channel_names = {str(cid): str(name) for cid, name in channel_names.items() if name}
         self.self_id = str(self_id) if self_id else None
+        #: 給了就只查這個頻道（宣告裡也沒有 channel 參數）
+        self.fixed_channel_id = str(fixed_channel_id) if fixed_channel_id else None
         #: 怎麼用這個工具（接在系統提示詞後面，見 `LLMService.generate_reply`）
         self.instructions = (
             instructions if instructions is not None
@@ -124,7 +142,7 @@ class ChatSearchTools:
 
     @property
     def tools(self) -> list[dict[str, Any]]:
-        return [CHAT_SEARCH_TOOL]
+        return [ONE_CHANNEL_TOOL if self.fixed_channel_id else CHAT_SEARCH_TOOL]
 
     # ── 名字、頻道 ────────────────────────────────────────────────────────
     def label(self, user_id: Any) -> str:
@@ -216,9 +234,12 @@ class ChatSearchTools:
         author_id, error = self.resolve_author(args.get("author"))
         if error:
             return {"error": error}
-        channel_id, error = self.resolve_channel(args.get("channel"))
-        if error:
-            return {"error": error}
+        if self.fixed_channel_id:
+            channel_id = self.fixed_channel_id      # 模型填了 channel 也不看
+        else:
+            channel_id, error = self.resolve_channel(args.get("channel"))
+            if error:
+                return {"error": error}
         contains = str(args.get("contains") or "").strip() or None
         record.update(query=query, mode=mode, author_id=author_id, channel_id=channel_id, contains=contains)
         scope = {"author_id": author_id, "channel_id": channel_id, "contains": contains}

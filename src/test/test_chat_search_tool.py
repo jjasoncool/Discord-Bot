@@ -10,6 +10,8 @@
   - contains 把兩種模式的範圍鎖在含某個詞的句子（phrase 多一個 ILIKE、topic 交給 search_chat 的 text_contains）
   - author／channel 用模型看到的名字對：對到一個就過濾；對不到或對到好幾個回錯誤（列出候選）
   - 任何失敗（參數錯、不認得的工具、DB 壞）都回 `{"error": ...}`，不往外丟；經過記在 `calls`
+  - 給了固定頻道（插話用）：宣告裡沒有 channel 參數、說明不講全部頻道，兩種模式都只查那個頻道，模型填別的頻道也不看；
+    原本那份全伺服器的宣告不受影響
 
 hermetic：假的連線、假的 search_chat，不碰模型與資料庫。
 
@@ -209,6 +211,32 @@ class ChatSearchToolsTests(unittest.TestCase):
         sql, params = self.cursor.executed[1]
         self.assertEqual(sql.count("text ILIKE %s ESCAPE"), 2)
         self.assertEqual(params[:2], ("%好了啦%", "%50\\%\\_%"))
+
+    # ── 鎖在一個頻道（插話用） ──
+    def test_one_channel_tools_declare_no_channel_and_always_search_that_channel(self):
+        runner = self.tools(fixed_channel_id=77)
+        (tool,) = runner.tools
+        self.assertNotIn("channel", tool["function"]["parameters"]["properties"])
+        self.assertIn("這個頻道的聊天紀錄", tool["function"]["description"])
+        self.assertNotIn("全部頻道", tool["function"]["description"])
+        for other in ("query", "mode", "author", "contains"):
+            self.assertIn(other, tool["function"]["parameters"]["properties"])
+
+        payload = self.run_tool(runner, {"query": "好了啦", "mode": "phrase", "channel": "鳴潮"})
+        self.assertNotIn("error", payload, "模型填了別的頻道也不看、不報錯")
+        sql, params = self.cursor.executed[1]
+        self.assertIn("metadata_->>'channel_id' = %s", sql)
+        self.assertEqual(params, ("%好了啦%", "77", cs.AskAIChatSearchSettings().phrase_scan_rows))
+        self.run_tool(runner, {"query": "不喝水", "channel": "沒有這個頻道"})
+        self.assertEqual("77", self.search_calls[0]["channel_id"])
+        self.assertEqual(["77", "77"], [call["channel_id"] for call in runner.calls])
+
+    def test_the_whole_server_declaration_keeps_its_channel_parameter(self):
+        self.tools(fixed_channel_id=77).tools
+        (tool,) = self.tools().tools
+        self.assertIn("channel", tool["function"]["parameters"]["properties"])
+        self.assertIn("全部頻道", tool["function"]["description"])
+        self.assertEqual(self.tools(fixed_channel_id=77).tools, self.tools(fixed_channel_id=88).tools, "宣告不隨頻道變，提示詞快取才穩")
 
     def test_failures_become_error_payloads(self):
         runner = self.tools()
