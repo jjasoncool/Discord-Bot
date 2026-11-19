@@ -22,6 +22,7 @@
       沒有補丁的模型，組出來的跟沒有這一層時一字不差。
   12. 接了哪些補丁檔記一行 INFO：同一個模型、同樣的清單只記一次，檔案增減後再記一次，一個都沒接上也記。
   13. 正式的補丁資料夾裡只放檔名小寫、有內容的 .txt。
+  14. 三個場合設定裡的身分檔、守則檔（插話與 /askai 再加範例卡）指向同一份。
 
 安全規則用假的標記字串，只驗證「放在哪裡」，不綁定規則檔的實際文案。模型名稱與補丁檔名都是虛構的。
 """
@@ -440,6 +441,14 @@ class SurfacesUseTheSharedLayersTests(unittest.TestCase):
             self.assertEqual("【abc 的毛病】", model_notes(MODEL), "補丁本身對得上")
             self.assertEqual(ambient_reply._DEFAULT_AMBIENT_PROMPT, ambient_reply._load_ambient_prompt(MODEL))
             self.assertEqual(ambient_diary._DEFAULT_DIARY_PROMPT, ambient_diary._load_diary_prompt(MODEL))
+
+    def test_the_three_surfaces_point_at_the_same_persona_files(self):
+        # 路徑在三個設定類別各寫一份：只改其中一份，三個場合就不再是同一個人設，而且沒有東西會報錯
+        from sys_settings.llm_settings import AmbientChatSettings, AskAICommandSettings, DiaryReflectionSettings
+        ambient, askai, diary = AmbientChatSettings(), AskAICommandSettings(), DiaryReflectionSettings()
+        self.assertEqual(1, len({ambient.identity_path, askai.identity_file_path, diary.identity_path}), "身分檔")
+        self.assertEqual(1, len({ambient.guardrails_path, askai.guardrails_file_path, diary.guardrails_path}), "守則檔")
+        self.assertEqual(ambient.examples_path, askai.examples_file_path, "範例卡（日記不用）")
 
     def test_the_real_notes_folder_holds_only_lowercase_txt_files_with_content(self):
         # 只認 .txt；比對不分大小寫，檔名大小寫各一份會兩個都接上；空檔接不上任何東西卻看起來像有補丁
