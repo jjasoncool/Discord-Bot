@@ -12,6 +12,8 @@
   - 任何失敗（參數錯、不認得的工具、DB 壞）都回 `{"error": ...}`，不往外丟；經過記在 `calls`
   - 給了固定頻道（插話用）：宣告裡沒有 channel 參數、說明不講全部頻道，兩種模式都只查那個頻道，模型填別的頻道也不看；
     原本那份全伺服器的宣告不受影響
+  - 群友已經刪掉的訊息不給模型看原文（照原始訊息表的軟刪記號）：topic 對撈回來的查一次、濾掉；phrase 只查要附的例句
+    （每人多留幾則備用，刪掉的由下一則補上），掃描的 SQL 不碰原始訊息表、計數不扣
 
 hermetic：假的連線、假的 search_chat，不碰模型與資料庫。
 
@@ -39,24 +41,45 @@ CHANNELS = {"77": "閒聊", "88": "鳴潮"}
 T = "2026-10-20T13:03:00+00:00"          # 本地（+08:00）21:03
 GROUPS = [(MING, "77", 80, T), (MING, "88", 17, "2026-10-01T00:00:00+00:00"),
           (HUA, "77", 3, "2026-09-01T00:00:00+00:00"), (BOT, "77", 5, T)]
-RECENT = [(MING, "77", T, "好了啦  又在裝"), (MING, "77", "2026-10-19T01:00:00+00:00", "好了啦！"),
-          (MING, "88", "2026-10-01T00:00:00+00:00", "好了啦 第三則"), (HUA, "77", "2026-09-01T00:00:00+00:00", "好了啦喔")]
+RECENT = [(MING, "77", T, "好了啦  又在裝", "901"), (MING, "77", "2026-10-19T01:00:00+00:00", "好了啦！", "902"),
+          (MING, "88", "2026-10-01T00:00:00+00:00", "好了啦 第三則", "903"), (HUA, "77", "2026-09-01T00:00:00+00:00", "好了啦喔", "904")]
 
 
 def combined(groups, recent):
     """一次掃描的回傳：計數列與最近幾則混在同一個結果裡，用第一欄分。"""
-    return [("count", a, c, str(n), last) for a, c, n, last in groups] + [("recent", a, c, ts, t) for a, c, ts, t in recent]
+    return ([("count", a, c, str(n), last, None) for a, c, n, last in groups]
+            + [("recent", a, c, ts, t, mid) for a, c, ts, t, mid in recent])
 
 
 class _Cursor:
     def __init__(self, rows):
         self.queue = [list(rows)]
-        self.executed: list[tuple[str, tuple]] = []
+        self.executed: list[tuple[str, tuple]] = []      # 對聊天表下的查詢（連同它前面設的時間上限）
+        self.deleted: set[str] = set()                   # 原始訊息表標成已刪的訊息
+        self.deleted_lookups: list[list[str]] = []       # 問過「這幾則有沒有被刪」的 id
+        self.deleted_sql: list[str] = []                 # 那幾次查詢的 SQL
+        self.deleted_limits: list[tuple] = []            # 那幾次查詢前設的時間上限（毫秒）；沒設是 None
+        self._limit = None                               # 剛設、還不知道是替哪一條查詢設的時間上限
+        self._asked_deleted = False
 
     def execute(self, sql, params=None):
-        self.executed.append((sql, params))
+        if sql.lstrip().startswith("SET LOCAL statement_timeout"):
+            self._limit = (sql, params)
+            return
+        self._asked_deleted = sql.lstrip().startswith("SELECT message_id FROM discord_messages_raw")
+        if self._asked_deleted:
+            self.deleted_lookups.append(list(params[0]))
+            self.deleted_sql.append(sql)
+            self.deleted_limits.append(self._limit[1] if self._limit else None)
+        else:
+            if self._limit:
+                self.executed.append(self._limit)
+            self.executed.append((sql, params))
+        self._limit = None
 
     def fetchall(self):
+        if self._asked_deleted:
+            return [(mid,) for mid in self.deleted_lookups[-1] if mid in self.deleted]
         return self.queue.pop(0) if self.queue else []
 
     def __enter__(self):
@@ -237,6 +260,42 @@ class ChatSearchToolsTests(unittest.TestCase):
         self.assertIn("channel", tool["function"]["parameters"]["properties"])
         self.assertIn("全部頻道", tool["function"]["description"])
         self.assertEqual(self.tools(fixed_channel_id=77).tools, self.tools(fixed_channel_id=88).tools, "宣告不隨頻道變，提示詞快取才穩")
+
+    # ── 群友已經刪掉的訊息 ──
+    def test_messages_members_deleted_are_left_out_of_what_topic_returns(self):
+        self.cursor.deleted = {"3"}
+        payload = self.run_tool(self.tools(), {"query": "不喝水"})
+        self.assertEqual(["水喝太少會頭痛"], [r["text"] for r in payload["results"]])
+        self.assertEqual([("小明", 1)], [(s["name"][:2], s["count"]) for s in payload["speakers"]], "刪掉的那則也不進統計")
+        self.assertEqual([["1", "2", "3", "4", "5"]], self.cursor.deleted_lookups, "只對撈回來的那幾則問一次")
+        sql = " ".join(self.cursor.deleted_sql[0].split())
+        self.assertIn("WHERE message_id = ANY(%s) AND is_deleted", sql, "只認標成已刪的；少了這個條件，表裡有的每一則都會被當成已刪")
+
+    def test_a_message_deleted_moments_ago_is_left_out_before_the_database_knows(self):
+        # 刪除記號是批次寫進資料庫的：上層交進「收到刪除事件、還沒寫進去」的 id，兩邊合起來算
+        runner = self.tools(pending_deleted=lambda: {"4", "999"})
+        payload = self.run_tool(runner, {"query": "不喝水"})
+        self.assertEqual(["我一天喝不到一杯水"], [r["text"] for r in payload["results"]])
+        self.cursor.deleted = {"3"}
+        payload = self.run_tool(runner, {"query": "不喝水"})
+        self.assertEqual([], payload["results"], "資料庫裡的和還沒寫進去的都算")
+
+    def test_phrase_leaves_deleted_messages_out_of_the_examples_and_fills_from_the_next_one(self):
+        self.cursor.deleted = {"901"}
+        payload = self.run_tool(self.tools(), {"query": "好了啦", "mode": "phrase"})
+        first = payload["speakers"][0]
+        self.assertEqual(["[2026-10-19 09:00 #閒聊] 好了啦！", "[2026-10-01 08:00 #鳴潮] 好了啦 第三則"], first["examples"],
+                         "刪掉的那則不給看，由下一則補上")
+        self.assertEqual(97, first["count"], "計數不扣：逐筆去查每一則有沒有被刪太貴")
+        self.assertEqual([["901", "902", "903", "904"]], self.cursor.deleted_lookups, "只問要附的那幾則，一次問完")
+
+    def test_the_phrase_scan_itself_does_not_touch_the_raw_message_table(self):
+        # 掃描時逐筆回原始訊息表查，資料不在快取時把查詢時間加倍、常見詞會撞逾時
+        self.run_tool(self.tools(), {"query": "好了啦", "mode": "phrase"})
+        sql, _params = self.cursor.executed[1]
+        self.assertNotIn("discord_messages_raw", sql)
+        self.assertNotIn("is_deleted", sql)
+        self.assertIn("metadata_->>'message_id' AS mid", sql)
 
     def test_failures_become_error_payloads(self):
         runner = self.tools()

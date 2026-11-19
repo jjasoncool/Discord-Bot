@@ -12,7 +12,8 @@ raw 表是備份層，也是互動（反應）的真相來源。
 介面：`enqueue_raw_message`、`enqueue_raw_edit`、`record_deletion`（刪除事件：判斷誰刪的再排進寫入）／`enqueue_raw_delete`、
   `prime_delete_audit`（上線時記審核日誌的基準）、`enqueue_reaction_change`、`should_trigger_flush`、
   `flush_raw_buffer`、`get_reaction_salience`、`buffer_sizes`／`total_buffer_size`；
-  讀：`channel_keys`（頻道 → 表裡的 channel_id／thread_id）、`recent_deletions`、`rows_around`、`original_texts`
+  讀：`channel_keys`（頻道 → 表裡的 channel_id／thread_id）、`recent_deletions`、`rows_around`、`original_texts`、
+  `pending_deleted_ids`（收到刪除事件、還沒寫進資料庫的訊息 id）
   （給 `llm.storage.deleted_and_edited`，篩選與組字在那邊）。
 
 規則：四種事件各自一個緩衝；新訊息進來時任一緩衝滿 50 則就寫一批，另外每 60 秒定期寫（反應要夠即時），單次 flush 合併處理；
@@ -289,6 +290,15 @@ def enqueue_raw_delete(message_id: int | str, *, deleted_at: str | None = None,
 
 
 # ========== 誰刪的（審核日誌）==========
+
+def pending_deleted_ids() -> set[str]:
+    """已經收到刪除事件、還沒寫進資料庫的訊息 id。
+
+    刪除記號是批次寫的，資料庫要過一會才看得到；要馬上知道「這則被刪了沒」的讀取端（聊天紀錄搜尋）拿這份補上。
+    判斷誰刪的那兩秒內還不在這裡。
+    """
+    return {message_id for message_id, _at, _by in _delete_buffer}
+
 
 #: 作者自己刪的。事件當下不一定知道作者是誰，緩衝裡先放這個記號，寫入時換成那一列的 author_id
 DELETED_BY_AUTHOR = "author"

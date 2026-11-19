@@ -7,7 +7,7 @@
 不 import discord：成員名字、頻道名稱、bot 自己的 id 由指令層查好交進來。
 
 介面：
-- `ChatSearchTools(settings=, member_names=, channel_names=, self_id=, instructions=, fixed_channel_id=)`：`ToolRunner`——
+- `ChatSearchTools(settings=, member_names=, channel_names=, self_id=, instructions=, fixed_channel_id=, pending_deleted=)`：`ToolRunner`——
   `tools`（宣告一個 chat_search）、`instructions`（規則檔 `askai_chat_search_rules.txt`，改檔即生效）、`execute`；
   `calls` 記這次請求查了什麼（寫進 /askai 的回應紀錄）。`phrase_search`／`topic_search` 是兩種模式的後端（同步、碰 DB）。
 - `CHAT_SEARCH_TOOL`：宣告（名稱與說明是模型決定要不要查的依據）；`ONE_CHANNEL_TOOL` 是鎖在一個頻道時的宣告。
@@ -22,6 +22,11 @@
   名單當白名單。bot 自己的訊息不算（`self_id`）。
 - 給了 `fixed_channel_id` 就只查那個頻道：宣告裡沒有 `channel` 參數，模型填了也不看。插話是在公開頻道回話，
   全庫搜回來的東西會帶著別的頻道（成人頻道、管理群、私人討論串）的名稱與原文，所以鎖在它所在的那一個。
+- 群友已經刪掉的訊息不給模型看原文：聊天向量庫沒有刪除的路徑，刪了的還在裡面，照原始訊息表的軟刪記號濾掉。
+  語意模式對折疊後要用的那些則（最多 `topic_tally_limit`）查一次；字面模式只查要附的例句（每人多留幾則備用），計數不扣
+  ——逐筆回原始訊息表查太貴（資料不在快取時把查詢時間加倍、常見詞會撞逾時），而已刪的只佔千分之幾。
+  刪除記號是批次寫進資料庫的，剛刪的那一分鐘資料庫還看不到：上層把「還沒寫進去的已刪 id」的函式交進來
+  （`pending_deleted=`，這一層不能 import 寫入端），兩邊合起來算。
 - 任何失敗（參數錯、名字對不到、DB 壞）都回 `{"error": ...}` 給模型，不往外丟。DB 是同步的，`execute` 丟到執行緒。
 
 例外與決策：topic 的統計只數最像的 N 句、不是全庫，向量抓的是主題不是態度，含蓄的欺負會漏；要判態度得再加一層 reranker，
@@ -29,6 +34,8 @@
 （「好 了 啦」）會漏，模型可以換寫法再查。字面模式一次掃描就把計數與最近幾則一起算出來（CTE 引用兩次會物化一次），
 熱快取約 0.3 秒、冷快取讀整個 heap（約 660 MB）要幾秒到十幾秒，所以設 statement_timeout 讓它逾時就回錯誤給模型；
 要再快得建 pg_trgm 的 GIN 索引（三個字以上的句子走索引，兩個字的照樣掃描），建不建記在交接檔。
+語意模式是先折疊（同一人同一句只留最新那則當代表）再查已刪：代表那則被刪時整組一起不見、連次數也少算，
+代表沒刪而組裡有已刪的則次數多算。已刪只佔千分之幾、給出去的文字不會多，先這樣。
 """
 from __future__ import annotations
 
@@ -40,7 +47,7 @@ import re
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 from llm.client.tool_calls import ToolArgumentError, parse_arguments
 from llm.preprocess import person_anchor
@@ -55,6 +62,10 @@ logger = logging.getLogger(__name__)
 
 _LLM_SETTINGS = LLMServiceSettings()
 MODES = ("phrase", "topic")
+#: 原始訊息表：只讀它的軟刪記號，用來濾掉群友已經刪掉的訊息
+_RAW_TABLE = "discord_messages_raw"
+#: 字面模式每個人的例句多留幾則備用：剛好挑到已刪的訊息時有得補
+_EXAMPLE_SPARES = 3
 
 #: 宣告給模型的工具（名稱與說明是模型決定要不要查的依據）
 CHAT_SEARCH_TOOL: dict[str, Any] = {
@@ -123,7 +134,8 @@ class ChatSearchTools:
 
     def __init__(self, *, member_names: Mapping[Any, list[str]], channel_names: Mapping[Any, str],
                  self_id: Any = None, settings: Optional[AskAIChatSearchSettings] = None,
-                 instructions: Optional[str] = None, fixed_channel_id: Any = None):
+                 instructions: Optional[str] = None, fixed_channel_id: Any = None,
+                 pending_deleted: Optional[Callable[[], Iterable[Any]]] = None):
         self.settings = settings or AskAIChatSearchSettings()
         #: author_id → [顯示名稱, …]（`member_names_from_guild`；第一個是顯示名稱，bot 不在裡面）
         self.member_names = {str(uid): list(names) for uid, names in member_names.items() if names}
@@ -132,6 +144,8 @@ class ChatSearchTools:
         self.self_id = str(self_id) if self_id else None
         #: 給了就只查這個頻道（宣告裡也沒有 channel 參數）
         self.fixed_channel_id = str(fixed_channel_id) if fixed_channel_id else None
+        #: 取「收到刪除事件、還沒寫進資料庫」的訊息 id 的函式（上層交進來；沒給就只看資料庫）
+        self._pending_deleted = pending_deleted
         #: 怎麼用這個工具（接在系統提示詞後面，見 `LLMService.generate_reply`）
         self.instructions = (
             instructions if instructions is not None
@@ -277,13 +291,13 @@ class ChatSearchTools:
         sql = f"""
             WITH hits AS (
                 SELECT metadata_->>'author_id' AS author, metadata_->>'channel_id' AS channel,
-                       metadata_->>'timestamp' AS ts, text
+                       metadata_->>'timestamp' AS ts, text, metadata_->>'message_id' AS mid
                 FROM {table} WHERE {' AND '.join(where)}
             )
-            SELECT 'count', author, channel, count(*)::text, max(ts) FROM hits GROUP BY author, channel
+            SELECT 'count', author, channel, count(*)::text, max(ts), NULL FROM hits GROUP BY author, channel
             UNION ALL
-            SELECT 'recent', author, channel, ts, text
-            FROM (SELECT author, channel, ts, text FROM hits ORDER BY ts DESC LIMIT %s) AS recent
+            SELECT 'recent', author, channel, ts, text, mid
+            FROM (SELECT author, channel, ts, text, mid FROM hits ORDER BY ts DESC LIMIT %s) AS recent
         """
         with _connect() as conn:
             with conn.cursor() as cur:
@@ -291,8 +305,8 @@ class ChatSearchTools:
                 cur.execute("SET LOCAL statement_timeout = %s", (int(s.statement_timeout_seconds * 1000),))
                 cur.execute(sql, tuple([*params, s.phrase_scan_rows]))
                 rows = cur.fetchall()
-        groups = [(author, channel, int(n), last) for kind, author, channel, n, last in rows if kind == "count"]
-        recent = [(author, channel, ts, text) for kind, author, channel, ts, text in rows if kind == "recent"]
+        groups = [(author, channel, int(n), last) for kind, author, channel, n, last, _mid in rows if kind == "count"]
+        recent = [(author, channel, ts, text, mid) for kind, author, channel, ts, text, mid in rows if kind == "recent"]
 
         counts: dict[str, int] = defaultdict(int)
         per_channel: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
@@ -304,13 +318,21 @@ class ChatSearchTools:
             counts[author] += int(n)
             per_channel[author][str(channel or "")] += int(n)
             latest[author] = max(latest.get(author, ""), str(last or ""))
-        examples: dict[str, list[str]] = defaultdict(list)
-        for author, channel, ts, text in recent:
+        listed = sorted(counts, key=lambda a: (-counts[a], a))[: s.phrase_speakers]
+        # 例句：只替要列出來的人挑，每人多留幾則備用，再一次問「這幾則有沒有被刪」——刪掉的原文不給模型看
+        candidates: dict[str, list[tuple[Any, Any, str, Any]]] = defaultdict(list)
+        for author, channel, ts, text, mid in recent:
             author = str(author or "")
-            if author in counts and len(examples[author]) < s.phrase_examples:
-                examples[author].append(f"[{_when(ts)} #{self.channel_label(channel)}] {_clip(text, s.text_max_chars)}")
+            if author in listed and len(candidates[author]) < s.phrase_examples + _EXAMPLE_SPARES:
+                candidates[author].append((channel, ts, text, mid))
+        deleted = self._deleted_ids([mid for rows in candidates.values() for _channel, _ts, _text, mid in rows])
+        examples = {
+            author: [f"[{_when(ts)} #{self.channel_label(channel)}] {_clip(text, s.text_max_chars)}"
+                     for channel, ts, text, mid in rows if str(mid or "") not in deleted][: s.phrase_examples]
+            for author, rows in candidates.items()
+        }
         speakers = []
-        for author in sorted(counts, key=lambda a: (-counts[a], a))[: s.phrase_speakers]:
+        for author in listed:
             channels = sorted(per_channel[author].items(), key=lambda kv: -kv[1])[: s.phrase_channels]
             speakers.append({
                 "name": self.label(author), "count": counts[author],
@@ -324,6 +346,17 @@ class ChatSearchTools:
             payload["note"] = f"還有 {len(counts) - len(speakers)} 個人說過，只列說最多次的 {len(speakers)} 個"
         return payload
 
+    def _deleted_ids(self, message_ids: list[Any]) -> set[str]:
+        """這幾則裡群友已經刪掉的：原始訊息表的軟刪記號，加上還沒寫進資料庫的刪除。"""
+        ids = [str(mid) for mid in message_ids if mid]
+        if not ids:
+            return set()
+        pending = {str(mid) for mid in self._pending_deleted()} if self._pending_deleted is not None else set()
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT message_id FROM {_RAW_TABLE} WHERE message_id = ANY(%s) AND is_deleted", (ids,))
+                return {str(row[0]) for row in cur.fetchall()} | (pending & set(ids))
+
     def topic_search(self, query: str, *, author_id: Optional[str] = None,
                      channel_id: Optional[str] = None, contains: Optional[str] = None) -> dict[str, Any]:
         """照意思找：全庫語意搜尋。回最像的幾則例句，加上「最像的 N 句裡誰說了幾句」的統計——距離在上限內才算像，
@@ -334,8 +367,11 @@ class ChatSearchTools:
             channel_id=channel_id, author_id=author_id, text_contains=contains,
             return_meta=True, min_chars=s.topic_min_chars, collapse=True,
         )
+        deleted = self._deleted_ids([row.get("message_id") for row in rows])
         kept: list[tuple[dict[str, Any], str]] = []
         for row in rows:
+            if str(row.get("message_id") or "") in deleted:
+                continue
             text = (row.get("text") or "").strip()
             distance = row.get("distance")
             if str(row.get("author_id") or "") == self.self_id or is_emoji_or_symbol_only(text) or is_link_only(text):

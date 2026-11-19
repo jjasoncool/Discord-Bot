@@ -41,6 +41,7 @@ from sys_settings import switches
 from sys_settings.llm_settings import AskAIChatSearchSettings, AskAICommandSettings, AskAIIntelSettings, AskAIWebSettings
 from sys_settings.time_settings import APP_TZ
 from llm.prompt.prompt_builder import persona_system
+from llm.storage.raw_message_store import pending_deleted_ids
 from utils import hot_files
 from utils.discord_content import send_model_text
 from utils.dm_notifier import send_dm
@@ -967,6 +968,7 @@ class LLMCommands(commands.Cog):
                 settings=CHAT_SEARCH_SETTINGS,
                 member_names=member_names_from_guild(interaction.guild), channel_names=_channel_names(interaction.guild),
                 self_id=str(client_user.id) if client_user else None,
+                pending_deleted=pending_deleted_ids,   # 剛刪、還沒寫進資料庫的也不給模型看
             )
 
         # 用 asyncio.Task 包裝，取消時可中斷 LLM 的 HTTP 請求；查情報、查網路都在同一個 task 裡，按取消時一起中斷

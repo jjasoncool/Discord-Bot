@@ -527,6 +527,15 @@ class FlushReportTests(unittest.TestCase):
         self.assertTrue([line for line in logs.output if "inserted=1" in line and "failed=1" in line])
         self.assertEqual(0, raw.total_buffer_size())
 
+    def test_deletions_not_yet_written_can_be_asked_for(self):
+        # 刪除記號是批次寫的：要馬上知道「這則被刪了沒」的讀取端拿得到還沒寫進資料庫的那幾則
+        self.assertEqual(set(), raw.pending_deleted_ids())
+        raw.enqueue_raw_delete(123)
+        raw.enqueue_raw_delete("456")
+        self.assertEqual({"123", "456"}, raw.pending_deleted_ids())
+        raw._delete_buffer.clear()
+        self.assertEqual(set(), raw.pending_deleted_ids())
+
     def test_message_deleted_before_its_batch_is_written_is_kept_and_marked(self):
         db = PgDatabase()
         pool = FakePool([PgConn(db)])

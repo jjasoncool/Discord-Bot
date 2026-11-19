@@ -349,6 +349,7 @@ class AskaiFlowTests(unittest.IsolatedAsyncioTestCase):
         h = await self._harness(web_mode="tool", intel_mode="on", chat_mode="on").run()
         self.assertEqual(len(h.intel_calls[0]["also"]), 2, "網搜與聊天搜尋都交給工具輪")
         self.assertEqual(h.chat_tool_kwargs["self_id"], "5555")
+        self.assertIs(h.chat_tool_kwargs["pending_deleted"], lc.pending_deleted_ids, "剛刪、還沒寫進資料庫的也不給模型看")
         self.assertEqual(h.chat_tool_kwargs["member_names"], {"1111": ["甲"], "2222": ["乙", "小乙"]})
         self.assertEqual(h.history[0]["chat_search_meta"]["calls"], [{"mode": "phrase", "query": "好了啦", "result_count": 3}])
 
