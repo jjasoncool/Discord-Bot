@@ -14,6 +14,9 @@
   - 插話回憶把 min_chars 交給 search_chat，注入行尾標「同一人說過 N 次」
   - 問句向量可以由呼叫端先算好交進來（評估程式一次算完再逐題查，不再找 embedding 模型）；回傳的列帶 channel_id
   - text_contains 把語意搜尋鎖在內文含某段字的列（ILIKE、% 與 _ 跳脫）
+  - 給了 timeout_seconds 就在同一個交易裡設查詢的時間上限（在查詢之前）；沒給不設
+  - raise_errors：查詢失敗、問句向量算不出來時往外丟；預設照舊回空 list
+  - 插話回憶的查詢帶時間上限（設定 `callback_search_timeout_seconds`）
 
 hermetic：假的連線、假的 embedding、假的 reranker，不碰模型與資料庫。
 
@@ -80,10 +83,12 @@ class _Cursor:
         self.sql = None
         self.params = None
         self.statements: list[str] = []
+        self.calls: list[tuple] = []      # (sql, params)
         self.ef_values: list[int] = []
 
     def execute(self, sql, params=None):
         self.statements.append(sql)
+        self.calls.append((sql, params))
         if "hnsw.ef_search" in sql:
             self.ef_values.append(int(params[0]))
         if sql.lstrip().startswith("SELECT"):
@@ -236,6 +241,36 @@ class SearchChatCollapseTests(unittest.TestCase):
         self.assertTrue(any("hnsw.ef_search" in st for st in cursor.statements))
         self.assertTrue(any("hnsw.iterative_scan = relaxed_order" in st for st in cursor.statements))
         self.assertTrue(cursor.statements[-1].lstrip().startswith("SELECT"))   # 設定在查詢之前
+
+    def test_a_time_limit_is_set_before_the_query_only_when_asked(self):
+        _, cursor = self._run(return_meta=True, timeout_seconds=1.5)
+        limits = [st for st in cursor.statements if "statement_timeout" in st]
+        self.assertEqual(1, len(limits))
+        self.assertIn((limits[0], (1500,)), cursor.calls, "單位是毫秒")
+        self.assertLess(cursor.statements.index(limits[0]), len(cursor.statements) - 1, "上限要在查詢之前設")
+        self.assertTrue(cursor.statements[-1].lstrip().startswith("SELECT"))
+        _, plain = self._run(return_meta=True)
+        self.assertFalse([st for st in plain.statements if "statement_timeout" in st], "沒給就不限")
+
+    def test_failures_come_back_empty_unless_the_caller_asks_for_them(self):
+        class Broken(_Cursor):
+            def execute(self, sql, params=None):
+                if sql.lstrip().startswith("SELECT"):
+                    raise RuntimeError("canceling statement due to statement timeout")
+                return super().execute(sql, params)
+
+        embed = SimpleNamespace(get_query_embedding=lambda q: [0.1, 0.2])
+        with mock.patch.object(cr, "psycopg2", cr.psycopg2 or object()), \
+             mock.patch.object(cr, "_get_embed_model", lambda logger: embed), \
+             mock.patch.object(cr, "_pgvector_connect", lambda: _Conn(Broken([]))):
+            self.assertEqual([], cr.search_chat(question="x", limit=2, logger=LOG))
+            with self.assertRaisesRegex(RuntimeError, "statement timeout"):
+                cr.search_chat(question="x", limit=2, logger=LOG, raise_errors=True)
+        with mock.patch.object(cr, "psycopg2", cr.psycopg2 or object()), \
+             mock.patch.object(cr, "embed_query", lambda question, logger: None):
+            self.assertEqual([], cr.search_chat(question="x", limit=2, logger=LOG))
+            with self.assertRaisesRegex(RuntimeError, "問句向量"):
+                cr.search_chat(question="x", limit=2, logger=LOG, raise_errors=True)
 
     def test_ef_search_never_exceeds_the_pgvector_limit(self):
         cursor = _Cursor([])
@@ -468,6 +503,9 @@ class CallbackLinesTests(unittest.TestCase):
             lines = asyncio.run(ar._build_chat_callback_context(message, "卜靈強不強"))
 
         self.assertEqual(captured["min_chars"], ar._SETTINGS.callback_min_chars)
+        self.assertEqual(captured["timeout_seconds"], ar._SETTINGS.callback_search_timeout_seconds)
+        self.assertGreater(captured["timeout_seconds"], 0, "回憶查詢卡住時同頻道的插話全部排隊，一定要有上限")
+        self.assertFalse(captured.get("raise_errors"), "查不到回憶照樣要能回話")
         self.assertEqual(len(lines), 2)
         marked = [line for line in lines if "卜靈真的很強" in line][0]
         self.assertIn("（同一人說過 3 次）", marked)

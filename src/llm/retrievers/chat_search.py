@@ -27,6 +27,8 @@
   ——逐筆回原始訊息表查太貴（資料不在快取時把查詢時間加倍、常見詞會撞逾時），而已刪的只佔千分之幾。
   刪除記號是批次寫進資料庫的，剛刪的那一分鐘資料庫還看不到：上層把「還沒寫進去的已刪 id」的函式交進來
   （`pending_deleted=`，這一層不能 import 寫入端），兩邊合起來算。
+- 掃描、向量查詢、查已刪這三條查詢都有時間上限（`statement_timeout_seconds`），逾時回錯誤給模型；語意模式查詢失敗也回錯誤，不回「0 句」
+  （模型會把沒查成當成沒這回事）。
 - 任何失敗（參數錯、名字對不到、DB 壞）都回 `{"error": ...}` 給模型，不往外丟。DB 是同步的，`execute` 丟到執行緒。
 
 例外與決策：topic 的統計只數最像的 N 句、不是全庫，向量抓的是主題不是態度，含蓄的欺負會漏；要判態度得再加一層 reranker，
@@ -354,6 +356,8 @@ class ChatSearchTools:
         pending = {str(mid) for mid in self._pending_deleted()} if self._pending_deleted is not None else set()
         with _connect() as conn:
             with conn.cursor() as cur:
+                # 主鍵查詢平常幾毫秒；磁碟忙的時候幾十到上百個隨機頁面也會拖，一樣給上限
+                cur.execute("SET LOCAL statement_timeout = %s", (int(self.settings.statement_timeout_seconds * 1000),))
                 cur.execute(f"SELECT message_id FROM {_RAW_TABLE} WHERE message_id = ANY(%s) AND is_deleted", (ids,))
                 return {str(row[0]) for row in cur.fetchall()} | (pending & set(ids))
 
@@ -366,6 +370,7 @@ class ChatSearchTools:
             question=query, limit=s.topic_tally_limit, logger=logger, candidate_ids=None,
             channel_id=channel_id, author_id=author_id, text_contains=contains,
             return_meta=True, min_chars=s.topic_min_chars, collapse=True,
+            timeout_seconds=s.statement_timeout_seconds, raise_errors=True,
         )
         deleted = self._deleted_ids([row.get("message_id") for row in rows])
         kept: list[tuple[dict[str, Any], str]] = []

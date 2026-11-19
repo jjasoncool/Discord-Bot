@@ -478,6 +478,8 @@ class AmbientChatSettings(BaseSettings):
     callback_recency_half_life_hours: float = 336.0 # recency 半衰期（時）；336≈2 週
     callback_recency_gap_hours: float = 2.0         # 比此時數更舊才算「過去」（排除近窗）
     callback_min_chars: int = 8                     # 候選品質：太短不當回憶點
+    # 回憶的向量查詢最多跑幾秒：超過就當這次沒有回憶。同頻道一次只跑一輪插話，這條卡住後面全部排隊
+    callback_search_timeout_seconds: float = 15.0
     callback_w_relevance: float = 0.5               # 排序權重：relevance 最高（文不對題最糟）
     callback_w_importance: float = 0.35
     callback_w_recency: float = 0.15
@@ -524,7 +526,8 @@ class AmbientChatSettings(BaseSettings):
     # 註：接續還有一道更關鍵的判準寫在 code 裡——**發話者必須是它剛才回的那個人**
     # （見 ambient_reply._is_followup_to_bot）。少了它，「它插完話、群裡繼續聊自己的」也會被
     # 當成有人在接它，實測 15 次插話裡 9 次是這樣來的。
-    # 看門狗：單一 pass 超過此秒數視為卡住 → 取消，避免一次生成卡死整個頻道的序列處理。
+    # 每一次模型呼叫最多等幾秒，超過就取消，避免一次生成卡死整個頻道的序列處理。不是整輪的上限：
+    # 一輪可能呼叫好幾次（查完再生成、撞輸出上限重答），查詢工具花的時間也不算在裡面。
     # 要夠長以容納冷載入(model load 30-60s)+生成。
     pass_timeout_seconds: float = 180.0
     # 被 @、被回覆時的輸出上限（含思考）：想太久撞到就關掉思考再答一次，點名的人才一定收得到回覆。
@@ -646,7 +649,8 @@ class AskAIChatSearchSettings(BaseSettings):
     topic_max_distance: float = 0.5
     #: 每則原文最多給模型幾個字（工具結果也佔 context）
     text_max_chars: int = 160
-    #: 字面模式的查詢最多跑幾秒（沒有 trigram 索引時是全表掃描；逾時回錯誤給模型，別讓整個回答卡住）
+    #: 一次查詢在資料庫最多跑幾秒（字面模式兩個字以下是全表掃描；照意思找在資料離開快取時要讀上萬個頁面）；
+    #: 逾時回錯誤給模型，別讓整個回答卡住
     statement_timeout_seconds: float = 20.0
 
     model_config = SettingsConfigDict(extra="forbid", frozen=True)

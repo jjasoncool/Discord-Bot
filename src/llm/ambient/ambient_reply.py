@@ -567,6 +567,7 @@ async def _build_chat_callback_context(
                 author_id=target_id,                  # 有 target → 只撈本人原話；None → 全作者
                 return_meta=True,
                 min_chars=_SETTINGS.callback_min_chars,   # SQL 就擋掉太短的，候選池不被反應詞佔掉
+                timeout_seconds=_SETTINGS.callback_search_timeout_seconds,   # 磁碟忙時不等到天荒地老：沒有回憶照樣能回
             ),
         )
     except Exception as exc:

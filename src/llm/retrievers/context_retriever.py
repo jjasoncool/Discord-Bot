@@ -382,6 +382,8 @@ def search_chat(
     collapse: bool = True,
     embedding_column: str = "embedding",
     query_embedding: list[float] | None = None,
+    timeout_seconds: float | None = None,
+    raise_errors: bool = False,
 ):
     """對 discord_chat 向量庫做語意搜尋。
 
@@ -411,6 +413,11 @@ def search_chat(
     - return_meta=True（callback 用）→ list[dict]：{message_id, text, distance, timestamp, author_id, channel_id, repeat_count}，
       由近到遠。
 
+    - timeout_seconds：這條查詢在資料庫最多跑幾秒，超過就取消。資料離開快取時一次要讀上萬個頁面，磁碟忙的時候
+      曾經跑到九分鐘，呼叫端整個卡住；等不起的呼叫端（插話的回憶、給模型用的搜尋工具）要給。沒給就不限。
+    - raise_errors：算不出問句向量、查詢失敗或逾時時往外丟，不回空 list。呼叫端要分得出「真的沒有」和「沒查成」
+      才開（搜尋工具：模型把查詢失敗當成沒這回事，會講出錯的結論）。
+
     回空 list 代表無結果或降級（psycopg2 缺、embedding/連線失敗等），caller 自行決定 fallback。
     """
     if psycopg2 is None:
@@ -425,6 +432,8 @@ def search_chat(
     if query_embedding is None:
         query_embedding = embed_query(question, logger)
     if not query_embedding:
+        if raise_errors:
+            raise RuntimeError("問句向量算不出來")
         return []
 
     try:
@@ -491,9 +500,13 @@ def search_chat(
                 ef_search = _FULL_CORPUS_EF_SEARCH if candidate_ids is None else min(1000, max(100, 2 * fetch_limit))
                 cur.execute("SET LOCAL hnsw.ef_search = %s", (ef_search,))
                 cur.execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
+                if timeout_seconds:
+                    cur.execute("SET LOCAL statement_timeout = %s", (int(timeout_seconds * 1000),))
                 cur.execute(sql, tuple(params))
                 rows = cur.fetchall()
     except Exception as exc:
+        if raise_errors:
+            raise
         logger.warning("pgvector chat 搜尋查詢失敗（降級）: %s", exc)
         return []
 

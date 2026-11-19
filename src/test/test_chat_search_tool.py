@@ -14,6 +14,7 @@
     原本那份全伺服器的宣告不受影響
   - 群友已經刪掉的訊息不給模型看原文（照原始訊息表的軟刪記號）：topic 對撈回來的查一次、濾掉；phrase 只查要附的例句
     （每人多留幾則備用，刪掉的由下一則補上），掃描的 SQL 不碰原始訊息表、計數不扣
+  - topic 帶查詢的時間上限；查詢失敗回錯誤給模型，不回「0 句」
 
 hermetic：假的連線、假的 search_chat，不碰模型與資料庫。
 
@@ -270,6 +271,7 @@ class ChatSearchToolsTests(unittest.TestCase):
         self.assertEqual([["1", "2", "3", "4", "5"]], self.cursor.deleted_lookups, "只對撈回來的那幾則問一次")
         sql = " ".join(self.cursor.deleted_sql[0].split())
         self.assertIn("WHERE message_id = ANY(%s) AND is_deleted", sql, "只認標成已刪的；少了這個條件，表裡有的每一則都會被當成已刪")
+        self.assertEqual([(20000,)], self.cursor.deleted_limits, "這條查詢也有時間上限")
 
     def test_a_message_deleted_moments_ago_is_left_out_before_the_database_knows(self):
         # 刪除記號是批次寫進資料庫的：上層交進「收到刪除事件、還沒寫進去」的 id，兩邊合起來算
@@ -296,6 +298,19 @@ class ChatSearchToolsTests(unittest.TestCase):
         self.assertNotIn("discord_messages_raw", sql)
         self.assertNotIn("is_deleted", sql)
         self.assertIn("metadata_->>'message_id' AS mid", sql)
+
+    # ── 時間上限、查詢失敗 ──
+    def test_topic_has_a_time_limit_and_reports_a_failed_search_as_an_error(self):
+        runner = self.tools()
+        self.run_tool(runner, {"query": "不喝水"})
+        call = self.search_calls[0]
+        self.assertEqual(cs.AskAIChatSearchSettings().statement_timeout_seconds, call["timeout_seconds"])
+        self.assertTrue(call["raise_errors"])
+
+        with mock.patch.object(cs.context_retriever, "search_chat", side_effect=RuntimeError("statement timeout")):
+            payload = self.run_tool(runner, {"query": "不喝水"})
+        self.assertIn("查不到", payload["error"], "沒查成要讓模型知道，不能回成 0 句")
+        self.assertNotIn("counted", payload)
 
     def test_failures_become_error_payloads(self):
         runner = self.tools()
