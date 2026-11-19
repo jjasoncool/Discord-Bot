@@ -29,6 +29,7 @@ import re
 import sys
 import tokenize
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1757,6 +1758,19 @@ class CanonicalHelperTests(unittest.TestCase):
         from sys_settings.llm_settings import AskAICommandSettings
 
         self.assertNotIn("taipei_utc_offset_hours", AskAICommandSettings.model_fields)
+
+    def test_the_database_connection_gives_up_connecting_after_a_few_seconds(self):
+        # 資料庫卡住而不是拒絕連線時，沒有上限的連線會把呼叫的執行緒一直掛著
+        from sys_settings.llm_settings import LLMServiceSettings
+
+        fake = mock.Mock()
+        with mock.patch.dict(sys.modules, {"psycopg2": fake}):
+            LLMServiceSettings().pgvector_connect()
+        kwargs = fake.connect.call_args.kwargs
+        self.assertEqual(LLMServiceSettings().pgvector_connect_timeout_seconds, kwargs["connect_timeout"])
+        self.assertTrue(0 < kwargs["connect_timeout"] <= 30)
+        for name in ("host", "port", "dbname", "user", "password"):
+            self.assertIn(name, kwargs)
 
     def test_prompt_loader_handles_missing_files(self):
         from utils import hot_files

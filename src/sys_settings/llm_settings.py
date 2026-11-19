@@ -61,6 +61,8 @@ class LLMServiceSettings(BaseSettings):
     pgvector_password: str = Field(
         validation_alias="PGVECTOR_PASSWORD",
     )
+    #: 連 pgvector 最多等幾秒（只管建立連線，不管查詢跑多久）
+    pgvector_connect_timeout_seconds: int = 5
     llm_context_safety_rules_path: str = Field(
         default=prompt_file("llm_context_safety_rules.json"),
     )
@@ -104,6 +106,9 @@ class LLMServiceSettings(BaseSettings):
         五個參數一字不差地抄了六遍。改連線池、加 timeout、換驅動時要記得改六個地方，
         而漏掉的那個不會報錯、只會行為不一致。
 
+        連線有等待上限：資料庫卡住而不是拒絕連線時（主機沒回應、連線數滿了在排隊），沒有上限的話呼叫的那條執行緒
+        會一直掛著，池子裡的執行緒被這樣佔滿，別的功能跟著排隊。
+
         延後 import psycopg2：讓沒裝驅動的環境（單元測試）也能匯入本設定模組。
         """
         import psycopg2
@@ -114,6 +119,7 @@ class LLMServiceSettings(BaseSettings):
             dbname=self.pgvector_db,
             user=self.pgvector_user,
             password=self.pgvector_password,
+            connect_timeout=self.pgvector_connect_timeout_seconds,
         )
 
     @contextmanager
