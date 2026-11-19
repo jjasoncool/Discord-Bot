@@ -1,8 +1,8 @@
 """搜尋這個伺服器的聊天紀錄，做成給模型用的工具：/askai 問「誰說過／誰常說某句話」「之前有人提過…嗎」時，
-由模型自己決定要不要查、查什麼（開關 `askai_chat_search_mode`）。
+由模型自己決定要不要查、查什麼（開關 `askai_chat_search_mode`）；插話用鎖在所在頻道的那一種（`ambient_chat_search_mode`）。
 
 架構定位：服務層（`llm/retrievers`）。上層：介面層 `commands.llm_commands`（和情報、網路搜尋一起交給
-`run_with_intel(also=…)`，模型在同一個工具輪裡挑）。下層：`context_retriever.search_chat`（語意路）、pgvector
+`run_with_intel(also=…)`，模型在同一個工具輪裡挑）、功能層 `llm.ambient.ambient_reply`（建好交給 `ambient_search`）。下層：`context_retriever.search_chat`（語意路）、pgvector
 （字面路，`LLMServiceSettings.pgvector_connect`）、`llm.preprocess.person_anchor`（名字#尾碼）、`emoji_text_utils`（品質閘）。
 不 import discord：成員名字、頻道名稱、bot 自己的 id 由指令層查好交進來。
 

@@ -54,6 +54,11 @@
     "on：真的查——同一次判斷裡可以查一次，結果交給她再決定要不要開口（網路查詢先過名字與識別碼檢查，再經 SearXNG 出去；遊戲情報只到本機）；每天最多 30 次，有查的那次會回得比較晚"
   ],
   "ambient_search_mode": "on",
+  "_ambient_chat_search_mode 可以填": [
+    "off：插話不查聊天紀錄",
+    "on：插話的查詢多一個「查這個頻道的聊天紀錄」——群裡自己的梗、外號、誰說過什麼，被問「哪一句」時查到原句才引（只查插話所在的頻道、已刪的訊息不回、不出網；和遊戲情報、網路共用每次一次與每天 30 次；ambient_search_mode 要開著才有作用）"
+  ],
+  "ambient_chat_search_mode": "on",
   "_ambient_seed_lines_mode 可以填": [
     "off：插話的語氣參考照舊撈被讚過的舊插話",
     "on：每次從預設句庫（settings/prompts/ambient_seed_lines.json）與學到的句子抽幾句當語氣參考；要和新人格的提示詞一起切"

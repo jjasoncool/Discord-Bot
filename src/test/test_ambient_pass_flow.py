@@ -1126,6 +1126,38 @@ class PassFlowTests(unittest.TestCase):
         self.assertEqual([str(EARLIER_AUTHOR)], self.persona_builder.await_args.args[3], "被 @ 的人（去掉 bot）要傳進人物卡檢索")
 
 
+class ChatSearchHereTests(unittest.TestCase):
+    """插話的聊天紀錄搜尋只查它所在的那個頻道：全庫搜回來的東西會把別的頻道的名稱與原文帶到公開頻道。"""
+
+    def _message(self):
+        msg = _message("之前誰說過好了啦")
+        msg.channel.name = "祕密花園"
+        return msg
+
+    def test_the_tool_is_locked_to_the_channel_the_message_is_in(self):
+        from llm.retrievers import chat_search
+        msg = self._message()
+        with mock.patch("llm.persona.member_names.member_names_from_guild", lambda guild: {"1": ["小明"]}):
+            tools = ambient_reply._chat_search_here(msg)
+        self.assertEqual(str(CHANNEL_ID), tools.fixed_channel_id)
+        self.assertEqual([chat_search.ONE_CHANNEL_TOOL], tools.tools)
+        self.assertEqual({str(CHANNEL_ID): "祕密花園"}, tools.channel_names)
+        self.assertEqual(str(BOT_ID), tools.self_id, "她自己的話不算進統計")
+        self.assertEqual({"1": ["小明"]}, tools.member_names)
+        self.assertEqual("", tools.instructions, "規則由插話查詢那一層給，不接 /askai 那份")
+        from llm.storage.raw_message_store import pending_deleted_ids
+        self.assertIs(pending_deleted_ids, tools._pending_deleted, "剛刪、還沒寫進資料庫的也不給模型看")
+
+    def test_preparing_the_search_tools_hands_over_a_builder_for_this_channel(self):
+        msg = self._message()
+        prepare = mock.AsyncMock(return_value=None)
+        with mock.patch.object(ambient_reply.ambient_search, "prepare", prepare), \
+                mock.patch("llm.persona.member_names.member_names_from_guild", lambda guild: {}):
+            asyncio.run(ambient_reply._prepare_search_tools(msg, "之前誰說過好了啦", [SPEAKER], "t"))
+            built = prepare.await_args.kwargs["chat"]()
+        self.assertEqual(str(CHANNEL_ID), built.fixed_channel_id)
+
+
 class MentionLookupTests(unittest.TestCase):
     """被 @ 的人：人物卡檢索收到的是 id 清單，回憶對象也認得 @。"""
 

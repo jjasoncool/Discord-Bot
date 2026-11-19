@@ -3,7 +3,8 @@
 架構定位：功能層（`llm/ambient`）。上層：介面層的 `discord_bot.on_message`（背景 task 執行，不阻塞訊息處理）。
 下層：`services.llm_service.LLMService`（生成）、`llm.prompt.prompt_builder.persona_system`（疊 system 的人設各層與模型補丁）、
 `ambient_hooks`（鉤子閘）、`ambient_memory`（偏好與招牌梗召回）、
-`ambient_insult`（被罵的應對與記仇名單）、`ambient_search`（判斷時可以先查一次遊戲情報或網路）、
+`ambient_insult`（被罵的應對與記仇名單）、`ambient_search`（判斷時可以先查一次遊戲情報、網路或這個頻道的聊天紀錄）、
+`llm.retrievers.chat_search`（建出只查這個頻道的聊天紀錄搜尋，交給 `ambient_search`）、
 `ambient_style_lines`（語氣參考句）、
 `llm.preprocess`（聊天行格式、人名錨點、貼文與表情描述）、`llm.storage.ai_interactions_store`（互動紀錄）、
 `llm.client.gpu_gate`（前景讓位）、`utils.discord_content`（回覆太長時切段）。
@@ -104,6 +105,7 @@ from llm.preprocess.vision_image import (
 )
 from llm.logger_factory import get_or_create_file_logger
 from llm.prompt.prompt_builder import persona_system
+from llm.retrievers.chat_search import ChatSearchTools
 from services.llm_service import LLMService, TRUNCATED_NOTE
 from sys_settings.llm_settings import AmbientChatSettings
 from utils.utils import ChannelConfig
@@ -1730,14 +1732,30 @@ def _today_line(now: datetime) -> str:
     return f"{now:%Y-%m-%d}（{_WEEKDAYS[now.weekday()]}）"
 
 
+def _chat_search_here(message: discord.Message) -> ChatSearchTools:
+    """只查這個頻道的聊天紀錄搜尋。插話是在公開頻道回話，全庫搜回來的東西會帶出別的頻道的名稱與原文，所以鎖在這一個。"""
+    from llm.persona.member_names import member_names_from_guild
+    from llm.storage.raw_message_store import pending_deleted_ids
+
+    channel = message.channel
+    return ChatSearchTools(
+        member_names=member_names_from_guild(message.guild),
+        channel_names={channel.id: getattr(channel, "name", None) or "這個頻道"},
+        self_id=getattr(getattr(message.guild, "me", None), "id", None),
+        fixed_channel_id=channel.id, instructions="",
+        pending_deleted=pending_deleted_ids,
+    )
+
+
 async def _prepare_search_tools(message: discord.Message, stripped: str, participant_ids: list[int], trace_id: str):
-    """這次插話要不要給查詢工具（開關、額度在 ambient_search 判）；名字檢查用的名單第一次要用時才去拿。"""
+    """這次插話要不要給查詢工具（開關、額度在 ambient_search 判）；名字檢查用的名單、聊天紀錄搜尋都是第一次要用時才去拿。"""
     # 名單要含被 @ 的人：他近期沒發言就不在參與者裡，但他的自介、印象暱稱會隨人物卡進 prompt、最容易被拿去查
     people = [*participant_ids, *_mentioned_user_ids(message)]
     return await ambient_search.prepare(
         stripped or "", now=lambda: datetime.now(APP_TZ),
         names=functools.partial(ambient_search.name_parts_for, message.guild, people),
         trace_id=trace_id,
+        chat=functools.partial(_chat_search_here, message),
     )
 
 

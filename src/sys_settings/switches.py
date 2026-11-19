@@ -70,6 +70,10 @@ class Switches(BaseModel):
     #: dry_run＝記錄模式：工具照宣告、名字檢查照做、額度照扣，但不出網、不給她結果，只記下她想查什麼；
     #: off＝不給工具，system 段跟原本一樣（user 段照樣帶今天日期）
     ambient_search_mode: Literal["off", "dry_run", "on"] = "off"
+    #: 插話的查詢工具多一個「查這個頻道的聊天紀錄」（llm.retrievers.chat_search 鎖在插話所在的頻道）：群裡自己的梗、
+    #: 外號、誰說過什麼。只查本機、不出網；和上面那組共用每次一次與每天的額度，所以 ambient_search_mode 是 off 時沒有作用，
+    #: dry_run 時一樣只記不查。on 之後工具宣告多一個，第一次插話整段提示詞重讀一次
+    ambient_chat_search_mode: Literal["off", "on"] = "off"
     #: 插話的語氣參考句從哪來（llm.ambient.ambient_style_lines）：off＝照舊撈被讚過的舊插話（style_refs）；
     #: on＝每次從預設句庫與學到的句子抽幾句放 user 段。要和新人格的提示詞一起切，舊人格配新句庫會兩邊打架
     ambient_seed_lines_mode: Literal["off", "on"] = "off"

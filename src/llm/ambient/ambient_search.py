@@ -1,14 +1,16 @@
-"""插話上網查：琇紫判斷要不要插話的同一次生成裡，可以先查一次遊戲情報或網路，再決定要不要開口、講什麼。
+"""插話時先查一次：琇紫判斷要不要插話的同一次生成裡，可以先查一次遊戲情報、網路或這個頻道的聊天紀錄，再決定要不要開口、講什麼。
 
 架構定位：功能層（`llm/ambient`）。上層：`ambient_reply._gather_inputs`（準備工具）、`_generate`（交給模型）。
 下層：`llm.retrievers.intel`（遊戲情報工具，連 search-mcp）、`llm.retrievers.web`（網路搜尋工具）、
+`llm.retrievers.chat_search`（聊天紀錄搜尋的宣告；工具本身由 `ambient_reply` 建好交進來，這一層不認 Discord）、
 `llm.persona.member_names`（名字檢查）、`llm.storage.member_profile_store`（自介與印象裡的暱稱）、
 `utils.daily_quota`、`utils.hot_files`、`sys_settings.switches`。
 
 介面：
 - `mode()`：開關的值（off／dry_run／on）。
-- `prepare(question, *, now, names, trace_id)`：開關開著、今天還有額度，就準備這次插話的那組工具（情報的 search＋
-  web_search）；否則回 None（照原本的方式生成）。`names` 是取群友名字片段的 async 函式，第一次要檢查查詢字時才呼叫。
+- `prepare(question, *, now, names, trace_id, chat=)`：開關開著、今天還有額度，就準備這次插話的那組工具（情報的 search＋
+  web_search，`ambient_chat_search_mode` 開著再加 chat_search）；否則回 None（照原本的方式生成）。`names` 是取群友名字
+  片段的 async 函式，第一次要檢查查詢字時才呼叫；`chat` 是建出「鎖在這個頻道的聊天紀錄搜尋」的函式，真的要查才呼叫。
 - `AmbientSearchTools`：交給 `LLMService.generate_reply(tool_runner=…)` 的那組工具；`records` 是這次查了什麼。
 - `name_parts_for(guild, participant_ids)`：全伺服器成員的 Discord 名字加在場的人自介、印象裡的暱稱，切成比對片段。
 - `NUDGE`、`RECORD_MODE_NOTE`：查滿時提醒模型的話、記錄模式回給模型的話。
@@ -17,7 +19,10 @@
 - 自發、被 @、接續三種插話給一字不差的同一份宣告與規則，提示詞快取才只在上線與改規則時失效一次；額度用完
   當天整天不宣告（提示詞一天只變一次），不是宣告了再回錯誤（那樣照樣多跑一輪）。
 - 同一次插話只執行第一個工具呼叫（共用迴圈會把同一輪的呼叫全執行，這裡擋）；情報只宣告 search、不宣告 fetch。
-- web_search 的查詢字先過名字與識別碼檢查，擋下的不出網、記下原因；情報查詢只到本機的 search-mcp，不檢查。
+- web_search 的查詢字先過名字與識別碼檢查，擋下的不出網、記下原因；情報查詢只到本機的 search-mcp，不檢查；
+  chat_search 只查本機的聊天紀錄，本來就要填群友的名字，也不檢查。三個工具共用「一次插話只查一次」與每天的額度。
+- chat_search 的規則寫在同一份規則檔的最後一段（從 `CHAT_RULES_HEADING` 那個標題起到檔尾），只在它有宣告時給：
+  開關關著時模型看到規則，會去呼叫一個沒宣告的工具。所以那個標題不能改，它後面也不要放別的工具的規則。
 - 開（on）：檢查都做、額度照扣，呼叫內層工具，結果交給模型；每次呼叫記一行 log。
 - 記錄模式（dry_run）：檢查都做、額度照扣、每次呼叫記一行 log，但不呼叫內層工具、回模型固定的說明。
 - 規則檔每次用 hot_files 讀、掛在這組工具上：掛在情報那組的話，search-mcp 一掉線規則就跟著消失。
@@ -41,6 +46,7 @@ from llm.client.tool_calls import ToolArgumentError, parse_arguments
 from llm.persona.member_names import member_names_from_guild, merge_names, name_parts, query_names_member
 from llm.retrievers.intel import prepare_intel_session
 from llm.retrievers.web import WebSearchTools
+from llm.retrievers.chat_search import CHAT_SEARCH_TOOL, ONE_CHANNEL_TOOL
 from llm.retrievers.web.tools import WEB_SEARCH_TOOL
 from sys_settings import switches
 from sys_settings.llm_settings import AmbientSearchSettings, AskAIIntelSettings, AskAIWebSettings
@@ -54,6 +60,7 @@ _WEB_SETTINGS = AskAIWebSettings()
 #: 今天有查的插話次數（換日歸零；只在行程記憶體）
 _QUOTA = DailyQuota(_SETTINGS.daily_limit)
 _WEB_TOOL = WEB_SEARCH_TOOL["function"]["name"]
+_CHAT_TOOL = CHAT_SEARCH_TOOL["function"]["name"]
 _INTEL_SEARCH = "search"
 
 #: 查滿輪數還想查時提醒模型的話：系統口吻（自發插話看的是旁觀的對話，用 user 口吻說會被當成有人在跟它講話），
@@ -64,7 +71,12 @@ NUDGE = ("（系統：這次不能再查了。請就手上的資料直接決定�
 RECORD_MODE_NOTE = ("這次不提供查詢結果。照你原本知道的判斷：自發插話沒把握就只輸出 [PASS]；"
                     "被 @ 就用手上的資料簡短回，不熟就說不熟。")
 
+#: 規則檔裡 chat_search 那一段的標題：從這一行起到檔尾，只在 chat_search 有宣告時給模型
+CHAT_RULES_HEADING = "【查這個頻道的聊天紀錄（chat_search）】"
+
 NamesProvider = Callable[[], Awaitable[Iterable[str]]]
+#: 建出「鎖在這個頻道的聊天紀錄搜尋」（`ChatSearchTools(fixed_channel_id=…)`）的函式
+ChatProvider = Callable[[], Any]
 
 
 def mode() -> str:
@@ -83,10 +95,11 @@ class AmbientSearchTools:
     """一次插話的那組工具（`llm.client.tool_calls.ToolRunner`）。"""
 
     def __init__(self, *, mode: str, intel: Any, web: Any, names: NamesProvider, now: Callable[[], datetime],
-                 settings: AmbientSearchSettings = _SETTINGS, trace_id: str = "-"):
+                 settings: AmbientSearchSettings = _SETTINGS, trace_id: str = "-", chat: Optional[ChatProvider] = None):
         self.mode = mode
         self._intel = intel
         self._web = web
+        self._chat = chat     # 真的要查才呼叫：建它要掃整個伺服器的成員名單
         self._names = names
         self._now = now
         self._settings = settings
@@ -98,12 +111,16 @@ class AmbientSearchTools:
 
     @property
     def instructions(self) -> str:
-        return hot_files.read_text(self._settings.rules_path, label="插話查詢規則")
+        rules = hot_files.read_text(self._settings.rules_path, label="插話查詢規則") or ""
+        if self._chat is not None:
+            return rules
+        return rules.split(CHAT_RULES_HEADING, 1)[0].rstrip()
 
     @property
     def tools(self) -> list[dict[str, Any]]:
         intel_tools = [t for t in (self._intel.tools if self._intel is not None else []) if _tool_name(t) == _INTEL_SEARCH]
-        return [*intel_tools, *self._web.tools]
+        # 聊天紀錄用「鎖在一個頻道」那份宣告：內容固定，不隨頻道、不隨這次是誰觸發而變
+        return [*intel_tools, *self._web.tools, *([ONE_CHANNEL_TOOL] if self._chat is not None else [])]
 
     async def execute(self, name: str, arguments: Any) -> str:
         started = time.perf_counter()
@@ -147,7 +164,7 @@ class AmbientSearchTools:
         if self.mode == "dry_run":
             record["verdict"] = "recorded"
             return {"results": [], "note": RECORD_MODE_NOTE}
-        runner = self._web if name == _WEB_TOOL else self._intel
+        runner = self._web if name == _WEB_TOOL else self._chat() if name == _CHAT_TOOL else self._intel
         payload = json.loads(await runner.execute(name, arguments))
         record["verdict"] = "error" if "error" in payload else "ok"
         return payload
@@ -160,9 +177,9 @@ class AmbientSearchTools:
 
 async def prepare(question: str, *, now: Callable[[], datetime], names: NamesProvider, trace_id: str = "-",
                   settings: AmbientSearchSettings = _SETTINGS, intel_settings: Optional[AskAIIntelSettings] = None,
-                  server: Any = None) -> Optional[AmbientSearchTools]:
+                  server: Any = None, chat: Optional[ChatProvider] = None) -> Optional[AmbientSearchTools]:
     """開關開著、今天還有額度 → 這次插話的那組工具；否則 None。`question` 是觸發那則的原文（情報搜尋的重排要讀問句）。
-    `server` 給單元測試用（同一個行程裡的 MCPServer）。"""
+    `chat` 給了、`ambient_chat_search_mode` 也開著，才多宣告聊天紀錄搜尋。`server` 給單元測試用（同一個行程裡的 MCPServer）。"""
     current = mode()
     if current == "off":
         return None
@@ -179,8 +196,10 @@ async def prepare(question: str, *, now: Callable[[], datetime], names: NamesPro
         logger.warning("ambient 查詢：準備情報工具超過 %.0f 秒，這次只給網路搜尋 trace=%s",
                        settings.intel_prepare_seconds, trace_id)
     web = WebSearchTools(settings=_WEB_SETTINGS, instructions="")
+    if switches.current().ambient_chat_search_mode != "on":
+        chat = None
     return AmbientSearchTools(mode=current, intel=intel, web=web, names=names, now=now, settings=settings,
-                              trace_id=trace_id)
+                              trace_id=trace_id, chat=chat)
 
 
 async def name_parts_for(guild: Any, participant_ids: Iterable[int]) -> frozenset[str]:
