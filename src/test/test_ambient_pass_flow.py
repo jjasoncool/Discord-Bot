@@ -7,7 +7,10 @@
 被 @ 才有輸出上限；夾著工具呼叫原文的回答不送；回覆超過 Discord 上限只送第一段、回覆不 @ 任何人；
 最新這則 @ 的人要傳進人物卡檢索與回憶對象（給模型看的文字已把 @ 換成名字，從那裡抓不到）。
 一輪最多給模型 3 張圖（動圖算一張、最多 1 張，那張照樣帶全部的幀），收滿就不再抓：最新那則 → 被回覆那則 →
-回覆鏈再往前（只追一小時內、最多 6 則，近的優先）→ 聊天紀錄裡被人回覆過的圖（近的優先；沒人回覆的不收）。
+回覆鏈再往前（只追一小時內、最多 6 則，近的優先）→ 發話的人緊接在前面連著貼的圖（沒人回覆也收；中間換人講話、超過一小時就不算）
+→ 聊天紀錄裡被人回覆過的圖（近的優先；沒人回覆的不收）。
+被人回覆過的圖要發話的人有參與才收（他貼的、他回覆過、或回覆過別人對它的回覆）；被點名時，他這句話在問圖也算，
+只是叫它、講別的事不算。
 自己貼的圖沒抓到時，補上的舊圖要標明是更早的一則。
 回覆鏈上是它自己的話：先附它當時對著講的那一則的圖（查互動紀錄；它的自動轉貼、別人的話不查）。
 被回覆那則、最新那則的圖（附件、連結預覽）抓不到時，在那則後面標「（這張圖沒抓到）」，模型才不會自己編看不到的理由。
@@ -45,6 +48,7 @@ BOT_ID = 1385591938438135848
 BOT_USER = SimpleNamespace(id=BOT_ID, bot=True, display_name="琇紫", name="琇紫")
 SPEAKER = 430244604688990212
 EARLIER_AUTHOR = 537251366008127489
+BYSTANDER = 611111111111111111
 GUILD_ID = 1
 CHANNEL_ID = 4242
 NOW = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
@@ -452,7 +456,9 @@ class PassFlowTests(unittest.TestCase):
         self.assertEqual("這次附了 1 張圖，照順序：", lines[0])
         self.assertTrue(lines[1].startswith("・第 1 張：發問的這則，某人#"), lines[1])
         self.assertTrue(lines[1].endswith("20:00 貼的"), lines[1])
-        self.assertEqual("講圖裡的東西之前，先對一下那張是誰貼的。", lines[-1])
+        self.assertTrue(lines[-1].startswith("講圖裡的東西之前，先對一下那張是誰貼的、誰回覆過它"), lines[-1])
+        self.assertIn("發問的人問的是哪一張就講哪一張", lines[-1], "圖是為發問的人收的，不能叫模型避開他")
+        self.assertNotIn("只拿來回貼它的人", lines[-1])
 
     def test_a_picture_people_replied_to_comes_along_with_the_latest_one(self):
         # 實例：甲貼梗圖、乙回覆它「我沒哭」、甲再貼一張哭臉。只給最新那張時，模型把哭臉當成乙回覆的那張、拿去虧乙
@@ -468,6 +474,7 @@ class PassFlowTests(unittest.TestCase):
         self.assertTrue(lines[1].startswith("・第 1 張：聊天紀錄 #3，某人#"), lines[1])
         self.assertTrue(lines[2].startswith("・第 2 張：聊天紀錄 #1，某人#"), lines[2])
         self.assertTrue(lines[2].endswith("19:57 貼的（#2 回覆的就是這張）"), lines[2])
+        self.assertIn("一張圖只拿來回貼它的人、回覆過它或沿著回覆接著講的人", lines[-1], "自發插話：接別人的話就不講那張圖")
         self.assertNotIn("沒附", kw["image_note"])
 
     def test_window_pictures_nobody_replied_to_are_left_out_and_named(self):
@@ -493,6 +500,136 @@ class PassFlowTests(unittest.TestCase):
         kw = self._generate_kwargs()
         self.assertEqual(["P3", "P2", "P1"], kw["images"])
         self.assertIn("其他標 (圖) 的行（#1）這次沒附", kw["image_note"])
+
+    # ── 聊天紀錄裡的圖：只收跟發話的人有關的 ──
+    def _reply_to(self, target, text="笑死", *, mid, author_id=SPEAKER):
+        return _message(text, mid=mid, author_id=author_id, reference=SimpleNamespace(message_id=target.id, resolved=None))
+
+    def test_a_picture_the_speaker_posted_just_before_comes_without_anyone_replying(self):
+        # 先貼圖、下一則才打字：他沒用回覆功能，圖也要在手上
+        mine = _message("", mid=6000, attachments=[_att(6000)], created_at=NOW - timedelta(minutes=1))
+        self.window = [mine, _message("哈哈 這也太快", mid=6001)]
+        self.images[6000] = ["MINE"]
+        self._run(_message("還限制級"))
+        kw = self._generate_kwargs()
+        self.assertEqual(["MINE"], kw["images"])
+        line = self._list()[1]
+        self.assertTrue(line.startswith("・第 1 張：聊天紀錄 #1，某人#"), line)
+        self.assertIn("貼的人接著講的那幾則就在它後面", line)
+
+    def test_a_picture_others_are_discussing_is_left_out_when_the_speaker_took_no_part(self):
+        # 實例：甲貼圖、乙回覆它；之後丙自己貼一張再講兩句。只收到甲那張時，回丙的話講的是甲那張圖的內容
+        theirs = self._said("", 6000, 5, image=True)
+        mine = _message("", mid=6002, attachments=[_att(6002)], created_at=NOW - timedelta(minutes=1))
+        self.window = [theirs, self._reply_to(theirs, mid=6001, author_id=BYSTANDER), mine, _message("哈哈 這也太快", mid=6003)]
+        self.images.update({6000: ["THEIRS"], 6002: ["MINE"]})
+        self._run(_message("還限制級"))
+        kw = self._generate_kwargs()
+        self.assertEqual(["MINE"], kw["images"], "他沒參與的那張不給")
+        self.assertNotIn("att://6000/0", self.fetched)
+        self.assertIn("其他標 (圖) 的行（#1）這次沒附", kw["image_note"])
+
+    def test_without_a_picture_of_his_own_the_speaker_still_does_not_get_other_peoples(self):
+        theirs = self._said("", 6000, 5, image=True)
+        self.window = [theirs, self._reply_to(theirs, mid=6001, author_id=BYSTANDER)]
+        self.images[6000] = ["THEIRS"]
+        self._run(_message("今天好冷"))
+        self.assertIsNone(self._generate_kwargs()["images"])
+
+    def test_a_picture_the_speaker_replied_to_earlier_comes_along(self):
+        theirs = self._said("", 6000, 5, image=True)
+        self.window = [theirs, self._reply_to(theirs, mid=6001), self._said("換個話題", 6002, 2)]
+        self.images[6000] = ["THEIRS"]
+        self._run(_message("剛剛那張真的好笑"))
+        self.assertEqual(["THEIRS"], self._generate_kwargs()["images"])
+
+    def test_replying_to_a_reply_about_the_picture_counts_as_taking_part(self):
+        theirs = self._said("", 6000, 5, image=True)
+        first = self._reply_to(theirs, mid=6001, author_id=BYSTANDER)
+        self.window = [theirs, first, self._reply_to(first, "真的", mid=6002), self._said("換個話題", 6003, 2)]
+        self.images[6000] = ["THEIRS"]
+        self._run(_message("我還在笑"))
+        self.assertEqual(["THEIRS"], self._generate_kwargs()["images"])
+
+    def test_the_speakers_run_stops_where_someone_else_spoke(self):
+        mine = _message("", mid=6000, attachments=[_att(6000)], created_at=NOW - timedelta(minutes=3))
+        self.window = [mine, self._said("今天好冷", 6001, 2), _message("對啊", mid=6002)]
+        self.images[6000] = ["MINE"]
+        self._run(_message("想喝熱的"))
+        self.assertIsNone(self._generate_kwargs()["images"], "中間換人講過話，那張圖不算他剛貼的")
+
+    def test_the_speakers_picture_from_hours_ago_is_not_brought_back(self):
+        mine = _message("", mid=6000, attachments=[_att(6000)], created_at=NOW - timedelta(hours=2))
+        self.window = [mine]
+        self.images[6000] = ["MINE"]
+        self._run(_message("我回來了"))
+        self.assertIsNone(self._generate_kwargs()["images"])
+
+    def test_mentioning_a_picture_without_calling_it_does_not_bring_other_peoples_picture(self):
+        # 自發插話時他那句不是對它講的：提到圖不代表在問它，照樣只看他有沒有參與
+        theirs = self._said("", 6000, 5, image=True)
+        self.window = [theirs, self._reply_to(theirs, mid=6001, author_id=BYSTANDER)]
+        self.images[6000] = ["THEIRS"]
+        self._run(_message("我昨天畫的那張圖被退件了"))
+        self.assertIsNone(self._generate_kwargs()["images"])
+
+    def test_calling_it_about_something_else_does_not_bring_other_peoples_picture(self):
+        theirs = self._said("", 6000, 5, image=True)
+        self.window = [theirs, self._reply_to(theirs, mid=6001, author_id=BYSTANDER)]
+        self.images[6000] = ["THEIRS"]
+        self._run(_message("<@1385591938438135848> 今天維護到幾點"), directed=True)
+        self.assertIsNone(self._generate_kwargs()["images"], "他沒參與那張圖，問的也不是圖")
+        self._run(_message("<:看圖說故事:123> 今天維護到幾點"), directed=True)
+        self.assertNotIn("att://6000/0", self.fetched, "表情名字裡的字不算他在問圖")
+
+    def test_asking_about_his_own_picture_does_not_bring_other_peoples(self):
+        # 圖貼在同一則再問「這張是什麼」：他問的是自己那張，別人在講的圖不要混進來
+        theirs = self._said("", 6000, 5, image=True)
+        self.window = [theirs, self._reply_to(theirs, mid=6001, author_id=BYSTANDER)]
+        self.images.update({6000: ["THEIRS"], 7001: ["MINE"]})
+        self._run(_message("這張是什麼", attachments=[_att(7001)]), directed=True)
+        self.assertEqual(["MINE"], self._generate_kwargs()["images"])
+
+    def test_words_that_only_contain_the_character_do_not_count_as_asking_about_a_picture(self):
+        theirs = self._said("", 6000, 5, image=True)
+        self.window = [theirs, self._reply_to(theirs, mid=6001, author_id=BYSTANDER)]
+        self.images[6000] = ["THEIRS"]
+        for text in ("新地圖什麼時候開", "圖鑑要怎麼解", "這張卡池值得抽嗎", "地圖上那個點是什麼"):
+            with self.subTest(text=text):
+                self.llm.generate_reply.reset_mock()
+                self._run(_message(text), directed=True)
+                self.assertIsNone(self._generate_kwargs()["images"])
+
+    def _others_are_discussing_a_picture(self):
+        theirs = self._said("", 6000, 5, image=True)
+        self.window = [theirs, self._reply_to(theirs, mid=6001, author_id=BYSTANDER)]
+        self.images[6000] = ["THEIRS"]
+
+    def test_with_no_picture_in_hand_the_model_is_told_it_saw_none_of_them(self):
+        # 圖片清單只在有附圖時才給；沒附的時候它照樣看得到「回覆那張圖」的對話，要講明那張沒看到
+        self._others_are_discussing_a_picture()
+        self._run(_message("今天好冷"))
+        kw = self._generate_kwargs()
+        self.assertIsNone(kw["images"])
+        self.assertIn("標 (圖) 的行（#1）這次都沒附，那些圖你沒看到", kw["chat_context"][-1])
+
+    def test_someone_calling_it_is_told_too_that_it_saw_none_of_the_pictures(self):
+        self._others_are_discussing_a_picture()
+        self._run(_message("今天維護到幾點"), directed=True)
+        self.assertIn("標 (圖) 的行（#1）這次都沒附", self._generate_kwargs()["prompt"])
+
+    def test_nothing_is_said_about_pictures_when_the_chat_has_none(self):
+        self.window = [self._said("今天好冷", 6000, 5)]
+        self._run(_message("今天抽卡又歪了啦"))
+        self.assertNotIn("沒附", self._generate_kwargs()["chat_context"][-1])
+
+    def test_when_called_by_name_asking_about_a_picture_brings_the_discussed_one(self):
+        # 專程問它的人常常沒用回覆功能就在問上面那張圖
+        theirs = self._said("", 6000, 5, image=True)
+        self.window = [theirs, self._reply_to(theirs, mid=6001, author_id=BYSTANDER)]
+        self.images[6000] = ["THEIRS"]
+        self._run(_message("上面那張在笑什麼"), directed=True)
+        self.assertEqual(["THEIRS"], self._generate_kwargs()["images"])
 
     def test_the_replied_picture_says_who_posted_it_and_who_replied_to_it(self):
         picture = self._said("", 6000, 9, image=True)

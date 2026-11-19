@@ -34,7 +34,11 @@
 - 有附圖就給圖片清單（`_picture_list`，放 user 段的 <image_instruction>）：每張是誰、在哪一則貼的，聊天紀錄裡哪幾行的圖
   沒附。圖另外送，文字裡看不出哪張對哪一行，不講模型會把圖安到別人頭上。
 - 圖照固定順序收，收滿就停：最新那則 → 被回覆那則 → 回覆鏈再往前（時限與層數有上限；鏈上是它自己的話，先收它當時
-  對著講的那一則）→ 聊天紀錄裡被人回覆過的圖，都是近的優先；同一則裡群友自己貼的圖先、貼文表情與預覽上的圖後。
+  對著講的那一則）→ 發話的人緊接在前面連著貼的圖 → 聊天紀錄裡被人回覆過的圖，都是近的優先；同一則裡群友自己貼的圖先、
+  貼文表情與預覽上的圖後。
+- 聊天紀錄裡被人回覆過的圖只收發話的人有參與的（他貼的，或他用回覆接著講過）：別人在講、他沒參與的圖一旦在手上，
+  回他的話就會混進那張圖的內容。被點名時多一種算數：他這句話在問圖（「上面那張是什麼」，常常沒用回覆功能），
+  而且前面一張他的圖都沒收到。一張都沒附、聊天紀錄裡卻有圖時，在最新那則後面講明那些圖沒看到。
   一輪最多 `image_max_pictures` 張，動圖算一張、最多 `image_max_animated` 張。
 
 例外與決策：靜默期依對話節奏切換（熱聊等不到安靜，而且插話本來就不需要空檔）；純機率的減壓閥已被鉤子閘取代
@@ -683,6 +687,7 @@ _TRIGGER = "trigger"    # 觸發這次評估的那則
 _REPLIED = "replied"    # 它直接回覆的那則
 _CHAIN = "chain"        # 回覆鏈再往前的
 _SEEN = "seen"          # 回覆鏈上它自己的話，當時是看了這則才講的
+_OWN = "own"            # 發話的人緊接在前面連著貼的（先貼圖、下一則才打字）
 _WINDOW = "window"      # 聊天紀錄視窗裡被人回覆過的
 # 那則訊息的哪一種圖
 _ATTACHED = "attached"  # 貼上去的附件
@@ -818,8 +823,27 @@ def _picture_list(pics: list[_Pic], trigger: discord.Message, thread_map: dict, 
     unseen = [f"#{no}" for no, m in sorted(thread_map.items()) if m.id not in attached and image_marker(m)]
     if unseen:
         lines.append(f"聊天紀錄裡其他標 (圖) 的行（{'、'.join(unseen)}）這次沒附，那些圖你沒看到。")
-    lines.append("講圖裡的東西之前，先對一下那張是誰貼的。")
+    if directed:
+        # 這些圖是為了發問的人收的（他貼的、他回覆的、沿著他回覆的那串找到的、他在問的）：不能叫模型避開他
+        lines.append("講圖裡的東西之前，先對一下那張是誰貼的、誰回覆過它。發問的人問的是哪一張就講哪一張；跟他問的無關的圖，不要拿來回他。")
+    else:
+        lines.append("講圖裡的東西之前，先對一下那張是誰貼的、誰回覆過它：一張圖只拿來回貼它的人、回覆過它或沿著回覆接著講的人，"
+                     "接別人的話就不講那張圖裡的東西。")
     return "\n".join(lines)
+
+
+def _unseen_pictures_note(pics: list[_Pic], thread_map: dict) -> str:
+    """一張圖都沒附、聊天紀錄裡卻有標 `(圖)` 的行時，接在最新那則後面的說明。
+
+    圖片清單只在有附圖時才給。沒附的時候模型照樣看得到「↩ 回覆那張圖」的對話，卻不知道自己沒看到圖，
+    會照著講圖裡的東西。
+    """
+    if pics:
+        return ""
+    unseen = [f"#{no}" for no, m in sorted(thread_map.items()) if image_marker(m)]
+    if not unseen:
+        return ""
+    return f"（聊天紀錄裡標 (圖) 的行（{'、'.join(unseen)}）這次都沒附，那些圖你沒看到，不要講圖裡的東西）"
 
 
 def _picture_origin(
@@ -857,6 +881,8 @@ def _picture_origin(
         clues.append(f"{'、'.join(replied_by)} 回覆的就是這張")
     if pic.role == _CHAIN:
         clues.append("沿著這串回覆往前找到的")
+    if pic.role == _OWN:
+        clues.append("貼的人接著講的那幾則就在它後面")
     if not number and not in_latest:
         gist = " ".join(semantic_message_text(source).split())[:60]
         if gist:
@@ -1025,17 +1051,77 @@ async def _chain_pictures(
     return pics
 
 
-async def _window_pictures(budget: _PicBudget, trigger: discord.Message, thread_map: dict, taken: set) -> list[_Pic]:
-    """聊天紀錄視窗裡被人回覆過的圖，近的優先。有人回覆代表大家正在講它；沒人理的圖不收，洗版的圖才不會佔掉名額。"""
+def _reference_id(message: discord.Message) -> Optional[int]:
+    return getattr(getattr(message, "reference", None), "message_id", None)
+
+
+def _own_run(trigger: discord.Message, thread_map: dict) -> list[discord.Message]:
+    """發話的人緊接在這則之前連著發的訊息，近的在前；中間換人講話就停，太久以前的也不算。
+
+    先貼圖、下一則才打字的人，圖在這裡：他沒用回覆功能，照「被人回覆過」找不到，結果手上只有別人的圖。
+    時限沿用回覆鏈那一個（話題可能早就換了）。
+    """
+    max_age = timedelta(seconds=_SETTINGS.reply_chain_image_max_age_seconds)
+    run: list[discord.Message] = []
+    for _number, m in sorted(thread_map.items(), reverse=True):
+        if m.author.id != trigger.author.id or trigger.created_at - m.created_at > max_age:
+            break
+        run.append(m)
+    return run
+
+
+#: 要有指著某張圖的寫法才算：單一個「圖」字會把地圖、圖鑑、企圖都算進來，「這張」後面接卡、票的是在講別的東西
+_PICTURE_WORDS = re.compile(
+    r"[這那哪](?:一)?張(?![卡票牌單])|上一張"
+    r"|(?:上面|剛剛|剛才|前面)[^，。？！\s]{0,3}圖"
+    r"|[這那]圖|什麼圖|(?<![地拼企意試藍])圖[裡上中片]|看圖|照片|截圖|梗圖"
+)
+#: 提及與表情的記號：裡面的名字不算他打的字
+_ANGLE_TOKENS = re.compile(r"<[^>]*>")
+
+
+def _asks_about_a_picture(trigger: discord.Message) -> bool:
+    """他這句話是不是在問某張圖。只看字面，認不出來的就當不是：寧可沒附，也不要把別人的圖混進回他的話。"""
+    return bool(_PICTURE_WORDS.search(_ANGLE_TOKENS.sub("", trigger.content or "")))
+
+
+def _took_part(person_id: int, picture: discord.Message, trigger: discord.Message, thread_map: dict) -> bool:
+    """這個人有沒有參與這張圖的討論：圖是他貼的，或他用回覆接著它講過（回覆它的、再回覆那些回覆的都算）。"""
+    if picture.author.id == person_id:
+        return True
+    thread = {picture.id}
+    for _number, m in (*sorted(thread_map.items()), (0, trigger)):   # 回覆只會指向更早的訊息，照時間走一遍就夠
+        if _reference_id(m) in thread:
+            thread.add(m.id)
+            if m.author.id == person_id:
+                return True
+    return False
+
+
+async def _window_pictures(
+    budget: _PicBudget, trigger: discord.Message, thread_map: dict, taken: set, asking: bool,
+) -> list[_Pic]:
+    """聊天紀錄視窗裡的圖，近的優先：先是發話的人緊接在前面連著貼的，再來是被人回覆過的。
+
+    有人回覆代表大家正在講它；沒人理的圖不收，洗版的圖才不會佔掉名額。自發插話時，被回覆過的圖還要發話的人有參與
+    才收（見 `_took_part`）：實例是甲貼圖、乙回覆它，五分鐘後丙自己貼了一張再講兩句，手上卻只有甲那張，
+    回丙的話講的是甲那張圖的內容。`asking`：他是專程來問某張圖、手上卻還沒有任何一張他的圖（專程問它的人常常
+    沒用回覆功能就問上面那張），這時別人在講的圖也收；他自己貼了圖、或用回覆指著圖在問，問的就是那一張，不算。
+    """
     if budget.full:
         return []
-    replied_to = {getattr(getattr(m, "reference", None), "message_id", None)
-                  for m in (*thread_map.values(), trigger)}
-    return await _collect_pictures(budget, [
+    own = [_PicSource(m, _OWN, _ATTACHED, remote=_attached(m))
+           for m in _own_run(trigger, thread_map) if m.id not in taken and _has_image(m)]
+    own_ids = {source.message.id for source in own}
+    asking = asking and not own
+    replied_to = {_reference_id(m) for m in (*thread_map.values(), trigger)}
+    discussed = [
         _PicSource(m, _WINDOW, _ATTACHED, remote=_attached(m))
         for _number, m in sorted(thread_map.items(), reverse=True)
-        if m.id in replied_to and m.id not in taken and _has_image(m)
-    ])
+        if m.id in replied_to and m.id not in taken and m.id not in own_ids and _has_image(m)
+        and (asking or _took_part(trigger.author.id, m, trigger, thread_map))
+    ]
+    return await _collect_pictures(budget, [*own, *discussed])
 
 
 def _picture_log(pics: list[_Pic]) -> str:
@@ -1755,12 +1841,17 @@ async def _gather_inputs(
         replied_to_text += _missed_of(replied_preview) + _missed_of(replied_att)
         if reply_notes:
             replied_to_text = replied_to_text + "\n" + "\n".join(reply_notes)
-    # 還有名額就補上大家正在講的圖：沿回覆鏈往前，再來是聊天紀錄裡被人回覆過的。是哪一則的圖由圖片清單講
+    # 還有名額就補上跟這則有關的圖：沿回覆鏈往前，再來是發話的人剛貼的、聊天紀錄裡被人回覆過的。是哪一則的圖由圖片清單講
     taken = {message.id}
     if replied_msg is not None:
         taken.add(replied_msg.id)
         pics += await _chain_pictures(bot, budget, message, replied_msg, taken)
-    pics += await _window_pictures(budget, message, thread_map, taken)
+    # 被點名、字面在問圖、前面卻一張都沒收到：他問的多半是聊天紀錄裡別人正在講的那張
+    asking = directed and not pics and _asks_about_a_picture(message)
+    pics += await _window_pictures(budget, message, thread_map, taken, asking)
+    unseen_note = _unseen_pictures_note(pics, thread_map)
+    if unseen_note:
+        latest_notes = [*latest_notes, unseen_note]
     if pics:
         logger.info("ambient 附圖 trace=%s：%s", trace_id, _picture_log(pics))
     image_payload: Optional[list[str]] = [frame for pic in pics for frame in pic.frames] or None
