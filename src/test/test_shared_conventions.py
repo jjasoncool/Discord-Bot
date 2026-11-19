@@ -971,7 +971,8 @@ RULES = [
     ),
     Rule(
         name="prompt 檔 mtime 快取",
-        pattern=r'_PROMPT_CACHE\s*[:=]\s*(?:dict)?\s*[:=]?\s*\{"text"',
+        # 字串內容在掃描前會被遮成空白，比對式不能靠引號裡的字：認「名字以 PROMPT_CACHE 結尾的變數被指定成一個 dict」
+        pattern=r'^\s*_?\w*PROMPT_CACHE\s*(?::[^=]*)?=\s*\{',
         canonical="utils.hot_files.read_text() / read_json()",
         allowed={"utils/hot_files.py"},
     ),
@@ -1572,6 +1573,27 @@ class SleepUntilFinderTests(unittest.TestCase):
             "    await asyncio.sleep(0.5)\n"
         )
         self.assertEqual(self._scan(src), [])
+
+
+class PromptCacheRuleTests(unittest.TestCase):
+    """「prompt 檔 mtime 快取」這條規則真的抓得到：自己寫一份 prompt 快取的典型寫法。"""
+
+    def _hits(self, src):
+        rule = next(r for r in RULES if r.name == "prompt 檔 mtime 快取")
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "sample.py"
+            path.write_text(src, encoding="utf-8")
+            return [i for i, line in _code_lines(path) if re.search(rule.pattern, line)]
+
+    def test_catches_a_module_level_prompt_cache_dict(self):
+        self.assertEqual([1], self._hits('_PROMPT_CACHE: dict = {"text": None, "key": None}\n'))
+        self.assertEqual([2], self._hits('import os\n_SYSTEM_PROMPT_CACHE = {"text": None}\n'))
+
+    def test_ignores_reads_of_it_and_mentions_in_text(self):
+        src = ('"""原本各自寫 _PROMPT_CACHE = {"text": None}"""\n'
+               'if _PROMPT_CACHE["key"] == key:\n    pass\n'
+               '# _PROMPT_CACHE = {"text": None}\n')
+        self.assertEqual([], self._hits(src))
 
 
 class GuardrailsPathFinderTests(unittest.TestCase):
