@@ -1145,6 +1145,7 @@ class ChatSearchHereTests(unittest.TestCase):
         self.assertEqual(str(BOT_ID), tools.self_id, "她自己的話不算進統計")
         self.assertEqual({"1": ["小明"]}, tools.member_names)
         self.assertEqual("", tools.instructions, "規則由插話查詢那一層給，不接 /askai 那份")
+        self.assertEqual(3, tools.settings.phrase_min_chars, "兩個字以下要掃整張表，插話等不起")
         from llm.storage.raw_message_store import pending_deleted_ids
         self.assertIs(pending_deleted_ids, tools._pending_deleted, "剛刪、還沒寫進資料庫的也不給模型看")
 

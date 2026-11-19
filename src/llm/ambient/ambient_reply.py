@@ -107,7 +107,7 @@ from llm.logger_factory import get_or_create_file_logger
 from llm.prompt.prompt_builder import persona_system
 from llm.retrievers.chat_search import ChatSearchTools
 from services.llm_service import LLMService, TRUNCATED_NOTE
-from sys_settings.llm_settings import AmbientChatSettings
+from sys_settings.llm_settings import AmbientChatSettings, AskAIChatSearchSettings
 from utils.utils import ChannelConfig
 from utils.background_tasks import spawn
 from utils.link_fix import TWEET_LINK_RE
@@ -1744,6 +1744,7 @@ def _chat_search_here(message: discord.Message) -> ChatSearchTools:
         channel_names={channel.id: getattr(channel, "name", None) or "這個頻道"},
         self_id=getattr(getattr(message.guild, "me", None), "id", None),
         fixed_channel_id=channel.id, instructions="",
+        settings=AskAIChatSearchSettings(phrase_min_chars=ambient_search.chat_phrase_min_chars()),
         pending_deleted=pending_deleted_ids,
     )
 

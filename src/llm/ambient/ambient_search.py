@@ -87,6 +87,11 @@ def max_tool_rounds() -> int:
     return _SETTINGS.max_tool_rounds
 
 
+def chat_phrase_min_chars() -> int:
+    """插話查聊天紀錄時，照字面找的話至少幾個字（不到就改照意思找）。"""
+    return _SETTINGS.chat_phrase_min_chars
+
+
 def _tool_name(tool: dict[str, Any]) -> str:
     return str((tool.get("function") or {}).get("name") or "")
 

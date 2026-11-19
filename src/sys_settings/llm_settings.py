@@ -641,6 +641,10 @@ class AskAIChatSearchSettings(BaseSettings):
     phrase_channels: int = 3
     phrase_examples: int = 2
     phrase_scan_rows: int = 300
+    #: 字面模式要找的話至少幾個字（空白不算）；不到就改照意思找。三個字以上走 trigram 索引（毫秒），兩個字以下要掃整張表
+    #: （資料不在快取時十幾秒）。/askai 是有人專程問、等得起，而且「誰常說某兩個字」只有掃得出來，所以預設不擋；
+    #: 插話等不起，建工具時給 `AmbientSearchSettings.chat_phrase_min_chars`
+    phrase_min_chars: int = 1
     #: 語意模式回幾則例句、太短的不算（反應詞撐不起一個印象）
     topic_limit: int = 8
     topic_min_chars: int = 6
@@ -678,6 +682,8 @@ class AmbientSearchSettings(BaseSettings):
     max_tool_rounds: int = 1
     #: 插話專用的查詢規則（接在插話 prompt 後面，只在有工具時給；改檔即生效）
     rules_path: str = prompt_file("ambient_search_rules.txt")
+    #: 插話查聊天紀錄時，照字面找的話至少幾個字；不到就改照意思找（兩個字以下要掃整張表，插話等不起）
+    chat_phrase_min_chars: int = 3
     #: 準備情報工具（連 search-mcp 列工具）最多等幾秒：它卡住時不該拖住每一次插話
     intel_prepare_seconds: float = 5.0
 

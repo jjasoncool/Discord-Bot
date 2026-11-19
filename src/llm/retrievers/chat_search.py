@@ -28,14 +28,14 @@
   刪除記號是批次寫進資料庫的，剛刪的那一分鐘資料庫還看不到：上層把「還沒寫進去的已刪 id」的函式交進來
   （`pending_deleted=`，這一層不能 import 寫入端），兩邊合起來算。
 - 掃描、向量查詢、查已刪這三條查詢都有時間上限（`statement_timeout_seconds`），逾時回錯誤給模型；語意模式查詢失敗也回錯誤，不回「0 句」
-  （模型會把沒查成當成沒這回事）。
+  （模型會把沒查成當成沒這回事）。字面模式要找的話不到 `phrase_min_chars` 個字就改照意思找，回傳裡註明。
 - 任何失敗（參數錯、名字對不到、DB 壞）都回 `{"error": ...}` 給模型，不往外丟。DB 是同步的，`execute` 丟到執行緒。
 
 例外與決策：topic 的統計只數最像的 N 句、不是全庫，向量抓的是主題不是態度，含蓄的欺負會漏；要判態度得再加一層 reranker，
 等看過效果再說。字面比對用 ILIKE 子字串而不是 `dedup_key` 的正規化——資料庫端沒有同一份正規化；句子中間夾標點或空白
-（「好 了 啦」）會漏，模型可以換寫法再查。字面模式一次掃描就把計數與最近幾則一起算出來（CTE 引用兩次會物化一次），
-熱快取約 0.3 秒、冷快取讀整個 heap（約 660 MB）要幾秒到十幾秒，所以設 statement_timeout 讓它逾時就回錯誤給模型；
-要再快得建 pg_trgm 的 GIN 索引（三個字以上的句子走索引，兩個字的照樣掃描），建不建記在交接檔。
+（「好 了 啦」）會漏，模型可以換寫法再查。字面模式一次掃描就把計數與最近幾則一起算出來（CTE 引用兩次會物化一次）：
+三個字以上走 text 的 trigram 索引，幾毫秒；兩個字以下用不到索引、要掃整張表，資料在快取裡約 0.3 秒，
+不在時十幾秒（這台的記憶體留不住這塊快取，多半是後者）。鎖頻道省不了：插話那個頻道佔全表九成七以上。
 語意模式是先折疊（同一人同一句只留最新那則當代表）再查已刪：代表那則被刪時整組一起不見、連次數也少算，
 代表沒刪而組裡有已刪的則次數多算。已刪只佔千分之幾、給出去的文字不會多，先這樣。
 """
@@ -260,7 +260,13 @@ class ChatSearchTools:
         record.update(query=query, mode=mode, author_id=author_id, channel_id=channel_id, contains=contains)
         scope = {"author_id": author_id, "channel_id": channel_id, "contains": contains}
 
-        if mode == "phrase":
+        too_short = mode == "phrase" and len("".join(query.split())) < self.settings.phrase_min_chars
+        if too_short:
+            record["fallback"] = "topic"
+            payload = await asyncio.to_thread(self.topic_search, query, **scope)
+            payload["note"] = (f"「{query}」太短，沒有照字面數（至少 {self.settings.phrase_min_chars} 個字才數得動），改照意思找。"
+                               + payload["note"])
+        elif mode == "phrase":
             payload = await asyncio.to_thread(self.phrase_search, query, **scope)
             if payload["total"]:
                 record["result_count"] = payload["total"]

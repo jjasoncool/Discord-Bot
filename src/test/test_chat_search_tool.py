@@ -15,6 +15,7 @@
   - 群友已經刪掉的訊息不給模型看原文（照原始訊息表的軟刪記號）：topic 對撈回來的查一次、濾掉；phrase 只查要附的例句
     （每人多留幾則備用，刪掉的由下一則補上），掃描的 SQL 不碰原始訊息表、計數不扣
   - topic 帶查詢的時間上限；查詢失敗回錯誤給模型，不回「0 句」
+  - phrase 要找的話不到設定的字數（空白不算）就不掃描、改照意思找並註明；預設不擋
 
 hermetic：假的連線、假的 search_chat，不碰模型與資料庫。
 
@@ -299,7 +300,7 @@ class ChatSearchToolsTests(unittest.TestCase):
         self.assertNotIn("is_deleted", sql)
         self.assertIn("metadata_->>'message_id' AS mid", sql)
 
-    # ── 時間上限、查詢失敗 ──
+    # ── 時間上限、查詢失敗、太短的字面查詢 ──
     def test_topic_has_a_time_limit_and_reports_a_failed_search_as_an_error(self):
         runner = self.tools()
         self.run_tool(runner, {"query": "不喝水"})
@@ -311,6 +312,22 @@ class ChatSearchToolsTests(unittest.TestCase):
             payload = self.run_tool(runner, {"query": "不喝水"})
         self.assertIn("查不到", payload["error"], "沒查成要讓模型知道，不能回成 0 句")
         self.assertNotIn("counted", payload)
+
+    def test_a_phrase_shorter_than_the_minimum_is_searched_by_meaning_instead(self):
+        settings = cs.AskAIChatSearchSettings(phrase_min_chars=3)
+        runner = self.tools(settings=settings)
+        payload = self.run_tool(runner, {"query": "好 了", "mode": "phrase"})     # 空白不算字數
+        self.assertEqual("topic", payload["mode"])
+        self.assertIn("太短", payload["note"])
+        self.assertEqual([], self.cursor.executed, "不掃描")
+        self.assertEqual("topic", runner.calls[0]["fallback"])
+
+        payload = self.run_tool(runner, {"query": "好了啦", "mode": "phrase"})
+        self.assertEqual("phrase", payload["mode"], "夠長的照字面找")
+
+    def test_by_default_short_phrases_are_still_counted(self):
+        payload = self.run_tool(self.tools(), {"query": "好了", "mode": "phrase"})
+        self.assertEqual("phrase", payload["mode"], "/askai 等得起，而且兩個字的口頭禪只有掃得出來")
 
     def test_failures_become_error_payloads(self):
         runner = self.tools()
