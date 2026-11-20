@@ -455,3 +455,15 @@ BanGDream_okoda = 認同、支持 | agree
 706355889090592851 = 震驚、嚇到 | think
 aworryFlashbang = 震驚、嚇到 | think
 FR24 = 拍照、記錄 | neutral
+a_pic_frog56 = 害羞、不好意思 | neutral
+
+# === 自動偵測 2026-11-20（待填寫） ===
+Brainwash =
+EatAll =
+EvenlyMatched =
+Greed =
+OjamaMuscle =
+SecondCoinToss =
+SuperPolymerization =
+TDKEK =
+Yummy =
