@@ -33,6 +33,9 @@ class TelegramFilterSettings(BaseSettings):
     prompt_path: str = prompt_file("telegram_filter_prompt.txt")
     #: 別款遊戲名單：文字點名就直接隔離、不問模型。手改的檔案，改了下一則就生效
     other_games_path: str = settings_file("telegram_other_games.json")
+    #: 只看圖問「這些圖是不是全是梗圖角色」的問題（文字有情報時用來決定圖要不要拿掉）。手改的檔案，
+    #: 檔案不在就不問、整則照送。管理員換梗圖角色時，這個檔和 `prompt_path`【不算】裡寫的名字要一起改
+    mascot_prompt_path: str = prompt_file("telegram_mascot_prompt.txt")
 
     #: 每個發送單位（單則或整本相簿）最多給模型看幾張圖：前幾個媒體各一張，媒體不到這個數時，
     #: 剩下的名額給動圖與影片多抽幾格（相簿看前 4 張）
@@ -57,6 +60,8 @@ class TelegramFilterSettings(BaseSettings):
     retry_max_seconds: float = 300
     #: 產圖佔著 GPU 時，隔多久看一次做完了沒
     busy_poll_seconds: float = 5
+    #: 只看圖那一問最多等多久（含等產圖、排 GPU）：整則已經判成放行，等不到就整則照送，不能為這一問拖住情報
+    mascot_wait_seconds: float = 5 * 60
 
     model_config = SettingsConfigDict(extra="forbid", frozen=True)
 

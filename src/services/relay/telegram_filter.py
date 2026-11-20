@@ -8,7 +8,7 @@
     utils.hot_files（prompt、名單）、sys_settings（開關、細項）。
 
 介面
-  judge(text, media, trace_id=)  判斷一個發送單位；判不了回放行（`by_model=False`），不拋例外
+  judge(text, media, trace_id=, check_strip=)  判斷一個發送單位；判不了回放行（`by_model=False`），不拋例外
   other_game_verdict(text)       只看文字：點名別款遊戲回隔離的判定，否則 None；不碰模型，圖沒到齊時也能用
   other_games_problem()          名單檔現在讀不讀得起來（給狀態面板）
   media_kind(…)                  媒體列 → image／video／other
@@ -20,6 +20,10 @@
   1. 文字點名 `settings/telegram_other_games.json` 的遊戲就隔離，不問模型，排在所有放行路徑前面；
      同一則也提到鳴潮就交回模型判，免得比較貼文被關。名單手改、下一則生效，寫壞了沿用上次的內容。
   2. 文字或任一張圖有遊戲資訊就放行；拿不準放行。
+     呼叫端要求（`check_strip`）時，放行、而且有文字又有圖的，只拿圖另外問一個問題（`mascot_prompt_path`）：
+     這些圖是不是全是梗圖角色（奶龍、奶蛙）。回「是」判定才帶 `strip_media`（文字照送、圖不送主頻道）。
+     要每個媒體都有給模型看才問；問題檔不在、問不到、等太久、回答不是「是」都當一般放行。
+     只有會照著拿圖的呼叫端才要求：補判與搬移不會回頭改已送出的貼文，多問只是白佔模型。
   3. 模型忙就排隊、不放行：排在插話、產圖、別的行程後面；模型逾時或連不上就等一下再問。
      轉發開著過濾時一次只處理一則，後面的訊息跟著排隊，晚一點送但不會漏判。
   4. 排了 `give_up_seconds` 還判不到才放行，並認定模型掛了：之後每則只問一次、失敗就放行，
@@ -36,6 +40,16 @@
   - 寧可漏掉一則垃圾，不能擋掉一則情報：放行是所有判不了的情況的出口。
   - 30 分鐘是給正常排隊留的餘裕（插話一次最多 3 分鐘、/askai 5 分鐘）；模型壞了情報也不能卡好幾個小時，
     認定掛了之後不再每則等滿，否則一次一則、5 則就卡 2.5 小時。
+  - 拿掉圖只做「整則的圖都是梗圖」這一種，不逐張挑：給模型的第幾張是抽出來的格、不是媒體（動圖與影片
+    一個媒體抽好幾格），模型講錯張數時會拿錯圖；情報圖和梗圖混在同一則的照舊整則放行。
+  - 拿不拿圖另外問一次、不寫進主 prompt 讓模型在同一次回答裡標：實測它標得不穩（該標的三次都沒標，
+    情報截圖配一張梗圖的反而標了），那條規則還會讓沒有文字的惡搞海報從隔離變成放行。
+  - 那一問問的是「是不是梗圖角色」，不是「圖自己有沒有資訊」：很多情報圖要配文字才看得懂，單看圖會被當成
+    無關圖（道具說明配的道具插畫、「紋理」配的特效貼圖、語音配的全黑影片），照「圖自己會被隔離就拿」會拿錯。
+    模型也叫不出奶蛙的名字（只看圖時說「黃色蛋形卡通角色」），所以長相寫在那一問的問題檔裡；
+    寫在主 prompt 會連帶讓別的玩偶、周邊被判得更嚴。
+  - 那一問的判準取嚴的：圖裡有牠就算，角落的小貼圖也算。情報圖上貼了牠時整張圖不進主頻道，
+    這是「不能擋掉情報」的刻意例外（群主要的是頻道裡一隻都不出現）；圖留在隔離 thread，要補回主頻道得重送。
 """
 from __future__ import annotations
 
@@ -68,6 +82,8 @@ _LLM = None
 LABELS = ("灌水", "閒聊", "罵人", "無關圖片")
 #: 文字點名別款遊戲時的標籤：由名單判定，不列給模型選
 OTHER_GAME_LABEL = "別款遊戲"
+#: 「這些圖是不是全是梗圖角色」那一問，回答的最後一行是這個字才拿圖（問題檔的【輸出】要用同一個字）
+MASCOT_YES = "是"
 _VERDICT = re.compile(r"^(放行|隔離)\s*(?:[｜|]\s*(.*))?$")
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 _VIDEO_EXTS = {".mp4", ".webm", ".mov", ".mkv", ".m4v"}
@@ -91,6 +107,8 @@ class Verdict:
     #: 沒經模型判、但之後再判可能判得出來（模型沒回應、出錯、回答看不懂）：轉發端記成待補判。
     #: 看不了的檔案、有圖沒看到再判也一樣，不補
     recheck: bool = False
+    #: 放行，但附的每張圖裡都有梗圖角色：文字照送、圖不送主頻道（要不要真的拿掉由轉發端看模式決定）
+    strip_media: bool = False
     images_seen: int = 0
     seconds: float = 0.0
     answer: str = field(default="", repr=False)
@@ -260,8 +278,13 @@ async def _ask_model(text: str, images: list[bytes], trace_id: str) -> str:
     system = hot_files.read_text(_SETTINGS.prompt_path, label="Telegram 過濾 prompt")
     if not system:
         raise RuntimeError("讀不到 prompt")
+    return await _chat(system, _user_message(text, len(images)), images, trace_id)
+
+
+async def _chat(system: str, content: str, images: list[bytes], trace_id: str) -> str:
+    """問主模型一次（關思考）；整則的判斷與只看圖那一問共用。"""
     llm = _get_llm()
-    user: dict = {"role": "user", "content": _user_message(text, len(images))}
+    user: dict = {"role": "user", "content": content}
     if images:
         user["images"] = [base64.b64encode(img).decode("ascii") for img in images]
     return await llm.chat_raw(
@@ -337,9 +360,10 @@ class _GaveUp(Exception):
     """模型等不到，這則未判就放行（理由寫在訊息裡）。"""
 
 
-async def judge(text: str, media: Iterable[MediaFile], *, trace_id: str) -> Verdict:
+async def judge(text: str, media: Iterable[MediaFile], *, trace_id: str, check_strip: bool = False) -> Verdict:
     """判斷一個發送單位。文字點名別款遊戲直接隔離；其餘問模型，模型忙或沒回應就排隊等（最多 `give_up_seconds`）；
-    判不了的（看不了的檔案、出錯、回答看不懂、等太久）回放行（`by_model=False`），不拋例外。"""
+    判不了的（看不了的檔案、出錯、回答看不懂、等太久）回放行（`by_model=False`），不拋例外。
+    `check_strip`：整則放行時，再只看圖問一次圖要不要拿掉（結果在 `strip_media`）。"""
     started = time.monotonic()
     images: list[bytes] = []
     try:
@@ -364,8 +388,43 @@ async def judge(text: str, media: Iterable[MediaFile], *, trace_id: str) -> Verd
     if parsed is None:
         return _passed("看不懂模型的回答", started, len(images), answer, recheck=True)
     quarantine, label, reason = parsed
-    return Verdict(quarantine, label=label, reason=reason, images_seen=len(images),
+    strip = (check_strip and not quarantine and _strip_possible(text, media)
+             and await _media_alone_is_mascot(images, trace_id))
+    return Verdict(quarantine, label=label, reason=reason, strip_media=strip, images_seen=len(images),
                    seconds=time.monotonic() - started, answer=answer)
+
+
+def _strip_possible(text: str, media: Sequence[MediaFile]) -> bool:
+    """值不值得只看圖再問一次：要有文字（拿掉圖之後還有東西可送）、有圖、而且每個媒體都有給模型看
+    （超過 `max_images` 的後面幾個沒看，不能跟著被拿掉）。"""
+    return bool((text or "").strip()) and 0 < len(media) <= _SETTINGS.max_images
+
+
+async def _media_alone_is_mascot(images: list[bytes], trace_id: str) -> bool:
+    """不帶文字、只拿圖問「這些圖是不是全是梗圖角色」：回答的最後一行是 `MASCOT_YES` 才回 True。
+
+    只問一次、不重試，連等產圖與排 GPU 最多 `mascot_wait_seconds`：整則已經判成放行，問題檔不在、問不到、
+    等太久、回答不是「是」都整則照送，不能為了這一問拖住情報。
+    """
+    system = hot_files.read_text(_SETTINGS.mascot_prompt_path, label="Telegram 梗圖角色 prompt")
+    if not system:
+        return False
+
+    async def once() -> str:
+        await _wait_for_imagegen(trace_id)
+        return await _chat(system, f"（附圖 {len(images)} 張）", images, f"{trace_id}-mascot")
+    try:
+        answer = await asyncio.wait_for(once(), _SETTINGS.mascot_wait_seconds)
+    except asyncio.TimeoutError:
+        logger.info("Telegram 過濾：只看圖那一問等太久，整則照送（%s）", trace_id)
+        return False
+    except Exception as exc:
+        logger.info("Telegram 過濾：只看圖那一問沒問到，整則照送（%s）：%s", trace_id, exc)
+        return False
+    mascot = final_line(answer).rstrip("。 ") == MASCOT_YES
+    logger.info("Telegram 過濾：只看圖問是不是梗圖角色（%s）→ %s｜%s",
+                trace_id, "是，圖拿掉" if mascot else "不是，圖照送", " / ".join(answer_lines(answer))[:120])
+    return mascot
 
 
 class RelayFilter:
@@ -376,8 +435,8 @@ class RelayFilter:
         """`settings/switches.json` 的 `telegram_filter_mode`；每則重讀（檔案改了才重新解析），改了就生效。"""
         return switches.current().telegram_filter_mode
 
-    async def judge(self, text: str, media: Iterable[MediaFile], *, trace_id: str) -> Verdict:
-        return await judge(text, media, trace_id=trace_id)
+    async def judge(self, text: str, media: Iterable[MediaFile], *, trace_id: str, check_strip: bool = False) -> Verdict:
+        return await judge(text, media, trace_id=trace_id, check_strip=check_strip)
 
     def other_game(self, text: str) -> Optional[Verdict]:
         return other_game_verdict(text)

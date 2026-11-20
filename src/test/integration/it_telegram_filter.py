@@ -14,8 +14,8 @@ E＝兩邊都算對、不計分：罵人但圖有遊戲資訊（照「任一邊�
     docker exec -w /app discord-bot python -m test.integration.it_telegram_filter 13649 14090 # 指定幾則
     docker exec -w /app discord-bot python -m test.integration.it_telegram_filter --days 7   # 最近 7 天全部
 加 --save 會把送給模型的圖存到 /tmp/telegram_filter_check/ 方便對照。
-`--days N`：最近 N 天的每個發送單位（相簿算一個）都判一次，列出會被隔離的；跟轉發端一樣，有圖標示但圖沒
-下載到的不判（轉發端也不會判，照常送）。
+`--days N`：最近 N 天的每個發送單位（相簿算一個）都判一次，列出會被隔離的、會被拿掉圖的（文字照送、圖不送）；
+跟轉發端一樣，有圖標示但圖沒下載到的不判（轉發端也不會判，照常送）。
 """
 import asyncio
 import sys
@@ -97,7 +97,7 @@ async def recent(days: int) -> None:
     """最近 N 天的每個發送單位都判一次，列出會被隔離的。"""
     repo = TelegramMessageRepository(build_telegram_pg_dsn_from_env())
     await repo.connect()
-    quarantined, fallback, skipped, total, total_seconds = [], [], [], 0, 0.0
+    quarantined, stripped, fallback, skipped, total, total_seconds = [], [], [], [], 0, 0.0
     try:
         rows = await repo.pool.fetch(
             """
@@ -126,14 +126,16 @@ async def recent(days: int) -> None:
                 continue          # 系統通知之類的空訊息，轉發端本來就略過
             total += 1
             started = time.monotonic()
-            v = await tf.judge(text, media, trace_id=f"it-tgfilter-{pk}")
+            v = await tf.judge(text, media, trace_id=f"it-tgfilter-{pk}", check_strip=True)
             total_seconds += time.monotonic() - started
             shown = " ".join(text.split())[:40] or f"（{len(media)} 個媒體）"
             mark = "隔離" if v.quarantine else ("放行" if v.by_model else "放行*")
-            print(f"  {when} {source:8} {pk:>6} {mark} {v.label or '':4}｜{v.reason}｜圖 {v.images_seen}｜"
-                  f"{v.seconds:.1f}s｜{shown}")
+            print(f"  {when} {source:8} {pk:>6} {mark}{'（圖不送）' if v.strip_media else ''} {v.label or '':4}｜{v.reason}｜"
+                  f"圖 {v.images_seen}｜{v.seconds:.1f}s｜{shown}")
             if v.quarantine:
                 quarantined.append((pk, when, v.label, v.reason, shown))
+            if v.strip_media:
+                stripped.append((pk, when, v.reason, shown))
             if not v.by_model and not v.quarantine:
                 fallback.append((pk, v.reason))
     finally:
@@ -144,6 +146,9 @@ async def recent(days: int) -> None:
     print(f"會被隔離 {len(quarantined)} 個：")
     for pk, when, label, reason, shown in quarantined:
         print(f"  {when}  db#{pk}  {label}｜{reason}｜{shown}")
+    print(f"文字照送、圖不送 {len(stripped)} 個：")
+    for pk, when, reason, shown in stripped:
+        print(f"  {when}  db#{pk}  {reason}｜{shown}")
     print(f"模型沒判、直接放行（放行*）{len(fallback)} 個：{fallback}")
 
 
@@ -152,7 +157,7 @@ async def main(ids: list[int], save: bool) -> None:
                                                                  if i not in {s[0] for s in SAMPLES}]
     repo = TelegramMessageRepository(build_telegram_pg_dsn_from_env())
     await repo.connect()
-    wrong_quarantine, missed, fallback, total_seconds = [], [], [], 0.0
+    wrong_quarantine, missed, fallback, stripped, total_seconds = [], [], [], [], 0.0
     try:
         for pk, expected, category in samples:
             text, media = await load_unit(repo, pk)
@@ -164,7 +169,7 @@ async def main(ids: list[int], save: bool) -> None:
                 for n, img in enumerate(await tf.collect_images(media)):
                     (SAVE_DIR / f"{pk}_{n}.jpg").write_bytes(img)
             started = time.monotonic()
-            v = await tf.judge(text, media, trace_id=f"it-tgfilter-{pk}")
+            v = await tf.judge(text, media, trace_id=f"it-tgfilter-{pk}", check_strip=True)
             total_seconds += time.monotonic() - started
             got = "Q" if v.quarantine else "P"
             mark = "  " if expected in ("E", "?") or got == expected else "✗ "
@@ -176,8 +181,10 @@ async def main(ids: list[int], save: bool) -> None:
             if passed_unjudged:
                 fallback.append(pk)
             shown = " ".join(text.split())[:30]
-            print(f"{mark}{pk:>6} 期望 {expected} 判 {got} {v.label or '':4}｜{v.reason}｜圖 {v.images_seen}｜"
-                  f"{v.seconds:.1f}s｜{category}｜{shown}")
+            if v.strip_media:
+                stripped.append(pk)
+            print(f"{mark}{pk:>6} 期望 {expected} 判 {got}{'（圖不送）' if v.strip_media else ''} {v.label or '':4}｜{v.reason}｜"
+                  f"圖 {v.images_seen}｜{v.seconds:.1f}s｜{category}｜{shown}")
             if passed_unjudged or mark.strip():
                 print(f"          模型回答：{' / '.join(v.answer.split(chr(10)))[:200]}")
     finally:
@@ -188,6 +195,7 @@ async def main(ids: list[int], save: bool) -> None:
     print(f"期望放行卻被隔離（上線門檻要 0）：{len(wrong_quarantine)} {wrong_quarantine}")
     print(f"期望隔離卻放行（漏放）：{len(missed)} {missed}")
     print(f"模型不能用而放行：{len(fallback)} {fallback}")
+    print(f"文字照送、圖不送（樣本裡沒有該拿圖的，要 0）：{len(stripped)} {stripped}")
 
 
 if __name__ == "__main__":

@@ -17,6 +17,9 @@
 - 文字點名別款遊戲就隔離、不問模型，連附語音的也是；英文比完整單字（content 不算 NTE）；同一則也提到鳴潮、
   聯動與參照其他作品的鳴潮情報、沒點名的素材都照常問模型；名單改了下一則生效，寫壞了沿用上次、從沒讀到就全交給模型，
   有空名字算壞檔（空字串會比中每一則）
+- 圖不送（文字有資訊、附的圖全是梗圖角色）：整則放行之後，只拿圖、不帶文字，用另一份問題問一次
+  「是不是全是梗圖角色」，最後一行回「是」才算；回「否」、看不懂、問不到、等太久都當一般放行、不用補判。
+  呼叫端沒要求、沒有文字、沒有圖、媒體比模型看得到的多（後面幾個沒看過）、整則隔離、問題檔不在時不多問這一次
 
 執行：
     cd src && python -m unittest test.test_telegram_filter -v
@@ -71,6 +74,8 @@ class FakeLLM:
         self.answer, self.delay, self.error = answer, delay, error
         #: 依序先拋這些錯（例如模型逾時），拋完才照常回答
         self.errors: list[Exception] = []
+        #: 依序回這些（一則問兩次時各回各的），回完才回 `answer`；放例外就在那一次拋出，放 async 函式就等它回
+        self.answers: list = []
         self.calls = []
 
     def resolve_request_model(self):
@@ -84,6 +89,11 @@ class FakeLLM:
             raise self.errors.pop(0)
         if self.error:
             raise self.error
+        if self.answers:
+            answer = self.answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return await answer() if callable(answer) else answer
         return self.answer
 
 
@@ -93,10 +103,13 @@ class FilterTestBase(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         prompt = self.tmp / "prompt.txt"
         prompt.write_text("判斷有沒有鳴潮的資訊。", encoding="utf-8")
+        self.mascot_prompt = self.tmp / "mascot.txt"
+        self.mascot_prompt.write_text("這些圖是不是全是梗圖角色？", encoding="utf-8")
         self.other_games = self.tmp / "other_games.json"
         self.write_other_games({"games": [{"name": "異環", "aliases": ["NTE", "异环"]}], "this_game": ["鸣潮", "WW"]})
         self.settings = tf._SETTINGS.model_copy(update={
             "prompt_path": str(prompt), "other_games_path": str(self.other_games),
+            "mascot_prompt_path": str(self.mascot_prompt),
             "retry_initial_seconds": 0.01, "retry_max_seconds": 0.5,
             "busy_poll_seconds": 0.01, "give_up_seconds": 10,
         })
@@ -123,8 +136,8 @@ class FilterTestBase(unittest.IsolatedAsyncioTestCase):
         self.other_games.write_text(raw, encoding="utf-8")
         hot_files.forget(self.other_games)
 
-    async def judge(self, text="", media=()):
-        return await tf.judge(text, list(media), trace_id="test")
+    async def judge(self, text="", media=(), **kwargs):
+        return await tf.judge(text, list(media), trace_id="test", **kwargs)
 
     def sent_images(self) -> list[bytes]:
         user = self.llm.calls[-1]["messages"][-1]
@@ -162,6 +175,110 @@ class VerdictTests(FilterTestBase):
         self.assertIsNone(tf.parse_verdict("看到圖。\n<think>應該是\n隔離｜灌水｜x"), "思考區塊沒收尾")
         # 結論寫在思考區塊裡不算（沒有真的回答）
         self.assertIsNone(tf.parse_verdict("<think>先想想\n隔離｜灌水｜打卡</think>"))
+
+
+
+class StripMediaTests(FilterTestBase):
+    """整則放行之後，只拿圖問「是不是全是梗圖角色」，決定圖要不要拿掉。"""
+
+    TEXT = "未来卡池 4.0 安娜"
+    PASS = "文字是卡池名單，圖是黃色卡通角色。\n放行｜卡池爆料"
+    YES = "圖是奶蛙拿著對勾牌。\n是"
+
+    def images(self, count: int) -> list[tf.MediaFile]:
+        return [self.file(f"{n}.png", _png(colour=(10 * n, 200, 30)), "image") for n in range(count)]
+
+    def message(self, call: int, role: int) -> str:
+        return self.llm.calls[call]["messages"][role]["content"]
+
+    async def judge(self, text="", media=(), **kwargs):
+        return await super().judge(text, media, check_strip=True, **kwargs)
+
+    async def test_not_asked_unless_the_caller_wants_it(self):
+        self.llm.answers = [self.PASS, self.YES]
+        v = await tf.judge(self.TEXT, self.images(1), trace_id="test")
+        self.llm.answers.clear()
+        self.assertFalse(v.strip_media)
+        self.assertEqual(len(self.llm.calls), 1, "補判、搬移這類用不到的呼叫端不該多佔模型一次")
+
+    async def test_yes_strips_and_the_question_is_about_the_images_only(self):
+        self.llm.answers = [self.PASS, self.YES]
+        v = await self.judge(self.TEXT, self.images(1))
+        self.assertFalse(v.quarantine)
+        self.assertTrue(v.strip_media)
+        self.assertEqual(v.reason, "卡池爆料", "理由是整則那次的")
+        self.assertEqual(len(self.llm.calls), 2)
+        self.assertIn(self.TEXT, self.message(0, 1))
+        self.assertEqual(self.message(1, 0), "這些圖是不是全是梗圖角色？", "第二次用另一份問題")
+        self.assertNotIn(self.TEXT, self.message(1, 1), "第二次只看圖、不帶文字")
+        self.assertEqual(len(self.sent_images()), 1, "第二次要真的帶圖")
+        self.assertFalse(self.llm.calls[1]["think"])
+
+    async def test_yes_with_a_full_stop_or_copied_prefix_still_counts(self):
+        for second in ("圖是奶龍。\n是。", "看到奶蛙。\n第二行：是"):
+            with self.subTest(second=second):
+                self.llm.answers = [self.PASS, second]
+                self.assertTrue((await self.judge(self.TEXT, self.images(1))).strip_media)
+
+    async def test_anything_but_yes_keeps_the_images(self):
+        for second in ("圖是角色設計稿，沒有奶蛙。\n否", "是奶蛙沒錯", "是不是奶蛙看不出來。\n不確定",
+                       "<think>是</think>\n圖是設計稿。\n否", "", RuntimeError("模型壞了"), tf.LlmTimeoutError("逾時")):
+            with self.subTest(second=second):
+                self.llm.calls.clear()
+                self.llm.answers = [self.PASS, second]
+                v = await self.judge(self.TEXT, self.images(1))
+                self.assertFalse(v.strip_media)
+                self.assertFalse(v.quarantine, "整則照樣放行")
+                self.assertTrue(v.by_model, "整則那次有判到，不用補判")
+                self.assertEqual(len(self.llm.calls), 2, "只問一次、不重試")
+
+    async def test_waiting_too_long_keeps_the_images(self):
+        async def slow():
+            await asyncio.sleep(2)
+            return "是"
+        self.llm.answers = [self.PASS, slow]
+        with mock.patch.object(tf, "_SETTINGS", self.settings.model_copy(update={"mascot_wait_seconds": 0.2})):
+            v = await self.judge(self.TEXT, self.images(1))
+        self.assertFalse(v.strip_media)
+        self.assertFalse(v.quarantine)
+        self.assertLess(v.seconds, 1.5, "等不到就整則照送，不能為這一問拖住情報")
+
+    async def test_not_asked_when_there_is_nothing_to_decide(self):
+        limit = self.settings.max_images
+        cases = [
+            ("沒有文字", "  ", self.images(1), self.PASS),
+            ("沒有圖", self.TEXT, [], self.PASS),
+            ("有媒體沒看過", self.TEXT, self.images(limit + 1), self.PASS),
+            ("整則隔離", "今日首水", self.images(1), "圖是奶蛙。\n隔離｜無關圖片｜奶蛙梗圖"),
+        ]
+        for name, text, media, first in cases:
+            with self.subTest(name):
+                self.llm.calls.clear()
+                self.llm.answers = [first, self.YES]
+                v = await self.judge(text, media)
+                self.llm.answers.clear()
+                self.assertEqual(len(self.llm.calls), 1, "不該多問一次")
+                self.assertFalse(v.strip_media)
+
+    async def test_missing_question_file_never_strips(self):
+        self.mascot_prompt.unlink()
+        hot_files.forget(self.mascot_prompt)
+        self.llm.answers = [self.PASS, self.YES]
+        v = await self.judge(self.TEXT, self.images(1))
+        self.llm.answers.clear()
+        self.assertFalse(v.strip_media)
+        self.assertEqual(len(self.llm.calls), 1, "沒有問題檔就不問")
+
+    async def test_every_media_seen_can_be_stripped(self):
+        self.llm.answers = [self.PASS, self.YES]
+        v = await self.judge(self.TEXT, self.images(self.settings.max_images))
+        self.assertTrue(v.strip_media, "剛好看得完的可以拿")
+
+    def test_real_question_file_exists_and_asks_for_the_word_the_code_reads(self):
+        """單元測試都用暫存的問題檔；正式的那份不在、或輸出用的字和程式認的不一樣，功能會無聲失效。"""
+        question = Path(TelegramFilterSettings().mascot_prompt_path).read_text(encoding="utf-8")
+        self.assertIn(f"「{tf.MASCOT_YES}」", question, "問題檔要叫模型回程式認的那個字")
+        self.assertIn("第二行", question, "程式只看最後一行")
 
 
 class ModelUnavailableTests(FilterTestBase):
