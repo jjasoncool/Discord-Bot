@@ -17,6 +17,10 @@
   紀錄記成要補判（`needs_recheck`）；補判判成垃圾就搬進隔離區（主頻道原貼文刪掉）、判成情報就清掉；還是判不到的留著、不一則一則
   再問；看不了的檔案、只記錄模式不記；相簿過了補圖時效才搬；模型一回應就叫醒補判；判成垃圾卻搬不動的清掉並記 log
 - 開了過濾一次只處理一則（模型一次只能判一則，並行只會打亂順序）；排隊或處理中又收到的通知，處理完再排一次
+- 文字有情報、附的圖全是梗圖（正式模式）：主頻道那則只有文字、沒有圖；圖另外貼進「垃圾訊息」thread，那則只有圖、
+  沒有文字，最上面一行寫判定；發送紀錄只記主頻道（相簿的每個組員都記），重排進來不重判、不重貼。
+  只記錄模式、沒接隔離區、隔離 thread 取不到或出錯時不拿圖、整則照送；圖貼進 thread 失敗不影響主頻道那則。
+  只有新訊息會問圖要不要拿掉，補判與搬移不問。相簿送出之後才到的組員沒被模型看過，照補圖的規則進主頻道
 
 執行：
     cd src && python -m unittest test.test_telegram_relay_filter -v
@@ -157,6 +161,126 @@ class WaitForMediaTests(FilterTestBase):
         await self.worker._process_one(10)
         self.assertEqual(self.publisher.sent, [])
         self.assertTrue(self.worker._seen_processed(10), "超過補圖時限才當空訊息略過")
+
+
+class StripMediaTests(FilterTestBase):
+    """文字有情報、附的圖全是梗圖：文字進主頻道，圖只進隔離區。"""
+
+    TEXT = "未来卡池 4.0 安娜"
+
+    async def test_text_goes_to_main_and_only_the_image_goes_to_quarantine(self):
+        self.repo.add_ready(9, 200, grouped_id=None, text=self.TEXT)
+        self.filter.strip(9)
+        await self.worker._process_one(9)
+
+        [main] = self.publisher.to(CHANNEL)
+        self.assertEqual(main["text"], self.TEXT)
+        self.assertEqual(main["media"], [], "主頻道那則不能帶梗圖")
+        self.assertEqual(main.header, "", "主頻道那則不寫判定")
+        thread = self.thread()
+        self.assertIsNotNone(thread)
+        [kept] = self.publisher.to(thread.id)
+        self.assertEqual(kept["media"], media_of(9))
+        self.assertEqual(kept["text"], "", "隔離區那則只放圖")
+        self.assertTrue(kept.header.startswith("判定：無關圖片"), kept.header)
+        self.assertEqual(self.repo.channels_of(9), {CHANNEL}, "去向是主頻道；兩邊都記會被當成放回過")
+
+    async def test_requeued_after_restart_is_left_alone(self):
+        self.repo.add_ready(9, 200, grouped_id=None, text=self.TEXT)
+        self.filter.strip(9)
+        await self.worker._process_one(9)
+        self.restart()
+        await self.worker._process_one(9)
+        self.assertEqual(len(self.filter.calls), 1, "重啟後再排進來不能重判")
+        self.assertEqual(self.publisher.sent, [], "文字和圖都不能再貼一次")
+
+    async def test_dry_run_sends_the_whole_unit(self):
+        self.filter.mode = "dry_run"
+        self.repo.add_ready(9, 200, grouped_id=None, text=self.TEXT)
+        self.filter.strip(9)
+        await self.worker._process_one(9)
+        [main] = self.publisher.to(CHANNEL)
+        self.assertEqual(main["media"], media_of(9), "只記錄模式不拿圖")
+        self.assertIsNone(self.thread())
+
+    async def test_without_quarantine_area_the_whole_unit_is_sent(self):
+        worker, repo, _, publisher = make_worker(content_filter=self.filter)
+        repo.add_ready(9, 200, grouped_id=None, text=self.TEXT)
+        self.filter.strip(9)
+        await worker._process_one(9)
+        [main] = publisher.to(CHANNEL)
+        self.assertEqual(main["media"], media_of(9), "沒有地方放圖就不拿")
+
+    async def test_thread_cannot_be_opened_sends_the_whole_unit(self):
+        self.bot.main.fail_create = True
+        self.repo.add_ready(9, 200, grouped_id=None, text=self.TEXT)
+        self.filter.strip(9)
+        await self.worker._process_one(9)
+        [(channel_id, main)] = self.publisher.sent
+        self.assertEqual(channel_id, CHANNEL)
+        self.assertEqual(main["media"], media_of(9), "圖沒有地方放就不拿，情報照樣送出")
+        self.assertEqual(self.repo.channels_of(9), {CHANNEL})
+
+    async def test_error_while_getting_the_thread_sends_the_whole_unit(self):
+        self.worker._quarantine.thread_for = mock.AsyncMock(side_effect=asyncio.TimeoutError())
+        self.repo.add_ready(9, 200, grouped_id=None, text=self.TEXT)
+        self.filter.strip(9)
+        await self.worker._process_one(9)
+        [(channel_id, main)] = self.publisher.sent
+        self.assertEqual((channel_id, main["media"]), (CHANNEL, media_of(9)), "隔離區出狀況不能擋住情報")
+        self.assertEqual(self.repo.channels_of(9), {CHANNEL})
+
+    async def test_only_the_relay_asks_whether_to_strip(self):
+        self.repo.add_ready(9, 200, grouped_id=None, text=self.TEXT)
+        self.filter.strip(9)
+        await self.worker._process_one(9)
+        self.assertTrue(self.filter.calls[0]["check_strip"], "新訊息要問圖要不要拿掉")
+        verdict = await self.worker.judge_existing(9)
+        self.assertFalse(self.filter.calls[1]["check_strip"], "補判與搬移不會回頭改貼文，不多問")
+        self.assertFalse(verdict.strip_media)
+
+    async def test_failing_to_keep_the_image_does_not_fail_the_text(self):
+        self.repo.add_row(8, 199, grouped_id=None, text="今日首水", has_media=False)
+        self.filter.quarantine(8)
+        await self.worker._process_one(8)            # 先讓隔離 thread 存在
+        thread = self.thread()
+        self.publisher.fail_channels.add(thread.id)   # 之後往 thread 送都失敗
+
+        self.repo.add_ready(9, 200, grouped_id=None, text=self.TEXT)
+        self.filter.strip(9)
+        await self.worker._process_one(9)
+        [main] = self.publisher.to(CHANNEL)
+        self.assertEqual((main["text"], main["media"]), (self.TEXT, []))
+        self.assertEqual(self.repo.channels_of(9), {CHANNEL}, "文字已經送出，要記成送過，不能因為圖沒留成而重送")
+
+    async def test_album_text_to_main_and_all_images_to_quarantine(self):
+        self.repo.add_ready(1, 101, text=self.TEXT)
+        self.repo.add_ready(2, 102)
+        self.filter.strip(1)
+        await self.worker._process_one(2)
+
+        self.assertEqual(len(self.filter.calls), 1, "整本判一次")
+        [main] = self.publisher.to(CHANNEL)
+        self.assertEqual((main["text"], main["media"]), (self.TEXT, []))
+        [kept] = self.publisher.to(self.thread().id)
+        self.assertEqual((kept["text"], kept["media"]), ("", media_of(1, 2)))
+        for pk in (1, 2):
+            self.assertEqual(self.repo.channels_of(pk), {CHANNEL},
+                             "每個組員都要記成送過主頻道，少記的會被當成還沒送、以補圖送進主頻道")
+
+        await self.worker._process_one(1)             # 同一本的另一個組員的通知
+        self.assertEqual(len(self.publisher.sent), 2, "不能再送一次")
+
+    async def test_late_member_of_a_stripped_album_follows_the_text_into_main(self):
+        self.repo.add_ready(1, 101, text=self.TEXT)
+        self.filter.strip(1)
+        await self.worker._process_one(1)
+        self.repo.add_ready(2, 102)                   # 送出之後才到的組員
+        await self.worker._process_one(2)
+        self.assertEqual(len(self.filter.calls), 1, "補圖不再判")
+        late = self.publisher.to(CHANNEL)[1]
+        self.assertEqual((late["media"], late["title_suffix"]), (media_of(2), "（補圖）"),
+                         "晚到的沒被模型看過，照補圖的規則跟著去向進主頻道")
 
 
 class AlbumTests(FilterTestBase):

@@ -10,6 +10,7 @@
 """
 import asyncio
 import contextlib
+from dataclasses import replace
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -396,9 +397,13 @@ class FakeFilter:
         """模型等不到（排滿時限、或掛了只問一次失敗）：放行、之後要補判。"""
         self.verdicts[pk] = Verdict(False, reason="模型 30 分鐘沒回應，未判", by_model=False, recheck=True)
 
-    async def judge(self, text, media, *, trace_id):
+    def strip(self, pk: int, reason: str = "卡池爆料") -> None:
+        """放行，但附的圖全是梗圖：文字照送、圖不送主頻道。"""
+        self.verdicts[pk] = Verdict(False, reason=reason, strip_media=True)
+
+    async def judge(self, text, media, *, trace_id, check_strip=False):
         pk = int(trace_id.rsplit("-", 1)[-1])
-        self.calls.append({"pk": pk, "text": text, "media": [m.path.name for m in media]})
+        self.calls.append({"pk": pk, "text": text, "media": [m.path.name for m in media], "check_strip": check_strip})
         self.active += 1
         self.max_active = max(self.max_active, self.active)
         try:
@@ -406,7 +411,9 @@ class FakeFilter:
                 await asyncio.sleep(self.delay)
         finally:
             self.active -= 1
-        return self.verdicts.get(pk, Verdict(False, reason="有情報"))
+        verdict = self.verdicts.get(pk, Verdict(False, reason="有情報"))
+        # 跟真的一樣：沒被要求就不問圖要不要拿掉
+        return verdict if check_strip or not verdict.strip_media else replace(verdict, strip_media=False)
 
 
 def make_worker(*, content_filter=None, quarantine: bool = False, bot: FakeBot | None = None,

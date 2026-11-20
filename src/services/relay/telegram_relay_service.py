@@ -19,7 +19,7 @@ import shutil
 import tempfile
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from sys_settings.paths import APP_ROOT, TELEGRAM_SCRAPER_DIR
@@ -1463,6 +1463,7 @@ class MessageRelayWorker:
 
     開了 LLM 過濾（`content_filter`，見 `services.relay.telegram_filter`）時，每個發送單位（單則或整本相簿）
     送出前判一次，判成垃圾的改送主頻道底下的隔離 thread（`quarantine`），發送紀錄記 thread 的 id。
+    放行、但附的圖全是梗圖角色時，主頻道那則只送文字，圖另外貼進隔離 thread（那一份不寫發送紀錄）。
     晚到的圖跟著同一則或同一本的去向送、不再判；被隔離的再被排進來也不會重判重貼。
     """
 
@@ -1494,7 +1495,8 @@ class MessageRelayWorker:
         #: 發文超過這麼久的不送（`_skip_if_stale`）；測試資料用固定日期時換成更長的
         self._max_message_age = timedelta(days=TelegramRelaySettings().max_message_age_days)
         self._emoji_resolver = CustomEmojiResolver(bot, repository, render_adapter.app_root)
-        #: 有 `mode`（off／dry_run／on）與 `judge(text, media, trace_id=)` 的物件；None＝不過濾（測試預設）
+        #: 有 `mode`（off／dry_run／on）、`judge(text, media, trace_id=, check_strip=)` 與 `other_game(text)` 的物件；
+        #: None＝不過濾（測試預設）
         self._filter = content_filter
         #: `QuarantineThreads`；None＝沒有隔離區（判成垃圾也照常送主頻道）
         self._quarantine = quarantine
@@ -2009,29 +2011,34 @@ class MessageRelayWorker:
             for item in unit.media_items
         ]
 
-    async def _judge_unit(self, unit: TelegramMessageRecord, *, complete: bool) -> tuple[Optional[Verdict], bool]:
-        """過濾一個發送單位 →（要隔離的判定, 要不要記成待補判）。
+    async def _judge_unit(self, unit: TelegramMessageRecord, *, complete: bool) -> tuple[Optional[Verdict], bool, bool]:
+        """過濾一個發送單位 →（要隔離的判定, 要不要記成待補判, 圖要不要拿掉）。
 
         - 判定：判成垃圾、而且要真的隔離時才有；其他情況（沒開、只記錄、放行）是 None。
         - 待補判：正式模式下模型沒判到（沒回應、出錯、回答看不懂）就照常送主頻道的，之後補判、是垃圾再搬走
           （每則訊息都要被檢查過）。
+        - 圖要拿掉：放行、但模型說附的圖全是梗圖（`Verdict.strip_media`），而且是正式模式、有接隔離區。
+          文字照送主頻道，圖由呼叫端另外留在隔離區（`_stripped_home`、`_keep_stripped_media`）；
+          只記錄模式只寫 log、整則照送。
         - `complete=False`（相簿等待逾時只到齊一部分、單則的圖等太久還沒到）不問模型、照常送：只看到一部分就判，
           會把「文字只有水、圖是設計稿」那種情報錯關（13649）。文字點名別款遊戲例外，那不用看圖。
         """
         if not self._filter_active():
-            return None, False
+            return None, False, False
         mode = self._filter.mode
         if complete:
-            verdict = await self._filter.judge(unit.text, self._filter_media(unit), trace_id=f"tgfilter-{unit.message_pk}")
+            verdict = await self._filter.judge(unit.text, self._filter_media(unit),
+                                               trace_id=f"tgfilter-{unit.message_pk}", check_strip=True)
         else:
             verdict = self._filter.other_game(unit.text)
             if verdict is None:
                 logger.info("Telegram 過濾：圖還沒到齊，不判、照常送 message_pk=%s", unit.message_pk)
-                return None, False
+                return None, False, False
+        strip = verdict.strip_media and not verdict.quarantine
         logger.info(
-            "Telegram 過濾：message_pk=%s 判定=%s 標籤=%s 理由=%s 看圖=%s 秒=%.1f 由模型判=%s mode=%s",
+            "Telegram 過濾：message_pk=%s 判定=%s 標籤=%s 理由=%s 看圖=%s 秒=%.1f 由模型判=%s mode=%s 去圖=%s",
             unit.message_pk, "隔離" if verdict.quarantine else "放行", verdict.label or "-", verdict.reason or "-",
-            verdict.images_seen, verdict.seconds, verdict.by_model, mode,
+            verdict.images_seen, verdict.seconds, verdict.by_model, mode, strip,
         )
         if verdict.by_model:
             if self._recheck_known:
@@ -2039,13 +2046,56 @@ class MessageRelayWorker:
         elif verdict.recheck and mode == "on" and self._quarantine is not None:
             self._recheck_known = True
             logger.info("Telegram 過濾：沒判到就送主頻道，記成待補判 message_pk=%s", unit.message_pk)
-            return None, True
+            return None, True, False
         if not verdict.quarantine:
-            return None, False
+            if strip and (mode != "on" or self._quarantine is None):
+                logger.info("Telegram 過濾（只記錄）：會拿掉圖、照常整則送主頻道 message_pk=%s", unit.message_pk)
+                strip = False
+            return None, False, strip
         if mode != "on" or self._quarantine is None:
             logger.info("Telegram 過濾（只記錄）：會隔離、照常送主頻道 message_pk=%s", unit.message_pk)
-            return None, False
-        return verdict, False
+            return None, False, False
+        return verdict, False, False
+
+    #: 被拿掉的圖在隔離區那則最上面一行：只有管理的人會看，說明文字已經送出、這裡只是圖
+    _STRIPPED_HEADER = "判定：無關圖片｜只拿掉圖，文字已送主頻道"
+
+    @staticmethod
+    def _without_media(unit: TelegramMessageRecord) -> TelegramMessageRecord:
+        """同一則、不帶媒體：文字照送主頻道用。"""
+        return replace(unit, media_items=[])
+
+    async def _stripped_home(self, unit: TelegramMessageRecord, channel, strip: bool):
+        """圖要拿掉時，先拿到放圖的隔離 thread；不用拿、或拿不到（開不了、出錯）回 None，呼叫端就整則照送。
+
+        先拿 thread 再送文字：拿掉的圖要有地方放，不能文字送出去了才發現圖沒處放。
+        """
+        if not strip or self._quarantine is None:
+            return None
+        try:
+            thread = await self._quarantine.thread_for(channel)
+        except Exception as exc:
+            thread = None
+            logger.warning("Telegram 過濾：取隔離 thread 出錯 message_pk=%s：%s", unit.message_pk, exc)
+        if thread is None:
+            logger.warning("Telegram 過濾：隔離 thread 取不到，圖不拿掉、整則照送 message_pk=%s", unit.message_pk)
+        return thread
+
+    async def _keep_stripped_media(self, unit: TelegramMessageRecord, route_id: int, thread) -> None:
+        """被拿掉的圖在隔離區留一份：只有圖、沒有文字，不寫發送紀錄。
+
+        不寫紀錄是因為這則的去向是主頻道（文字在那裡）；同一個 pk 兩邊都有紀錄會被當成「放回過」，
+        面板不列、之後也搬不動。所以這份不在放回面板裡，要把圖補回主頻道用 /resend_article
+        （一次重送一筆訊息：單則下一次，相簿要每個組員各下一次，帶文字的那個會連文字再貼一次）。
+        拿掉圖這件事沒有另外記下來：之後手動把主頻道那則移進隔離區再放回，會整則（含圖）重貼。
+        送不成只記 log：文字已經送出，不能因為這份而重送或算成失敗。
+        """
+        try:
+            only_media = replace(unit, text="", entities=[])
+            await self._send_unit(only_media, [], thread, int(thread.id), header=self._STRIPPED_HEADER, record=False)
+            self._quarantine.changed(route_id, thread)
+        except Exception as exc:
+            logger.warning("Telegram 過濾：拿掉的圖沒能留在隔離區 message_pk=%s：%s", unit.message_pk, exc)
 
     @staticmethod
     def _verdict_header(verdict: Optional[Verdict]) -> str:
@@ -2083,7 +2133,8 @@ class MessageRelayWorker:
     ) -> int:
         """把一個發送單位送到頻道（或 thread），並把這批 pk 記成送到那裡。單則、相簿、隔離共用。
 
-        `record=False`：不寫紀錄，由呼叫端改（搬移：主頻道原貼文刪掉後才改）；`sent`：收集送出的 Discord 訊息；
+        `record=False`：不寫紀錄（搬移：主頻道原貼文刪掉後由呼叫端改；被拿掉的圖留在隔離區的那一份：不寫也不補寫）；
+        `sent`：收集送出的 Discord 訊息；
         `needs_recheck`：模型沒判到就送出，紀錄記成要補判。
         """
         logger.info(
@@ -2628,7 +2679,7 @@ class MessageRelayWorker:
         # 半則訊息最多貼 N 份（開過濾一次只處理一則時一定會發生）。重試交給重啟時的補償，跟單則一致
         failed_pks: set[int] = set()
         followup = False
-        judged: dict[str, Optional[Verdict]] = {}
+        judged: Optional[tuple[Optional[Verdict], bool, bool]] = None
         for channel_id in route_ids:
             pending, follow = self._group_pending(
                 grouped_id, ready_pks, channel_id, deliveries.get(channel_id), force_replay,
@@ -2645,23 +2696,25 @@ class MessageRelayWorker:
 
             if follow is None:
                 # 第一次送：整本判一次（多個路由共用同一個判定）
-                if "verdict" not in judged:
-                    judged["verdict"], judged["recheck"] = await self._judge_unit(merged, complete=complete)
-                verdict, recheck = judged["verdict"], judged["recheck"]
+                if judged is None:
+                    judged = await self._judge_unit(merged, complete=complete)
+                verdict, recheck, strip = judged
                 to_quarantine = verdict is not None
             else:
                 # 補圖：跟著同本的去向，不再判（待補判時整本一起判、一起搬，補圖不另記）
-                verdict, recheck = None, False
+                verdict, recheck, strip = None, False, False
                 to_quarantine = follow == "quarantine"
             dest = await self._destination(channel_id, to_quarantine)
             if dest is None:
                 failed_pks.update(pending)
                 continue
             target, target_id = dest
+            home = await self._stripped_home(merged, target, strip)
             try:
-                # 只標記這次實際合併送出的組員；還沒就緒的留著，到了再以補圖送出
+                # 只標記這次實際合併送出的組員；還沒就緒的留著，到了再以補圖送出。
+                # 圖要拿掉時主頻道只送文字，但每個組員照樣記成送過：少記一個，它會被當成還沒送的、以補圖送進主頻道
                 published_count += await self._send_unit(
-                    merged, pending, target, target_id,
+                    self._without_media(merged) if home is not None else merged, pending, target, target_id,
                     title_suffix=self._GROUP_FOLLOWUP_TITLE_SUFFIX if follow is not None else "",
                     header=self._verdict_header(verdict),
                     needs_recheck=recheck and target_id == channel_id,
@@ -2670,6 +2723,8 @@ class MessageRelayWorker:
                 followup = followup or follow is not None
                 if target_id != channel_id:
                     self._quarantine.changed(channel_id, target)
+                elif home is not None:
+                    await self._keep_stripped_media(merged, channel_id, home)
             except Exception as exc:
                 failed_pks.update(pending)
                 logger.error(
@@ -2767,20 +2822,25 @@ class MessageRelayWorker:
             else:
                 pending_routes.append(channel_id)
 
-        verdict, recheck = (await self._judge_unit(message, complete=not media_pending)
-                            if pending_routes else (None, False))
+        verdict, recheck, strip = (await self._judge_unit(message, complete=not media_pending)
+                                   if pending_routes else (None, False, False))
         for channel_id in pending_routes:
             dest = await self._destination(channel_id, verdict is not None)
             if dest is None:
                 continue
             target, target_id = dest
+            # 圖要拿掉：主頻道那則只送文字，圖另外留在隔離區；發送紀錄照樣記在主頻道
+            home = await self._stripped_home(message, target, strip)
             try:
                 published_count += await self._send_unit(
-                    message, [message_pk], target, target_id, header=self._verdict_header(verdict),
+                    self._without_media(message) if home is not None else message,
+                    [message_pk], target, target_id, header=self._verdict_header(verdict),
                     needs_recheck=recheck and target_id == channel_id,
                 )
                 if target_id != channel_id:
                     self._quarantine.changed(channel_id, target)
+                elif home is not None:
+                    await self._keep_stripped_media(message, channel_id, home)
             except Exception as exc:
                 logger.error(
                     "Telegram relay 發送失敗: message_pk=%s channel_id=%s err=%s",
